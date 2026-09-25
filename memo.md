@@ -2939,7 +2939,30 @@ Windows 盘符式与 msys 式都算），否则 `admin` / `test` / `data` 这类
 | 档位 | 命令 | 结果 |
 | --- | --- | --- |
 | 快档 | `npm run verify:fast` | ✅ EXIT=0（64 passed；含 `scripts-syntax` 与文档一致性） |
-| 脱敏 | 全库 PII 形状扫描 + 23 份本地素材的 48 字窗重合检测 | ✅ 真命中 1 处（已改）；重合 20 组全是通用 import/SQL 语法 || 容器交付档 | `./start.sh --verify` | ✅ 判题矩阵 **433 passed / 0 skipped**、IDE 档 118 / 0 skipped、EXIT=0<br>（跑在"文档两处改完、E2E 判据还没改"的树上。顺序是干净的：容器档 `SKIP_E2E=1` 根本不读 `tests/e2e/`，而 `.gitignore` 不参与镜像构建（那是 `.dockerignore` 的活）⇒ 这两条改动都不在它的判据路径上。E2E 判据改完是**单独重跑 E2E** 验的） |
+| 脱敏 | 全库 PII 形状扫描 + 23 份本地素材的 48 字窗重合检测 | ✅ 真命中 1 处（已改）；重合 20 组全是通用 import/SQL 语法 |
+
+### 推送这一步实际做了什么（2026-09-25 收尾）
+
+用户给了地址 `https://github.com/sherman9527/localIDE.git`，要求"合并 commit、历史不用拆开"。
+落地顺序（每步都可回退，因为先做了备份）：
+
+1. **先备份再动历史**：`git tag backup/prepublic-20260925 main` +
+   `git bundle create data/history-backup-20260925.bundle --all`（落在 `data/` ⇒ 不入库又不会被清），
+   `bundle verify` 报 "records a complete history"。⇒ 142 个旧 commit（138 + 今天这 4 个）一个没丢，
+   只是不再出现在 `main` 上。
+2. `git checkout --orphan` 造一个无父提交，`git add -A` 后**按命令传身份**
+   （`GIT_AUTHOR_*` / `GIT_COMMITTER_*` 环境变量），不碰 `git config` ⇒ 作者与提交者都是
+   `sherman9527 <sherman9527@users.noreply.github.com>`。
+3. 旧 `main` **改名**成 `local-history-138` 而不是删掉，再把孤儿分支改名成 `main`。
+   ⇒ 全程没有 `reset --hard`、没有 `branch -D`。
+4. 推送前那道"扫**将要被 push 的树**"的检查抓出了 `memo.md` 里的账户名（见上一节），修完再扫
+   ⇒ 621 文件 / 615 文本 blob **命中 0**。剩下 6 个是 PNG，于是**单独查图片元数据**
+   （`tEXt`/`iTXt` 里的 Software/Creator/Author）⇒ 无；`.drawio` 的 `agent` 是 `arena-doc`、
+   `host` 是 `Electron`，也不含账户名。
+5. 推之前 `git push --dry-run` 确认**只有 `refs/heads/main` 一条 ref**：`push.followTags` 未设置
+   ⇒ 备份 tag 不会顺带推上去。这一步不是形式主义：若 followTags 开着，那 142 个带个人邮箱的旧 commit
+   会跟着 tag 一起公开，而"我扫过工作树所以没事"完全拦不住它。
+6. `git push -u origin main` ⇒ 远端实测 `refs/heads/main` 一个 commit、身份干净、**无 tag**。| 容器交付档 | `./start.sh --verify` | ✅ 判题矩阵 **433 passed / 0 skipped**、IDE 档 118 / 0 skipped、EXIT=0<br>（跑在"文档两处改完、E2E 判据还没改"的树上。顺序是干净的：容器档 `SKIP_E2E=1` 根本不读 `tests/e2e/`，而 `.gitignore` 不参与镜像构建（那是 `.dockerignore` 的活）⇒ 这两条改动都不在它的判据路径上。E2E 判据改完是**单独重跑 E2E** 验的） |
 | 宿主 E2E | `npm run e2e` | ✅ **45 passed（2.8m）**，REAL_EXIT=0（首轮 44 passed / 1 failed，红因见上） |
 | 界面 | `#/bank` 真浏览器 | ✅ 五控件中心点 190.0000 全等；换类别（sql）后再量仍全等；console error 与 warning **均 0** |
 | 题库闸门 | `node scripts/check-bank.mjs` | ✅ exit 0（`.bank-count` 改 ignore 后） |

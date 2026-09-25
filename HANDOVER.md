@@ -1036,8 +1036,14 @@
   其余手机号 / 身份证 / 银行卡 / `@handle` 全是假阳性，逐条核过而非看着像。
   另外做了一次**重合检测**（23 份本地素材规范化后切 48 字滑窗，对全部 tracked 文件求交集）：
   20 组命中、每组只 1 窗，打出来全是通用 import 与 SQL 语法 ⇒ **公开树里没有一句从 `data/kb-txt/` 转录的话**。
-  ｜**唯一还欠的一步**：把 138 个 commit 压成一个干净初始提交（用户会先建 repo 给地址，作者身份从地址里取；
-  动手前先打备份 tag，绝不裸改历史）。在那之前**不许 push**。详见 memo 里程碑 AX。
+  ｜**已推送**（2026-09-25 收尾）：地址 `https://github.com/sherman9527/localIDE.git`。
+  按用户要求把历史压成**一个初始提交**，身份 `sherman9527 <…@users.noreply.github.com>`（按命令传环境变量，没碰 git config）。
+  旧 142 个 commit **没删**：改名成 `local-history-138` 分支 + `backup/prepublic-20260925` tag +
+  `data/history-backup-20260925.bundle`（`bundle verify` 确认是完整历史）。全程无 `reset --hard`、无 `branch -D`。
+  ｜推送前的最后一道检查是**扫"将要被 push 的那棵树"**而不是扫工作树 —— 就差这一字之差抓出了 `memo.md`
+  里被复盘抄回来的账户名（于是补了 `publish-identity.test.ts` 这道闸门，判据从本机取身份、不硬编码）。
+  621 文件 / 615 文本 blob 命中 0；6 张 PNG 另查了元数据也无。`push --dry-run` 确认只发一条 ref、
+  `followTags` 未开 ⇒ 备份 tag 不会跟着公开。远端实测：1 个 commit、身份干净、无 tag。
 
 ## IN PROGRESS
 
