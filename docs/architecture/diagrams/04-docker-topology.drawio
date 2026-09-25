@@ -1,0 +1,78 @@
+<mxfile host="Electron" modified="2026-09-20T00:00:00.000Z" agent="arena-doc" version="24.0.0" type="device">
+  <diagram id="docker-topo" name="04-容器拓扑">
+    <mxGraphModel dx="1200" dy="860" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="容器拓扑：一个镜像装下全部技术栈，宿主只负责 Docker 和已登录 CLI" style="text;html=1;align=left;fontSize=18;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="1080" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="host" value="宿主机 Windows —— 你唯一需要装的是 Docker（外加 Git Bash 的 curl / git）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#666666;strokeWidth=2;fontSize=13;fontStyle=1;verticalAlign=top;align=left;spacing=12;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="56" width="1100" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="hStart" value="&lt;b&gt;bash ./start.sh&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;建桥 → build → up -d&lt;br&gt;→ 健康检查 → 报栈 → 开浏览器&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="100" width="220" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="hBridge" value="&lt;b&gt;node scripts/llm-bridge.mjs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;:7799（只绑 127.0.0.1）&lt;br&gt;token 见 .env · pid 见 data/llm-bridge.pid&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="370" y="100" width="270" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="hCli" value="&lt;b&gt;qodercli / copilot&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;宿主上已登录的 CLI 会话&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B8547D;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="720" y="100" width="180" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="hE2e" value="&lt;b&gt;Playwright（宿主）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;用默认浏览器 Edge 验你真正看的界面&lt;br&gt;自己起隔离实例，跑完收掉&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="930" y="100" width="190" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="hRepo" value="&lt;b&gt;仓库目录就是持久层&lt;/b&gt;　content/（题与知识库，进 git）　·　data/（db / 日志 / 沙箱，不进 git）　·　docker-cache/（npm / pip / maven 缓存）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#82B366;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="184" width="1060" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ctr" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCFDFF;strokeColor=#D79B00;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="286" width="1100" height="450" as="geometry" />
+        </mxCell>
+        <mxCell id="ctrLabel" value="容器 daily-arena　image daily-arena:0.1　（ubuntu:22.04 基座，单镜像承载全部技术栈）" style="text;html=1;align=left;fontSize=13;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="56" y="294" width="900" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="cEntry" value="&lt;b&gt;docker/entrypoint.sh&lt;/b&gt;　拉起并等待 mysqld（180s，容忍崩溃恢复）与 redis-server → 建 arena 库 → mkdir data/judge → &lt;b&gt;exec node server/dist/index.js&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="324" width="1060" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="cApp" value="&lt;b&gt;Fastify 5 · :7788&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;/api/* 与 web/dist 静态资源同源（@fastify/static）&lt;br&gt;Node 24（镜像内）· node:sqlite 直接开 data/arena.db&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="392" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="cMysql" value="&lt;b&gt;mysqld 8.0&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;unix socket&lt;br&gt;/var/run/mysqld/mysqld.sock&lt;br&gt;每题一个 arena_* 临时库，判完 DROP&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5FBEC;strokeColor=#82B366;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="430" y="392" width="320" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="cRedis" value="&lt;b&gt;redis-server 7.2.7&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;127.0.0.1:6379&lt;br&gt;--save '' --appendonly no（不落盘）&lt;br&gt;判题用 db 1-15，前后各自 FLUSHDB&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="780" y="392" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="cSpark" value="&lt;b&gt;spark_worker.py 常驻 JVM&lt;/b&gt;（local[2]）　·　JDK 17（同一个 JVM 既跑判题又跑 Spark）　·　JUnit5 standalone jar　·　scala-compiler　·　PySpark 3.5.5 自带 Spark jars" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="512" width="1060" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="cJudge" value="&lt;b&gt;data/judge/&lt;/b&gt;　每次判题一个 mkdtemp 沙箱，跑完必删（进程被杀留下的残留由启动时清扫）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#999999;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="580" width="530" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="cHealth" value="&lt;b&gt;HEALTHCHECK&lt;/b&gt;　每 20s curl /api/health（start-period 40s）　·　init: true 回收僵尸进程" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#999999;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="610" y="580" width="510" height="46" as="geometry" />
+        </mxCell>
+        <mxCell id="cWhy" value="&lt;font style=&quot;font-size:11px&quot;&gt;&lt;b&gt;为什么必须真 MySQL 而不是替身&lt;/b&gt;：MariaDB / SQLite 与 MySQL 8 的语义差异（窗口函数、NULL 排序、utf8mb4_0900_ai_ci 排序规则、优化器行为）会把面试答案教错。&lt;br&gt;&lt;b&gt;为什么 Redis 走源码编译&lt;/b&gt;：apt 只有 6.0，缺 Redis 7 的 sintercard / Functions / shard lists；下载或编译失败则退回 apt 版本，不阻塞镜像构建。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9B2;strokeColor=#D6B656;fontSize=11;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="644" width="1060" height="72" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eStartBridge" value="拉起" style="html=1;strokeColor=#B8547D;strokeWidth=2;fontSize=10;fontColor=#B8547D;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hStart" target="hBridge"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eBridgeCli" value="代跑" style="html=1;strokeColor=#B8547D;strokeWidth=2;fontSize=10;fontColor=#B8547D;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="hBridge" target="hCli"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eAppBridge" value="评分链第 1 档 bridge（host.docker.internal + 同一个 token）" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#B8547D;strokeWidth=2;dashed=1;fontSize=11;fontColor=#B8547D;exitX=0.5;exitY=0;entryX=0.5;entryY=1;" edge="1" parent="1" source="cApp" target="hBridge"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eAppMysql" value="socket" style="html=1;strokeColor=#82B366;strokeWidth=2;fontSize=10;fontColor=#595959;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="cApp" target="cMysql"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eMysqlRedis" value="127.0.0.1:6379" style="html=1;strokeColor=#B8547D;strokeWidth=2;fontSize=10;fontColor=#595959;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="cMysql" target="cRedis"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="stages" value="&lt;b&gt;镜像分三段构建（可单独复用）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;&lt;b&gt;stack&lt;/b&gt;　ubuntu:22.04 + apt（JDK17 / maven / mysql-server / redis-server / build-essential / python3）+ Node 24 二进制（npmmirror 优先、官方兜底）+ PySpark 3.5.5 + JUnit5 jar + scala-compiler + Redis 7.2.7 源码编译&lt;br&gt;&lt;b&gt;deps&lt;/b&gt;　只 COPY package.json / package-lock.json / .npmrc / tsconfig.base.json → npm install（改源码不会重刷依赖层）&lt;br&gt;&lt;b&gt;app&lt;/b&gt;　COPY . . → npm run build → 断言 node:sqlite 可用 →（可选）playwright install chromium&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F3F5;strokeColor=#666666;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="756" width="640" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="svc" value="&lt;b&gt;compose.yml 的四个服务（同一个镜像）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;&lt;b&gt;arena&lt;/b&gt;　默认 · 7788:7788 · 挂 data / docker-cache / content&lt;br&gt;&lt;b&gt;dev&lt;/b&gt;　profile dev · 额外开 5173（vite）· 挂载整个仓库 · npm run dev&lt;br&gt;&lt;b&gt;e2e&lt;/b&gt;　profile e2e · 127.0.0.1:7798:7788 · ARENA_DATA_DIR=/app/data/e2e · content 只读&lt;br&gt;&lt;b&gt;tools&lt;/b&gt;　profile tools · image arena-deps:dev · 只挂源码，跑容器内构建与测试&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="700" y="756" width="440" height="120" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

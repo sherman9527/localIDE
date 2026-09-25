@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0013",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "Sentinel 集群限流退化到单机：降级不许清总账、被拒不许落账、恢复必须并账",
+  "statement": "## 背景\n\nSentinel《集群流量控制》给了一条最关键的失效语义【源 S19】：\n\n> \"若用户未引入集群限流 client 相关依赖，或者 client **未开启 / 连接失败 / 通信失败**，\n> 则对于开启了集群模式的规则：普通集群限流会**退化到 local 模式的限流，\n> 即在本地按照单机阈值执行限流检查**。\"\n\n也就是说：限流中心挂了，**官方答案是\"按单机阈值拒\"，不是\"放行\"**。\n但这条退化里有两个坑，素材把它们列成追问点：\n\n1. **容量陷阱**：`单机阈值 × 实例数 > 期望总阈值` 时，退化瞬间会超放；\n   所以\"退化期间的放行量\"必须**记在本地窗口里**，恢复之后能并回总账；\n2. 退化不是\"清账\"：`DEL` 掉全局窗口会让恢复后的第一秒**从零开始计数**。\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL` / `EVALSHA` / `SCRIPT` / `FCALL` / `KEYS` / `FLUSHDB` /\n`CONFIG` / `DEBUG` / `SORT` / `OBJECT` / `SELECT`。\n所以\"用 Lua 做 if-else\"不在解空间内 —— 一切条件都要靠命令自己\n（`NX` / `XX` / `ZUNIONSTORE`）或数据形状表达。\n\n## 判题方式\n\n判题**不模拟并发、也不让时间流逝**：\n① 按\"初始状态\"摆好 Redis；② 顺序执行你提交的**这一份命令脚本**（每行一条，`#` 是注释）；\n③ 逐条执行校验命令比对最终状态。\n本场景**观测时刻 `now = 10000`、窗口 = 1000ms**（逻辑毫秒，题面内自洽即可）。\n\n## 初始状态\n\n```\nHSET rl:order:cfg cluster_qps 100 per_instance_qps 2      -- 总阈值 100、单机阈值 2\nHSET rl:order:stat reject 0 degrade 0\nSET  rl:order:mode cluster\nZADD rl:order:global 8900 g-001 / 9500 g-002 / 9800 g-003 -- 全局窗口（score = 逻辑毫秒）\nZADD rl:order:i3 9500 a-001 / 9600 a-002                  -- i3 本地窗口：已经占满单机阈值\nrl:order:i1 / rl:order:i2 不存在\n```\n\n## 一批到达的 9 个事件（必须全部处理）\n\n| 事件 | 情况 | 必须 | 绝对不许 |\n| --- | --- | --- | --- |\n| E1 | `g-001` 已在窗口外 | 从全局窗口清掉 | 连窗口内的 `g-002/g-003` 一起删 |\n| E2 | Token Server 连接失败 | 落下退化标记 | **DEL 全局窗口** |\n| E3 | `i1` 放行 `r-101`（时刻 10100） | 记在 `rl:order:i1` | 写全局窗口（此时已不可写） |\n| E4 | `i1` 放行 `r-102`（10200）⇒ 正好占满单机阈值 2 | 记在 `rl:order:i1` | 写第 3 条 |\n| E5 | `i2` 放行 `r-201`（10300） | 记在 `rl:order:i2` | — |\n| E6 | `i3` 的第 3 个请求 `r-303` **被单机阈值拒** | 只记一次 `reject` | **把被拒的请求写进任何窗口** |\n| E7 | Token Server 恢复 | 把三个本地窗口并回全局 | 从头计数 |\n| E8 | 并账完成后 | 清掉三个本地窗口 | 顺手清 `reject` / `degrade` |\n| E9 | 恢复完成 | 模式标记复位 | — |\n\n要求最终状态：`rl:order:global` 恰好 **7** 个成员\n（`g-002`=9500、`g-003`=9800、`r-101`=10100、`r-102`=10200、`r-201`=10300、\n`a-001`=9500、`a-002`=9600）；`rl:order:i1/i2/i3` 都不存在；\n`r-303` **不存在于任何键**；`rl:order:mode = cluster`；\n`reject = 1`、`degrade = 1`、`cluster_qps` 仍是 100。\n\n## 这题真正考的东西\n\n1. **`ZUNIONSTORE` 是\"先并后删\"的那一步**：恢复之后不并账，\n   总窗口就\"忘了\"退化期间放掉的 5 条 ⇒ 下一秒的额度被算重（超放）。\n   而**先 `DEL` 本地窗口再并**等于把账撕了 —— 顺序本身就是判分点。\n2. **被拒的请求不落账**（E6）：与\"被熔断器拒绝的请求不计入样本\"是同一条纪律。\n   落账之后单机阈值会被自己的拒绝撑满，\n   症状是\"限流中心恢复后这个实例永远限死\"。\n3. **`SET rl:order:mode local` 之后不许再动全局窗口**：\n   退化期间全局窗口的写路径已经不归本实例负责（多实例并发写同一个 ZSET 会互相看不到），\n   本地记账是**唯一能自证\"这段时间放了多少\"的证据链**。\n\n只交一段命令脚本，不需要写代码。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "sentinel-cluster-flow",
+    "token-server-degrade",
+    "sliding-window",
+    "degrade-ledger",
+    "no-lua-constraint",
+    "modern:resilience-semantics"
+  ],
+  "cases": [
+    {
+      "name": "退化期间的放行必须并回总账：全局窗口恰好 7 个成员",
+      "input": [
+        "ZCARD rl:order:global"
+      ],
+      "expected": 7,
+      "visible": true,
+      "note": "2 条窗口内的旧全局 + 3 条 i1/i2 的本地放行 + 2 条 i3 的本地放行"
+    },
+    {
+      "name": "过期条目被清、窗口内条目必须留着：g-002 还在（9500）",
+      "input": [
+        "ZSCORE rl:order:global g-002"
+      ],
+      "expected": "9500",
+      "visible": true,
+      "note": "清到 now=10000 的实现会把 9500/9800 一起删掉 ⇒ ZCARD 变 5"
+    },
+    {
+      "name": "退化期间新放行的 r-101 在总账里，分数是它自己的时刻",
+      "input": [
+        "ZSCORE rl:order:global r-101"
+      ],
+      "expected": "10100",
+      "visible": true
+    },
+    {
+      "name": "边界：i3 的旧账 a-001 也要被并进来（不许漏某个实例）",
+      "input": [
+        "ZSCORE rl:order:global a-001"
+      ],
+      "expected": "9500",
+      "visible": true
+    },
+    {
+      "name": "边界：被单机阈值拒掉的 r-303 绝不允许落任何账本",
+      "input": [
+        "ZSCORE rl:order:global r-303"
+      ],
+      "expected": null,
+      "visible": true,
+      "note": "落账之后单机阈值会被自己的拒绝撑满 —— 恢复后这个实例永远限死"
+    },
+    {
+      "name": "本地窗口并完必须清掉：i1 不存在",
+      "input": [
+        "EXISTS rl:order:i1"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "本地窗口并完必须清掉：i3 不存在（它就是那个\"已经限满\"的实例）",
+      "input": [
+        "EXISTS rl:order:i3"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "全局窗口不许被 DEL：它必须仍然存在（哪怕退化期间没人写它）",
+      "input": [
+        "EXISTS rl:order:global"
+      ],
+      "expected": 1,
+      "visible": true,
+      "note": "清掉它 = 恢复后从 0 计数 = 下一秒超放"
+    },
+    {
+      "name": "退化标记要复位成 cluster",
+      "input": [
+        "GET rl:order:mode"
+      ],
+      "expected": "cluster",
+      "visible": true
+    },
+    {
+      "name": "降级事件要计数（HINCRBY 不是 HSET）",
+      "input": [
+        "HGET rl:order:stat degrade"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "超限拒绝要计数",
+      "input": [
+        "HGET rl:order:stat reject"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "配额上限不许被这个脚本改掉",
+      "input": [
+        "HGET rl:order:cfg cluster_qps"
+      ],
+      "expected": "100",
+      "visible": true,
+      "note": "改阈值是运营动作，不在本场景里 ⇒ 动了就是越权"
+    },
+    {
+      "name": "空结果边界：全局窗口里没有任何\"未来时刻\"的条目",
+      "input": [
+        "ZCOUNT rl:order:global 10301 +inf"
+      ],
+      "expected": 0,
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nZREMRANGEBYSCORE rl:order:global -inf 8999\nSET rl:order:mode local\nHINCRBY rl:order:stat degrade 1\nZADD rl:order:i1 10100 r-101\nZADD rl:order:i1 10200 r-102\nZADD rl:order:i2 10300 r-201\nHINCRBY rl:order:stat reject 1\nZUNIONSTORE rl:order:global 4 rl:order:global rl:order:i1 rl:order:i2 rl:order:i3\nDEL rl:order:i1\nDEL rl:order:i2\nDEL rl:order:i3\nSET rl:order:mode cluster\n```\n\n**清理边界是 8999，不是 10000。** `score <= 9000` 才算窗口外，而只有 `g-001`(8900) 满足。\n写成 `-inf 10000` 会把 `g-002`(9500) 与 `g-003`(9800) 一起删掉\n⇒ `ZCARD` 从 7 变 5、`ZSCORE g-002` 变 nil，**两条校验同时红**。\n这是本题唯一一条\"清得太干净\"的错法，而它的线上症状是\n\"限流窗口里的历史被抹掉，通过率突然变高\"。\n（初值刻意做成 8900 / 9500 / 9800 三个跨在边界两侧的值 ——\n全在边界之下会让这个错法**不可判**，那是用例设计的失败而不是判题器的。）\n\n**`ZUNIONSTORE dest 4 dest src1 src2 src3` 是本题的题眼**：\n目标键同时作为源键在 Redis 里是合法的（先读后写），\n所以\"并回总账\"是一条命令，不需要 Lua。\n顺序上必须是 `ZUNIONSTORE` 在前、三个 `DEL` 在后 ——\n反过来就是先撕证据再合并，`ZCARD` 会停在 2。\n\n**E6 只发 `HINCRBY`、不发任何 `ZADD`。** 朴素解把 `r-303` 也写进 `rl:order:i3`\n（`ZADD rl:order:i3 10400 r-303`），于是并账之后总账里多出一个本该被拒的请求，\n`ZCARD` 变 8。更糟的是它在**本地**的形态：i3 的窗口被自己的拒绝撑到 3 条，\n下一轮任何请求都会被\"已经限满\"的判断拒掉 ——\n**被拒的请求落账 = 拒绝会自我放大**，这与熔断器里\"被拒的请求不计入统计\"是同一件事。\n\n**`HSET rl:order:stat degrade 1`（朴素解写法）为什么不算错在这里、但方向上错**：\n本场景只发生一次降级，`HSET` 与 `HINCRBY` 给出同一个数，所以这一格看不出来。\n但配额服务是多实例共享的：每个实例退化时都 `SET` 成自己看到的 1，\n**最终只剩 1**，而真实降级次数是实例数。\n`reject` 同理 —— 丢更新的方向是单向的（只少不多），\n所以这类计数器一律 `HINCRBY`。（素材在直播配额那题里写过同一条纪律。）\n\n**为什么\"不许 `DEL rl:order:global`\"值得单独一列校验**：\n它的症状不在退化期间（那段时间总账本来就不更新），\n而在**恢复后的第一秒**：Token Server 从零开始计数，\n`cluster_qps = 100` 又被完整放行一遍，而本地已经放掉了 5 条。\n**\"限流中心恢复 ⇒ 突然超放\"** 是这类系统最难在监控里认出来的一刻\n（大盘看起来是\"恢复后流量涨了\"）。\n\n**工程延伸（面试追问点）**\n\n1. 单机阈值该配多少？（素材 §4 考点 9 把这条写成\"阈值之间的大小关系与推导方法\"，\n   §7 第 3 条明确**没有可引用的官方推荐值**。可辩护的答案是\n   `单机阈值 ≤ 期望总阈值 / 实例数`，并且压测标定单实例水位；\n   配错的方向性后果就是本题的容量陷阱。）\n2. 退化的判据是什么？（官方给的是\"未引入依赖 / 未开启 / 连接失败 / 通信失败\"四种【源 S19】，\n   并提供\"通信失败时是否退化到本地\"的配置项。\n   **要能说清\"不退化\"意味着什么**：请求会在拿令牌这一步超时，等价于全拒。）\n3. `ZUNIONSTORE` 的分数会怎样？（默认 `AGGREGATE SUM`，同名成员分数相加！\n   本场景成员 ID 全局唯一所以安全；若成员可能重名，必须带 `WEIGHTS 1 1 1 1` 之前\n   先确认命名域。这是这题**没有考但一定会被追问**的一处。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL rl:order:global",
+      "DEL rl:order:i1",
+      "DEL rl:order:i2",
+      "DEL rl:order:i3",
+      "DEL rl:order:mode",
+      "HSET rl:order:cfg cluster_qps 100 per_instance_qps 2",
+      "HSET rl:order:stat reject 0 degrade 0",
+      "SET rl:order:mode cluster",
+      "ZADD rl:order:global 8900 g-001",
+      "ZADD rl:order:global 9500 g-002",
+      "ZADD rl:order:global 9800 g-003",
+      "ZADD rl:order:i3 9500 a-001",
+      "ZADD rl:order:i3 9600 a-002"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# 观测时刻 now = 10000，窗口 1000ms ⇒ 过期线是 9000（score <= 9000 视为窗口外）\n# E1 先清全局窗口的过期条目（只清 g-001=8900，9500/9800 必须留着）\nZREMRANGEBYSCORE rl:order:global -inf (9000\n# E2 Token Server 失联 ⇒ 落下降级标记；**绝不许 DEL 全局窗口**\nSET rl:order:mode local\nHINCRBY rl:order:stat degrade 1\n# E3/E4 退化期间 i1 按单机阈值放行 2 条\nZADD rl:order:i1 10100 r-101\nZADD rl:order:i1 10200 r-102\n# E5 i2 放行 1 条\nZADD rl:order:i2 10300 r-201\n# E6 i3 窗口里已有 2 条 = 单机阈值已满 ⇒ r-303 被拒：一条写入都不发，只记 reject\nHINCRBY rl:order:stat reject 1\n# E7 Token Server 恢复 ⇒ 先把本地三窗并回总账（不并就会超放）\nZUNIONSTORE rl:order:global 4 rl:order:global rl:order:i1 rl:order:i2 rl:order:i3\n# E8 并完再清本地窗口（先清等于撕账）\nDEL rl:order:i1\nDEL rl:order:i2\nDEL rl:order:i3\n# E9 模式标记复位\nSET rl:order:mode cluster",
+    "naiveSolution": "# \"降级 = 清账 + 放行\"版：DEL 掉全局窗口、被拒的请求也记进窗口、恢复后不并账\nHINCRBY rl:order:stat reject 1\nZADD rl:order:i1 10100 r-101\nZADD rl:order:i1 10200 r-102\nZADD rl:order:i2 10300 r-201\nZADD rl:order:i3 10400 r-303\nDEL rl:order:global\nHSET rl:order:stat degrade 1"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（稳定性与流量治理方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 9（限流：Token Client/Server 与\"连接失败/通信失败时退化到 local 模式按单机阈值执行限流检查\"、可配置是否退化、`limitApp` 与阈值口径【源 S19】；素材该考点的 redis 出题建议正是\"跨实例共享令牌桶，桶服务不可用时按单机阈值 × 实例数上限拒\"，并把\"单机阈值 × 实例数 > 期望总阈值\"列为容量陷阱。\"并回总账\"的具体命令顺序是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T14:59:13.091Z"
+  }
+}

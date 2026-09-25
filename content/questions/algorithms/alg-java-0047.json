@@ -1,0 +1,270 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0047",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "熔断器状态机：最小样本门槛、万分比阈值、冷却与半开探测的完整迁移",
+  "statement": "## 背景\n\nKitex 的熔断器文档给了三条可核查的硬信息【源 S2】：\n\n1. 默认阈值是 `ErrRate: 0.5` + `MinSample: 200`，并且**样本不足 200 时阈值不生效**；\n2. 熔断有**统计粒度**（服务粒度 key = `fromService/toService/method`，实例粒度另有配置），\n   实例粒度熔断后框架会**自动重试换实例**；\n3. 文档把\"触发策略 / 冷却策略 / 半打开时策略\"分成独立小节 —— 也就是\n   **恢复判据要自己定**（本题把它写成契约，见下）。\n\n这题不考\"熔断就是短路请求\"，考的是**状态机本身**：门槛、阈值边界、冷却、半开探测、\n以及\"探测期再次失败要回哪去\"。低峰期误熔断是这类代码唯一的真实事故形态。\n\n## 任务\n\n实现 `public static int[] breakerSimulate(int minSample, int thresholdBps, int cooldownSteps, int probeSample, int[] outcomes)`。\n\n`outcomes[i]` 是第 i 个**到达**的请求的结局：`1` = 失败，`0` = 成功。\n返回四个整数：`{放行数, 拒绝数, 打开次数, 结束时的状态}`，状态取 `0=关闭 / 1=打开 / 2=半开`。\n\n## 契约（**逐条实现，不要自己发挥**）\n\n判定顺序对每个到达的请求执行一次：\n\n| 当前状态 | 行为 |\n| --- | --- |\n| 关闭 / 半开 | **放行**，并把这次结局计入统计（`samples++`，失败则 `errors++`） |\n| 打开 | **拒绝**。不产生统计（**被拒的请求不计入样本** —— 它根本没打到下游）。冷却计数 `cooldownLeft--`；减到 0 时转半开并重置统计，`probeLeft = probeSample` |\n\n打开条件（放行并统计之后判）：\n\n```\nsamples >= minSample  且  errors * 10000 >= thresholdBps * samples\n```\n\n- 用**万分比整数**比较，不许出现浮点：`thresholdBps = 5000` 就是官方的 0.5。\n- 是 `>=` 不是 `>`：错误率**恰好等于**阈值就要打开。\n- 一旦不满足 `samples >= minSample`，**阈值完全不参与判定**（哪怕错误率 100%）。\n\n命中打开条件时：`openEvents++`，统计清零，`openEvents` 可多次累加（半开再犯就是二次打开）；\n`cooldownSteps <= 0` ⇒ **直接进入半开**（不产生任何拒绝），否则进入打开并置 `cooldownLeft = cooldownSteps`。\n\n半开的恢复判据（这一段是本题设定的规则，不是官方原文）：\n半开放行 `probeSample` 个请求，其间任意时刻满足打开条件 ⇒ 回到打开；\n否则**探测窗口跑满且没越界** ⇒ 回到关闭并清零统计。\n\n## 参数合法性（抛 `IllegalArgumentException`，消息必须一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `minSample <= 0` | `minSample must be positive` |\n| `thresholdBps <= 0` 或 `> 10000` | `thresholdBps out of range` |\n| `cooldownSteps < 0` | `cooldownSteps must be non-negative` |\n| `probeSample < minSample` | `probeSample must be >= minSample` |\n| `outcomes == null` | `outcomes must not be null` |\n| 某个元素不是 0/1 | `outcome must be 0 or 1` |\n\n`probeSample < minSample` 是**配置错误而不是钳制**：半开窗口比样本门槛还短，\n打开条件永远不可能在窗口内被判定，熔断器会变成\"探测一次就无条件恢复\"的死循环。\n钳制它等于悄悄改掉语义，所以必须拒绝。\n\n## 这题真正考的东西\n\n**`MinSample` 不是\"性能优化\"，是熔断器的第一道安全阀。**\n低峰期 1 QPS 时 200 个样本要 3 分多钟才攒够，看起来\"熔断变钝了\"；\n但去掉门槛之后，任何一次孤立失败都让错误率跳到 100%，\n于是**一个实例的一次抖动 = 该 key 全量拒绝**。素材里那句\n\"阈值要和熔断后自动重试/降级链路一起算，别只说配 0.5\"就是这个意思。\n\n第二条：被拒的请求**不许计入统计**。否则打开状态会自我强化 ——\n拒绝率越高、样本里失败越多、越不可能满足恢复条件，熔断器再也关不上。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "circuit-breaker",
+    "min-sample-gate",
+    "state-machine",
+    "service-mesh",
+    "modern:resilience-semantics"
+  ],
+  "cases": [
+    {
+      "name": "基线：满样本 + 错误率过半 ⇒ 打开，冷却后转半开",
+      "input": [
+        4,
+        5000,
+        2,
+        4,
+        [
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        6,
+        2,
+        1,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：样本数不足 minSample 时阈值不生效（低峰期不许误熔断）",
+      "input": [
+        200,
+        5000,
+        2,
+        200,
+        [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        5,
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "官方默认阈值是 0.5 / 200，且\"样本不足 200 时配置不生效\"——5 条全错也不该打开"
+    },
+    {
+      "name": "阈值恰好相等即打开（判定用 >= 不是 >）",
+      "input": [
+        4,
+        5000,
+        0,
+        4,
+        [
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        8,
+        0,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：冷却为 0 ⇒ 打开后下一条就是半开探测，不产生拒绝",
+      "input": [
+        2,
+        5000,
+        0,
+        2,
+        [
+          1,
+          1,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        4,
+        0,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "半开窗口内再次越界 ⇒ 二次打开（openEvents 记 2）",
+      "input": [
+        2,
+        5000,
+        2,
+        2,
+        [
+          1,
+          1,
+          0,
+          0,
+          1,
+          1,
+          0
+        ]
+      ],
+      "expected": [
+        4,
+        3,
+        2,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：空事件流 ⇒ 一个都没放过也没拒，终态关闭",
+      "input": [
+        4,
+        5000,
+        2,
+        4,
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "整段全对 ⇒ 从不打开，终态仍是关闭",
+      "input": [
+        3,
+        5000,
+        2,
+        3,
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        6,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：probeSample 小于 minSample（半开窗口永远判不出结果）",
+      "input": [
+        10,
+        5000,
+        2,
+        4,
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "probeSample must be >= minSample"
+    },
+    {
+      "name": "非法：冷却步数为负",
+      "input": [
+        4,
+        5000,
+        -1,
+        4,
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "cooldownSteps must be non-negative"
+    },
+    {
+      "name": "非法：阈值万分比越界",
+      "input": [
+        4,
+        10001,
+        2,
+        4,
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "thresholdBps out of range"
+    },
+    {
+      "name": "非法：事件值不是 0/1",
+      "input": [
+        4,
+        5000,
+        2,
+        4,
+        [
+          0,
+          2
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "outcome must be 0 or 1"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n状态机三态 + 一条\"越界即打开\"的判定，全整数比较：\n\n```java\nif (samples >= minSample && (long) errors * 10000L >= (long) thresholdBps * samples) { 打开 }\n```\n\n**基线用例 `minSample=4 / 阈值 5000 / 冷却 2 / 探测 4 / 事件 [1,1,1,1,0,0,0,0]` 走的是：**\n前 4 条放行并统计，第 4 条结束时 `samples` 刚够门槛，且四条全错（万分比 10000）越过 5000 阈值\n⇒ 第 1 次打开，`cooldownLeft=2`；第 5、6 条被拒（**不产生统计**），冷却减到 0 ⇒ 转半开、窗口 `probeLeft=4`；\n第 7、8 条作为探测放行，全成功且不越界，但窗口只跑了 2/4 ⇒ 结束态仍是**半开**。\n所以返回 `{6, 2, 1, 2}`：放行 6、拒绝 2、打开 1 次、终态半开。\n\"结束在半开\"不是瑕疵 —— 它说明**恢复是一个需要样本的过程，不是一次定时器到点的动作**。\n\n**边界用例（`minSample=200`、5 条全错）返回 `{5, 0, 0, 0}`**，这就是官方\n\"样本不足 200 时配置不生效\"的实现形态：错误率 `100%` 却一个都没拒。\n去掉 `samples >= minSample` 这一侧，`errors * 10000 >= threshold * samples` 在 1 条失败时就是\n`10000 >= 5000` ⇒ 立刻打开，低峰期一次抖动锁死整个 key。\n\n**阈值相等即打开**（用例「阈值恰好相等即打开（判定用 >= 不是 >）」）：\n`minSample=4 / 冷却 0 / [1,1,0,0,...]` 在第 4 条结束时是 4 个样本里 2 个失败，\n万分比恰好 5000 —— 判 `>=` 才打得开。写成 `>` 的实现整条用例少一次打开，且**线上表现为\"该熔断时不熔断\"**，\n监控上极难归因。\n\n**半开再犯要计第二次打开**：`openEvents` 是\"这个 key 被打开了几次\"的 SLO 计数，\n把半开失败并回打开算作\"没发生\"，就等于把抖动从故障统计里抹掉。\n\n**为什么被拒的请求不许进统计**：进了就会形成正反馈 —— 打开 ⇒ 全是\"失败样本\" ⇒\n错误率永远 100% ⇒ 永远关不上。这是自锁型熔断器的经典实现错误，\n和\"降级后按降级结果上报监控\"是同一类污染（本题的 A/B 面：一个是把失败洗成成功，\n一个是把成功洗成失败）。\n\n**工程延伸（面试追问点）**\n\n1. 实例级熔断打开后框架做什么？（自动重试换实例，前提是中间件用 `WithInstanceMW` 注册，\n   因为它要在负载均衡**之后**执行 —— 重试要换实例，就必须先知道选的是哪个实例。\n   顺序错了就变成\"重试到同一个坏实例\"。）\n2. 冷却用\"请求数\"而不是\"时间\"的代价？（低峰期可能很久都不推进恢复、\n   高峰期几毫秒就走完冷却；真实实现要挂时钟，但要能说出这是可测性换真实性的取舍 ——\n   本题这么定就是为了让它可判分。）\n3. 阈值怎么定？（要和服务粒度熔断阈值联动：重试停止策略 `CBPolicy` 默认 10%、\n   合法域 (0,30%]，且**必须小于**服务粒度熔断阈值，否则重试统计会盖过熔断判定。）\n4. 半开窗口该多大？（至少 `minSample`，否则判不出 —— 这就是参数校验里那条\n   `probeSample must be >= minSample`。题面故意要求抛错而不是钳制：\n   钳制会静默改变一个已经配好的熔断器的恢复速度。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] breakerSimulate(int minSample, int thresholdBps, int cooldownSteps, int probeSample, int[] outcomes)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  private static final int CLOSED = 0, OPEN = 1, HALF = 2;\n\n  public static int[] breakerSimulate(int minSample, int thresholdBps, int cooldownSteps,\n                                      int probeSample, int[] outcomes) {\n    if (minSample <= 0) throw new IllegalArgumentException(\"minSample must be positive\");\n    if (thresholdBps <= 0 || thresholdBps > 10000)\n      throw new IllegalArgumentException(\"thresholdBps out of range\");\n    if (cooldownSteps < 0) throw new IllegalArgumentException(\"cooldownSteps must be non-negative\");\n    if (probeSample < minSample) throw new IllegalArgumentException(\"probeSample must be >= minSample\");\n    if (outcomes == null) throw new IllegalArgumentException(\"outcomes must not be null\");\n    for (int o : outcomes) if (o != 0 && o != 1) throw new IllegalArgumentException(\"outcome must be 0 or 1\");\n\n    int state = CLOSED, samples = 0, errors = 0;\n    int allowed = 0, rejected = 0, openEvents = 0, cooldownLeft = 0, probeLeft = 0;\n    for (int o : outcomes) {\n      if (state == OPEN) {\n        rejected++;\n        if (--cooldownLeft <= 0) { state = HALF; samples = 0; errors = 0; probeLeft = probeSample; }\n        continue;\n      }\n      allowed++;\n      samples++;\n      errors += o;\n      if (samples >= minSample && (long) errors * 10000L >= (long) thresholdBps * samples) {\n        openEvents++;\n        samples = 0;\n        errors = 0;\n        if (cooldownSteps <= 0) { state = HALF; probeLeft = probeSample; }\n        else { state = OPEN; cooldownLeft = cooldownSteps; }\n        continue;\n      }\n      if (state == HALF && --probeLeft <= 0) { state = CLOSED; samples = 0; errors = 0; }\n    }\n    return new int[] {allowed, rejected, openEvents, state};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"错误率一超标就短路\"版：没有最小样本门槛、打开之后永远打开（没有半开），\n  // 且被拒的请求也算进样本 —— 低峰期一条失败就能把整个 key 锁死。\n  public static int[] breakerSimulate(int minSample, int thresholdBps, int cooldownSteps,\n                                      int probeSample, int[] outcomes) {\n    if (minSample <= 0) throw new IllegalArgumentException(\"minSample must be positive\");\n    if (thresholdBps <= 0 || thresholdBps > 10000)\n      throw new IllegalArgumentException(\"thresholdBps out of range\");\n    if (cooldownSteps < 0) throw new IllegalArgumentException(\"cooldownSteps must be non-negative\");\n    if (probeSample < minSample) throw new IllegalArgumentException(\"probeSample must be >= minSample\");\n    if (outcomes == null) throw new IllegalArgumentException(\"outcomes must not be null\");\n    for (int o : outcomes) if (o != 0 && o != 1) throw new IllegalArgumentException(\"outcome must be 0 or 1\");\n\n    int open = 0, allowed = 0, rejected = 0;\n    int samples = 0, errors = 0;\n    for (int o : outcomes) {\n      samples++;\n      errors += o;\n      if (open > 0) { rejected++; continue; }\n      allowed++;\n      if (errors * 10000 >= thresholdBps * samples) { open = 1; }\n    }\n    return new int[] {allowed, rejected, open, open == 0 ? 0 : 1};\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "ByteDance",
+    "role": "服务端研发（Go 微服务治理与稳定性方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-backend-and-infrastructure.md#4 考点 2（熔断器：粒度、阈值、半开与自动重试；默认 ErrRate 0.5 / MinSample 200 且\"样本不足时不生效\"；半开/冷却判据按【推】补全）＋ §5 题面草稿 A 第 1 条",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:20:38.821Z"
+  }
+}

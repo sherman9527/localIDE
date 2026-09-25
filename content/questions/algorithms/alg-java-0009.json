@@ -1,0 +1,151 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0009",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "路由表的最长前缀匹配与无符号地址陷阱",
+  "statement": "## 背景\n\n网关转发表做**最长前缀匹配**（LPM）：规则 i 是 CIDR `prefixAddrs[i]/prefixLens[i]`，其下一跳就是 `i`。给定一批目标地址，返回每条流量命中的规则下标。\n\nIPv4 地址以**无符号 32 位**语义存在 Java 的**有符号 `int`** 里（`255.255.255.255` 就是 `-1`）。所有\"移位、比较、区间端点\"都必须按无符号位模式处理，这是本题的核心陷阱。\n\n## 入口\n\n```java\npublic static int[] nextHopFor(int[] prefixAddrs, int[] prefixLens, int[] targets)\n```\n\n- 返回长度 = `targets.length` 的 `int[]`：`out[q]` = 命中的规则下标，**没有任何规则命中时为 `-1`**；\n- 命中定义：目标的**高 `len` 位**与 `prefixAddrs[i]` 的高 `len` 位相同（`len == 0` 命中一切，`len == 32` 要求逐位相同）；\n- 多条规则命中时取 **`len` 最大**的那条（最长前缀优先）；若仍有并列（同 len 同前缀），取**下标最小**的规则。\n\n## 不变式与硬约束\n\n1. `prefixAddrs.length == prefixLens.length`，否则抛 `IllegalArgumentException`；`prefixLens[i] ∈ [0, 32]`，越界抛 `IllegalArgumentException`。\n2. **`int` 移位取模 32**：`x >>> 32 == x`、`1 << 32 == 1`。因此 `len == 0` 时不能写 `t >>> (32 - len)`——它等价于 `t >>> 0`，默认路由会永远不命中。`len == 32` 时 `>>> 0` 反而是对的。这个两端都要特判。\n3. 高位比较只能用 `>>>`（无符号右移），用 `>>` 会把 `200.x.x.x`（负 int）的符号位补进去，导致匹配错误。\n4. 期望复杂度：预处理 O(R)，单条查询 O(32) 次哈希查找（按前缀长度分桶）或 O(log R)（`TreeMap` + `floorKey` + 区间判定）；R ≤ 2e5、Q ≤ 2e5。不许对每条查询线性扫全部规则。\n5. 输出不得依赖 `HashMap` 迭代顺序（并列取\"更小下标\"要显式实现）。\n\n## 输出契约\n\n返回 `int[]`。空规则表时返回全 `-1`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "longest-prefix-match",
+    "tree-map",
+    "unsigned-comparison",
+    "bit-shift-trap",
+    "modern:cidr-routing"
+  ],
+  "cases": [
+    {
+      "name": "空路由表全部不可达",
+      "input": [
+        [],
+        [],
+        [
+          16909060
+        ]
+      ],
+      "expected": [
+        -1
+      ]
+    },
+    {
+      "name": "默认路由 0.0.0.0/0 命中一切（含最高位为 1 的地址）",
+      "input": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          16777217,
+          -1
+        ]
+      ],
+      "expected": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "最长前缀优先于短前缀",
+      "input": [
+        [
+          0,
+          167772160,
+          167837696
+        ],
+        [
+          0,
+          8,
+          16
+        ],
+        [
+          167838211,
+          167903233,
+          134744072
+        ]
+      ],
+      "expected": [
+        2,
+        1,
+        0
+      ]
+    },
+    {
+      "name": "/32 精确匹配与不命中",
+      "input": [
+        [
+          -1
+        ],
+        [
+          32
+        ],
+        [
+          -1,
+          -2
+        ]
+      ],
+      "expected": [
+        0,
+        -1
+      ]
+    },
+    {
+      "name": "同前缀重复规则并列时取更小下标",
+      "input": [
+        [
+          167772160,
+          167772160
+        ],
+        [
+          8,
+          8
+        ],
+        [
+          167772161
+        ]
+      ],
+      "expected": [
+        0
+      ]
+    },
+    {
+      "name": "无符号高位地址（负 int）按位比较",
+      "input": [
+        [
+          -939524096
+        ],
+        [
+          8
+        ],
+        [
+          -939458045,
+          -1062731775
+        ]
+      ],
+      "expected": [
+        0,
+        -1
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] nextHopFor(int[] prefixAddrs, int[] prefixLens, int[] targets)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 按前缀长度分桶：byLen[len] 这张哈希表的键是\"地址的高 len 位\"，值是该前缀首次出现的规则下标\n   * （并列取更小下标）。查询时从 len=32 往下扫到 0，第一个命中就是最长前缀 —— 至多 33 次哈希查找。\n   * 移位两端特判：len==0 时键恒为 0（不能用 >>> 32，因为 int 移位按 32 取模）；\n   * len==32 时用 >>> 0；一律用无符号右移 >>>，避免负 int 地址的符号位污染。\n   */\n  public static int[] nextHopFor(int[] prefixAddrs, int[] prefixLens, int[] targets) {\n    if (prefixAddrs.length != prefixLens.length) {\n      throw new IllegalArgumentException(\"prefix arrays must be parallel\");\n    }\n    @SuppressWarnings(\"unchecked\")\n    java.util.HashMap<Integer, Integer>[] byLen = new java.util.HashMap[33];\n    for (int r = 0; r < prefixAddrs.length; r++) {\n      int len = prefixLens[r];\n      if (len < 0 || len > 32) throw new IllegalArgumentException(\"bad prefix length\");\n      int masked = len == 0 ? 0 : prefixAddrs[r] >>> (32 - len);\n      if (byLen[len] == null) byLen[len] = new java.util.HashMap<Integer, Integer>();\n      Integer held = byLen[len].get(masked);\n      if (held == null || r < held) byLen[len].put(masked, r);   // 并列取更小下标\n    }\n    int[] out = new int[targets.length];\n    for (int q = 0; q < targets.length; q++) {\n      int t = targets[q];\n      int hit = -1;\n      for (int len = 32; len >= 0 && hit < 0; len--) {\n        java.util.HashMap<Integer, Integer> table = byLen[len];\n        if (table == null) continue;\n        Integer got = table.get(len == 0 ? 0 : t >>> (32 - len));\n        if (got != null) hit = got;\n      }\n      out[q] = hit;\n    }\n    return out;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：按输入顺序线性扫规则，第一条\"看起来匹配\"的就返回。\n  // 两个错：(1) 没有最长前缀优先；(2) >>> (32 - 0) == >>> 32 == >>> 0，默认路由永远不命中。\n  public static int[] nextHopFor(int[] prefixAddrs, int[] prefixLens, int[] targets) {\n    int[] out = new int[targets.length];\n    for (int q = 0; q < targets.length; q++) {\n      int t = targets[q];\n      out[q] = -1;\n      for (int r = 0; r < prefixAddrs.length; r++) {\n        int shift = 32 - prefixLens[r];\n        if ((t >>> shift) == (prefixAddrs[r] >>> shift)) {\n          out[q] = r;\n          break;\n        }\n      }\n    }\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：LPM 的工程实现是\"按前缀长度分桶 + 从长到短查\"或 `TreeMap` 有序底数 + `floorKey`。参考解用 33 个哈希表（每个 len 一张），键是高 len 位（`addr >>> (32-len)`），值是该前缀**首次出现**的规则下标；查询从 32 递减到 0，第一个命中即最长前缀 → O(33) 次哈希查找，与 R 无关。\n\n**必考的语言细节**：\n1. **移位取模**：`int` 的移位量按 `& 31` 处理，所以 `x >>> 32 == x`。`len == 0` 时 `t >>> (32 - len)` 变成 `t >>> 0 == t`，默认路由 0.0.0.0/0 只能命中\"目标恰好等于 0\"的地址——朴素实现就在这里判负。`len == 32` 反而必须走 `>>> 0`。两端都要特判，不能\"统一 +1 处理\"。\n2. **有符号/无符号**：地址高位为 1 时 `int` 是负数，`>>` 会补符号位，必须 `>>>`；同理若用 `TreeMap` 方案比较区间端点 `(addr & 0xffffffffL) + (1L << (32-len))` 也要升 `long`（`1 << 32` 直接归 1）。\n3. **确定性**：并列（同 len 同前缀）取更小下标，必须在插入时用 `r < held` 显式判断；靠 `HashMap` 迭代顺序取\"第一个\"跨 JDK 版本会变。\n\n**复杂度**：预处理 O(R)，查询 O(Q·32) 期望；空间 O(R + 33)。`TreeMap.floorKey` 版本是 O((R+Q) log R)，但要先证明\"任一包含目标的 CIDR 块，其底数必是 ≤ target 的最大底数\"（CIDR 块两两不交或嵌套，结论成立）——面试里能给出这个论证比写出来更值钱。\n\n**面试追问**：\n1. 为什么不用 `TreeMap` + `subMap`？（`subMap` 是视图，在视图上 `put` 超出范围的键会抛 `IllegalArgumentException`；LPM 要的是\"点查 + 前缀回溯\"，`floorKey` 足够。）\n2. 路由表热更新（增量插入/删除）？（哈希分桶天然支持 O(1) 增删；`TreeMap` 版本要处理\"同一前缀多个下一跳\"的计数，删除不能直接 `remove(key)`。生产里通常用 FIB（Fixed-Block Trie）或 DPDK route table，理由就是\"内存局部性 + 无指针追逐\"。）\n3. 如果规则里有 `10.1.0.0/16` 这种底数未对齐的\"脏规则\"？（要么在插入时归一化 `addr &= ~((1<<(32-len))-1)`（注意 `len==0` 特判），要么显式拒绝；不处理就会漏匹配——这是本题最真实的线上 bug。）\n4. 为什么不用 `Long.compare` 把地址当 `long` 处理？（可以，`Integer.toUnsignedLong`；代价是键空间翻倍、哈希表桶数增加；但区间端点计算 `start + (1L << (32-len))` 必须走 `long`。）\n5. 1e5 条规则、2e5 条查询，为什么\"线性扫\"一定崩？（2e10 次比较，数量级上 1e9 次/秒 → 20 秒；这题的规模就是为暴力判负设计的。）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#3-常见错误答案",
+    "addedBy": "content-agent-alg"
+  }
+}

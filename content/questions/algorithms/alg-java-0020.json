@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0020",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "配置版本树里最长的同值路径（自底向上，答案不等于返回值）",
+  "statement": "## 背景\n\n一次配置热更新会形成一棵**版本树**：每个节点存一个配置指纹 `val`，父子表示「从哪个版本派生」。运维想知道**最长的一段「连续同值派生链」**有多少跳——这条链越长，说明这段时间里配置实际上没变，但每次派生都触发了一轮下发与校验，是纯浪费。这个数就是回滚窗口选择的重要依据。\n\n## 你要实现的入口\n\n```java\npublic static int longestUnivaluePath(TreeNode root)\n```\n\n- `TreeNode` 由判题器提供（`int val` / `TreeNode left` / `TreeNode right`），**不要在自己代码里再定义一遍**；\n- 入参是一棵用**层序数组**表达的二叉树，`null` 是空位占位符（例如 `[3,9,20,null,null,15,7]`）；\n- 返回值：树中任意两点之间路径上的**最大边数**，要求这条路径上所有节点的 `val` 相同。\n\n## 约定（不变式，必须遵守）\n\n1. 路径**可以经过任意节点转折**（左边上来、右边下去都算同一条路径），不必落到叶子，也不必从根开始。\n2. 按**边数**计数：单节点的答案是 `0`；两个相同值父子相连是 `1`。\n3. `root` 可能为 `null`（空树），此时返回 `0`，不得抛异常。\n4. 节点值可以是负数；树不一定是二叉搜索树，也不保证平衡。\n\n## 复杂度要求\n\n- 时间 `O(n)`、递归栈空间 `O(h)`（`h` 为树高）；\n- 一次后序遍历就要把答案算出来，不许对每个节点重新向下扫描（那是 `O(n^2)`）。\n\n## 输出契约\n\n返回 `int`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": ["binary-tree", "postorder-dp", "traversal", "tree-height", "modern:config-lineage"],
+  "cases": [
+    {
+      "name": "空树返回 0",
+      "input": [null],
+      "expected": 0,
+      "note": "root 为 null 不得抛异常"
+    },
+    {
+      "name": "单节点边界：没有边所以是 0",
+      "input": [[1]],
+      "expected": 0
+    },
+    {
+      "name": "单边同值",
+      "input": [[1, 1, 2]],
+      "expected": 1
+    },
+    {
+      "name": "经过根转折的双边同值",
+      "input": [[1, 1, 1]],
+      "expected": 2,
+      "note": "只取单边最长会算出 1，这条用例专门杀它"
+    },
+    {
+      "name": "不同值阻断路径累计",
+      "input": [[2, 2, 2, 1, 1, null, 3]],
+      "expected": 2
+    },
+    {
+      "name": "退化成链的同值树",
+      "input": [[1, 1, null, 1, null, 1]],
+      "expected": 3
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int longestUnivaluePath(TreeNode root)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  private static int best;\n\n  /**\n   * 后序遍历：向孩子要「从孩子出发、往下同值的最长单边」，\n   * 在当前位置把左右两条边拼起来更新全局答案，但只向上返回单边。\n   * 答案（双边）与返回值（单边）不是一回事，这是本题唯一的坑。\n   */\n  public static int longestUnivaluePath(TreeNode root) {\n    best = 0;\n    down(root);\n    return best;\n  }\n\n  private static int down(TreeNode node) {\n    if (node == null) return 0;\n    int left = down(node.left);\n    int right = down(node.right);\n    int ll = 0;\n    int rr = 0;\n    if (node.left != null && node.left.val == node.val) ll = left + 1;\n    if (node.right != null && node.right.val == node.val) rr = right + 1;\n    best = Math.max(best, ll + rr);\n    return Math.max(ll, rr);\n  }\n}",
+    "naiveSolution": "public class Solution {\n  private static int best;\n\n  // 忘了「路径可以在当前节点转折」：只把单边当答案，经过根的双边同值链永远算少\n  public static int longestUnivaluePath(TreeNode root) {\n    best = 0;\n    down(root);\n    return best;\n  }\n\n  private static int down(TreeNode node) {\n    if (node == null) return 0;\n    int left = down(node.left);\n    int right = down(node.right);\n    int ll = 0;\n    int rr = 0;\n    if (node.left != null && node.left.val == node.val) ll = left + 1;\n    if (node.right != null && node.right.val == node.val) rr = right + 1;\n    best = Math.max(best, Math.max(ll, rr));\n    return Math.max(ll, rr);\n  }\n}"
+  },
+  "answer": "**思路**：一次后序遍历。对每个节点，从左、右孩子各拿到「以孩子为起点向下的最长同值单边」，若孩子存在且值相同则该方向是 `child + 1`，否则是 `0`；**在当前节点把两个方向相加**更新全局答案（路径在这里转折），而**向上只返回较长的那一边**（一条路径不能有两个向上的出口）。\n\n**唯一的坑**：`best = max(best, ll + rr)` 而不是 `max(best, max(ll, rr))`。后者在 `[1,1,1]` 上返回 1，正确答案是 2（左子-根-右子共两条边）。这也是「返回值 ≠ 答案」这一类树题的通用模式（直径、最长同值路径、斜率类问题都一样）。\n\n**为什么必须是单边返回**：如果向上返回 `ll + rr`，父节点会再叠一次，得到一条自我折返的路径，长度虚高。\n\n**复杂度**：时间 `O(n)`（每个节点常数次工作），空间是递归栈 `O(h)`；退化链最坏 `O(n)`，`n=2e5` 时可能栈溢出——生产实现要改成显式栈或先算树高再决定策略，面试里能主动说出这一点比写对递归更加分。\n\n**状态与并发**：示例用 `static` 字段传状态，单次调用没问题，但**并发判题/多次调用会互相踩**（`best` 被别的线程重置）。更稳的写法是返回一个 `(单边长, 全局最优)` 二元组，或把累加器作为参数传下去。\n\n**面试追问点**：\n1. 如果要求路径上的值「单调不增」而不是全相等，改哪里？（把相等判断换成 `child.val <= node.val`，并让状态带上「当前段的值」——一个方向上的比较不再独立，需要向下传上下文）。\n2. 树很宽很深、担心栈溢出怎么办？（改成显式栈的后序遍历：每个节点记录「左右是否已处理」；或者用 Morris 式线程化把空间降到 O(1)，代价是实现复杂度）。\n3. 如果这棵树是**多叉**的版本谱系（一个配置可以有多个子版本）？（把左右两边换成对所有孩子排序取最大的两个同值分支即可，其余逻辑不变）。\n4. 运维真正要的是什么？（不只是长度，还要**是哪条链**：把 `best` 换成 `(长度, 转折点)`，再向下走一次同值最长边就能还原路径，用于定位该回收哪一批下发）。",
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-20T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md",
+    "addedBy": "n04-pointer-structures"
+  }
+}

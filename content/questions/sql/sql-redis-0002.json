@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0002",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "滑动窗口限流：同毫秒请求不能被互相覆盖，被拒的请求不能落库",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7；只用 6.0+ 就有的有序集合命令）。\n\n实现**滑动窗口日志**限流器，规则：`窗口 60000 毫秒内最多 3 次调用`。\n契约（必须逐条照做，判题只按这些常量断言）：\n- 每个 uid 一个有序集合键：uid 42 → `rl:42`，uid 43 → `rl:43`；\n- score = 请求时间戳 `now_ms`；member 必须写成 `<now_ms>:<该键上的第几次请求，从 1 开始>`（例如第一次是 `1000000:1`）—— **同一毫秒的多次请求必须是不同 member**；\n- 禁止 `TIME`/`RANDOMKEY`：所有 now_ms 由题面给定（判题串行执行，时钟必须可复现）；\n- 每个请求的步骤顺序必须是：① 先清理窗口外记录（保留 `now_ms - 60000 < ts <= now_ms`，即清理 `ts <= now_ms - 60000`）→ ② 统计窗口内条数 → ③ 只有没超限才写入本次记录；**被拒绝的请求绝对不许落库**；\n- 每个限流键都要有 TTL（租约），否则冷 uid 的键会永久堆积。\n\n请按时间线顺序提交命令序列（一行一条命令，逻辑毫秒基准 1000000）：\n  t1  uid42 请求 @ now_ms=1000000\n  t2  uid42 请求 @ now_ms=1000000（同一毫秒的第二个请求）\n  t3  uid42 请求 @ now_ms=1000000（第三条，达到上限）\n  t4  uid42 请求 @ now_ms=1059999（窗口内已有 3 条 → 必须被拒绝）\n  t5  uid43 请求 @ now_ms=1002000\n  t6  uid43 请求 @ now_ms=1062001（此刻 t5 那条已滑出窗口 → 必须放行，且旧记录必须被清掉）\n\n禁止 KEYS/FLUSHALL/FLUSHDB/EVAL/SCRIPT/OBJECT/SORT/DEBUG。判题只观察最终键状态：中间态要靠「正确的命令顺序 + 最终留下的成员集合」才能反推出来。",
+  "judgeKind": "redis",
+  "tags": [
+    "rate-limiting",
+    "sliding-window",
+    "zset",
+    "ttl-lease",
+    "modern:redis7-rate-limiting"
+  ],
+  "cases": [
+    {
+      "name": "同毫秒三条不互相覆盖且被拒请求未落库",
+      "input": ["ZCARD rl:42"],
+      "expected": 3,
+      "note": "member 只用 now_ms 的实现会得到 1；把被拒请求也写进去的实现会得到 4。"
+    },
+    {
+      "name": "窗口日志内容（nonce 边界）",
+      "input": ["ZRANGE rl:42 0 -1 WITHSCORES"],
+      "expected": ["1000000:1", "1000000", "1000000:2", "1000000", "1000000:3", "1000000"]
+    },
+    {
+      "name": "超限请求的时间戳不得出现在日志里",
+      "input": ["ZCOUNT rl:42 1059999 1059999"],
+      "expected": 0
+    },
+    {
+      "name": "滑动窗口过期清理边界（固定窗口实现在这里露馅）",
+      "input": ["ZRANGE rl:43 0 -1 WITHSCORES"],
+      "expected": ["1062001:2", "1062001"],
+      "note": "1062001-60000=1002001，score 1002000 的记录必须被清掉，窗口里只剩本次这一条。"
+    },
+    {
+      "name": "结构必须是有序集合",
+      "input": ["TYPE rl:42", "TYPE rl:43"],
+      "expected": ["zset", "zset"]
+    },
+    {
+      "name": "两个键都必须已带 TTL（租约边界）",
+      "input": ["EXPIRE rl:42 999 XX", "EXPIRE rl:43 999 XX"],
+      "expected": [1, 1],
+      "note": "EXPIRE ... XX 只在键**已经存在过期时间**时返回 1。判题器不允许断言 TTL 精确值（读的时候可能跨秒），所以用这个方式验证「有没有设过 TTL」。"
+    }
+  ],
+  "answer": "参考解（每个请求：清理 → 计数 → 条件写入；被拒的那次不写）：\n```\nDEL rl:42\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:1\nEXPIRE rl:42 120 NX\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:2\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:3\nZREMRANGEBYSCORE rl:42 -inf 999999\nZCARD rl:42                       # 3 -> 拒绝，不 ZADD\nDEL rl:43\nZREMRANGEBYSCORE rl:43 -inf 942000\nZCARD rl:43\nZADD rl:43 1002000 1002000:1\nEXPIRE rl:43 120 NX\nZREMRANGEBYSCORE rl:43 -inf 1002001\nZCARD rl:43\nZADD rl:43 1062001 1062001:2\nEXPIRE rl:43 120 NX\n```\n要点：\n1) 固定窗口（`INCR k` + `EXPIRE k 60`）的问题不是「不准」，而是**边界翻倍**：t=59s 打满 + t=61s 再打满 = 2 倍配额。滑动窗口日志把每个请求都留成一条带时间戳的记录，用 `now - W < ts <= now` 的区间计数消掉这个突刺。\n2) **member 必须带 nonce**：`ZADD k 1000000 1000000` 执行三次只有一个成员 —— 同一毫秒的并发请求被静默合并，等于限流器对同毫秒流量完全放行。这也是为什么窗口日志的 member 不能只有时间戳。\n3) **清理必须在计数之前、写入在判断之后**：顺序错了就会出现「先写后清（把自己清掉）」或「数完不判断（超发）」。判题看不到中间返回值，只能靠最终成员集合反推，所以「被拒请求没落库」是用例 1/3 的判定点。\n4) `EXPIRE key ttl NX`（7.0）= 只在还没有 TTL 时设置，用来挂一个「窗口 + 余量」的租约；`INCR` 之后无条件 `EXPIRE` 会把窗口无限延长（这是固定窗口写法最常见的 bug）。\n5) 为什么窗口清理用闭区间 `<= now-60000`：Redis 的 `(` 前缀开区间语法要写成 `ZREMRANGEBYSCORE k -inf (999999`（**没有右括号**，很多人写成 `(999999)` 直接 `ERR min or max is not a float`），而闭区间写法更直观也少一个坑。\n6) 判题器禁用 `EVAL`/`FCALL`，所以清理/计数/写入是三条命令 —— **这份提交在线上不够用**：A 数完 2、B 也数完 2，两人都写入 → 超发。必须包成 Lua/Function（或 7.4+ 用 `ZADD ... GT` 之类的单命令条件写做变体），并能说出「Function 比 EVAL 多的那部分价值（库被持久化与复制、不会有 NOSCRIPT）」与「集群下库不会自动同步到所有节点」。\n\n追问：\n- 热点：单 uid 的高 QPS 全打在一个 slot → 分片计数 `rl:42:{shard}` + 汇总，或本地令牌桶 + Redis 粗粒度配额；要说清「限流精度 vs RTT/内存」的取舍。\n- 令牌桶需要「读上次时间 + 写新值」的原子比较，无脚本时做不到；诚实的答案是「这里必须要 Function」，并解释 `FCALL_RO`/`no-writes` flag 与只读副本的约束。\n- 被拒请求要不要写日志？→ 不能写（窗口会被拒绝请求填满，形成「越限越慢」的雪崩），但要在客户端打 metric：被拒比例 + 重试分布才是限流的健康度指标。",
+  "runner": {
+    "setup": ["DEL rl:42", "DEL rl:43"],
+    "timeoutMs": 10000,
+    "referenceSolution": "DEL rl:42\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:1\nEXPIRE rl:42 120 NX\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:2\nZREMRANGEBYSCORE rl:42 -inf 940000\nZCARD rl:42\nZADD rl:42 1000000 1000000:3\nZREMRANGEBYSCORE rl:42 -inf 999999\nZCARD rl:42\nDEL rl:43\nZREMRANGEBYSCORE rl:43 -inf 942000\nZCARD rl:43\nZADD rl:43 1002000 1002000:1\nEXPIRE rl:43 120 NX\nZREMRANGEBYSCORE rl:43 -inf 1002001\nZCARD rl:43\nZADD rl:43 1062001 1062001:2\nEXPIRE rl:43 120 NX",
+    "naiveSolution": "DEL rl:42\nZADD rl:42 1000000 1000000\nZADD rl:42 1000000 1000000\nZADD rl:42 1000000 1000000\nZADD rl:42 1059999 1059999\nDEL rl:43\nZADD rl:43 1002000 1002000\nZADD rl:43 1062001 1062001"
+  },
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#15-高频生产模式含命令级细节",
+    "addedBy": "content-agent-sql"
+  }
+}

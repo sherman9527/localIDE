@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0008",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "严格顺序漏斗：三步 MIN(时间) 两两比较是错的",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表 funnel_event(id INT 主键, uid INT, step VARCHAR(16), ts DATETIME)。step 只有 'view' / 'login' / 'purchase'。id 是落库顺序，用于在**同一秒**的事件之间决出先后。\n\n口径（必须逐条照做）：\n- 事件的时间序用 `(ts, id)` 的字典序，**严格递增**；\n- 一个用户「完成第 k 步」= 存在一条 view → login → purchase 的**有序子序列**（不要求相邻，允许中间夹杂别的事件）；判定按「贪心最早」：先取该用户最早的一次 view，再取它之后最早的 login，再取那之后最早的 purchase；\n- 第 1 步 uv = 有 view 的人数；第 2 步 uv = 能走通前两步的人数；第 3 步 uv = 能走通三步的人数；\n- 输出**固定 3 行**（步骤维表要自己造出来）：列顺序与别名必须是 step_no, step_name, uv, cvr_pct；某一步一个人都没有时该行仍要输出且 uv = 0；\n- cvr_pct = ROUND(本步 uv / 上一步 uv * 100, 2)；第一步（无上一步）或上一步 uv = 0 时为 NULL；\n- 判题按行序敏感比对，必须自带 ORDER BY step_no。\n\n不许用用户变量（`@x := ...`）、不许用 GROUP_CONCAT。只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。\n\n这道题的坑在于：绝大多数人写的「三个 MIN 时间两两比较」在某个用户上是**错的**，本题数据里就有这样的用户。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "funnel",
+    "ordered-subsequence",
+    "gap-with-no-filler",
+    "analytics",
+    "modern:mysql8-cte"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：乱序用户与提前购买用户并列存在",
+      "input": [],
+      "expected": {
+        "columns": ["step_no", "step_name", "uv", "cvr_pct"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "view", 6, "NULL"],
+          [2, "login", 5, 83.33],
+          [3, "purchase", 4, 80]
+        ]
+      },
+      "note": "uid 3 的 login 在 view 之前（不算第 2 步）；uid 4 的 purchase 在 view 之前但后面还有完整一条链（要算第 3 步）；uid 6 的 view/login 同一秒，靠 id 决出先后。"
+    },
+    {
+      "name": "迟到事件重放边界（上一步补齐后转化率反而下降）",
+      "input": ["INSERT INTO funnel_event VALUES (20,3,'login','2026-06-01 10:05:00')"],
+      "expected": {
+        "columns": ["step_no", "step_name", "uv", "cvr_pct"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "view", 6, "NULL"],
+          [2, "login", 6, 100],
+          [3, "purchase", 4, 66.67]
+        ]
+      },
+      "note": "补上迟到 login 后 uid 3 进了第 2 步，但他的 purchase 在那之前，所以第 3 步仍是 4 人。"
+    },
+    {
+      "name": "某一步零完成也必须出行（除零与掉行边界）",
+      "input": ["DELETE FROM funnel_event WHERE step = 'purchase'"],
+      "expected": {
+        "columns": ["step_no", "step_name", "uv", "cvr_pct"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "view", 6, "NULL"],
+          [2, "login", 5, 83.33],
+          [3, "purchase", 0, 0]
+        ]
+      }
+    },
+    {
+      "name": "全部事件为空的退化边界",
+      "input": ["DELETE FROM funnel_event"],
+      "expected": {
+        "columns": ["step_no", "step_name", "uv", "cvr_pct"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "view", 0, "NULL"],
+          [2, "login", 0, "NULL"],
+          [3, "purchase", 0, "NULL"]
+        ]
+      }
+    },
+    {
+      "name": "单个用户走完全程的边界",
+      "input": [
+        "DELETE FROM funnel_event",
+        "INSERT INTO funnel_event VALUES (1,1,'view','2026-06-01 10:00:00'),(2,1,'login','2026-06-01 10:01:00'),(3,1,'purchase','2026-06-01 10:02:00')"
+      ],
+      "expected": {
+        "columns": ["step_no", "step_name", "uv", "cvr_pct"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "view", 1, "NULL"],
+          [2, "login", 1, 100],
+          [3, "purchase", 1, 100]
+        ]
+      }
+    }
+  ],
+  "answer": "要点（把 `(ts,id)` 压成每用户内的序号 pos，之后全部用 pos 比较）：\n```sql\nWITH evt AS (\n  SELECT uid, step, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY ts, id) AS pos FROM funnel_event\n),\nv AS (SELECT uid, MIN(pos) AS pos FROM evt WHERE step = 'view' GROUP BY uid),\nl AS (SELECT v.uid, MIN(e.pos) AS pos FROM v JOIN evt e ON e.uid = v.uid AND e.step = 'login' AND e.pos > v.pos GROUP BY v.uid),\np AS (SELECT l.uid, MIN(e.pos) AS pos FROM l JOIN evt e ON e.uid = l.uid AND e.step = 'purchase' AND e.pos > l.pos GROUP BY l.uid),\nuv AS (\n  SELECT 1 AS step_no, 'view' AS step_name, COUNT(*) AS uv FROM v\n  UNION ALL SELECT 2, 'login', COUNT(*) FROM l\n  UNION ALL SELECT 3, 'purchase', COUNT(*) FROM p\n),\nw AS (SELECT step_no, step_name, uv, LAG(uv) OVER (ORDER BY step_no) AS prev_uv FROM uv)\nSELECT step_no, step_name, uv,\n       CASE WHEN prev_uv IS NULL OR prev_uv = 0 THEN NULL ELSE ROUND(uv / prev_uv * 100, 2) END AS cvr_pct\nFROM w ORDER BY step_no;\n```\n1) **三个 `MIN(ts)` 两两比较是错的**：它只比较「各自最早事件的时间」，会把「先买过一次、后来又走通 view→login→purchase」的用户（uid 4）判成不合格。正确的判定是「是否存在有序子序列」，而贪心最早（最早 view → 其后最早 login → 其后最早 purchase）恰好是充分必要的，证明方式是任何合法子序列的第一次出现不早于贪心选择。\n2) `(ts, id)` 不能直接写 `e.ts > v.ts`，同秒事件会漏：先用 `ROW_NUMBER() OVER (PARTITION BY uid ORDER BY ts, id)` 造出稠密序号 pos，把「时间序」变成「整数序」，后面所有比较都是 pos —— 这也是能一条查询写完的关键。\n3) 步骤维表必须由查询自己造（`UNION ALL` 常量 / 递归 CTE 生成 1..N），否则 `GROUP BY step` 在第 3 步 0 人时**整行消失**，前端的漏斗直接少一格（用例 3、4 打的就是这个）。聚合无 GROUP BY 时天然返回 1 行，所以 `SELECT 1,'view',COUNT(*) FROM v` 空表也出 0。\n4) `LAG` 给「上一步人数」比自连接便宜；除零要显式判 `prev_uv = 0`（MySQL 里 `x/0` 在 `ERROR_FOR_DIVISION_BY_ZERO` 下是 **NULL + warning**，不是报错，容易蒙混过关，要在 SQL 里写清口径）。\n5) 转化率在补数后**下降**（用例 2）是正常的：分母补上了、分子没动。要在看板上说明，否则一定被当成数据故障。\n\n面试追问：\n- 若要「30 分钟会话内完成」的时间窗约束，pos 比较怎么改？→ 把 `e.pos > l.pos` 换成 `e.ts BETWEEN l_ts AND l_ts + INTERVAL 30 MINUTE`，且贪心要改成「每条 view 都试一次」（用 LATERAL 或对每个候选取 LEAD），最早贪心在带窗口的情况下不再最优 —— 这是漏斗题最容易讲错的一点。\n- 事件 5 亿行怎么跑？→ 三步各扫一遍代价太高；按 uid 聚成「每人每步的时间数组」（或 bitmap）后在数组上做子序列判定；OLAP 侧用 `windowFunnel`（ClickHouse）/ `sequenceMatch`（Databricks）就是这个算法的内建版本，能讲出对应关系是加分项。\n- 「每一步只计最早完成路径」与「每步独立统计人数」的差别？→ 后者会出现第 3 步人数 > 第 2 步的倒挂；口径文档必须写清是子序列还是集合。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS funnel_event",
+      "CREATE TABLE funnel_event (id INT PRIMARY KEY, uid INT NOT NULL, step VARCHAR(16) NOT NULL, ts DATETIME NOT NULL, KEY idx_uid_ts (uid, ts, id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO funnel_event VALUES (1,1,'view','2026-06-01 10:00:00'),(2,1,'login','2026-06-01 10:01:00'),(3,1,'purchase','2026-06-01 10:02:00'),(4,2,'view','2026-06-01 10:00:00'),(5,2,'login','2026-06-01 10:03:00'),(6,3,'login','2026-06-01 10:00:00'),(7,3,'view','2026-06-01 10:01:00'),(8,3,'purchase','2026-06-01 10:02:00'),(9,4,'purchase','2026-06-01 09:59:00'),(10,4,'view','2026-06-01 10:00:00'),(11,4,'login','2026-06-01 10:01:00'),(12,4,'purchase','2026-06-01 10:02:00'),(13,5,'view','2026-06-01 10:00:00'),(14,5,'view','2026-06-01 10:00:30'),(15,5,'login','2026-06-01 10:01:00'),(16,5,'purchase','2026-06-01 10:02:00'),(17,6,'view','2026-06-01 10:00:00'),(18,6,'login','2026-06-01 10:00:00'),(19,6,'purchase','2026-06-01 10:01:00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH evt AS (\n  SELECT uid, step, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY ts, id) AS pos FROM funnel_event\n),\nv AS (SELECT uid, MIN(pos) AS pos FROM evt WHERE step = 'view' GROUP BY uid),\nl AS (SELECT v.uid, MIN(e.pos) AS pos FROM v JOIN evt e ON e.uid = v.uid AND e.step = 'login' AND e.pos > v.pos GROUP BY v.uid),\np AS (SELECT l.uid, MIN(e.pos) AS pos FROM l JOIN evt e ON e.uid = l.uid AND e.step = 'purchase' AND e.pos > l.pos GROUP BY l.uid),\nuv AS (\n  SELECT 1 AS step_no, 'view' AS step_name, COUNT(*) AS uv FROM v\n  UNION ALL SELECT 2, 'login', COUNT(*) FROM l\n  UNION ALL SELECT 3, 'purchase', COUNT(*) FROM p\n),\nw AS (SELECT step_no, step_name, uv, LAG(uv) OVER (ORDER BY step_no) AS prev_uv FROM uv)\nSELECT step_no, step_name, uv,\n       CASE WHEN prev_uv IS NULL OR prev_uv = 0 THEN NULL ELSE ROUND(uv / prev_uv * 100, 2) END AS cvr_pct\nFROM w\nORDER BY step_no",
+    "naiveSolution": "WITH t AS (\n  SELECT uid,\n         MIN(CASE WHEN step = 'view' THEN ts END) AS v_ts,\n         MIN(CASE WHEN step = 'login' THEN ts END) AS l_ts,\n         MIN(CASE WHEN step = 'purchase' THEN ts END) AS p_ts\n  FROM funnel_event GROUP BY uid\n),\nsteps AS (SELECT 1 AS step_no, 'view' AS step_name UNION ALL SELECT 2, 'login' UNION ALL SELECT 3, 'purchase'),\nu AS (\n  SELECT 1 AS step_no, COUNT(*) AS uv FROM t WHERE v_ts IS NOT NULL\n  UNION ALL SELECT 2, COUNT(*) FROM t WHERE v_ts IS NOT NULL AND l_ts IS NOT NULL AND v_ts < l_ts\n  UNION ALL SELECT 3, COUNT(*) FROM t WHERE v_ts IS NOT NULL AND l_ts IS NOT NULL AND p_ts IS NOT NULL AND v_ts < l_ts AND l_ts < p_ts\n)\nSELECT s.step_no, s.step_name, u.uv,\n       CASE WHEN u.step_no = 1 THEN NULL ELSE ROUND(u.uv / LAG(u.uv) OVER (ORDER BY u.step_no) * 100, 2) END AS cvr_pct\nFROM steps s JOIN u ON u.step_no = s.step_no\nORDER BY s.step_no"
+  },
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#13-四类必考查询模式",
+    "addedBy": "content-agent-sql"
+  }
+}

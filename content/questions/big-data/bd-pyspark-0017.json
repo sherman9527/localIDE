@@ -1,0 +1,440 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0017",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "地址缺失率涨到 40%：把\"不该给\"与\"该给却没给\"拆成两列，再让指标自己报失真",
+  "statement": "## 输入\n\nPySpark 3.5（判题容器内）。已注册一张表 `ods_order_receiver`：\n\n```\nods_order_receiver(\n  order_sn INT, biz_date STRING,        -- 'yyyy-MM-dd'\n  order_status INT,                     -- 1 待发货 / 2 已发货待签收 / 3 已签收\n  risk_control_status INT,              -- 0 正常 / 1 审核中\n  receiver_address STRING)              -- 密文、空串 ''、或 NULL\n```\n\n## 背景\n\n官方字段注释原文：`receiver_address`「订单状态为待发货状态，**且订单未被风控打标的情况下\n返回密文数据；其余情况返回空字符串**」。\n也就是说一个字段有**三态**：密文 / 空串 / 根本没这一列，\n而\"空串\"通常是**权限或风控结果**，不是数据缺失。\n\n事故场景（素材原题）：某天开始\"地址缺失率\"从 2% 涨到 40%，同时\"待发货超时率\"略微下降。\n业务方怀疑采集坏了。这题就是让这条指标**自己说清楚**它是被谁污染的。\n\n## 任务\n\n按 `biz_date` 输出一行，列固定为：\n\n```\nbiz_date, total_orders, raw_missing_cnt, policy_hidden_cnt, true_missing_cnt,\nraw_missing_bp, true_missing_bp, distorted\n```\n\n## 口径（这张表就是判分点）\n\n1. **\"取不到值\" `empty`** 的判据：`receiver_address IS NULL OR receiver_address = ''`\n   —— 空串与 NULL 都必须算\"取不到\"（这一层是 ODS，两种写法都真实存在）。\n2. **\"本就不该给\" `hidden`** 的判据：`NOT (order_status = 1 AND risk_control_status = 0)`，\n   即**状态不是待发货**或**被风控打标**。\n3. `raw_missing_cnt` = `empty` 的行数（朴素口径：今天大家看到的那条\"缺失率\"）。\n4. `policy_hidden_cnt` = `empty AND hidden` 的行数（**不该给所以没有**，是合规正常态）。\n5. `true_missing_cnt` = `empty AND NOT hidden` 的行数（**该给却没给**，这才是数据质量事故）。\n6. `raw_missing_bp` = `ROUND(raw_missing_cnt × 10000 / total_orders)`，\n   `true_missing_bp` 同理。用**万分比**（不是百分数），中间不要出现浮点比较。\n7. `distorted` = 1 当且仅当 `raw_missing_bp − true_missing_bp > 1000`\n   （即\"缺失率里有超过 10 个百分点是被可见性策略撑起来的\"）。\n   **严格大于**：正好 10 个百分点不算失真。\n\n按 `biz_date` 升序。\n\n## 约束\n\n不许 `collect()` 到驱动侧；比率一律用整数万分比表达，不要用 double。\n\n## 这题真正考的东西\n\n- **`hidden` 与 `empty` 是两个维度**：一行可以\"该给但没给\"（事故）、\n  \"不该给所以没有\"（正常）、\"不该给但值还在\"（另一类合规问题，本题不判）。\n  只用一列 `IS NULL` 的指标，在风控收紧的那一周必然\"看起来像采集故障\"。\n- **失真量本身要成为指标**：`distorted` 是\"这条指标今天能不能信\"的元信息。\n  看板不带它，就会出现\"整条曲线被业务动作推动、团队去查 ETL 查三天\"。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "field-visibility",
+    "metric-distortion",
+    "null-vs-empty",
+    "three-valued-logic",
+    "modern:privacy-engineering"
+  ],
+  "cases": [
+    {
+      "name": "基线：6 单里 4 单取不到值，其中 2 单本就不该给",
+      "input": {
+        "view": "ods_order_receiver",
+        "schema": "order_sn int, biz_date string, order_status int, risk_control_status int, receiver_address string",
+        "rows": [
+          {
+            "order_sn": 1,
+            "biz_date": "2026-05-01",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:A"
+          },
+          {
+            "order_sn": 2,
+            "biz_date": "2026-05-01",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 3,
+            "biz_date": "2026-05-01",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 4,
+            "biz_date": "2026-05-01",
+            "order_status": 2,
+            "risk_control_status": 0,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 5,
+            "biz_date": "2026-05-01",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": null
+          },
+          {
+            "order_sn": 6,
+            "biz_date": "2026-05-01",
+            "order_status": 3,
+            "risk_control_status": 0,
+            "receiver_address": "enc:C"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-05-01",
+          "total_orders": 6,
+          "raw_missing_cnt": 4,
+          "policy_hidden_cnt": 2,
+          "true_missing_cnt": 2,
+          "raw_missing_bp": 6667,
+          "true_missing_bp": 3333,
+          "distorted": 1
+        }
+      ],
+      "visible": true,
+      "note": "raw 4 条 = 不该给 2 条 + 真缺失 2 条；恒等式 raw = hidden + true 必须成立"
+    },
+    {
+      "name": "风控收紧那天：raw 拉到 80% 而 true_missing 是 0（distorted 必须亮）",
+      "input": {
+        "view": "ods_order_receiver",
+        "schema": "order_sn int, biz_date string, order_status int, risk_control_status int, receiver_address string",
+        "rows": [
+          {
+            "order_sn": 1,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 2,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 3,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 4,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 5,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 6,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 7,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 8,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 1,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 9,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:A"
+          },
+          {
+            "order_sn": 10,
+            "biz_date": "2026-05-02",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:B"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-05-02",
+          "total_orders": 10,
+          "raw_missing_cnt": 8,
+          "policy_hidden_cnt": 8,
+          "true_missing_cnt": 0,
+          "raw_missing_bp": 8000,
+          "true_missing_bp": 0,
+          "distorted": 1
+        }
+      ],
+      "visible": true,
+      "note": "80% 的\"缺失\"全部来自审核中打标 ⇒ 该去问风控而不是查 ETL"
+    },
+    {
+      "name": "边界：失真正好 10 个百分点不算失真（严格大于才亮）",
+      "input": {
+        "view": "ods_order_receiver",
+        "schema": "order_sn int, biz_date string, order_status int, risk_control_status int, receiver_address string",
+        "rows": [
+          {
+            "order_sn": 1,
+            "biz_date": "2026-05-03",
+            "order_status": 2,
+            "risk_control_status": 0,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 2,
+            "biz_date": "2026-05-03",
+            "order_status": 2,
+            "risk_control_status": 0,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 3,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 4,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 5,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 6,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 7,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 8,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 9,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 10,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 11,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 12,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 13,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 14,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 15,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 16,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 17,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 18,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 19,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          },
+          {
+            "order_sn": 20,
+            "biz_date": "2026-05-03",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:X"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-05-03",
+          "total_orders": 20,
+          "raw_missing_cnt": 2,
+          "policy_hidden_cnt": 2,
+          "true_missing_cnt": 0,
+          "raw_missing_bp": 1000,
+          "true_missing_bp": 0,
+          "distorted": 0
+        }
+      ],
+      "visible": true,
+      "note": "20 行里 2 行是\"不该给\"、0 行真缺失 ⇒ 两个比率之差正好 1000 万分点，写成 >= 的实现这里会翻成 1 —— 之后风控比例一稳在 10% 就永久滥报"
+    },
+    {
+      "name": "真缺失事故：raw 与 true 同时拉满而差为零（此刻这条指标是可信的）",
+      "input": {
+        "view": "ods_order_receiver",
+        "schema": "order_sn int, biz_date string, order_status int, risk_control_status int, receiver_address string",
+        "rows": [
+          {
+            "order_sn": 1,
+            "biz_date": "2026-05-04",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": null
+          },
+          {
+            "order_sn": 2,
+            "biz_date": "2026-05-04",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": ""
+          },
+          {
+            "order_sn": 3,
+            "biz_date": "2026-05-04",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-05-04",
+          "total_orders": 3,
+          "raw_missing_cnt": 3,
+          "policy_hidden_cnt": 0,
+          "true_missing_cnt": 3,
+          "raw_missing_bp": 10000,
+          "true_missing_bp": 10000,
+          "distorted": 0
+        }
+      ],
+      "visible": true,
+      "note": "三行全都\"该给却没给\" ⇒ raw_bp = true_bp = 10000、distorted 0；这种形态才是要立刻查管道的那种"
+    },
+    {
+      "name": "退化：全部有值 ⇒ 两个比率都是 0 且 distorted 为 0",
+      "input": {
+        "view": "ods_order_receiver",
+        "schema": "order_sn int, biz_date string, order_status int, risk_control_status int, receiver_address string",
+        "rows": [
+          {
+            "order_sn": 1,
+            "biz_date": "2026-05-05",
+            "order_status": 1,
+            "risk_control_status": 0,
+            "receiver_address": "enc:A"
+          },
+          {
+            "order_sn": 2,
+            "biz_date": "2026-05-05",
+            "order_status": 2,
+            "risk_control_status": 1,
+            "receiver_address": "enc:B"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-05-05",
+          "total_orders": 2,
+          "raw_missing_cnt": 0,
+          "policy_hidden_cnt": 0,
+          "true_missing_cnt": 0,
+          "raw_missing_bp": 0,
+          "true_missing_bp": 0,
+          "distorted": 0
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一行布尔（`is_empty`）、一行布尔（`is_hidden`），然后四个条件求和共用同一次扫描。\n关键结构是**先建可见性判定，再算缺失**：`policy_hidden_cnt` 与 `true_missing_cnt`\n是 `raw_missing_cnt` 的一个**划分**，所以恒等式\n`raw = policy_hidden + true_missing` 必须在每一行上成立 —— 这句话本身就是最好的自检。\n\n**为什么 `empty` 要把 NULL 和空串都算进来**：官方语义里\"其余情况返回空字符串\"，\n所以绝大多数缺失行其实是 `''`；而 ODS 层还可能整列没给（NULL）。\n只写 `IS NULL` 的实现（就是朴素解）在这张表上会得到一个**永远偏低**的缺失率，\n风控当天涨到 40% 它也纹丝不动 —— 因为它连\"取不到值\"都没测到。\n\n**`hidden` 的布尔写法**：`NOT (status = 1 AND risk = 0)` 等价于\n`status != 1 OR risk == 1`。写成后一种更短，但要小心 NULL：\n本题 `order_status` / `risk_control_status` 都是非空列，所以两种写法同解；\n真实 ODS 里这两列**可以**为空，那时 `!=` 会把 NULL 行判成\"不 hidden\"，\n于是\"该给却没给\"被虚增。这就是这类布尔表达式在数仓里最经典的三值逻辑坑。\n\n**`distorted` 的阈值方向**（严格大于 1000 万分点）：\n正好 10 个百分点是\"合规策略的正常投影\"，不该报警。\n把 `>` 写成 `>=` 之后，风控比例一稳定在 10%，这条指标就永久亮红 ——\n**告警失效通常不是漏报，是滥报**：一周后没人再看它，真正的采集故障就在里面。\n\n**看板怎么用它**：把 `raw_missing_bp` 与 `true_missing_bp` 画在同一张图上。\n两条线重合 ⇒ 缺失就是缺失；两条线分开且 `distorted = 1` ⇒\n**这条指标的波动来自可见性策略，不是数据质量**，该去问风控为什么收紧，\n而不是去查 ETL。用例里风控占比升高的那一天就是专门演示这一对的。\n\n**工程延伸（面试追问点）**\n\n1. 为什么在 DWD 就拆，而不是在报表层？（报表层的口径无法约束上游：\n   任何新消费者都会重新\"猜\"一次。放到 DWD 之后，\n   `receiver_value` + `visibility_reason` 两列是全公司唯一入口。）\n2. 三种结论分别是什么？（① 风控打标比例升高 ⇒ `policy_hidden` 涨、`true_missing` 不动；\n   ② 订单状态分布变化（大促后集中发货）⇒ 同上但 reason 是状态；\n   ③ 上游真的没传 ⇒ `true_missing` 涨。区分三者只需要这两列，不需要查日志。）\n3. `visibility_reason` 值不值得建枚举？（值得，而且必须版本化：\n   将来新增\"跨境分区不下发\"之类的 reason 时，\n   未知值要显式落到 `unmapped` 桶并告警，不能被 `ELSE` 吞掉 ——\n   否则\"缺失率\"又一次悄悄换了定义。）\n4. 万分比而不是百分数？（万分比与广告那边的分流桶同构，\n   且 `> 1000` 这种阈值在整数域上比较不需要容差 ——\n   指标层少一处浮点比较，就少一处\"昨天等今天不等\"的排查。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    w = (spark.table('ods_order_receiver')\n         .withColumn('is_empty',\n                     F.col('receiver_address').isNull()\n                     | (F.col('receiver_address') == F.lit('')))\n         .withColumn('is_hidden',\n                     ~(F.col('order_status') == 1) | (F.col('risk_control_status') == 1)))\n\n    g = (w.groupBy('biz_date')\n         .agg(F.count(F.lit(1)).cast('int').alias('total_orders'),\n              F.sum(F.col('is_empty').cast('int')).cast('int').alias('raw_missing_cnt'),\n              F.sum((F.col('is_empty') & F.col('is_hidden')).cast('int')).cast('int')\n                .alias('policy_hidden_cnt'),\n              F.sum((F.col('is_empty') & ~F.col('is_hidden')).cast('int')).cast('int')\n                .alias('true_missing_cnt')))\n\n    return (g.select('biz_date', 'total_orders', 'raw_missing_cnt', 'policy_hidden_cnt',\n                     'true_missing_cnt',\n                     F.round(F.col('raw_missing_cnt') * 10000 / F.col('total_orders'))\n                       .cast('int').alias('raw_missing_bp'),\n                     F.round(F.col('true_missing_cnt') * 10000 / F.col('total_orders'))\n                       .cast('int').alias('true_missing_bp'),\n                     F.when((F.round(F.col('raw_missing_cnt') * 10000 / F.col('total_orders'))\n                             - F.round(F.col('true_missing_cnt') * 10000 / F.col('total_orders')))\n                            > 1000, 1).otherwise(0).cast('int').alias('distorted'))\n            .orderBy('biz_date'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # \"空值就是缺失\"版：没有可见性维度，policy_hidden 恒 0，\n    # 于是风控收紧的当天这条指标直接翻十倍，而它测的东西根本不是数据质量。\n    g = (spark.table('ods_order_receiver')\n         .groupBy('biz_date')\n         .agg(F.count(F.lit(1)).cast('int').alias('total_orders'),\n              F.sum(F.when(F.col('receiver_address').isNull(), 1).otherwise(0)).cast('int')\n                .alias('raw_missing_cnt')))\n    return (g.select('biz_date', 'total_orders', 'raw_missing_cnt',\n                     F.lit(0).cast('int').alias('policy_hidden_cnt'),\n                     F.col('raw_missing_cnt').alias('true_missing_cnt'),\n                     F.round(F.col('raw_missing_cnt') * 10000 / F.col('total_orders'))\n                       .cast('int').alias('raw_missing_bp'),\n                     F.round(F.col('raw_missing_cnt') * 10000 / F.col('total_orders'))\n                       .cast('int').alias('true_missing_bp'),\n                     F.lit(0).cast('int').alias('distorted'))\n            .orderBy('biz_date'))"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "PDD",
+    "role": "数据研发（埋点与指标治理方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-data-and-recommendation.md#1 核心机制 8 与 §5 题面草稿 C（\"地址缺失率从 2% 涨到 40%\"的原题场景、receiver_* 三态官方注释、\"在 DWD 就拆成 value + visibility_reason 两列\"）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.110Z"
+  }
+}

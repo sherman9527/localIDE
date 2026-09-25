@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "composite": true,
+    "tsBuildInfoFile": "./node_modules/.cache/web.tsbuildinfo",
+    "emitDeclarationOnly": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": false,
+    "types": ["vite/client", "node"]
+  },
+  "include": ["src", "test", "vite.config.ts", "vitest.config.ts"],
+  "references": [{ "path": "../shared" }]
+}

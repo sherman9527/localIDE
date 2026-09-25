@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0046",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "两次哈希构造正交流量层：用列联表偏差把\"边际均匀 ≠ 正交\"判成分",
+  "statement": "## 背景\n\n火山引擎 A/B 测试（DataTester）的《规划实验流量》一文里，\n\"正交\"不是口号，是一句实现描述【源 S9】：\n\n> \"火山引擎 A/B 测试的分流服务通过**两次运算「哈希函数」**，使得不同互斥域的流量之间呈正交关系\"\n\n同一页还给了正交的反例推演：两个实验各占 100% 且互不处理时，\n\"一个用户被 A1 命中时，同时也会被 B1 命中\" ⇒ \"**B1 组指标涨了，真的是 B1 的策略生效了吗？**\"\n解法是\"把 A1/A2 各切一半分别进 B1/B2，这种影响也均匀地分布在实验 B 的两个组之中\"。\n\n同一页的另外两条硬约束（本题不实现，但答题要能引用）：\n**客户端实验只可添加客户端互斥域，服务端实验只可添加服务端互斥域**；\n父子实验（流量继承）是**官方明写的\"打破正交\"特例**。\n\n## 任务\n\n把\"两次哈希 ⇒ 正交\"变成一个可以精确模拟的模型：\n\n```java\npublic static int[] abJoint(int saltA, int saltB, int buckets, int users)\n```\n\n对 `uid = 0 .. users-1` 每个用户，用**同一个哈希函数、两个不同的 salt**\n分别算出他在 A 层和 B 层的桶号（都是 `0 .. buckets-1`）。\n返回 `buckets * buckets` 个格子的计数（**按 A 层桶行优先**）+ 最后一个数 `maxDeviationBps`。\n\n## 哈希（**逐位照抄，不许换实现**）\n\n```java\nprivate static long mix(long z) {\n  z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;\n  z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;\n  return z ^ (z >>> 31);\n}\n// bucketOf(uid, salt, buckets) = (mix(uid * 0x9E3779B97F4A7C15L + salt) >>> 1) % buckets\n```\n\n（这是 SplitMix64 的 finalizer，选它只有一个理由：**Java 的 long 溢出语义\n与逐位定义一致，判题两端可以复现同一个数**。真实分流服务用的是 murmur 类哈希 +\n实验号当盐，性质相同。）\n\n## `maxDeviationBps`（正交性的可机器判定据）\n\n\"正交\"在数据上的意思是**联合分布 = 两侧边际分布的乘积**；\n每层都是均匀分桶，所以期望每个格子有 `users / buckets²` 个人。用纯整数写成：\n\n```\n每个格子：dev = |obs * buckets² - users| * 10000 / users     （整除，向下取整）\nmaxDeviationBps = 所有格子里最大的 dev                        （users == 0 时直接记 0）\n```\n\n含义：偏差 0 表示完全均匀；10000（即 100%）表示某个格子比期望多一倍或少一倍。\n**不许在 `users == 0` 时抛异常** —— \"没有用户\"是一个合法状态，\n此时列联表全零、偏差按 0 报（正交是空真命题）。\n\n## 合法性（`IllegalArgumentException`，消息一字不差）\n\n`salt must be non-negative` / `buckets must be positive` / `buckets too large`（> 8）/\n`users must be non-negative` / `users too large`（> 200000）\n\n## 这题真正考的东西\n\n1. **边际分布均匀不等于正交。** 用同一个哈希、只是\"取模时错开一位\"的实现\n   （见 `naiveSolution`），每层人数都完全均匀，只有**联合分布**看得见它坏在哪。\n   这就是为什么答题要写\"两次哈希\"而不是\"两次取模\"。\n2. **`saltA == saltB` 不是\"参数配错了\"，是\"两个实验在同一互斥域里\"。**\n   官方语义里同域实验**必须**共用盐（这样它们才会真的互斥），\n   所以\"完全重叠\"在这个配置下是**正确行为**。\n   用例「互斥域同 salt」和用例「关键：salt 相同」给的是同一件事的两个说法 ——\n   能把\"正交破产\"和\"互斥生效\"当成同一个机制的两种用途，才算读懂了流量模型。\n3. **偏差判据要能在小样本上不撒谎。** 用户数少于格子数时必然有空格 ⇒\n   偏差很大是样本太小，不是分流坏了。这就是为什么真实的 SRM/独立性检验要看\n   **期望频数够不够**，而不是直接比占比。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "ab-testing",
+    "orthogonal-traffic",
+    "hash-bucketing",
+    "contingency-table",
+    "mutual-exclusion-domain",
+    "modern:experimentation"
+  ],
+  "cases": [
+    {
+      "name": "基线：两个不同 salt ⇒ 联合分布接近均匀，最大偏差是万分比量级",
+      "input": [
+        1,
+        2,
+        2,
+        4000
+      ],
+      "expected": [
+        1014,
+        944,
+        1023,
+        1019,
+        560
+      ],
+      "visible": true,
+      "note": "前 4 个数是 2x2 联合列联表（按 A 层桶行优先），最后一个数是最大偏差万分比"
+    },
+    {
+      "name": "关键：salt 相同时两层流量完全重叠 ⇒ 正交性当场破产",
+      "input": [
+        7,
+        7,
+        2,
+        4000
+      ],
+      "expected": [
+        2035,
+        0,
+        0,
+        1965,
+        10350
+      ],
+      "visible": true,
+      "note": "非对角格子全是 0：命中 A1 的用户必然同时命中 B1，\"B1 组指标涨了\"永远无法归因给 B1"
+    },
+    {
+      "name": "边界：桶数取 1 ⇒ 只有一个格子，偏差恒为 0（正交是空真命题）",
+      "input": [
+        1,
+        9,
+        1,
+        500
+      ],
+      "expected": [
+        500,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：零个用户 ⇒ 全零表且偏差记 0，不做除零",
+      "input": [
+        1,
+        2,
+        2,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：用户数少于格子数 ⇒ 必有空格子，偏差仍要如实报出来",
+      "input": [
+        3,
+        4,
+        2,
+        3
+      ],
+      "expected": [
+        2,
+        1,
+        0,
+        0,
+        16666
+      ],
+      "visible": true
+    },
+    {
+      "name": "加细粒度：4 桶两层 8000 人 ⇒ 16 格 + 偏差",
+      "input": [
+        11,
+        23,
+        4,
+        8000
+      ],
+      "expected": [
+        510,
+        503,
+        519,
+        557,
+        499,
+        497,
+        479,
+        472,
+        488,
+        505,
+        492,
+        489,
+        527,
+        485,
+        508,
+        470,
+        1140
+      ],
+      "visible": true
+    },
+    {
+      "name": "互斥域同 salt：换桶数后仍然完全重叠（同域=同哈希，这是定义不是巧合）",
+      "input": [
+        5,
+        5,
+        4,
+        3200
+      ],
+      "expected": [
+        755,
+        0,
+        0,
+        0,
+        0,
+        821,
+        0,
+        0,
+        0,
+        0,
+        806,
+        0,
+        0,
+        0,
+        0,
+        818,
+        31050
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：桶数为 0",
+      "input": [
+        1,
+        2,
+        0,
+        10
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "buckets must be positive"
+    },
+    {
+      "name": "非法：salt 为负（salt 是盐不是有符号偏移）",
+      "input": [
+        1,
+        -2,
+        2,
+        10
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "salt must be non-negative"
+    },
+    {
+      "name": "非法：用户数为负",
+      "input": [
+        1,
+        2,
+        2,
+        -1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "users must be non-negative"
+    },
+    {
+      "name": "非法：桶数超过题面上限",
+      "input": [
+        1,
+        2,
+        9,
+        100
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "buckets too large"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两次调用同一个 `bucketOf`，**只有 salt 不同**；把 `buckets²` 个格子摊平，\n最后附一个偏差数。偏差用 `|obs * buckets² - users| * 10000 / users` 的整数形式，\n是为了避开\"期望值是小数时怎么比\"的取模争议 ——\n乘回去再比，两边都是整数，判题器和实现之间不会有第二种解读。\n\n**基线 `[1, 2, 2, 4000]` 给出 2x2 列联表 + 偏差。** 期望每格 1000 人，\n实测四格合计 4000、最大偏差在**千分位量级**（万分比几百）。\n这个数量级才配得上\"正交\"两个字：它是**有限样本的随机误差**，\n不是系统性偏置。\n\n**`[7, 7, 2, 4000]`（同一个 salt）给出 `[2035, 0, 0, 1965]`，偏差 10350。**\n期望每格 1000 人：对角两格吃掉全部 4000 人（2035 / 1965 ⇒ 偏差\n`|2035 * 4 - 4000| * 10000 / 4000 = 10350`），非对角两格**恒为 0**\n（偏差 `10000`，即\"比期望少 100%\"，不可能更少）。\n两层的相关系数是 1，也就是说\"命中 A1 必然命中 B1\"——\n官方那句反问\"**B1 组指标涨了，真的是 B1 的策略生效了吗？**\"在数据上就长这样。\n\n注意这个判据的**盲区**：它只报最大偏离幅度、不报方向，\n也不报形状。\"两层完全正相关\"（非对角为 0）与\"两层完全互斥\"（对角为 0）\n给出**同一个偏差数**。所以真实的独立性检验要看的是**整个列联表的形状**\n（卡方、或对角占比），单一标量只够做告警、不够做归因。\n答题时能指出自己判据的盲区，比判据本身正确更值钱。\n\n**`[3, 4, 2, 3]`（3 个人填 4 个格子）⇒ `[2, 1, 0, 0]`，偏差 16666。**\n期望每格只有 `0.75` 人，于是\"有人挤在一起、有人一格没有\"是**必然**的。\n这是**样本量不足**而不是分流缺陷 —— 判 SRM / 独立性时先看期望频数\n（经验上每格至少 5），否则一个 3 人的实验会因为\"必然有空格\"被判成不正交。\n\n**`[1, 9, 1, 500]`（一层只有一个桶）⇒ 偏差恒为 0。**\n只有一层在分桶时，\"跨层正交\"这个命题没有内容。\n边界用例存在的意义是：**判据在退化维度上不许自己造出信号**。\n\n**朴素解为什么必挂**：它用 `h % buckets` 与 `(h / buckets) % buckets` 当作\"两次哈希\"。\n第二次是**对同一个哈希值做移位**，不是独立的第二次哈希 ⇒\n联合分布呈现确定性的锯齿（某些格子恒空），偏差远大于基线。\n它同时解释了官方为什么强调\"两次**运算哈希函数**\"而不是\"两次取模\"。\n\n**工程延伸（面试追问点）**\n\n1. 50 个并行实验怎么分层分域？（同一互斥域内共享盐 ⇒ 互斥，\n   合计占用不超过该域流量比例；不同互斥域各用自己的盐 ⇒ 正交，可各自吃满 100%。\n   要保留：互斥域组的**保留对照组**与**全局保留对照组**\n   —— 后者是\"评估 3 个部门累加的提升效果\"的唯一手段，\n   不然每个团队各自的提升幅度加起来永远大于大盘观察到的变化。）\n2. 桶数与哈希的关系？（先分桶再把桶段划给实验 ⇒ 桶数是分辨率上限；\n   桶太少时\"10% 流量\"根本表示不出来。真实实现用 100 或 1000 桶。）\n3. 为什么客户端与服务端不能共用互斥域？（分流**主体**不同：\n   设备 ID 与用户 ID 不是同一个键，同一salt 在两个键空间里不构成同一个划分 ⇒\n   \"互斥\"变成假象，两个人群还会互相串。）\n4. 父子实验（流量继承）为什么危险？（子实验开在父实验某一组的流量之下 ⇒\n   它测的是\"父策略生效之后的人群上，子策略的增量\"，\n   结论**不能外推**到全量；且父组与子组完全重叠时，两者的效应无法分离。\n   官方把它列成\"打破正交\"的特例，就是这个意思。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] abJoint(int saltA, int saltB, int buckets, int users)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  private static long mix(long z) {\n    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;\n    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;\n    return z ^ (z >>> 31);\n  }\n\n  private static int bucketOf(long uid, int salt, int buckets) {\n    long h = mix(uid * 0x9E3779B97F4A7C15L + salt);\n    return (int) ((h >>> 1) % buckets);\n  }\n\n  public static int[] abJoint(int saltA, int saltB, int buckets, int users) {\n    if (saltA < 0 || saltB < 0) throw new IllegalArgumentException(\"salt must be non-negative\");\n    if (buckets <= 0) throw new IllegalArgumentException(\"buckets must be positive\");\n    if (buckets > 8) throw new IllegalArgumentException(\"buckets too large\");\n    if (users < 0) throw new IllegalArgumentException(\"users must be non-negative\");\n    if (users > 200000) throw new IllegalArgumentException(\"users too large\");\n\n    int[] cells = new int[buckets * buckets];\n    for (int u = 0; u < users; u++) {\n      int a = bucketOf(u, saltA, buckets);\n      int b = bucketOf(u, saltB, buckets);\n      cells[a * buckets + b]++;\n    }\n    int bsq = buckets * buckets;\n    long dev = 0;\n    if (users > 0) {\n      for (int c : cells) {\n        long d = (long) c * bsq - users;\n        if (d < 0) d = -d;\n        d = d * 10000L / users;\n        if (d > dev) dev = d;\n      }\n    }\n    int[] out = new int[cells.length + 1];\n    System.arraycopy(cells, 0, out, 0, cells.length);\n    out[cells.length] = (int) dev;\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"分层随机就行\"版：两层共用同一个哈希（只是取模的桶数不同）。\n  // 每一层各自的边际分布都完美均匀 —— 只有联合分布看得见它坏在哪。\n  private static long mix(long z) {\n    z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L;\n    z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL;\n    return z ^ (z >>> 31);\n  }\n\n  public static int[] abJoint(int saltA, int saltB, int buckets, int users) {\n    if (saltA < 0 || saltB < 0) throw new IllegalArgumentException(\"salt must be non-negative\");\n    if (buckets <= 0) throw new IllegalArgumentException(\"buckets must be positive\");\n    if (buckets > 8) throw new IllegalArgumentException(\"buckets too large\");\n    if (users < 0) throw new IllegalArgumentException(\"users must be non-negative\");\n    if (users > 200000) throw new IllegalArgumentException(\"users too large\");\n    int[] cells = new int[buckets * buckets];\n    for (int u = 0; u < users; u++) {\n      long h = mix(u * 0x9E3779B97F4A7C15L + saltA) >>> 1;\n      int a = (int) (h % buckets);\n      int b = (int) ((h / buckets) % buckets);   // \"错开一位\"就当成正交\n      cells[a * buckets + b]++;\n    }\n    int bsq = buckets * buckets;\n    long dev = 0;\n    if (users > 0) {\n      for (int c : cells) {\n        long d = (long) c * bsq - users;\n        if (d < 0) d = -d;\n        d = d * 10000L / users;\n        if (d > dev) dev = d;\n      }\n    }\n    int[] out = new int[cells.length + 1];\n    System.arraycopy(cells, 0, out, 0, cells.length);\n    out[cells.length] = (int) dev;\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（实验平台与指标方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 10（A/B 流量模型：流量层、互斥域与正交性；\"通过两次运算哈希函数使不同互斥域的流量呈正交关系\"、正交的反例推演、客户端/服务端互斥域不可混用）＋ 考点 11（父子实验打破正交）；SplitMix64 与整数偏差判据是【推】（题面已声明为本题选型）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:20:38.819Z"
+  }
+}

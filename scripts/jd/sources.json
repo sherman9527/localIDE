@@ -1,0 +1,58 @@
+{
+  "_comment": "JD 抓取目标配置（需求 9：优先 Apple / Airbnb 上海+美国 的大数据/后端工程师）。adapter 实现在 scripts/jd/adapters.mjs。",
+  "_adapterNotes": {
+    "apple-web": "实测 2026-09-19：jobs.apple.com/api/en-us/search 已 301 到 pagenotfound（无可用 JSON API）；/en-us/search 返回 Remix 渲染的 HTML，职位数据在 window.__staticRouterHydrationData 的 loaderData.search.searchResults[] 里，因此走 HTML 解析。",
+    "greenhouse": "实测 2026-09-19 可用：https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true 返回 jobs[]（absolute_url / title / location.name / content HTML）。",
+    "smartrecruiters": "实测 2026-09-19：api.smartrecruiters.com/v1/companies/Airbnb/postings 返回 totalFound=0（Airbnb 不用 SmartRecruiters），保留 adapter 作通用兜底但默认不启用。"
+  },
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 daily-interview-arena/0.1 (personal interview prep; local use)",
+  "http": { "timeoutMs": 20000, "retries": 2, "backoffMs": [1000, 3000] },
+  "cacheDir": "content/jd-cache",
+  "historyDir": "content/jd-cache/history",
+  "targets": [
+    {
+      "company": "Apple",
+      "adapter": "apple-web",
+      "locale": "en-us",
+      "maxPages": 5,
+      "queries": [
+        { "term": "Data Engineer", "location": "shanghai" },
+        { "term": "Data Engineer", "location": "us" },
+        { "term": "Backend Engineer", "location": "shanghai" },
+        { "term": "Backend Engineer", "location": "us" },
+        { "term": "Software Engineer Data Platform", "location": "us" },
+        { "term": "Senior Software Engineer Big Data", "location": "us" }
+      ],
+      "limit": 25
+    },
+    {
+      "company": "Airbnb",
+      "adapter": "greenhouse",
+      "board": "airbnb",
+      "url": "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+      "queries": [
+        { "term": "Data Engineer", "location": "shanghai" },
+        { "term": "Data Engineer", "location": "us" },
+        { "term": "Backend Engineer", "location": "shanghai" },
+        { "term": "Backend Engineer", "location": "us" },
+        { "term": "Senior Software Engineer Platform", "location": "us" },
+        { "term": "Machine Learning Engineer Data", "location": "us" }
+      ],
+      "limit": 25
+    },
+    {
+      "company": "Airbnb",
+      "adapter": "smartrecruiters",
+      "enabled": false,
+      "companySlug": "Airbnb",
+      "disabledReason": "实测 https://api.smartrecruiters.com/v1/companies/Airbnb/postings 返回 totalFound:0 —— Airbnb 不在 SmartRecruiters 上（走 Greenhouse），因此默认不启用；adapter 保留，换成真正用 SmartRecruiters 的公司时把 enabled 改回 true 即可。",
+      "queries": [
+        { "term": "Data Engineer", "location": "shanghai" },
+        { "term": "Data Engineer", "location": "us" },
+        { "term": "Backend Engineer", "location": "shanghai" },
+        { "term": "Senior Software Engineer", "location": "us" }
+      ],
+      "limit": 25
+    }
+  ]
+}

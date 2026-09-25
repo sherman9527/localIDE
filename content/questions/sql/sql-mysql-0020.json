@@ -1,0 +1,318 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0020",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "按财报原文算活跃商家：已发货触发、不扣退款、去重到账号，再并排出扣退款版本",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n拼多多 20-F 里对\"活跃商家（active merchants）\"给了**官方定义**原文：\n\n> merchant accounts that had **one or more orders shipped to a buyer** on our platforms\n> in that period, **regardless of whether the buyer returns the merchandise or the merchant\n> refunds the purchase price**\n\n这句话里有三个考点：① 触发事件是**已发货（shipped）**，不是支付、也不是成交；\n② **不扣退款/退货**；③ 主体是**账号（account）**，不是店铺或经营主体\n（同一个人开 3 个账号就算 3 个）。\n\n```\nperiod_calendar(period_tag VARCHAR(12) PK, start_ts DATETIME, end_ts DATETIME)\norders(order_sn INT PK, merchant_account_id INT, pay_time DATETIME NULL,\n       shipped_time DATETIME NULL, pay_amount DECIMAL(12,2))\norder_refund(order_sn INT PK, refund_amount DECIMAL(12,2), is_full TINYINT)  -- 1 全额 / 0 部分\nmerchant_shop(merchant_account_id INT PK, subject_id INT)                    -- 账号 → 经营主体\n```\n\n## 任务\n\n每个周期输出一行，按 `period_tag` 升序，列名与顺序必须是：\n\n```\nperiod_tag, active_accounts_official, active_accounts_after_refund,\ngap_after_refund, active_subjects, shipped_order_cnt\n```\n\n## 口径（这张表就是判分点）\n\n1. **周期内的\"发货单\"集合**：`shipped_time` 非空且\n   `shipped_time BETWEEN start_ts AND end_ts`（**两端都是闭区间**）。\n   窗口边界**恰好等于** `start_ts` 或 `end_ts` 的那一条必须算进来。\n2. `active_accounts_official` = 上述集合里 `COUNT(DISTINCT merchant_account_id)`。\n   **不扣退款** —— 这是官方定义，不是疏忽。\n3. `shipped_order_cnt` = 上述集合的**行数**（不是账号数；一个账号发 3 单算 3）。\n4. `active_accounts_after_refund` = **另一个口径**（题面要求一起出，用来量差异）：\n   账号内**至少有一单**不是\"全额退款\"就算活跃\n   （\"全额退款\" = 该单在 `order_refund` 里有行且 `is_full = 1`；部分退款 `is_full = 0` **不**扣）。\n   即：一个账号在周期内只发了 1 单且那单全额退款 ⇒ 它从这一列里消失。\n5. `gap_after_refund` = `active_accounts_official − active_accounts_after_refund`。\n6. `active_subjects` = 第 2 列那批账号所对应的 `COUNT(DISTINCT subject_id)`\n   （**主体维度**：同主体多账号只算一个；维表里没配到主体的账号不贡献 subject）。\n\n只提交**一条** `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- **时间锚点选错，整列都错**：用 `pay_time` 算出来的是\"有支付行为的商家\"，\n  与财报口径不是一回事，且差额无法解释（发货在周期末、支付在周期初的单会两边跳）。\n- **把\"不扣退款\"当 bug 修掉**是最典型的错误：官方**刻意**让它不扣，\n  因为它服务的是**供给侧健康度**（这个账号还在不在卖），不是成交质量。\n  本题的解法是**两列都出**并给出 `gap_after_refund`，而不是挑一个。\n- **账号 ≠ 主体**：算成主体会让\"一个主体批量注册账号\"看起来没有增长，\n  而供给侧指标恰恰要暴露这件事（虚假交易抬高的就是账号级销量）。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "metric-definition",
+    "active-merchant",
+    "time-anchor",
+    "entity-granularity",
+    "modern:metric-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：两个周期、账号数与主体数分岔、gap 只在 W19 出现",
+      "input": [],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            2,
+            2,
+            0,
+            1,
+            3
+          ],
+          [
+            "2026-W19",
+            3,
+            2,
+            1,
+            2,
+            4
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "W18：2 个账号 / 1 个主体 / gap 0；W19：3 个账号 / 2 个主体 / gap 1"
+    },
+    {
+      "name": "边界：把全额退款改成部分退款，官方口径与扣退款口径合流",
+      "input": [
+        "UPDATE order_refund SET is_full = 0 WHERE order_sn = 5"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            2,
+            2,
+            0,
+            1,
+            3
+          ],
+          [
+            "2026-W19",
+            3,
+            3,
+            0,
+            2,
+            4
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "账号 4 那单不再是\"全额退款\" ⇒ 两列相等、gap 归零；官方那一列本来就没动过"
+    },
+    {
+      "name": "删掉同主体另一账号唯一的发货单：账号数降一格，主体数不动",
+      "input": [
+        "DELETE FROM orders WHERE order_sn = 6"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            2,
+            2,
+            0,
+            1,
+            3
+          ],
+          [
+            "2026-W19",
+            2,
+            1,
+            1,
+            2,
+            3
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "时间锚点陷阱：把 W18 末那单的发货时间挪过界，它归属 W19",
+      "input": [
+        "UPDATE orders SET shipped_time = '2026-05-04 00:00:00' WHERE order_sn = 2"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            2,
+            2,
+            0,
+            1,
+            2
+          ],
+          [
+            "2026-W19",
+            4,
+            3,
+            1,
+            3,
+            5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "W18 少 1 单、W19 多 1 单；用 pay_time 的实现看不到这次移动"
+    },
+    {
+      "name": "退化：所有发货时间清空 ⇒ 六列全 0，而不是返回 NULL 或整行消失",
+      "input": [
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 1",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 2",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 3",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 4",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 5",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 6",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 8",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 9",
+        "UPDATE orders SET shipped_time = NULL WHERE order_sn = 10"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            "2026-W19",
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "没有任何发货 ⇒ 官方 0、扣退款 0、主体 0、行数 0；周期卡本身仍要各出一行（\"没数据\"和\"没这个周期\"是两件事）"
+    },
+    {
+      "name": "同主体再开一个账号：账号数变 3，主体数还是 1",
+      "input": [
+        "INSERT INTO merchant_shop VALUES (9, 100)",
+        "INSERT INTO orders VALUES (11, 9, '2026-04-28 09:00:00', '2026-04-30 09:00:00', '12.00')"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            3,
+            3,
+            0,
+            1,
+            4
+          ],
+          [
+            "2026-W19",
+            3,
+            2,
+            1,
+            2,
+            4
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "W18 的 official 从 2 变 3，而 active_subjects 纹丝不动 —— 这就是\"注册出来的增长\"被可见化"
+    },
+    {
+      "name": "边界：维表缺一个账号，主体数少一格而账号数不变",
+      "input": [
+        "DELETE FROM merchant_shop WHERE merchant_account_id = 3"
+      ],
+      "expected": {
+        "columns": [
+          "period_tag",
+          "active_accounts_official",
+          "active_accounts_after_refund",
+          "gap_after_refund",
+          "active_subjects",
+          "shipped_order_cnt"
+        ],
+        "rows": [
+          [
+            "2026-W18",
+            2,
+            2,
+            0,
+            1,
+            3
+          ],
+          [
+            "2026-W19",
+            3,
+            2,
+            1,
+            1,
+            4
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "COUNT(DISTINCT subject_id) 忽略没配到主体的账号 ⇒ 掉行不报错，但两列的差会变大，这正是要盯的信号"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n`shipped` 这个 CTE 是唯一的\"事实\"：把周期与订单做一次区间连接，锚点是 `shipped_time`。\n后面几列都从它出发 —— 账号数、行数、以及\"扣掉全额退款之后还剩几个账号\"。\n**关键是先固定集合，再算不同的投影**，而不是每个指标各连一次表（那样时间锚点迟早漂移）。\n\n**两行口径卡**（W18 / W19）：\nW18 周期内发货 3 单（order 1、2、3），账号 {1, 2} ⇒ `active_accounts_official` = 2；\n这两个账号同属主体 100 ⇒ `active_subjects` = 1；没有退款 ⇒ `gap_after_refund` = 0。\nW19 周期内发货 4 单（order 4、5、6、9），账号 {3, 4, 8} ⇒ 官方口径 3；\n扣退款口径下账号 4 唯一那单（order 5）是全额退款 ⇒ 只剩 {3, 8} = 2 ⇒ **gap = 1**；\n主体是 {200, 300} = 2（账号 4 与 8 同属主体 300）。\n\n**边界用例都在钉时间锚点**：\n`order 3` 的 `shipped_time` 正好等于 W18 的 `start_ts`，`order 9` 正好等于 W19 的 `end_ts`\n⇒ 闭区间下它们都必须被算进来；把 `BETWEEN` 写成 `>` / `<` 的实现会两边各少一条，\n而这种\"少一条\"在周环比上表现为\"上周少一个、这周少一个\"，很容易被当成正常波动。\n另一条边界是 `order 10`：钱在 W18 付、货在 W19 发 —— **它只属于 W19**（锚点是发货）。\n用 `pay_time` 的实现在这里必然给出不同的数。\n\n**`shipped_time IS NULL` 的单永远不参与**（用例「所有发货时间清空」）：\n只付款没发货是\"待履约\"，不是\"活跃\"。官方定义里 `shipped` 是**必要条件**。\n把 NULL 也算进来的实现会给出\"支付即活跃\"，那正是素材里\n\"你若答按支付商家数，会被追问那和财报口径差多少\"的那一步。\n\n**\"扣退款\"那一列存在的意义**：不是给出第二个真相，而是**把差异量化成可讨论的数**。\n供给侧指标（不扣）与成交质量指标（要扣）时间锚点天然不同，直接对比就是错的；\n但同时出两列，业务方就能看到\"这个周期有多少活跃靠退款撑住\"。\n只出一列、或把两列混成一个平均数，都算没做过指标治理。\n\n**工程延伸（面试追问点）**\n\n1. 为什么主体数要一起出？（\"同主体批量注册账号\"是虚假交易的典型形态之一，\n   官方自列风险里就有\"虚假交易可能使关键指标虚高\"。\n   账号数涨而主体数不涨 ⇒ 供给增长是注册出来的，不是招商招来的。）\n2. 跨周期的退款怎么算？（`order_refund` 没有退款时间列是**有意的简化**：\n   真实系统要记 `refund_time`，然后声明\"扣退款口径按退款发生周期归属\"还是\n   \"按原订单周期回溯\" —— 两种都有人用，但**必须选一种并写进指标卡**，\n   否则同一份数据能算出两个\"活跃商家数\"。）\n3. 指标卡上该写哪五项？（触发事件、去重主体、时间归属、是否回溯、排除集。\n   这题的官方定义五项齐全：shipped / 账号 / 发货时间落周期 / 不回溯 / 不扣退款。）\n4. 为什么不用 `confirm_status`？（素材里活跃商家锚在\"已发货\"，而成交/结算锚在\n   `confirm_status = 1 AND group_status = 1` —— 两组指标的时间锚点不同，\n   混用会让\"活跃商家涨、结算金额不涨\"这类正常现象看起来像 bug。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS period_calendar",
+      "DROP TABLE IF EXISTS orders",
+      "DROP TABLE IF EXISTS order_refund",
+      "DROP TABLE IF EXISTS merchant_shop",
+      "CREATE TABLE period_calendar (period_tag VARCHAR(12) PRIMARY KEY, start_ts DATETIME NOT NULL, end_ts DATETIME NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE orders (order_sn INT PRIMARY KEY, merchant_account_id INT NOT NULL, pay_time DATETIME NULL, shipped_time DATETIME NULL, pay_amount DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE order_refund (order_sn INT PRIMARY KEY, refund_amount DECIMAL(12,2) NOT NULL, is_full TINYINT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE merchant_shop (merchant_account_id INT PRIMARY KEY, subject_id INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO period_calendar VALUES ('2026-W18', '2026-04-27 00:00:00', '2026-05-03 23:59:59'), ('2026-W19', '2026-05-04 00:00:00', '2026-05-10 23:59:59')",
+      "INSERT INTO orders VALUES (1, 1, '2026-04-28 10:00:00', '2026-04-29 09:00:00', '100.00'), (2, 1, '2026-05-03 23:00:00', '2026-05-03 23:30:00', '50.00'), (3, 2, '2026-04-27 00:00:00', '2026-04-27 00:00:00', '20.00'), (4, 3, '2026-05-05 08:00:00', '2026-05-06 12:00:00', '30.00'), (5, 4, '2026-05-06 08:00:00', '2026-05-07 12:00:00', '40.00'), (6, 8, '2026-05-08 08:00:00', '2026-05-09 12:00:00', '60.00'), (7, 5, '2026-04-30 08:00:00', NULL, '70.00'), (8, 6, '2026-04-25 08:00:00', '2026-04-26 08:00:00', '80.00'), (9, 3, '2026-05-09 08:00:00', '2026-05-10 23:59:59', '15.00'), (10, 7, '2026-05-02 08:00:00', '2026-05-11 08:00:00', '25.00')",
+      "INSERT INTO order_refund VALUES (5, '40.00', 1), (6, '10.00', 0)",
+      "INSERT INTO merchant_shop VALUES (1, 100), (2, 100), (3, 200), (4, 300), (5, 400), (6, 500), (7, 100), (8, 300)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 9000,
+    "referenceSolution": "WITH shipped AS (\n  SELECT p.period_tag, o.merchant_account_id AS acct, o.order_sn\n  FROM period_calendar p\n  JOIN orders o ON o.shipped_time BETWEEN p.start_ts AND p.end_ts\n), per_order AS (\n  SELECT s.period_tag, s.acct,\n         CASE WHEN r.order_sn IS NOT NULL AND r.is_full = 1 THEN 0 ELSE 1 END AS kept\n  FROM shipped s\n  LEFT JOIN order_refund r ON r.order_sn = s.order_sn\n), per_account AS (\n  SELECT period_tag, acct, MAX(kept) AS any_kept\n  FROM per_order\n  GROUP BY period_tag, acct\n), order_cnt AS (\n  SELECT period_tag, COUNT(*) AS cnt FROM shipped GROUP BY period_tag\n)\nSELECT p.period_tag,\n       COUNT(DISTINCT a.acct) AS active_accounts_official,\n       COUNT(DISTINCT CASE WHEN a.any_kept = 1 THEN a.acct END) AS active_accounts_after_refund,\n       COUNT(DISTINCT a.acct)\n         - COUNT(DISTINCT CASE WHEN a.any_kept = 1 THEN a.acct END) AS gap_after_refund,\n       COUNT(DISTINCT m.subject_id) AS active_subjects,\n       COALESCE(MAX(c.cnt), 0) AS shipped_order_cnt\nFROM period_calendar p\nLEFT JOIN per_account a ON a.period_tag = p.period_tag\nLEFT JOIN merchant_shop m ON m.merchant_account_id = a.acct\nLEFT JOIN order_cnt c ON c.period_tag = p.period_tag\nGROUP BY p.period_tag\nORDER BY p.period_tag",
+    "naiveSolution": "-- \"把官方定义当没读过\"版：时间锚点用 pay_time、去重主体用 subject_id、\n-- 并且主动扣掉全额退款（以为官方那句 regardless 是疏漏）。三个方向全错。\nSELECT p.period_tag,\n       COUNT(DISTINCT m.subject_id) AS active_accounts_official,\n       COUNT(DISTINCT m.subject_id) AS active_accounts_after_refund,\n       0 AS gap_after_refund,\n       COUNT(DISTINCT m.subject_id) AS active_subjects,\n       COUNT(o.order_sn) AS shipped_order_cnt\nFROM period_calendar p\nLEFT JOIN orders o\n  ON o.pay_time BETWEEN p.start_ts AND p.end_ts\nLEFT JOIN order_refund r ON r.order_sn = o.order_sn AND r.is_full = 1\nLEFT JOIN merchant_shop m ON m.merchant_account_id = o.merchant_account_id\nWHERE r.order_sn IS NULL\nGROUP BY p.period_tag\nORDER BY p.period_tag"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "PDD",
+    "role": "数据研发（指标与口径平台方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-data-and-recommendation.md#1 核心机制 5（20-F 对 active merchants 的定义原文：shipped / 不扣退款 / 主体是账号）＋ 考点 2「素材建议 judgeKind=mysql，用例含发货后全额退款、同主体多账号、窗口边界跨天」；素材未给判据表",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.118Z"
+  }
+}

@@ -1,0 +1,293 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0018",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "成交—商品—结算—收入四层钱：过滤条件各不相同，佣金必须逐行取整",
+  "statement": "## 输入\n\nPySpark 3.5（判题容器内）。已注册一张 DWD 宽表 `dwd_order_settle`（金额一律**分**，整数）：\n\n```\ndwd_order_settle(\n  order_sn INT, merchant_account_id INT,\n  pay_amount INT,        -- 官方口径：含邮费与服务费\n  post_amount INT,       -- 邮费\n  service_fee INT,       -- 服务费（平台收入的一部分，不给商家结算）\n  refund_amount INT,     -- 已发生的退款（0 表示没退）\n  take_rate_bp INT,      -- 该类目佣金率，万分比\n  confirm_status INT,    -- 0 未成交 / 1 已成交 / 2 已取消\n  group_status INT)      -- 0 拼团中 / 1 已成团 / 2 团失败\n```\n\n## 背景\n\n素材里那道必答题：\"GMV 涨 20%，交易服务收入只涨 12%，给我三种解释路径。\"\n三条路径（take rate 结构变化 / 出资结构 / 退款滞后回冲）分别对应下面四列里的**不同分母**。\n所以这题不是算术，是**把三层钱各自的分母写对**。\n\n官方口径锚点：`pay_amount = 商品金额 − 折扣金额 + 邮费 + 服务费`；\n交易服务收入是\"for sales of the products **completed** on our platforms\"，\n而平台\"**does not control the products ... at any point in time**\"。\n\n## 任务\n\n按 `merchant_account_id` 升序输出一行，列固定为：\n\n```\nmerchant_account_id, order_rows, settled_rows, deal_fen, goods_fen, settle_fen,\nrevenue_fen, unsettled_gap_bp\n```\n\n## 四层口径（这张表就是判分点）\n\n1. `order_rows` = 该商家的行数（**所有**订单，含未成交、团失败、已取消）。\n2. **成交层** `deal_fen` = `SUM(pay_amount)`，**不加任何过滤**\n   （支付口径就是\"买家付了多少\"，它含邮费与服务费 —— 这正是它不能当 GMV 商品口径的原因）。\n3. **商品层** `goods_fen` = `SUM(pay_amount − post_amount − service_fee)`，同样**不加过滤**。\n   把邮费与服务费剥出来才是可比的商品价体量。\n4. **应结算集合**：`confirm_status = 1 AND group_status = 1`\n   （\"钱付了但团没成\"**不在**这个集合里）。`settled_rows` 是它的行数。\n5. **结算层** `settle_fen` = 应结算集合上 `SUM(pay_amount − service_fee − refund_amount)`。\n6. **收入层** `revenue_fen` = 应结算集合上 **逐行**\n   `FLOOR((pay_amount − post_amount − service_fee) × take_rate_bp / 10000)` 之和。\n   **必须逐行取整再求和**：佣金是按单结算的，先把分子分母各自求和再乘率\n   会得到另一个数（而且只会偏大或偏小，没人知道差在哪一单）。\n7. `unsettled_gap_bp` = `ROUND((deal_fen − settle_fen) × 10000 / deal_fen)`，\n   `deal_fen = 0` 时输出 `0`（这一列是\"付了但没结给商家的比例\"，没有分母就是 0）。\n\n## 约束\n\n不许 `collect()` 到驱动侧；不许用浮点做金额运算；分组的 shuffle 键必须是商家账号。\n\n## 这题真正考的东西\n\n- **四层各有各的过滤条件**：成交层与商品层**不**过滤状态，结算层与收入层**才**过滤。\n  把过滤条件下推到全部四列，`deal_fen` 就变成\"可结算口径\"，\n  于是\"GMV 涨、收入不涨\"这件事在报表上**消失**了 —— 你把要解释的现象自己解释掉了。\n- **`group_status` 参与结算判定**：这是\"成团才算成交\"落到资金侧的样子。\n- **逐行取整 vs 聚合后取整**是真实系统里最常见的\"对不上三分钱\"来源。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "layered-metrics",
+    "take-rate",
+    "per-row-rounding",
+    "metric-denominator",
+    "modern:finance-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：两商家四层钱各不相同，501 有一单付了没结",
+      "input": {
+        "view": "dwd_order_settle",
+        "schema": "order_sn int, merchant_account_id int, pay_amount int, post_amount int, service_fee int, refund_amount int, take_rate_bp int, confirm_status int, group_status int",
+        "rows": [
+          {
+            "order_sn": 1,
+            "merchant_account_id": 501,
+            "pay_amount": 10000,
+            "post_amount": 600,
+            "service_fee": 300,
+            "refund_amount": 0,
+            "take_rate_bp": 1000,
+            "confirm_status": 1,
+            "group_status": 1
+          },
+          {
+            "order_sn": 2,
+            "merchant_account_id": 501,
+            "pay_amount": 5000,
+            "post_amount": 0,
+            "service_fee": 200,
+            "refund_amount": 1000,
+            "take_rate_bp": 1000,
+            "confirm_status": 1,
+            "group_status": 2
+          },
+          {
+            "order_sn": 3,
+            "merchant_account_id": 502,
+            "pay_amount": 20000,
+            "post_amount": 1000,
+            "service_fee": 500,
+            "refund_amount": 0,
+            "take_rate_bp": 250,
+            "confirm_status": 1,
+            "group_status": 1
+          },
+          {
+            "order_sn": 4,
+            "merchant_account_id": 502,
+            "pay_amount": 8000,
+            "post_amount": 0,
+            "service_fee": 0,
+            "refund_amount": 8000,
+            "take_rate_bp": 250,
+            "confirm_status": 1,
+            "group_status": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "merchant_account_id": 501,
+          "order_rows": 2,
+          "settled_rows": 1,
+          "deal_fen": 15000,
+          "goods_fen": 13900,
+          "settle_fen": 9700,
+          "revenue_fen": 910,
+          "unsettled_gap_bp": 3533
+        },
+        {
+          "merchant_account_id": 502,
+          "order_rows": 2,
+          "settled_rows": 2,
+          "deal_fen": 28000,
+          "goods_fen": 26500,
+          "settle_fen": 19500,
+          "revenue_fen": 662,
+          "unsettled_gap_bp": 3036
+        }
+      ],
+      "visible": true,
+      "note": "501 的 settled_rows 是 1 而 order_rows 是 2 —— 那 1 单是\"付了但团失败\""
+    },
+    {
+      "name": "逐行取整 vs 聚合后取整：小金额高费率时必须分岔",
+      "input": {
+        "view": "dwd_order_settle",
+        "schema": "order_sn int, merchant_account_id int, pay_amount int, post_amount int, service_fee int, refund_amount int, take_rate_bp int, confirm_status int, group_status int",
+        "rows": [
+          {
+            "order_sn": 1,
+            "merchant_account_id": 503,
+            "pay_amount": 1,
+            "post_amount": 0,
+            "service_fee": 0,
+            "refund_amount": 0,
+            "take_rate_bp": 9999,
+            "confirm_status": 1,
+            "group_status": 1
+          },
+          {
+            "order_sn": 2,
+            "merchant_account_id": 503,
+            "pay_amount": 1,
+            "post_amount": 0,
+            "service_fee": 0,
+            "refund_amount": 0,
+            "take_rate_bp": 9999,
+            "confirm_status": 1,
+            "group_status": 1
+          },
+          {
+            "order_sn": 3,
+            "merchant_account_id": 503,
+            "pay_amount": 1,
+            "post_amount": 0,
+            "service_fee": 0,
+            "refund_amount": 0,
+            "take_rate_bp": 9999,
+            "confirm_status": 1,
+            "group_status": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "merchant_account_id": 503,
+          "order_rows": 3,
+          "settled_rows": 3,
+          "deal_fen": 3,
+          "goods_fen": 3,
+          "settle_fen": 3,
+          "revenue_fen": 0,
+          "unsettled_gap_bp": 0
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：一单都没结 ⇒ settle 与 revenue 都是 0 而 gap 是 10000",
+      "input": {
+        "view": "dwd_order_settle",
+        "schema": "order_sn int, merchant_account_id int, pay_amount int, post_amount int, service_fee int, refund_amount int, take_rate_bp int, confirm_status int, group_status int",
+        "rows": [
+          {
+            "order_sn": 1,
+            "merchant_account_id": 504,
+            "pay_amount": 30000,
+            "post_amount": 1000,
+            "service_fee": 500,
+            "refund_amount": 0,
+            "take_rate_bp": 500,
+            "confirm_status": 0,
+            "group_status": 0
+          },
+          {
+            "order_sn": 2,
+            "merchant_account_id": 504,
+            "pay_amount": 12000,
+            "post_amount": 0,
+            "service_fee": 0,
+            "refund_amount": 0,
+            "take_rate_bp": 500,
+            "confirm_status": 1,
+            "group_status": 2
+          }
+        ]
+      },
+      "expected": [
+        {
+          "merchant_account_id": 504,
+          "order_rows": 2,
+          "settled_rows": 0,
+          "deal_fen": 42000,
+          "goods_fen": 40500,
+          "settle_fen": 0,
+          "revenue_fen": 0,
+          "unsettled_gap_bp": 10000
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：只有一单且零退款 ⇒ gap 只剩服务费那一段",
+      "input": {
+        "view": "dwd_order_settle",
+        "schema": "order_sn int, merchant_account_id int, pay_amount int, post_amount int, service_fee int, refund_amount int, take_rate_bp int, confirm_status int, group_status int",
+        "rows": [
+          {
+            "order_sn": 1,
+            "merchant_account_id": 505,
+            "pay_amount": 9900,
+            "post_amount": 900,
+            "service_fee": 900,
+            "refund_amount": 0,
+            "take_rate_bp": 100,
+            "confirm_status": 1,
+            "group_status": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "merchant_account_id": 505,
+          "order_rows": 1,
+          "settled_rows": 1,
+          "deal_fen": 9900,
+          "goods_fen": 8100,
+          "settle_fen": 9000,
+          "revenue_fen": 81,
+          "unsettled_gap_bp": 909
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "全额退款的一单：settle_fen 被扣成负数，不许夹到 0",
+      "input": {
+        "view": "dwd_order_settle",
+        "schema": "order_sn int, merchant_account_id int, pay_amount int, post_amount int, service_fee int, refund_amount int, take_rate_bp int, confirm_status int, group_status int",
+        "rows": [
+          {
+            "order_sn": 1,
+            "merchant_account_id": 506,
+            "pay_amount": 5000,
+            "post_amount": 0,
+            "service_fee": 250,
+            "refund_amount": 5000,
+            "take_rate_bp": 400,
+            "confirm_status": 1,
+            "group_status": 1
+          },
+          {
+            "order_sn": 2,
+            "merchant_account_id": 506,
+            "pay_amount": 7000,
+            "post_amount": 500,
+            "service_fee": 300,
+            "refund_amount": 0,
+            "take_rate_bp": 400,
+            "confirm_status": 1,
+            "group_status": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "merchant_account_id": 506,
+          "order_rows": 2,
+          "settled_rows": 2,
+          "deal_fen": 12000,
+          "goods_fen": 10950,
+          "settle_fen": 6450,
+          "revenue_fen": 438,
+          "unsettled_gap_bp": 4625
+        }
+      ],
+      "visible": true,
+      "note": "第一单退款额等于实付 ⇒ 结算额 −250 分（商家欠平台服务费）；兜成 0 就等于凭空多结 250 分，那是资损"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一次 `groupBy(merchant_account_id)`，七列全部在**同一个** `agg` 里算完，\n靠 `F.when(应结算条件, …)` 给结算层与收入层加过滤，成交层与商品层不加。\n这样四层看的是同一批行，差异只来自各自的过滤条件 —— 这是\"分层口径\"唯一不会漂移的写法。\n\n**（参考解里有个坑值得单独讲）**：`F.when(cond, x)` 在 `cond` 为假时返回 **NULL**，\n而 `SUM` 会跳过 NULL —— 所以\"不加过滤的列\"和\"加了 when 的列\"混在同一个 `agg` 里是对的，\n但**计数**列如果也用 `when` 就必须 `.otherwise(0)`，否则空集会得到 NULL 而不是 0。\n`cast('long')` 也不能省：整数除法在 Spark 里返回 `bigint`，\n而 `F.sum` 的结果类型随表达式推导，不显式收口就会在 schema 比对上翻车。\n\n**逐行取整为什么必须**（第 6 条口径）：\n用例「逐行取整 vs 聚合后取整」就是为这一条造的：三单，每单商品价 1 分、费率 9999 万分点。\n逐行 `1 × 9999 ÷ 10000` 截断 ⇒ 每单 0 分，合计 **0 分**；\n先加再乘 ⇒ `3 × 9999 ÷ 10000 = 2.9997` 截断成 **2 分**。\n同一个商家的收入，两种实现差出一倍。差额无规律（取决于每一单的尾数），\n所以对账时永远查不出来，只会积累成\"佣金总额总比财务口径少几分钱\"。\n**根因是佣金按单入账**：商家账单是按单可解释的，任何\"先聚合再乘率\"的结果都拆不回单。\n\n**`deal_fen` 不加过滤是这题最贵的一条**（朴素解把过滤条件下推到全部四列，会**把整题打掉**）：\n成交层的意义是\"买家掏了多少钱\"，它必须包含\"付了但团失败\"、\"付了但被取消\"这些行。\n把这些过滤掉，`unsettled_gap_bp` 就恒等于 0，\n于是\"GMV 涨 20% 而收入涨 12%\"这个真实存在的现象**在你的报表上做出来是平的** ——\n指标治理最坏的失败不是算错，是**把要解释的现象用口径吃掉了**。\n\n**`unsettled_gap_bp` 的分母是 `deal_fen` 而不是 `settle_fen`**：\n它回答的是\"付出去的钱里有几成还没结给商家\"。\n用 `settle_fen` 当分母在 `settle = 0` 时会炸（除零），\n而且语义变成\"结算额里有多少被吞了\"，那是另一个问题（而且是财务问题，不是产品问题）。\n\n**工程延伸（面试追问点）**\n\n1. 为什么 `goods_fen` 也要\"不加过滤\"？（要和成交层**逐行对齐**才能算\"邮费+服务费占比\"；\n   两张不同过滤集合的表相减得到的比例无法解释。）\n2. 国补与支付立减在这四列里怎么落？（它们进 `discount_amount`，不进 `pay_amount` 的加项；\n   出资方不是平台也不是商家的那部分**不能**算进平台让利 ——\n   参见同方向那道 `pay_amount` 口径题，两边必须能互相对上。）\n3. 退款时间跨账期怎么办？（`refund_amount` 是\"已发生的退款\"快照 ⇒ 这条宽表必须带\n   `as_of_date`，否则重跑同一天会得到不同的 `settle_fen`。\n   素材里\"可变对价要预估并事后冲正\"说的就是这件事：要留**预估时点快照**，\n   不然历史永远无法复算。）\n4. `take_rate_bp` 为什么在行上而不在类目维表上？（这是 DWD 宽表，费率是**成交时点**的费率。\n   调率之后再 join 维表会把历史订单的佣金改掉 —— 那正是审计追溯断裂的形态。\n   维表只用于解释，不用于重算。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # 四层共用一次 groupBy：过滤条件只写在结算层与收入层的聚合表达式里，\n    # 成交层与商品层**不**加过滤 —— 这是\"分层口径不漂移\"的唯一结构。\n    r = (spark.table('dwd_order_settle')\n         .withColumn('settled',\n                     (F.col('confirm_status') == 1) & (F.col('group_status') == 1))\n         .withColumn('goods',\n                     F.col('pay_amount') - F.col('post_amount') - F.col('service_fee'))\n         .withColumn('settle_row',\n                     F.col('pay_amount') - F.col('service_fee') - F.col('refund_amount'))\n         # 佣金按单入账：逐行乘率再截断。cast('long') 对正数就是 floor。\n         .withColumn('fee_row',\n                     (F.col('goods') * F.col('take_rate_bp') / F.lit(10000)).cast('long')))\n\n    agg = r.groupBy('merchant_account_id').agg(\n        F.count(F.lit(1)).cast('int').alias('order_rows'),\n        F.sum(F.col('pay_amount')).cast('long').alias('deal_fen'),\n        F.sum('goods').cast('long').alias('goods_fen'),\n        F.sum(F.col('settled').cast('int')).cast('int').alias('settled_rows'),\n        F.sum(F.when(F.col('settled'), F.col('settle_row'))).cast('long').alias('settle_fen'),\n        F.sum(F.when(F.col('settled'), F.col('fee_row'))).cast('long').alias('revenue_fen'))\n\n    return (agg.select('merchant_account_id', 'order_rows', 'settled_rows', 'deal_fen',\n                       'goods_fen',\n                       F.coalesce('settle_fen', F.lit(0)).cast('long').alias('settle_fen'),\n                       F.coalesce('revenue_fen', F.lit(0)).cast('long').alias('revenue_fen'),\n                       F.when(F.col('deal_fen') == 0, F.lit(0))\n                        .otherwise(F.round((F.col('deal_fen')\n                                            - F.coalesce(F.col('settle_fen'), F.lit(0)))\n                                           * 10000 / F.col('deal_fen')))\n                        .cast('int').alias('unsettled_gap_bp'))\n             .orderBy('merchant_account_id'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # \"四层共用一个 WHERE\"版：所有指标都只算可结算行，\n    # 于是\"GMV 涨了收入没涨\"这件事在报表上根本不存在 —— 问题被口径吃掉了。\n    r = (spark.table('dwd_order_settle')\n         .filter((F.col('confirm_status') == 1) & (F.col('group_status') == 1)))\n    agg = r.groupBy('merchant_account_id').agg(\n        F.count(F.lit(1)).cast('int').alias('order_rows'),\n        F.sum('pay_amount').cast('long').alias('deal_fen'),\n        F.sum(F.col('pay_amount') - F.col('post_amount') - F.col('service_fee'))\n          .cast('long').alias('goods_fen'),\n        F.sum(F.col('pay_amount') - F.col('service_fee') - F.col('refund_amount'))\n          .cast('long').alias('settle_fen'))\n    return (agg.select('merchant_account_id', 'order_rows',\n                       F.col('order_rows').alias('settled_rows'),\n                       'deal_fen', 'goods_fen', 'settle_fen',\n                       (F.col('goods_fen') * 1000 / F.lit(10000)).cast('long')\n                       .alias('revenue_fen'),\n                       F.lit(0).cast('int').alias('unsettled_gap_bp'))\n             .orderBy('merchant_account_id'))"
+  },
+  "estimatedMinutes": 32,
+  "source": {
+    "company": "PDD",
+    "role": "数据研发（交易与收入口径方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-data-and-recommendation.md#4 考点 3/14 与 §5 题面草稿 A 第 2 问（成交/结算/收入多列口径、`pay_amount` 官方公式含邮费与服务费、\"GMV 涨而交易服务收入不涨\"的三条解释路径、FY2025 收入结构 50.4% / 49.6%）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.111Z"
+  }
+}

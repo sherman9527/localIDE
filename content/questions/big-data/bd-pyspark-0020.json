@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0020",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "位点差才是堆积：三类位点算追赶 ETA，并把\"数据尚未完整\"做成状态分档",
+  "statement": "## 背景\n\n火山引擎消息队列 RocketMQ 版的《相关概念》把\"堆积\"定义成了三个可查的数【源 S19】：\n`MaxOffset`（分区总数）、`MinOffset`（起始）、`ConsumerOffset`（已消费条数）。\n也就是说 —— **堆积不是一个\"队列长度\"，它是三个位点之间的差**。\n素材 §1.5 那句\"扇出的可观测指标就是位点差，不是队列长度这种笼统说法\"就是这个意思。\n\n同一页还给了集群消费与广播消费的语义差【源 S15/S19】：\n集群消费\"每条消息仅被消费一次\"、广播消费\"每条消息会被消费多次\" ——\n**同一个消费组的位点形状在两种语义下完全不同**，这也是为什么必须校验位点合法性而不是直接除。\n\n## 任务\n\nPySpark 3.5，已注册表：\n\n```\noffset_rows(\n  row_id INT, ds STRING, topic STRING, consumer_group STRING,\n  min_offset BIGINT, max_offset BIGINT, consumer_offset BIGINT,\n  window_minutes INT,      -- 这批位点是跨多长分钟数采的两个快照之差\n  sla_minutes INT)\n```\n\n每行是一个 `(ds, topic, consumer_group)` 的快照。输出列固定为\n\n```\nds, topic, consumer_group, backlog, consumed, total_span, eta_minutes, status\n```\n\n按 `ds`、`topic`、`consumer_group` 升序。定义：\n\n```\ntotal_span = max_offset - min_offset\nconsumed   = consumer_offset - min_offset\nbacklog    = max_offset - consumer_offset\n```\n\n`eta_minutes`（还要多少分钟追平）**必须向上取整**：还剩一条没消费完就不许报 0 分钟。\n不适用时输出 `null`。\n\n## `status` 判定（优先级从上到下，命中即止）\n\n| 顺序 | 条件 | status | 为什么排在这里 |\n| --- | --- | --- | --- |\n| 1 | 位点非法（见下） | `invalid-position` | 输入不可信时**任何派生数都不许输出** |\n| 2 | `backlog == 0` | `complete` | 追平优先于\"消费速率为 0\" |\n| 3 | `consumed == 0` | `stalled` | 一条都没往前走 ⇒ ETA 无定义，不许给一个数 |\n| 4 | `eta_minutes <= sla_minutes` | `healthy` | **是 `<=`**：恰好卡在 SLA 上算达标 |\n| 5 | 其余 | `sla-risk` | |\n\n**位点非法**的判据（任一成立即是）：\n`min_offset < 0`，或 `max_offset < min_offset`，或 `consumer_offset < min_offset`，\n或 `consumer_offset > max_offset`，或 `window_minutes <= 0`。\n\n## 三条口径纪律\n\n- **`complete` 必须排在 `stalled` 前面。**\n  空分区（`min == max == consumer == 0`）的两个条件同时成立，\n  判成 `stalled` 的实现在每天凌晨给每个新 topic 报一次\"消费停滞\"，\n  于是这条告警三个月后就没人看了 —— **误报的代价不是误报本身，是把真信号淹掉**。\n- **`consumed == 0` 时不许输出 ETA 数字。**\n  输出 0 是\"马上就好\"，输出一个巨大的数是\"很久以后\"，\n  两者都比\"无法预测\"更确定，而确定的假数字会直接进 SLO 计算。\n- **向上取整不是保守，是让 ETA 单调。**\n  向下取整会让\"还剩 1 条\"和\"还剩 0 条\"报出同一个数，\n  于是仪表盘上\"堆积在减少\"这件事**看不见最后一段**。\n\n## 这题真正考的东西\n\n素材考点 9 的原话是：放行判据是**完整度指标**（应到 vs 实到 + 位点差），\n而不是\"任务成功\"。**任务成功只说明代码没抛异常，不说明数据到齐了。**\n把\"看板 8 点没数\"这件事做成产品化标记（\"数据尚未完整\"而不是\"报错\"），\n靠的就是这张表里的 `status` 分档 —— 现在说出你的第四档叫什么名字、\n以及它该不该进 SLO 分母。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "consumer-lag",
+    "offset-model",
+    "completeness-gate",
+    "sla",
+    "message-fanout",
+    "modern:streaming-reliability"
+  ],
+  "cases": [
+    {
+      "name": "基线：六类状态各一次（健康 / SLA 违约 / 追平 / 停滞 / 位点越界 / 边界相等）",
+      "input": {
+        "view": "offset_rows",
+        "schema": "row_id int, ds string, topic string, consumer_group string, min_offset bigint, max_offset bigint, consumer_offset bigint, window_minutes int, sla_minutes int",
+        "rows": [
+          {
+            "row_id": 1,
+            "ds": "2026-09-01",
+            "topic": "T1",
+            "consumer_group": "g-fast",
+            "min_offset": 1000,
+            "max_offset": 2000,
+            "consumer_offset": 1900,
+            "window_minutes": 10,
+            "sla_minutes": 60
+          },
+          {
+            "row_id": 2,
+            "ds": "2026-09-01",
+            "topic": "T1",
+            "consumer_group": "g-slow",
+            "min_offset": 1000,
+            "max_offset": 2000,
+            "consumer_offset": 1100,
+            "window_minutes": 10,
+            "sla_minutes": 60
+          },
+          {
+            "row_id": 3,
+            "ds": "2026-09-01",
+            "topic": "T1",
+            "consumer_group": "g-done",
+            "min_offset": 1000,
+            "max_offset": 2000,
+            "consumer_offset": 2000,
+            "window_minutes": 10,
+            "sla_minutes": 60
+          },
+          {
+            "row_id": 4,
+            "ds": "2026-09-01",
+            "topic": "T2",
+            "consumer_group": "g-idle",
+            "min_offset": 500,
+            "max_offset": 900,
+            "consumer_offset": 500,
+            "window_minutes": 20,
+            "sla_minutes": 30
+          },
+          {
+            "row_id": 5,
+            "ds": "2026-09-01",
+            "topic": "T2",
+            "consumer_group": "g-bad",
+            "min_offset": 500,
+            "max_offset": 900,
+            "consumer_offset": 950,
+            "window_minutes": 20,
+            "sla_minutes": 30
+          },
+          {
+            "row_id": 6,
+            "ds": "2026-09-01",
+            "topic": "T3",
+            "consumer_group": "g-edge",
+            "min_offset": 0,
+            "max_offset": 100,
+            "consumer_offset": 50,
+            "window_minutes": 5,
+            "sla_minutes": 5
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ds": "2026-09-01",
+          "topic": "T1",
+          "consumer_group": "g-done",
+          "backlog": 0,
+          "consumed": 1000,
+          "total_span": 1000,
+          "eta_minutes": 0,
+          "status": "complete"
+        },
+        {
+          "ds": "2026-09-01",
+          "topic": "T1",
+          "consumer_group": "g-fast",
+          "backlog": 100,
+          "consumed": 900,
+          "total_span": 1000,
+          "eta_minutes": 2,
+          "status": "healthy"
+        },
+        {
+          "ds": "2026-09-01",
+          "topic": "T1",
+          "consumer_group": "g-slow",
+          "backlog": 900,
+          "consumed": 100,
+          "total_span": 1000,
+          "eta_minutes": 90,
+          "status": "sla-risk"
+        },
+        {
+          "ds": "2026-09-01",
+          "topic": "T2",
+          "consumer_group": "g-bad",
+          "backlog": -50,
+          "consumed": 450,
+          "total_span": 400,
+          "eta_minutes": null,
+          "status": "invalid-position"
+        },
+        {
+          "ds": "2026-09-01",
+          "topic": "T2",
+          "consumer_group": "g-idle",
+          "backlog": 400,
+          "consumed": 0,
+          "total_span": 400,
+          "eta_minutes": null,
+          "status": "stalled"
+        },
+        {
+          "ds": "2026-09-01",
+          "topic": "T3",
+          "consumer_group": "g-edge",
+          "backlog": 50,
+          "consumed": 50,
+          "total_span": 100,
+          "eta_minutes": 5,
+          "status": "healthy"
+        }
+      ],
+      "visible": true,
+      "note": "g-edge 是 eta 恰好等于 sla_minutes ⇒ healthy（判据用 <=）"
+    },
+    {
+      "name": "边界：分区全空（min==max==consumer==0）⇒ 追平，不许算成停滞",
+      "input": {
+        "view": "offset_rows",
+        "schema": "row_id int, ds string, topic string, consumer_group string, min_offset bigint, max_offset bigint, consumer_offset bigint, window_minutes int, sla_minutes int",
+        "rows": [
+          {
+            "row_id": 1,
+            "ds": "2026-09-02",
+            "topic": "T9",
+            "consumer_group": "g-zero",
+            "min_offset": 0,
+            "max_offset": 0,
+            "consumer_offset": 0,
+            "window_minutes": 30,
+            "sla_minutes": 60
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ds": "2026-09-02",
+          "topic": "T9",
+          "consumer_group": "g-zero",
+          "backlog": 0,
+          "consumed": 0,
+          "total_span": 0,
+          "eta_minutes": 0,
+          "status": "complete"
+        }
+      ],
+      "visible": true,
+      "note": "span=0 且 backlog=0 ⇒ complete；把它算成 stalled 的实现会在\"今天还没有数据\"的凌晨误报"
+    },
+    {
+      "name": "退化：窗口分钟数为 0 ⇒ 位点越界一类，拒绝给 ETA",
+      "input": {
+        "view": "offset_rows",
+        "schema": "row_id int, ds string, topic string, consumer_group string, min_offset bigint, max_offset bigint, consumer_offset bigint, window_minutes int, sla_minutes int",
+        "rows": [
+          {
+            "row_id": 1,
+            "ds": "2026-09-03",
+            "topic": "TA",
+            "consumer_group": "g1",
+            "min_offset": 10,
+            "max_offset": 20,
+            "consumer_offset": 10,
+            "window_minutes": 100,
+            "sla_minutes": 5
+          },
+          {
+            "row_id": 2,
+            "ds": "2026-09-03",
+            "topic": "TA",
+            "consumer_group": "g2",
+            "min_offset": 10,
+            "max_offset": 20,
+            "consumer_offset": 10,
+            "window_minutes": 0,
+            "sla_minutes": 5
+          }
+        ]
+      },
+      "expected": [
+        {
+          "ds": "2026-09-03",
+          "topic": "TA",
+          "consumer_group": "g1",
+          "backlog": 10,
+          "consumed": 0,
+          "total_span": 10,
+          "eta_minutes": null,
+          "status": "stalled"
+        },
+        {
+          "ds": "2026-09-03",
+          "topic": "TA",
+          "consumer_group": "g2",
+          "backlog": 10,
+          "consumed": 0,
+          "total_span": 10,
+          "eta_minutes": null,
+          "status": "invalid-position"
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n整题是一串列表达式，没有 join、没有 UDF —— 难点全在**优先级**和**空值语义**上。\n向上取整写成 `-((-a) // b)`（Python）或 `F.ceil(...)`（Spark）；\n用浮点 `ceil` 时要把乘法放在整数域里再做，否则大位点数会先在 `double` 上丢精度。\n\n**基线六行的 ETA 逐个算**（`consumed` 都是相对 `min_offset` 的差）：\n\n| 组 | span | consumed | backlog | ETA | status |\n| --- | --- | --- | --- | --- | --- |\n| g-fast | 1000 | 900 | 100 | `ceil(100*10/900)` = 2 | healthy（2 ≤ 60） |\n| g-slow | 1000 | 100 | 900 | `ceil(900*10/100)` = 90 | sla-risk（90 > 60） |\n| g-done | 1000 | 1000 | 0 | 0 | complete |\n| g-idle | 400 | 0 | 400 | null | stalled |\n| g-bad | 400 | 450 | −50 | null | invalid-position（位点超过 max） |\n| g-edge | 100 | 50 | 50 | `ceil(50*5/50)` = 5 | healthy（5 ≤ 5，判据是 `<=`） |\n\n**g-bad 是唯一一行\"负 backlog\"，也是本题故意留的陷阱**：\n`backlog = -50`，它既不等于 0 也不大于 0 ⇒ 如果不在第 1 档拦住，\n后面所有分支都会拿着一个负堆积算出\"已经追平\"。\n**位点越界在真实链路里的成因就是\"消费组换过语义\"**\n（集群消费改成广播消费，或位点被人工重置过），\n这时 `consumer_offset` 已经不是这个 topic 队列上的合法游标了 —— 素材 §1.5\n把\"广播消费：每条消息会被消费多次\"列成官方定义，正是这条的根因。\n\n**边界用例（三个 offset 全 0）**：`span=0`、`consumed=0`、`backlog=0` ⇒ 合法，\n判第 2 档 ⇒ `complete`，ETA 是 0（不是 null）。\n朴素解在这里给出 `stalled`/ETA 0 混合的错误形状。\n\n**退化用例里第 2 行 `window_minutes=0`**：`eta` 的分子分母都有一个 0 ⇒\n必须落进 `invalid-position`。注意它和第 1 行 (`g1`) 的对照：\n`g1` 是 `consumed=0` 的正常停滞 ⇒ `stalled`；同一张表里两行状态不同，\n考的就是\"你有没有把'输入不可信'和'输入可信但没进展'分开\"。\n\n**工程延伸（面试追问点）**\n\n1. 集群 vs 广播怎么影响这张表？（广播消费的 `ConsumerOffset` 是**每个消费者实例各自**的，\n   聚合出来的位点差天然偏小甚至为负。真实系统要按 `(consumer_group, client_id)` 采，\n   再取 min 做保守估计 —— 取 min 会高估堆积，但**高估堆积只是多等一会儿，\n   低估堆积会把没算完的数据放行到看板**。）\n2. 延时/定时消息在这里怎么体现？（官方边界是\"毫秒级延迟，最长 3 天或保留时长的 3 倍取小\"\n   【源 S19】。一条 3 天延时消息会让 `backlog` 长期不归零 ⇒ 需要把\n   \"计划内未到\" 从 `stalled` 里分出去，否则这一档永远在误报。）\n3. 死信呢？（死信队列在订阅关系创建时**自动创建**【源 S19】，\n   但它是**另一个 topic** ⇒ 本表按 topic 采时死信完全不可见。\n   \"消费成功率高\"和\"没有消息进死信\"是两条独立 SLI，别把后者省掉。）\n4. 这套状态怎么变成产品？（`invalid-position` 与 `stalled` 都该出\"数据尚未完整\"标记\n   而不是报错；`sla-risk` 出预警、`healthy` 才允许下游看板刷新 ——\n   这就是素材 §2 追问 12 \"看板 8 点没数先做什么\"的答案：\n   先看这张表的 `status`，而不是先看任务日志。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('offset_rows')\n    span = F.col('max_offset') - F.col('min_offset')\n    consumed = F.col('consumer_offset') - F.col('min_offset')\n    backlog = F.col('max_offset') - F.col('consumer_offset')\n    invalid = ((F.col('window_minutes') <= 0) | (consumed < 0) | (consumed > span)\n               | (F.col('min_offset') < 0) | (span < 0))\n    # 向上取整写成整数除法：(a + b - 1) / b 再截断，全程不碰浮点边界\n    ceil_eta = ((backlog * F.col('window_minutes') + consumed - F.lit(1)) / consumed).cast('long')\n    eta = (F.when(invalid, F.lit(None).cast('long'))\n           .when(backlog == 0, F.lit(0).cast('long'))\n           .when(consumed == 0, F.lit(None).cast('long'))\n           .otherwise(ceil_eta))\n    status = (F.when(invalid, F.lit('invalid-position'))\n              .when(backlog == 0, F.lit('complete'))\n              .when(consumed == 0, F.lit('stalled'))\n              .when(eta <= F.col('sla_minutes'), F.lit('healthy'))\n              .otherwise(F.lit('sla-risk')))\n    return (r.select('ds', 'topic', 'consumer_group',\n                     backlog.alias('backlog'), consumed.alias('consumed'),\n                     span.alias('total_span'), eta.alias('eta_minutes'),\n                     status.alias('status'))\n            .orderBy('ds', 'topic', 'consumer_group'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # \"任务成功就是数据完整\"版：把位点差直接除一下，不校验位点合法性、\n    # 不把\"零消费\"单独分出来，ETA 还向下取整 —— 越接近追平越乐观。\n    r = spark.table('offset_rows')\n    backlog = F.col('max_offset') - F.col('consumer_offset')\n    consumed = F.col('consumer_offset')\n    return (r.select('ds', 'topic', 'consumer_group',\n                     backlog.alias('backlog'), consumed.alias('consumed'),\n                     (F.col('max_offset') - F.col('min_offset')).alias('total_span'),\n                     F.when(consumed == 0, F.lit(0))\n                      .otherwise((backlog / consumed).cast('long')).alias('eta_minutes'),\n                     F.when(backlog == 0, F.lit('complete')).otherwise(F.lit('healthy'))\n                      .alias('status'))\n            .orderBy('ds', 'topic', 'consumer_group'))"
+  },
+  "estimatedMinutes": 25,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（实时链路与数据平台方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 9（离线/实时双链路的对账与完整度：放行判据是完整度指标而不是任务成功）＋ 后端篇 #4 考点 11（消息投递语义与扇出可观测：三类位点 Max/Min/ConsumerOffset 是堆积与追赶速度的定义基础）；状态分档与 ETA 取整规则是【推】，已在题面写成本题契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:33:24.464Z"
+  }
+}

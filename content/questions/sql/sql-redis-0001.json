@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0001",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "排行榜读路径固定为 ZRANGE：同分升序怎么编码",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7；本题只用到 6.0 起就存在的命令，但结论与 7.x 的 ZADD GT/LT 有关，见答案）。\n\n场景：直播打赏榜。网关只放开了四个有序集合读命令，且**只有一个方向**：\n  `ZRANGE board <start> <stop> WITHSCORES`（升序）、`ZRANGE board <start> <stop>`、`ZRANK board <member>`、`ZCARD board`。\n`ZREVRANGE` / `ZREVRANK` 在这条链路上不可用（历史包袱：接入层是只支持 ZRANGE 的老代理）。\n\n产品要求的榜单顺序（写死在 PRD 里）：\n  A. 打赏额**从高到低**；\n  B. 同分时按用户 id 的**字典序升序**（字典序小排前面，这是为了保证分页游标稳定而规定的决定性次序）；\n  C. 用户主页上的「你现在的第 N 名」必须能由 `ZRANK board <member> + 1` 直接得到；\n  D. 前端展示的**原始正整数分数**不得依赖有序集合的 score（因为 score 被你征用了），必须写进哈希 `board:raw`，field = 用户 id，value = 原始分数的十进制字符串。\n\n本次要上榜的数据（6 位用户，注意有并列）：\n  alice 1500、bob 1200、carol 1200、dan 1500、eve 900、frank 1500。\n\n提交一段 Redis 命令序列（每行一条命令，`#` 开头是注释），把榜单与展示分数落到 `board` / `board:raw` 上。\n键名固定为 `board` 与 `board:raw`；不要留下其它键；禁止 `KEYS`/`FLUSHALL`/`EVAL`/`SCRIPT`/`OBJECT`/`SORT` 等命令。\n本题考的是「你知不知道 ZSET 对同分成员是按成员字典序**升序**存的，以及 ZREVRANGE 会把这层次序一起翻转」。",
+  "judgeKind": "redis",
+  "tags": [
+    "zset",
+    "leaderboard",
+    "stable-pagination",
+    "tie-breaking",
+    "modern:redis7-zset-encoding"
+  ],
+  "cases": [
+    {
+      "name": "Top-3 顺序（同分按成员升序）",
+      "input": ["ZRANGE board 0 2"],
+      "expected": ["alice", "dan", "frank"],
+      "note": "并列 1500 的三人必须是 alice, dan, frank。用正分数 + ZREVRANGE 的写法会得到 frank, dan, alice。"
+    },
+    {
+      "name": "第二页分页边界",
+      "input": ["ZRANGE board 3 5"],
+      "expected": ["bob", "carol", "eve"]
+    },
+    {
+      "name": "名次必须等于 ZRANK",
+      "input": ["ZRANK board carol"],
+      "expected": 4,
+      "note": "carol 是第 5 名（ZRANK 从 0 开始）：alice, dan, frank, bob, carol, eve。"
+    },
+    {
+      "name": "未上榜成员的边界回复",
+      "input": ["ZRANK board guest-9"],
+      "expected": null,
+      "note": "必须是 nil（前端据此显示「未上榜」）；如果实现把名次存成普通 INT 键，这里通常会给出 0 或错误。"
+    },
+    {
+      "name": "展示分数与 score 解耦",
+      "input": ["HMGET board:raw alice bob carol dan eve frank"],
+      "expected": ["1500", "1200", "1200", "1500", "900", "1500"]
+    },
+    {
+      "name": "并列成员没有被互相覆盖（成员数边界）",
+      "input": ["ZCARD board"],
+      "expected": 6,
+      "note": "同分成员写成同一个 member 会掉人；6 个人必须都在。"
+    },
+    {
+      "name": "键类型正确",
+      "input": ["TYPE board", "TYPE board:raw"],
+      "expected": ["zset", "hash"]
+    }
+  ],
+  "answer": "参考解（负分征用 score，让唯一的升序读命令给出正确次序）：\n```\nDEL board\nDEL board:raw\nZADD board -1500 alice\nZADD board -1500 dan\nZADD board -1500 frank\nZADD board -1200 bob\nZADD board -1200 carol\nZADD board -900  eve\nHSET board:raw alice 1500 dan 1500 frank 1500 bob 1200 carol 1200 eve 900\n```\n要点与代价：\n1) ZSET 的次序是 (score 升序, member 字典序升序)；`ZREVRANGE` 是**整体翻转**，同分组内的 member 次序也跟着翻转 → 只要读路径固定为 `ZRANGE`，就必须把「分数从高到低」编码成「score 从小到大」，即存负分（或 `SCORE_RANGE - raw` 之类的单调递减映射）。\n2) 同分成员必须靠 member 唯一性承载，`ZADD board -1500 alice` 重复执行是覆盖不是新增；想保留「同一个人多笔累加」要 `ZINCRBY board -100 alice`（注意符号！）。\n3) 征用 score 的**真实代价**（面试官等着问这条）：Redis 7.0 的 `ZADD ... GT/LT` 是按 score 比较的，负分编码下「只保留更高分」要写成 `ZADD board LT -<新分> <member>`（符号反转），写 `GT` 会把高分覆盖成低分 —— 这是绝大多数线上事故的来源。\n4) 展示分数另存一份（`board:raw`）或用 `HSET` + 版本号；不要在读路径上做 `10000 - score` 这种隐式约定散落各处。\n5) 名次语义：`ZRANK` 给的是 0 基位置，同分并列时它**不是**「第几名」的竞赛名次。产品若要「并列同名次」，得用 `ZCOUNT board -inf (<score)` 计数 + 1，代价是每次多一个命令，且要先拿到该 member 的 score。\n6) 大 key 与热 key：单房间 ZSET 可控；全站榜要分片（`board:{shard}` + 归并），百万成员时 `ZRANGE 0 9` 是 O(log N + 10)，但 `ZADD` 打在同一实例上会成热点，生产口径是本地聚合 + 批量 flush。\n\n追问：\n- 如果允许 `ZREVRANGE` 但要求「同分按 member 升序」怎么办？→ 只能存负分再用 ZREVRANGE，或把 member 的可排序前缀编进 score（小数位）——都要讨论精度上限。\n- 如何做「我的名次」而不暴露全榜？→ `ZRANK` + `HMGET board:raw`，两次 RTT 可用 pipeline 合并；注意 pipeline 不是原子性保证。\n- 榜单快照（每 5 分钟冻结）怎么做？→ `ZRANGESTORE`（7.0）或 `COPY`（6.2）+ TTL，别用 `ZUNIONSTORE` 全量复制。",
+  "runner": {
+    "setup": ["DEL board", "DEL board:raw"],
+    "timeoutMs": 10000,
+    "referenceSolution": "# 读路径只有升序 ZRANGE，所以把分数取负存进 score\nDEL board\nDEL board:raw\nZADD board -1500 alice -1500 dan -1500 frank\nZADD board -1200 bob -1200 carol\nZADD board -900 eve\nHSET board:raw alice 1500 dan 1500 frank 1500 bob 1200 carol 1200 eve 900",
+    "naiveSolution": "DEL board\nDEL board:raw\nZADD board 1500 alice 1200 bob 1200 carol 1500 dan 900 eve 1500 frank\nHSET board:raw alice 1500 dan 1500 frank 1500 bob 1200 carol 1200 eve 900"
+  },
+  "estimatedMinutes": 12,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#15-高频生产模式含命令级细节",
+    "addedBy": "content-agent-sql"
+  }
+}

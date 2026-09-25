@@ -1,0 +1,145 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0004",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "调度器出队的多键降序稳定排序",
+  "statement": "## 背景\n\n批处理调度器每个 tick 从 waiting 队列取任务：先按 `priority` **降序**（数值大 = 更紧急），优先级相同的必须**保持入队顺序**（先进先出，否则同优先级任务会被饿死）。产出的是 `jobId` 序列。\n\n这个接口每天都对，**只在优先级取到极值或大量并列时出问题**——所以它考的是排序语义，不是排序思路。\n\n## 入口\n\n```java\npublic static int[] orderByPriority(int[] priorities, int[] jobIds)\n```\n\n- 输入是同一批任务的两个平行数组（下标 i = 第 i 个入队的任务）；\n- 返回 `jobId` 序列：按 `priority` 降序；同优先级的按**入队下标升序**；\n- `priorities.length == jobIds.length`，否则抛 `IllegalArgumentException`；长度为 0 时返回 `int[0]`。\n\n## 不变式与硬约束\n\n1. `priority` 取遍 `int` 全域，**包括 `Integer.MIN_VALUE` 与 `Integer.MAX_VALUE`**。任何 `(x, y) -> b - a` 型减法比较器在这里都会崩：`MAX - MIN` 溢出为负 → 序错乱，并且 `Arrays.sort(Object[])`（TimSort）在 merge 阶段可能抛 `IllegalArgumentException: Comparison method violates its general contract!`，线上表现为偶发失败。\n2. \"同优先级按入队序\"必须由**显式次键**保证，不能依赖排序稳定性（`Arrays.sort(int[])` 是双轴快排，**不保证稳定**；只有对象数组的 TimSort 稳定）。请在实现里说清为什么有了次键之后稳定性无关紧要。\n3. O(n log n) 时间；n 上界 2e5。`Integer[]` + `Comparator` 链是可接受的，但要能说出代价（装箱对象数、指针跳跃）与不装箱替代（把 `(降序键, 下标)` 打包进 `long[]` 再 `Arrays.sort(long[])`）。\n4. **不得修改入参数组**（判题会在调用后复用同一份输入）。\n\n## 输出契约\n\n返回新分配的 `int[]`。不要返回 `List<Integer>`，不要返回入参数组的视图。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "sorting",
+    "comparator-contract",
+    "stability",
+    "overflow-contract",
+    "modern:timsort-contract"
+  ],
+  "cases": [
+    {
+      "name": "基本降序",
+      "input": [
+        [
+          3,
+          1,
+          2
+        ],
+        [
+          10,
+          20,
+          30
+        ]
+      ],
+      "expected": [
+        10,
+        30,
+        20
+      ]
+    },
+    {
+      "name": "优先级全并列时保持入队序",
+      "input": [
+        [
+          5,
+          5,
+          5
+        ],
+        [
+          7,
+          8,
+          9
+        ]
+      ],
+      "expected": [
+        7,
+        8,
+        9
+      ]
+    },
+    {
+      "name": "极值优先级触发减法溢出",
+      "input": [
+        [
+          -2147483648,
+          2147483647,
+          0
+        ],
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "expected": [
+        2,
+        3,
+        1
+      ]
+    },
+    {
+      "name": "空任务表返回空数组",
+      "input": [
+        [],
+        []
+      ],
+      "expected": []
+    },
+    {
+      "name": "单任务退化输入",
+      "input": [
+        [
+          42
+        ],
+        [
+          999
+        ]
+      ],
+      "expected": [
+        999
+      ]
+    },
+    {
+      "name": "并列与极值混合",
+      "input": [
+        [
+          2,
+          -2147483648,
+          2,
+          2147483647,
+          -2147483648
+        ],
+        [
+          101,
+          102,
+          103,
+          104,
+          105
+        ]
+      ],
+      "expected": [
+        104,
+        101,
+        103,
+        102,
+        105
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] orderByPriority(int[] priorities, int[] jobIds)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 不装箱的多键排序：高 32 位 = ~priority（int 域内取反即\"降序键\"，且避开 -MIN_VALUE 陷阱），\n   * 低 32 位 = 入队下标（升序次键）。long 的有符号比较先比高 32 位再比低 32 位，\n   * 于是 Arrays.sort(long[]) 一次完成双键排序；键是全序，所以稳定性无关紧要。\n   */\n  public static int[] orderByPriority(int[] priorities, int[] jobIds) {\n    if (priorities.length != jobIds.length) {\n      throw new IllegalArgumentException(\"parallel arrays required\");\n    }\n    int n = priorities.length;\n    if (n == 0) return new int[0];\n    long[] keys = new long[n];\n    for (int k = 0; k < n; k++) {\n      keys[k] = ((long) (~priorities[k]) << 32) | (k & 0xffffffffL);\n    }\n    java.util.Arrays.sort(keys);\n    int[] out = new int[n];\n    for (int k = 0; k < n; k++) out[k] = jobIds[(int) keys[k]];\n    return out;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：减法比较器 + 只有单键。极值优先级下 b - a 溢出，序直接乱掉；\n  // 并列任务的入队顺序则交给 sort 的稳定性碰运气（Integer[] 恰好稳定，int[] 就不稳定）。\n  public static int[] orderByPriority(int[] priorities, int[] jobIds) {\n    if (priorities.length != jobIds.length) {\n      throw new IllegalArgumentException(\"parallel arrays required\");\n    }\n    Integer[] order = new Integer[priorities.length];\n    for (int k = 0; k < order.length; k++) order[k] = k;\n    java.util.Arrays.sort(order, (x, y) -> priorities[y] - priorities[x]);\n    int[] out = new int[order.length];\n    for (int k = 0; k < order.length; k++) out[k] = jobIds[order[k]];\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：把 (优先级降序, 入队下标升序) 组成**全序**再排。参考解把两个键打包进一个 `long`：高位 `~priority`（按位取反等价于有符号降序键，且不会像 `-p` 那样在 `Integer.MIN_VALUE` 上溢出），低位是无符号下标。`Arrays.sort(long[])` 的有符号比较天然实现\"先高后低\"。\n\n**为什么不依赖稳定性**：一旦有显式次键，任何排序（含 `int[]` 的双轴快排）结果都唯一，稳定与否不再是正确性问题；反之只排单键时 `Arrays.sort(int[])` 根本不保证稳定 → 同优先级顺序不可预期，生产上表现为偶发的任务饥饿。这是本题最主要的追问点。\n\n**减法比较器为什么必然死**：`priorities[y] - priorities[x]` 的取值域是 [-2^32+1, 2^32-1]，超出 int；`MAX - MIN` 溢出为 -1，比较器同时违反**反对称性**，TimSort 能在 merge 阶段检测到矛盾并抛异常（不是每次都抛 → 线上偶发堆栈）。正解：`Integer.compare` 或 `Comparator.comparingInt(T::p).reversed().thenComparingInt(T::seq)`（可读版，代价是 `Integer[]` 装箱与 n 次比较器调用）。\n\n**复杂度**：时间 O(n log n)；额外空间 O(n)（`long[]` 8B/元素，n=2e5 时约 1.6MB；`Integer[]` 版本约 16B/对象 + 引用 → 3~4 倍，并产生同量级的 GC 扫描）。\n\n**面试追问**：\n1. `~p` 与 `-p` 的差别？（`-Integer.MIN_VALUE == Integer.MIN_VALUE`，取负在极值处不单调；`~` 是纯位翻转，与原值构成保序同构。）\n2. `comparingInt(...).reversed().thenComparingInt(...)` 里 `reversed()` 作用范围？（只作用于前一个键；写成 `.thenComparingInt(...).reversed()` 就把次键也反转，FIFO 立刻反了。）\n3. 为什么不能 `Arrays.sort(int[][])` + 自写比较器？（`int[][]` 是对象数组，元素是 `int[]`；比较器不满足传递性就会 TimSort 抛错，另外每条边一个数组对象。）\n4. 只需要\"最紧急的 k 个\"呢？（大小 k 的小顶堆 O(n log k)；k << n 才划算，且仍要显式次键，否则并列时 FIFO 语义丢失。）\n5. 排序键相同且数量巨大（全部并列）时你的实现复杂度？（`Arrays.sort(long[])` 双轴快排在\"全等\"上表现良好（等于 pivot 的一批直接跳过），但\"两值交替\"的构造更接近最坏情形——能说出这点是区分点。）",
+  "estimatedMinutes": 20,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#3-常见错误答案",
+    "addedBy": "content-agent-alg"
+  }
+}

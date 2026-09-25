@@ -1,0 +1,569 @@
+{
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "主键宽表的逐字段版本归一：null 不覆盖、删除看主流、谓词必须后于合并",
+  "statement": "主键宽表 `trade_wide` 由**两条流**写同一批 key，本题把这张表的合并过程等价重写成一次\nSpark 批处理：读视图 `changes`（下表全部记录），算出**合并之后**的最终表。\n\n| 列 | 含义 |\n| --- | --- |\n| `key` | 主键 |\n| `stream` | 1 = 主流（写 `status`/`amount`），2 = 价格流（写 `price`） |\n| `seq` | **本流内的业务顺序**，越大越新 |\n| `arrived` | 到达序号，只用于同一 `seq` 内的 tie-break |\n| `ts` | 墙上时钟，**不能**用来定版本（乱序、时钟回拨、补数都会让它与 `seq` 反向） |\n| `status` / `amount` / `price` | 值列，可以为 null（表示\"这条记录没写这个字段\"） |\n| `is_delete` | 1 = 删除记录；只有主流会带，且删除记录的值列一律为 null |\n\n合并契约（逐条都是判分点）：\n\n1. 每个字段**独立**取\"该字段最后一个非 null 输入\"（先比 `seq`，同 `seq` 比 `arrived` 大者）；\n   **null 输入保持原值，不覆盖**。\n2. 每个值字段配一个来源列：`status_seq` / `amount_seq` / `price_seq` = 决定该字段的那条记录的 `seq`，\n   该字段从未被写过时输出 `-1`（此时值列为 null）。\n3. 删除只看主流：主流里业务顺序最大（`seq` 最大、同 `seq` 取 `arrived` 最大）的那条如果是删除\n   ⇒ 这个 key **整行消失**；之后再出现非删除的主流记录 ⇒ 复活（值仍按规则 1 逐字段归并）。\n4. **谓词必须发生在合并之后**：只输出合并后 `status = 'open'` 的 key。\n   先按 `status` 过滤输入是错的。\n5. `versions` = 该 key 的输入记录条数（含被折叠掉的版本、含删除记录）。\n\n## 输入\n\n视图 `changes`，列与类型：`key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING,\namount BIGINT, price BIGINT, is_delete INT`。\n\n## 输出\n\n一行一个 key，列**固定**为\n`key, status, status_seq, amount, amount_seq, price, price_seq, versions`，按 `key` 升序。\n`status` 恒为 `'open'`，但它是合并的结果，不许当常量塞回去。\n禁止 `collect()`（判题器要的是可分区的结果，不是驱动内存里的一份副本）。\n\n## 说明\n\n机制对照：规则 1–3 是 Paimon 主键表 `merge-engine = partial-update` + sequence group 的语义\n（\"非 null 输入替换对应字段、null 保持不变\"、\"latest 依记录顺序，到达顺序不代表业务顺序时要配\nsequence field\"）；规则 4 是\"可变非键列的过滤不能在合并前下推\"。**把这套机制重写成一次 Spark\n批处理是本题设定**，题面里的列名、`-1` 约定、tie-break 都是本题契约，不是任何产品的接口。\n",
+  "judgeKind": "pyspark",
+  "tags": [
+    "paimon-partial-update",
+    "sequence-group",
+    "late-predication",
+    "changelog-merge",
+    "modern:lakehouse"
+  ],
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发（实时湖仓 / 主键表方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-data-and-storage.md#5 题面草稿 A（changelog 归一 + 版本正确合并：按 key 取业务顺序最新版本、\"谓词必须后于合并\"、null 不覆盖的打宽语义、同 seq 的确定性 tie-break；§1.5 与 §6 D5/D7/D8。用 Spark 等价重写这条机制属素材 §7 第 6 条标注的【推】，题面已写成\"本题契约\"）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T14:59:13.093Z"
+  },
+  "language": "python",
+  "cases": [
+    {
+      "name": "基线：三个 key 两条流乱序到达，逐字段版本归一 + 打宽",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 101,
+            "stream": 1,
+            "seq": 5,
+            "arrived": 1,
+            "ts": 900,
+            "status": "open",
+            "amount": 300,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 101,
+            "stream": 1,
+            "seq": 3,
+            "arrived": 4,
+            "ts": 5000,
+            "status": "hold",
+            "amount": 200,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 101,
+            "stream": 2,
+            "seq": 2,
+            "arrived": 2,
+            "ts": 700,
+            "status": null,
+            "amount": null,
+            "price": 9900,
+            "is_delete": 0
+          },
+          {
+            "key": 102,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 3,
+            "ts": 100,
+            "status": "open",
+            "amount": 100,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 103,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 5,
+            "ts": 100,
+            "status": "open",
+            "amount": 50,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 103,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 6,
+            "ts": 200,
+            "status": null,
+            "amount": 70,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 103,
+            "stream": 2,
+            "seq": 1,
+            "arrived": 7,
+            "ts": 150,
+            "status": null,
+            "amount": null,
+            "price": 10,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 101,
+          "status": "open",
+          "status_seq": 5,
+          "amount": 300,
+          "amount_seq": 5,
+          "price": 9900,
+          "price_seq": 2,
+          "versions": 3
+        },
+        {
+          "key": 102,
+          "status": "open",
+          "status_seq": 1,
+          "amount": 100,
+          "amount_seq": 1,
+          "price": null,
+          "price_seq": -1,
+          "versions": 1
+        },
+        {
+          "key": 103,
+          "status": "open",
+          "status_seq": 1,
+          "amount": 70,
+          "amount_seq": 2,
+          "price": 10,
+          "price_seq": 1,
+          "versions": 3
+        }
+      ],
+      "note": "101：seq 5 赢（ts 反而更小 ⇒ 拿 ts 当业务顺序的实现会挑错版本）；103：status 来自 seq 1、amount 来自 seq 2 ⇒ 两个 *_seq 不同，这正是\"逐字段版本\"与\"整行覆盖\"的分界",
+      "visible": true
+    },
+    {
+      "name": "边界：旧行 open、新行 closed ⇒ 合并后不满足谓词，这个 key 不许出行",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 201,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 1,
+            "ts": 100,
+            "status": "open",
+            "amount": 10,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 201,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 2,
+            "ts": 200,
+            "status": "closed",
+            "amount": 20,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 201,
+            "stream": 2,
+            "seq": 1,
+            "arrived": 3,
+            "ts": 150,
+            "status": null,
+            "amount": null,
+            "price": 8800,
+            "is_delete": 0
+          },
+          {
+            "key": 202,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 4,
+            "ts": 100,
+            "status": "closed",
+            "amount": 30,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 202,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 5,
+            "ts": 200,
+            "status": "open",
+            "amount": 40,
+            "price": null,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 202,
+          "status": "open",
+          "status_seq": 2,
+          "amount": 40,
+          "amount_seq": 2,
+          "price": null,
+          "price_seq": -1,
+          "versions": 2
+        }
+      ],
+      "note": "201 合并后是 closed ⇒ 整行不许出现（它\"曾经 open\"不是理由）；202 方向相反：合并后才是 open（amount 40、status_seq 2、price 仍是 null 且 price_seq -1、versions 2）。两条一起看才分得清\"先过滤\"错在哪一步",
+      "visible": true
+    },
+    {
+      "name": "边界：后到的记录该字段是 null ⇒ 保持原值，*_seq 也停在旧那条",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 301,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 1,
+            "ts": 100,
+            "status": "open",
+            "amount": 8,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 301,
+            "stream": 2,
+            "seq": 1,
+            "arrived": 2,
+            "ts": 110,
+            "status": null,
+            "amount": null,
+            "price": 5000,
+            "is_delete": 0
+          },
+          {
+            "key": 301,
+            "stream": 2,
+            "seq": 4,
+            "arrived": 3,
+            "ts": 400,
+            "status": null,
+            "amount": null,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 302,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 4,
+            "ts": 120,
+            "status": "open",
+            "amount": null,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 302,
+            "stream": 1,
+            "seq": 9,
+            "arrived": 5,
+            "ts": 900,
+            "status": null,
+            "amount": 99,
+            "price": null,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 301,
+          "status": "open",
+          "status_seq": 1,
+          "amount": 8,
+          "amount_seq": 1,
+          "price": 5000,
+          "price_seq": 1,
+          "versions": 3
+        },
+        {
+          "key": 302,
+          "status": "open",
+          "status_seq": 1,
+          "amount": 99,
+          "amount_seq": 9,
+          "price": null,
+          "price_seq": -1,
+          "versions": 2
+        }
+      ],
+      "note": "301：price 仍是 5000、price_seq 仍是 1（不是 -1、也不是 4）；302：status 由 seq 1 决定、amount 由 seq 9 决定",
+      "visible": true
+    },
+    {
+      "name": "边界：删除看主流最大 seq；删完又被写回来就算复活",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 401,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 1,
+            "ts": 100,
+            "status": "open",
+            "amount": 10,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 401,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 2,
+            "ts": 200,
+            "status": null,
+            "amount": null,
+            "price": null,
+            "is_delete": 1
+          },
+          {
+            "key": 402,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 3,
+            "ts": 100,
+            "status": "open",
+            "amount": 10,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 402,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 4,
+            "ts": 200,
+            "status": null,
+            "amount": null,
+            "price": null,
+            "is_delete": 1
+          },
+          {
+            "key": 402,
+            "stream": 1,
+            "seq": 3,
+            "arrived": 5,
+            "ts": 300,
+            "status": "open",
+            "amount": 99,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 402,
+            "stream": 2,
+            "seq": 1,
+            "arrived": 6,
+            "ts": 120,
+            "status": null,
+            "amount": null,
+            "price": 700,
+            "is_delete": 0
+          },
+          {
+            "key": 403,
+            "stream": 1,
+            "seq": 2,
+            "arrived": 7,
+            "ts": 500,
+            "status": null,
+            "amount": null,
+            "price": null,
+            "is_delete": 1
+          },
+          {
+            "key": 403,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 8,
+            "ts": 900,
+            "status": "open",
+            "amount": 5,
+            "price": null,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 402,
+          "status": "open",
+          "status_seq": 3,
+          "amount": 99,
+          "amount_seq": 3,
+          "price": 700,
+          "price_seq": 1,
+          "versions": 4
+        }
+      ],
+      "note": "401 消失；402 复活（versions 4、status_seq 3、price 仍带着 700）；403 按到达顺序看是\"先删后写\"，按业务顺序看是\"写了又删\"⇒ 必须消失，这条测的就是\"用 arrived/入表顺序当版本\"的写法",
+      "visible": true
+    },
+    {
+      "name": "边界：同一 key 同一 seq 两条 ⇒ tie-break 取 arrived 大者",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 501,
+            "stream": 1,
+            "seq": 7,
+            "arrived": 3,
+            "ts": 100,
+            "status": "open",
+            "amount": 1,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 501,
+            "stream": 1,
+            "seq": 7,
+            "arrived": 6,
+            "ts": 200,
+            "status": "open",
+            "amount": 2,
+            "price": null,
+            "is_delete": 0
+          },
+          {
+            "key": 501,
+            "stream": 2,
+            "seq": 7,
+            "arrived": 5,
+            "ts": 300,
+            "status": null,
+            "amount": null,
+            "price": 11,
+            "is_delete": 0
+          },
+          {
+            "key": 501,
+            "stream": 2,
+            "seq": 7,
+            "arrived": 8,
+            "ts": 400,
+            "status": null,
+            "amount": null,
+            "price": 22,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 501,
+          "status": "open",
+          "status_seq": 7,
+          "amount": 2,
+          "amount_seq": 7,
+          "price": 22,
+          "price_seq": 7,
+          "versions": 4
+        }
+      ],
+      "note": "两条同 seq 的记录必须可判定：arrived 大者后写 ⇒ amount=2、price=22；两个 *_seq 都是 7（seq 不能区分它们，所以输出里没有 arrived）",
+      "visible": true
+    },
+    {
+      "name": "退化：只有价格流到过的 key、以及只有删除记录的 key 都不许出行",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": [
+          {
+            "key": 601,
+            "stream": 2,
+            "seq": 1,
+            "arrived": 1,
+            "ts": 100,
+            "status": null,
+            "amount": null,
+            "price": 500,
+            "is_delete": 0
+          },
+          {
+            "key": 602,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 2,
+            "ts": 110,
+            "status": null,
+            "amount": null,
+            "price": null,
+            "is_delete": 1
+          },
+          {
+            "key": 603,
+            "stream": 1,
+            "seq": 1,
+            "arrived": 3,
+            "ts": 120,
+            "status": "open",
+            "amount": 1,
+            "price": null,
+            "is_delete": 0
+          }
+        ]
+      },
+      "expected": [
+        {
+          "key": 603,
+          "status": "open",
+          "status_seq": 1,
+          "amount": 1,
+          "amount_seq": 1,
+          "price": null,
+          "price_seq": -1,
+          "versions": 1
+        }
+      ],
+      "note": "601 连 status 都没有 ⇒ 谓词不成立（写成 `status = 'open' OR status IS NULL` 的会多一行）；602 只剩一条删除；603 是这题唯一的对照组，缺了它两条退化都判不出来",
+      "visible": true
+    },
+    {
+      "name": "退化：一条记录都没有 ⇒ 空结果（不许凭空造一行\"零状态\"）",
+      "input": {
+        "view": "changes",
+        "schema": "key INT, stream INT, seq BIGINT, arrived INT, ts BIGINT, status STRING, amount BIGINT, price BIGINT, is_delete INT",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    r = spark.table('changes')\n    # 业务顺序 = (seq, arrived)：ts 是墙上时钟，本题不许用它定版本\n    part = Window.partitionBy('key').orderBy('seq', 'arrived')\n    ord_col = F.col('seq') * F.lit(1000000) + F.col('arrived')\n    last_main = F.last(F.when(F.col('stream') == 1, ord_col), True).over(part)\n    last_del = F.last(F.when((F.col('stream') == 1) & (F.col('is_delete') == 1), ord_col), True).over(part)\n    staged = (r\n              .withColumn('status_v', F.last('status', True).over(part))\n              .withColumn('status_s', F.last(F.when(F.col('status').isNotNull(), F.col('seq')), True).over(part))\n              .withColumn('amount_v', F.last('amount', True).over(part))\n              .withColumn('amount_s', F.last(F.when(F.col('amount').isNotNull(), F.col('seq')), True).over(part))\n              .withColumn('price_v', F.last('price', True).over(part))\n              .withColumn('price_s', F.last(F.when(F.col('price').isNotNull(), F.col('seq')), True).over(part))\n              .withColumn('ord_main', last_main)\n              .withColumn('ord_del', last_del)\n              .withColumn('versions', F.count(F.lit(1)).over(Window.partitionBy('key')))\n              .withColumn('rn', F.row_number().over(\n                  Window.partitionBy('key').orderBy(F.col('seq').desc(), F.col('arrived').desc()))))\n    merged = (staged\n              .filter(F.col('rn') == 1)\n              .filter(F.col('ord_del').isNull() | (F.col('ord_del') != F.col('ord_main'))))\n    # 谓词在合并之后：这里才允许出现 status 上的等值过滤\n    return (merged\n            .filter(F.col('status_v') == 'open')\n            .select(F.col('key'),\n                    F.col('status_v').alias('status'),\n                    F.coalesce(F.col('status_s'), F.lit(-1)).alias('status_seq'),\n                    F.col('amount_v').alias('amount'),\n                    F.coalesce(F.col('amount_s'), F.lit(-1)).alias('amount_seq'),\n                    F.col('price_v').alias('price'),\n                    F.coalesce(F.col('price_s'), F.lit(-1)).alias('price_seq'),\n                    F.col('versions'))\n            .orderBy('key'))\n",
+    "naiveSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    r = spark.table('changes')\n    # 1) 删除记录\"没值\"，先丢掉省一半数据 —— 于是 key 永远不会消失\n    live = r.filter(F.col('is_delete') == 0)\n    # 2) 谓词下推到合并之前（看板只看 open）\n    live = live.filter((F.col('status') == 'open') | F.col('status').isNull())\n    # 3) 版本顺序用 ts：它才是\"真实时间\"，seq 只是业务编号\n    w = Window.partitionBy('key').orderBy('ts', 'arrived')\n    last = (live\n            .withColumn('status_v', F.last('status').over(w))\n            .withColumn('amount_v', F.last('amount').over(w))\n            .withColumn('price_v', F.last('price').over(w))\n            .withColumn('seq_v', F.last('seq').over(w))\n            .withColumn('cnt', F.count(F.lit(1)).over(Window.partitionBy('key')))\n            .withColumn('rn', F.row_number().over(\n                Window.partitionBy('key').orderBy(F.col('ts').desc(), F.col('arrived').desc()))))\n    # 4) 整行覆盖：三个字段都记在同一条记录的 seq 上\n    return (last\n            .filter(F.col('rn') == 1)\n            .filter(F.col('status_v') == 'open')\n            .select(F.col('key'),\n                    F.col('status_v').alias('status'),\n                    F.col('seq_v').alias('status_seq'),\n                    F.col('amount_v').alias('amount'),\n                    F.col('seq_v').alias('amount_seq'),\n                    F.col('price_v').alias('price'),\n                    F.col('seq_v').alias('price_seq'),\n                    F.col('cnt').alias('versions'))\n            .orderBy('key'))\n",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 25,
+  "answer": "## 参考答案要点\n\n一次 `Window.partitionBy('key').orderBy('seq','arrived')` + 六个\n`F.last(..., ignorenulls=True)`，取 `rn = 1` 那一行，**最后**才过滤 `status = 'open'`。\n\n**为什么是\"最后一个非 null\"而不是\"最后一条记录的字段值\"**：`ignorenulls=False` 就是\n\"整行覆盖\"，也就是 `deduplicate` 引擎 —— 而两条流打宽要的是 `partial-update`。\n用例「后到的记录该字段是 null」测的正是这一格：301 的 `price` 必须还是 5000、\n`price_seq` 必须还是 1。把它写成 4（\"最后一条的 seq\"）说明你**记得**忽略 null 但\n把 provenance 记在了整行上 —— 这在只有一列的报表里看不出来，在三列×两条流打宽的表里\n就是\"这条数据到底是哪个流写的\"再也查不到。\n\n**为什么谓词要在合并之后**（用例「旧行 open、新行 closed」）：`status` 是可变非键列，\n合并前过滤会连同\"替代行\"一起扔掉 —— 素材 §1.5 的原文结论是\n\"过早按 `status='open'` 过滤会丢掉替代行、错误地返回旧行\"，生产症状是\n\"看板昨天还对、今天多了 3% 的单\"，而数据一行都没坏。\n这题刻意不让你只测\"值对不对\"：202（closed → open）先过滤**刚好**也给出一样的值列，\n但它把 `versions` 从 2 报成 1（被扔掉的那条记录不再计数），\n并且三个 `*_seq` 全被记成同一条记录的 seq。\nprovenance 与计数摊进列里，方向才藏不住。\n\n**删除只能看主流的最大业务顺序**（用例「删除看主流最大 seq」）：\n401 消失；402 复活（`versions` 4、`status_seq` 3、`price` 还是 700 且 `price_seq` 1）；\n403 的删除记录**到达更早但 seq 更大** ⇒ 仍然是消失。\n朴素解 `filter(is_delete == 0)` 之后 key 永远不会消失，\n于是 401 会带着删除前的 `(open, 10)` 回来 —— 这正是\"上游删了单、下游还在算 GMV\"的形状。\n\n**同 seq 的 tie-break**（用例「同一 key 同一 seq 两条」）：按 `arrived` 大者后写。\n本题把它写进契约，是因为 Spark 在 `orderBy` 有并列时**不保证行序**：\n不定义 tie-break 的题目会做出一个\"参考解自己都不稳定\"的判分，\n所以输出列里刻意不放 `arrived`。\n\n**退化两条**：601 只有价格流 ⇒ 合并后 `status` 为 null ⇒ 不出现\n（写成 `status = 'open' OR status IS NULL` 的会多一行\"没有状态的订单\"）；\n602 只有一条删除 ⇒ 不出现；603 是唯一的对照组，没有它这两条退化都判成\"空表\"而看不出区别。\n空输入必须返回**空结果**（`[]`）：三个值列都 `-1`/null 的\"零状态行\"是凭空造的。\n\n**工程延伸（面试追问点）**\n\n1. 这套合并为什么要 `sequence group` 而不是一个全局 seq？\n   （两条流的 seq 各自单调，拼在一起不单调；用同一个 seq 排序会让\"后到的价格\"倒灌主流字段。）\n2. 先过滤为什么\"看起来\"是优化？（谓词下推对**不可变列**（分区键、主键）才是纯收益，\n   对可变非键列要付\"替代行被丢掉\"的正确性代价 —— 素材 §1.5 的原文结论。）\n3. 结果要写回 Paimon 时，`is_delete` 与 `versions` 该不该落库？\n   （不该：删除是合并的**结果**、versions 是过程的**副产品**，落库就等于把中间态当事实。）",
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0023"
+}

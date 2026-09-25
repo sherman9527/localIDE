@@ -1,0 +1,116 @@
+name: daily-arena
+
+# 主观题评分：容器里调不到宿主的 qodercli.exe，走宿主 CLI 桥（scripts/llm-bridge.mjs）。
+# arena 与 dev 必须共用同一份 —— 漏一处就是"--dev 下主观题永远只能人工自检"。
+x-llm-env: &llm-env
+  ARENA_LLM_PROVIDERS: ${ARENA_LLM_PROVIDERS:-bridge,qodercli,copilot,manual}
+  ARENA_LLM_BRIDGE_URL: ${ARENA_LLM_BRIDGE_URL:-http://host.docker.internal:7799}
+  ARENA_LLM_BRIDGE_TOKEN: ${ARENA_LLM_BRIDGE_TOKEN:-}
+x-host-gateway: &host-gateway
+  - "host.docker.internal:host-gateway"
+
+services:
+  arena:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: daily-arena:0.1
+    container_name: daily-arena
+    ports:
+      # 绑回环而不是 0.0.0.0：这台工具会把整个题库（含被"移除"的题）从 /api/bank 发出来，
+      # 而它没有任何鉴权 —— 发布到所有网卡等于让同局域网的人浏览你的题库与进度。
+      # "隐藏"的语义是从今日套餐/游戏里摘出去，不是保密；把暴露面收小比给它加一套登录更划算。
+      # 代价说清楚：**手机 / iPad 访问不了**（已确认不需要，2026-09-24）。
+      # 闸门：server/test/regression/compose-ports.test.ts 钉住"每个发布端口都必须绑回环"。
+      - "127.0.0.1:7788:7788"
+    volumes:
+      # 运行期数据与依赖缓存都留在仓库目录内（需求 通用 7 / 场景 14）
+      - ./data:/app/data
+      - ./docker-cache:/root/.cache
+      # 题库是文件形态：挂载后改题目不必重新构建镜像
+      - ./content:/app/content
+    environment:
+      NODE_ENV: production
+      ARENA_DB_FILE: /app/data/arena.db
+      ARENA_BANK_DIR: /app/content/questions
+      ARENA_PORT: "7788"
+      <<: *llm-env
+    extra_hosts: *host-gateway
+    init: true
+    command: ["node", "server/dist/index.js"]
+
+  # 开发/验证工具位：复用同一镜像的 linux 依赖层，把源码挂载进去跑测试与构建
+  tools:
+    image: arena-deps:dev
+    container_name: daily-arena-tools
+    profiles: ["tools"]
+    working_dir: /app
+    volumes:
+      - ./server:/app/server
+      - ./shared:/app/shared
+      - ./web:/app/web
+      - ./tests:/app/tests
+      - ./scripts:/app/scripts
+      - ./content:/app/content
+      - ./data:/app/data
+      - ./package.json:/app/package.json
+      - ./eslint.config.mjs:/app/eslint.config.mjs
+      - ./tsconfig.base.json:/app/tsconfig.base.json
+      - ./vitest.config.ts:/app/vitest.config.ts
+      - ./docker:/app/docker
+      - ./docker-cache/npm:/root/.npm
+    init: true
+    entrypoint: ["bash", "-lc"]
+    command: ["echo '用 docker compose run --rm tools <命令>'"]
+
+  # 同一个镜像的开发模式（vite dev server + 后端 watch），不是第二个镜像
+  dev:
+    image: daily-arena:0.1
+    container_name: daily-arena-dev
+    profiles: ["dev"]
+    ports:
+      # 同 arena：开发模式也别把端口开到局域网（vite 的 5173 代理着同一个 /api）
+      - "127.0.0.1:7788:7788"
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - ./:/app
+      - ./data:/app/data
+      - ./docker-cache:/root/.cache
+    environment:
+      NODE_ENV: development
+      ARENA_DB_FILE: /app/data/arena.db
+      ARENA_BANK_DIR: /app/content/questions
+      ARENA_PORT: "7788"
+      <<: *llm-env
+    extra_hosts: *host-gateway
+    init: true
+    command: ["npm", "run", "dev"]
+
+  # E2E 专用实例（WI-40）：同一个镜像，但**可写状态**全在 data/e2e 下 ——
+  # 数据目录（db/日志/判题沙箱）与软删账本都另起一份，题库还是只读挂进来，
+  # 所以跑 E2E 不会改动真人的 XP/连击，也不可能把题目从 content/hidden.json 里抹掉。
+  # 用 `npm run e2e`（tests/e2e/instance.setup.ts 负责起停），不是 compose up 的默认成员。
+  e2e:
+    image: daily-arena:0.1
+    container_name: daily-arena-e2e
+    profiles: ["e2e"]
+    ports:
+      # 7799 是宿主 CLI 桥的端口，别再占它（撞上去会让两个实例的 llm-rubric 一起变 false）
+      - "127.0.0.1:7798:7788"
+    volumes:
+      - ./data:/app/data
+      - ./docker-cache:/root/.cache
+      - ./content:/app/content:ro
+    environment:
+      NODE_ENV: production
+      ARENA_DATA_DIR: /app/data/e2e
+      # 三条都显式给：镜像里的旧 config 不会从 ARENA_DATA_DIR 派生 db/沙箱路径，
+      # 少一条就会静默写回真人那份 data/arena.db（实测踩过）。
+      ARENA_DB_FILE: /app/data/e2e/arena.db
+      ARENA_HIDDEN_FILE: /app/data/e2e/hidden.json
+      ARENA_BANK_DIR: /app/content/questions
+      ARENA_PORT: "7788"
+      <<: *llm-env
+    extra_hosts: *host-gateway
+    init: true
+    command: ["node", "server/dist/index.js"]

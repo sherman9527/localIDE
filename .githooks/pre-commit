@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# 提交前快检：lint + 类型 + 宿主机能跑的单元测试。
+# 判题套件与 E2E 需要容器里的 JDK/MySQL/Redis/Spark，因此这里跳过（发布前必须容器内补跑）：
+#   docker compose run --rm arena npm run verify
+# 紧急绕过：ARENA_SKIP_HOOK=1 git commit ...（请在 memo.md 说明原因）
+set -uo pipefail
+# 不能用 `dirname $0/..` 推仓库根：core.hooksPath 指向 .githooks 时它算对，
+# 但把本文件复制进 .git/hooks 时会算成 .git —— 于是 scripts/verify.sh 直接找不到。
+root="$(git rev-parse --show-toplevel)" || exit 1
+cd "${root}"
+
+if [ "${ARENA_SKIP_HOOK:-0}" = "1" ]; then
+  echo '[pre-commit] 已跳过（ARENA_SKIP_HOOK=1）—— 请记得在 memo.md 记录原因' >&2
+  exit 0
+fi
+
+bash scripts/verify.sh --fast
+status=$?
+
+if [ $status -ne 0 ]; then
+  echo '[pre-commit] 校验未通过，提交已阻止。修完再提交，或按 rule.md 说明后跳过。' >&2
+  exit $status
+fi

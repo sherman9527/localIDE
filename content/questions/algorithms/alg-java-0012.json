@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0012",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "机房专线铺设的 MST 成本与边排序打包",
+  "statement": "## 背景\n\n新机房之间要铺设专线把 `n` 个机房全部连通，给定候选链路 `(u[e], v[e], w[e])`，`w` 是年成本（非负；已经建好的暗纤成本记 0）。求最小总成本（MST），并判断是否根本无法连通。\n\n`m` 可达 5e5。**为每条边建一个对象/数组（`int[][]`、`record Edge`、`PriorityQueue<Edge>`）在这个规模下是内存与 cache 的双重事故**，正解是把排序键打包进 `long[]` 后 `Arrays.sort(long[])`。\n\n## 入口\n\n```java\npublic static long mstCost(int n, int[] u, int[] v, int[] w)\n```\n\n- 三个平行数组描述 `m` 条**无向**边；返回 MST 的边权之和；\n- 图不连通（无法用 `n-1` 条边连起所有节点）时返回 `-1`；因为本接口把边权限定为非负，`-1` 一定落在答案域之外，可以当哨兵。\n- `n == 1` 时返回 `0`（不需要任何链路）。\n\n## 不变式与硬约束\n\n1. `u.length == v.length == w.length`，否则抛 `IllegalArgumentException`；端点必须落在 `[0, n)`，越界抛 `IllegalArgumentException`。\n2. **自环 `u[e] == v[e]` 必须被忽略**（不得计入成本，也不得让算法误判不连通）；**重边**允许存在，取其中最小者。\n3. `w[e]` 是非负成本，`0 <= w[e] <= 1e9`（出现负数抛 `IllegalArgumentException`）；`n <= 2e5` → 总成本可达 2e14，累加必须 `long`（`int` 会溢出成负数并被误判为\"更优解\"）。\n4. 打包排序键的硬约束：`keys[e] = ((long) w[e] << 32) | (e & 0xffffffffL)`。请论证**为什么不能给 `w` 加 `Integer.MIN_VALUE` 偏移**（平移后 `w >= 0` 的部分会把符号位顶起来，`long` 的有符号序被打乱），以及为什么即使 `w` 允许为负、这个打包依然正确（即\"不加偏移\"才是对的）。\n5. 不允许把 `(w, u, v)` 三个字段塞进同一个 `long`（位宽不够：`w` 到 1e9 时只剩不到 24 位给端点，直接错）。\n6. 复杂度 O(m log m) 时间、O(m + n) 空间；判分规模 n ≤ 2000、m ≤ 5000（但请给出 `m=5e5` 的量级论证）。\n\n## 输出契约\n\n返回 `long`；不连通返回 `-1`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "minimum-spanning-tree",
+    "kruskal",
+    "long-key-packing",
+    "union-find",
+    "modern:object-header-budget"
+  ],
+  "cases": [
+    {
+      "name": "单节点零成本",
+      "input": [
+        1,
+        [],
+        [],
+        []
+      ],
+      "expected": 0
+    },
+    {
+      "name": "不连通返回 -1 哨兵",
+      "input": [
+        3,
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          5
+        ]
+      ],
+      "expected": -1
+    },
+    {
+      "name": "零成本暗纤必须最先被选",
+      "input": [
+        3,
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          1,
+          2,
+          2
+        ],
+        [
+          0,
+          3,
+          100
+        ]
+      ],
+      "expected": 3
+    },
+    {
+      "name": "重边取最小",
+      "input": [
+        2,
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          7,
+          2,
+          9
+        ]
+      ],
+      "expected": 2
+    },
+    {
+      "name": "自环不得被计入也不得判失败",
+      "input": [
+        2,
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          4
+        ]
+      ],
+      "expected": 4
+    },
+    {
+      "name": "权重全并列时结果唯一",
+      "input": [
+        4,
+        [
+          0,
+          1,
+          2,
+          0,
+          0
+        ],
+        [
+          1,
+          2,
+          3,
+          3,
+          2
+        ],
+        [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": 3
+    },
+    {
+      "name": "跨端短边优先于多条长边",
+      "input": [
+        4,
+        [
+          0,
+          1,
+          2,
+          0,
+          3
+        ],
+        [
+          1,
+          2,
+          3,
+          3,
+          0
+        ],
+        [
+          5,
+          5,
+          5,
+          1,
+          5
+        ]
+      ],
+      "expected": 11
+    },
+    {
+      "name": "累加成本超出 int 需要 long",
+      "input": [
+        4,
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          1000000000,
+          1000000000,
+          1000000000
+        ]
+      ],
+      "expected": 3000000000
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "long mstCost(int n, int[] u, int[] v, int[] w)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * Kruskal：排序键打包进 long —— 高 32 位是 (long)w 的有符号值，低 32 位是无符号边号。\n   * long 的有符号比较 = 先比高 32 位（w 的有符号序，负权也天然排在最前）、再比低 32 位（边号，保证并列时结果确定）。\n   * 因此绝不能再给 w 加 MIN_VALUE 偏移：那会把 w>=0 的位顶到符号位上，序就乱了。\n   * 并查集按大小组并 + 迭代 find + 路径压缩；自环被 ru==rv 天然跳过（下面显式 continue 以便归因）。\n   */\n  public static long mstCost(int n, int[] u, int[] v, int[] w) {\n    if (u.length != v.length || u.length != w.length) {\n      throw new IllegalArgumentException(\"edge arrays must be parallel\");\n    }\n    int m = u.length;\n    for (int e = 0; e < m; e++) {\n      if (u[e] < 0 || u[e] >= n || v[e] < 0 || v[e] >= n) {\n        throw new IllegalArgumentException(\"edge endpoint out of range\");\n      }\n      if (w[e] < 0) throw new IllegalArgumentException(\"negative edge cost\");\n    }\n    if (n <= 1) return 0L;\n    long[] keys = new long[m];\n    for (int e = 0; e < m; e++) {\n      keys[e] = ((long) w[e] << 32) | (e & 0xffffffffL);\n    }\n    java.util.Arrays.sort(keys);\n    int[] parent = new int[n];\n    int[] size = new int[n];\n    for (int node = 0; node < n; node++) {\n      parent[node] = node;\n      size[node] = 1;\n    }\n    long total = 0L;\n    int used = 0;\n    for (long key : keys) {\n      int e = (int) key;                        // 低 32 位取回原边号\n      if (u[e] == v[e]) continue;               // 自环：忽略，不计成本\n      int ru = find(parent, u[e]);\n      int rv = find(parent, v[e]);\n      if (ru == rv) continue;                   // 已连通（重边/环）\n      if (size[ru] < size[rv]) {\n        int t = ru;\n        ru = rv;\n        rv = t;\n      }\n      parent[rv] = ru;\n      size[ru] += size[rv];\n      total += w[e];                            // long 域累加\n      if (++used == n - 1) break;\n    }\n    return used == n - 1 ? total : -1L;\n  }\n\n  static int find(int[] parent, int x) {\n    int root = x;\n    while (parent[root] != root) root = parent[root];\n    while (parent[x] != root) {\n      int next = parent[x];\n      parent[x] = root;\n      x = next;\n    }\n    return root;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：用 Integer[] + Comparator 排边（能过，但每条边一个装箱对象），\n  // 更致命的是总成本用 int 累加，并且忘了检查\"是否真的连通\"——不连通时给出一个看似合理的部分成本。\n  public static long mstCost(int n, int[] u, int[] v, int[] w) {\n    int m = u.length;\n    Integer[] idx = new Integer[m];\n    for (int e = 0; e < m; e++) idx[e] = e;\n    java.util.Arrays.sort(idx, java.util.Comparator.comparingInt(e -> w[e]));\n    int[] parent = new int[n];\n    for (int node = 0; node < n; node++) parent[node] = node;\n    int total = 0;\n    for (int e : idx) {\n      int ru = find(parent, u[e]);\n      int rv = find(parent, v[e]);\n      if (ru == rv) continue;\n      parent[rv] = ru;\n      total += w[e];\n    }\n    return total;\n  }\n\n  static int find(int[] parent, int x) {\n    while (parent[x] != x) x = parent[x];\n    return x;\n  }\n}\n"
+  },
+  "answer": "**思路**：Kruskal = 按权重排序 + 并查集贪心合并，取到 `n-1` 条边即停。本题的题眼在**怎么排**和**怎么判不连通**。\n\n**打包排序键的正确性论证（这就是本题要听的话）**：`keys[e] = ((long) w[e] << 32) | (e & 0xffffffffL)`。两个 long 比较时，符号位就是高 32 位的符号位，且高 32 位不同时其差至少 2^32，压过任意低位差异 → \"long 有符号序 ⟺ 高 32 位有符号序，其次低 32 位无符号序\"。所以 **`w` 为负时天然排在最前**，不需要任何偏移。反过来写 `((long) w - Integer.MIN_VALUE) << 32`：`w >= 0` 的部分平移后 $\\ge 2^{31}$，把符号位顶起来 → 变成负 long → 排到最前，序彻底错。**加偏移才是错的**，这一点和\"无符号排序要翻符号位\"的直觉相反，是区分\"真写过图引擎\"的题眼。\n\n**为什么不用 `int[][]`/`record Edge` 排序**：`Arrays.sort(Object[])` 是 TimSort，`m=5e5` 时要有 5e5 个对象（每个 16~24B 头 + 引用）+ 比较期虚调用；`long[]` 是连续 4MB、纯数值比较，常数项差 3~5 倍，而且不产生 Young 区垃圾。能报出\"字节数 + 数组头 + GC 扫描成本\"就是 senior 以上。\n\n**自环与重边**：自环 `find(u)==find(v)` 自然被跳过，但**必须在归因上显式 continue**（否则\"used 计数\"会误导不连通判定）；重边按权重排序后先取最小的那条，其余被判为已连通。\n\n**复杂度**：时间 O(m log m)（排序主导），find 近似 O(α(n))；空间 O(m + n)。并查集若换成\"按秩 + 路径减半\"，`m=5e5` 时 total 约 4MB + 2 个 int[n]。\n\n**面试追问**：\n1. 为什么不连通的哨兵必须是 `-1`（而不是 `0`）？（本接口把成本限为非负，`-1` 才落在答案域之外；一旦业务放开\"返利链路\"（w 可为负），`-1` 就会与合法总成本冲突，届时必须换成 `OptionalLong`/抛异常/独立的状态列——**哨兵设计与值域契约是同一件事**。这也是判分可复现性的前提。）\n2. Prim 与 Kruskal 在此场景怎么选？（稠密图 `m ≈ n^2` 用 Prim + 二叉堆/邻接矩阵；稀疏 + 边已给出的场景 Kruskal 更简单且天然可并行（边分片排序后归并，再单遍并查集）。）\n3. 边是流式来的、内存只够 100MB？（分片外部排序（本批 0005 的 k 路归并）后再跑 Kruskal；或 Borůvka——每轮只关心\"每个连通分量的最小出边\"，可 MapReduce 化，轮数 O(log n)。）\n4. 如何验证实现正确？（固定 seed 的 `SplittableRandom` 生成小图与\"Prim 邻接表版\"对拍；再加\"全并列权重\"与\"完全图\"两类退化输入，检查并列时结果唯一。）\n5. `total += w[e]` 的上界证明？（(n-1) × max|w| = 2e5 × 1e9 = 2e14 < 9.22e18，`long` 安全；换成 `int` 在 3e9 处翻负。）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-graph-dp-adversarial.md#11-图的表示一个决定成败的选择题",
+    "addedBy": "content-agent-alg"
+  }
+}

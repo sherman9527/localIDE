@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0008",
+  "category": "frontend",
+  "difficulty": "principal",
+  "title": "用 Activity 与 useEffectEvent 做保活不保订阅的标签页",
+  "statement": "## 场景\n\n工单后台的三个标签页（列表 / 详情 / 实时日志），每个面板里有一个写到一半的回复框、一份首屏数据、一条 WebSocket。老实现是 `{active && <Panel/>}`：切走即卸载，回来草稿没了、首屏重新拉一遍、socket 重新连一次，客服每天骂八遍。用 CSS `display:none` 藏起来呢？订阅全在后台跑着，三个 tab 同时收消息，内存和电量都顶不住。\n\nReact 19.2 的 `Activity` 就是为这个场景加的：`mode='hidden'` 时 DOM 与 `useState`（含 textarea 的 DOM 内部状态）**全部保留**，但**所有 Effect 被 cleanup**（订阅被摘），恢复可见时 Effect 重建；初次渲染就是 hidden 的面板会\"预渲染但不跑 Effect\"。而 `useEffectEvent`（19.2）解决另一半：事件回调要读最新的 `filter`，但不能因为 `filter` 变化就重启订阅。\n\n## 契约\n\n脚手架 **`socketKit.ts`** 已随题目落盘（`SocketMessage` / `PanelSocket` / `SocketFactory` / `Tab`）。提交写在 **`Solution.tsx`**：\n\n```tsx\nexport interface TabShellProps {\n  tabs: Tab[];\n  activeId: string;\n  filter: string;\n  createSocket: SocketFactory;      // 测试注入的替身，会被计数\n  loadInitial: (tabId: string) => string[];\n}\n\nexport function TabShell(props: TabShellProps): JSX.Element;\n```\n\n每个 tab 的面板渲染：\n\n- `data-testid=\"note-<id>\"`：受控 textarea（值是组件内部 state）；\n- `data-testid=\"items-<id>\"`：首屏数据 `join('|')`，**未加载时是空串**；\n- `data-testid=\"matched-<id>\"`：累计计数——收到的消息里 `text` 包含**当前** `filter`（filter 非空时）才 +1。\n\n## 硬性要求\n\n1. 用 `Activity`（`mode` 按 `activeId` 给 `visible`/`hidden`）保活面板，不要用条件卸载或纯 CSS 隐藏。\n2. 订阅生命周期严格配对：`createSocket(tabId)` 只在面板**可见期间**存在；每次隐藏必须 `close()` 一次，切回**新建一条**并 `connect()`。测试会数 `createSocket`/`connect`/`close` 的次数。\n3. `loadInitial` 属于首屏数据：只在 Effect 里拉，且**每个 tab 一辈子一次**（切回时靠保住的 state，不重复请求）。初次就 hidden 的 tab 不许 `createSocket`、不许 `loadInitial`。\n4. `filter` 变化不得导致重连（订阅的依赖里不许出现 `filter`）；但消息处理必须读到**最新** `filter`（这正是 `useEffectEvent` 的用途；用 ref 转发的老写法同样能过测试，但本题会人工追问 ref 版的坑）。\n5. 30 轮来回切换后：`createSocket(a)` 恰好 31 次、`close` 恰好 30 次、`connect` 31 次、`loadInitial(a)` 1 次（严格配对，不漏关也不多关）。\n\n## 不许做什么\n\n- 不许把 `filter` 放进订阅 Effect 的依赖数组（重启订阅 = 断流）；\n- 不许把 `useEffectEvent` 的返回值写进依赖数组或传给子组件（它每次 render 身份都变，只能在 Effect 内调用）；\n- 不许用 `display:none` 手动模拟 Activity（Effect 不会 cleanup，订阅继续在后台跑）；\n- 不许引入第三方库（沙箱不 `npm install`）；判分只看提交序列与调用次数，不看墙钟。\n\n## 判分\n\n6 个用例：可见才连、切走关闭切回重连且数据不重拉、textarea 保活、filter 变更不重连但读最新值、30 轮切换的严格配对、无匹配消息不计数。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:react19-activity",
+    "modern:use-effect-event",
+    "subscription-lifecycle",
+    "keep-alive",
+    "render-performance"
+  ],
+  "cases": [
+    {
+      "name": "可见面板建连且隐藏面板不预连",
+      "input": {
+        "tabs": 3,
+        "activeId": "a"
+      },
+      "expected": "createSocket(a)=1、connect(a)=1、createSocket(b) 未发生、loaded(a)=1、loaded(b) 未发生；note-b 的 DOM 存在但 items-b 为空串",
+      "note": "初次即 hidden 只预渲染不跑 Effect"
+    },
+    {
+      "name": "切走关闭连接切回重连但初始数据只拉一次",
+      "input": {
+        "flow": "a -> b -> a"
+      },
+      "expected": "第一条 socket close 1 次；createSocket(a)=2 且第二条 connect=1；loadInitial(a) 仍为 1；items-a 文案不变"
+    },
+    {
+      "name": "隐藏期间 textarea 内容不丢",
+      "input": {
+        "type": "写了一半的草稿",
+        "flow": "a -> b -> a"
+      },
+      "expected": "note-a 的 value 仍是「写了一半的草稿」"
+    },
+    {
+      "name": "filter 变化不重连但消息处理读到最新值",
+      "input": {
+        "filterChanges": 5,
+        "emit": [
+          "不含 x5",
+          "含 x5"
+        ]
+      },
+      "expected": "createSocket(a) 仍为 1；matched-a 从 0 变 1（按最新 filter 判定）"
+    },
+    {
+      "name": "超大次数来回切换时建连与关闭严格配对",
+      "input": {
+        "rounds": 30
+      },
+      "expected": "createSocket(a)=31、connect 合计 31、close 合计 30、loadInitial(a)=1",
+      "note": "重复切换不许漏关或多关"
+    },
+    {
+      "name": "无数据与无匹配消息都不增加计数",
+      "input": {
+        "filter": "needle",
+        "messages": 2
+      },
+      "expected": "不匹配的保持 0，匹配的一条后为 1"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "socketKit.ts",
+        "content": "/** 判题脚手架：面板订阅与标签页的契约类型（测试与考生共用）。 */\nexport interface SocketMessage {\n  readonly topic: string;\n  readonly text: string;\n}\n\nexport interface PanelSocket {\n  connect(): void;\n  close(): void;\n  onMessage(handler: (message: SocketMessage) => void): void;\n}\n\nexport type SocketFactory = (tabId: string) => PanelSocket;\n\nexport interface Tab {\n  readonly id: string;\n  readonly label: string;\n}\n"
+      },
+      {
+        "path": "tab-shell.test.tsx",
+        "content": "import { act, fireEvent, render, screen } from '@testing-library/react';\nimport { expect, it } from 'vitest';\nimport type { SocketMessage } from './socketKit';\nimport { TabShell } from './Solution';\n\ninterface SocketRecord {\n  tabId: string;\n  connects: number;\n  closes: number;\n  handlers: ((message: SocketMessage) => void)[];\n}\n\nfunction makeBackends() {\n  const sockets: SocketRecord[] = [];\n  const created: Record<string, number> = {};\n  const loaded: Record<string, number> = {};\n  const createSocket = (tabId: string) => {\n    created[tabId] = (created[tabId] ?? 0) + 1;\n    const record: SocketRecord = { tabId, connects: 0, closes: 0, handlers: [] };\n    sockets.push(record);\n    return {\n      connect() {\n        record.connects += 1;\n      },\n      close() {\n        record.closes += 1;\n      },\n      onMessage(handler: (message: SocketMessage) => void) {\n        record.handlers.push(handler);\n      },\n    };\n  };\n  const loadInitial = (tabId: string) => {\n    loaded[tabId] = (loaded[tabId] ?? 0) + 1;\n    return [tabId + '-alpha', tabId + '-beta'];\n  };\n  const forTab = (tabId: string) => sockets.filter((s) => s.tabId === tabId);\n  const emit = (tabId: string, message: SocketMessage) => {\n    const list = forTab(tabId);\n    const live = list[list.length - 1];\n    act(() => {\n      live.handlers.slice().forEach((handler) => handler(message));\n    });\n  };\n  return { sockets, created, loaded, createSocket, loadInitial, forTab, emit };\n}\n\nconst TABS = [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }];\n\nfunction mount(b: ReturnType<typeof makeBackends>, activeId = 'a', filter = '') {\n  const shell = (id: string, f: string) => (\n    <TabShell tabs={TABS} activeId={id} filter={f} createSocket={b.createSocket} loadInitial={b.loadInitial} />\n  );\n  const view = render(shell(activeId, filter));\n  const go = (id: string, f = filter) => {\n    view.rerender(shell(id, f));\n  };\n  const text = (testid: string) => screen.queryByTestId(testid)?.textContent ?? 'MISSING';\n  return { view, go, text };\n}\n\nit('可见面板建连且隐藏面板不预连', () => {\n  const b = makeBackends();\n  const m = mount(b, 'a', '');\n  expect(b.created.a).toBe(1);\n  expect(b.forTab('a')[0].connects).toBe(1);\n  expect(b.created.b).toBeUndefined();\n  expect(b.loaded.a).toBe(1);\n  expect(b.loaded.b).toBeUndefined();\n  // Activity：DOM 留在文档里，但没有 Effect\n  expect(screen.queryByTestId('note-b')).not.toBe(null);\n  expect(m.text('items-b')).toBe('');\n  expect(m.text('items-a')).toBe('a-alpha|a-beta');\n});\n\nit('切走关闭连接切回重连但初始数据只拉一次', () => {\n  const b = makeBackends();\n  const m = mount(b, 'a', '');\n  m.go('b');\n  expect(b.forTab('a')[0].closes).toBe(1);\n  expect(b.created.b).toBe(1);\n  m.go('a');\n  expect(b.created.a).toBe(2);\n  expect(b.forTab('a')[1].connects).toBe(1);\n  expect(b.loaded.a).toBe(1);\n  expect(m.text('items-a')).toBe('a-alpha|a-beta');\n});\n\nit('隐藏期间 textarea 内容不丢', () => {\n  const b = makeBackends();\n  const m = mount(b, 'a', '');\n  fireEvent.change(screen.getByTestId('note-a'), { target: { value: '写了一半的草稿' } });\n  expect(screen.getByTestId('note-a')).toHaveProperty('value', '写了一半的草稿');\n  m.go('b');\n  m.go('a');\n  expect((screen.getByTestId('note-a') as HTMLTextAreaElement).value).toBe('写了一半的草稿');\n});\n\nit('filter 变化不重连但消息处理读到最新值', () => {\n  const b = makeBackends();\n  const m = mount(b, 'a', '');\n  for (let i = 1; i <= 5; i += 1) m.go('a', 'x' + i);\n  expect(b.created.a).toBe(1);\n  expect(m.text('matched-a')).toBe('0');\n  b.emit('a', { topic: 'log', text: 'nothing here' });\n  expect(m.text('matched-a')).toBe('0');\n  m.go('a', 'x5');\n  b.emit('a', { topic: 'log', text: 'a x5 hit' });\n  expect(m.text('matched-a')).toBe('1');\n});\n\nit('超大次数来回切换时建连与关闭严格配对', () => {\n  const b = makeBackends();\n  const m = mount(b, 'a', '');\n  for (let i = 0; i < 30; i += 1) {\n    m.go('b');\n    m.go('a');\n  }\n  expect(b.created.a).toBe(31);\n  expect(b.forTab('a').reduce((sum, s) => sum + s.closes, 0)).toBe(30);\n  expect(b.forTab('a').reduce((sum, s) => sum + s.connects, 0)).toBe(31);\n  expect(b.loaded.a).toBe(1);\n});\n\nit('无数据与无匹配消息都不增加计数', () => {\n  const b = makeBackends();\n  const m = mount(b, 'c', 'needle');\n  expect(m.text('matched-c')).toBe('0');\n  b.emit('c', { topic: 'log', text: 'no match at all' });\n  expect(m.text('matched-c')).toBe('0');\n  b.emit('c', { topic: 'log', text: 'has needle inside' });\n  expect(m.text('matched-c')).toBe('1');\n});\n"
+      }
+    ],
+    "timeoutMs": 50000,
+    "referenceSolution": "import { Activity, useEffect, useEffectEvent, useRef, useState } from 'react';\nimport type { PanelSocket, SocketFactory, Tab } from './socketKit';\n\nexport interface TabShellProps {\n  tabs: Tab[];\n  activeId: string;\n  filter: string;\n  createSocket: SocketFactory;\n  loadInitial: (tabId: string) => string[];\n}\n\nfunction Panel({ tabId, filter, createSocket, loadInitial }: Omit<TabShellProps, 'tabs' | 'activeId'>) {\n  const [note, setNote] = useState('');\n  const [items, setItems] = useState<string[]>([]);\n  const [matched, setMatched] = useState(0);\n\n  /**\n   * useEffectEvent：事件语义的回调，永远读最新已提交的 filter，\n   * 但 identity 不进依赖数组，所以订阅不会因为 filter 变化而重启。\n   */\n  const onMessage = useEffectEvent((message: { topic: string; text: string }) => {\n    if (filter && message.text.includes(filter)) setMatched((n) => n + 1);\n  });\n\n  const loaded = useRef(false);\n\n  useEffect(() => {\n    // 首屏数据在 Effect 里拉（初次就 hidden 时不跑）；切回来时 state 被保活，靠 ref 不再重拉\n    if (!loaded.current) {\n      loaded.current = true;\n      setItems(loadInitial(tabId));\n    }\n    let socket: PanelSocket | null = null;\n    let disposed = false;\n    socket = createSocket(tabId);\n    socket.onMessage((message) => {\n      if (!disposed) onMessage(message);\n    });\n    socket.connect();\n    return () => {\n      disposed = true;\n      socket?.close();\n    };\n    // onMessage 是 useEffectEvent 的结果：identity 每帧都变，绝不进依赖数组\n  }, [tabId, createSocket, loadInitial]);\n\n  return (\n    <section>\n      <textarea data-testid={'note-' + tabId} value={note} onChange={(event) => setNote(event.target.value)} />\n      <span data-testid={'items-' + tabId}>{items.join('|')}</span>\n      <span data-testid={'matched-' + tabId}>{matched}</span>\n    </section>\n  );\n}\n\nexport function TabShell({ tabs, activeId, filter, createSocket, loadInitial }: TabShellProps) {\n  return (\n    <div>\n      {tabs.map((tab) => (\n        <Activity key={tab.id} mode={tab.id === activeId ? 'visible' : 'hidden'}>\n          <Panel\n            tabId={tab.id}\n            filter={filter}\n            createSocket={createSocket}\n            loadInitial={loadInitial}\n          />\n        </Activity>\n      ))}\n    </div>\n  );\n}\n",
+    "naiveSolution": "import { useEffect, useRef, useState } from 'react';\n\nexport function TabShell({ tabs, activeId, filter, createSocket, loadInitial }) {\n  return (\n    <div>\n      {tabs.map((tab) => (\n        <div key={tab.id} style={tab.id === activeId ? undefined : { display: 'none' }}>\n          {tab.id === activeId ? (\n            <Panel\n              tabId={tab.id}\n              filter={filter}\n              createSocket={createSocket}\n              loadInitial={loadInitial}\n            />\n          ) : null}\n        </div>\n      ))}\n    </div>\n  );\n}\n\nfunction Panel({ tabId, filter, createSocket, loadInitial }) {\n  const [note, setNote] = useState('');\n  const [items, setItems] = useState<string[]>([]);\n  const loaded = useRef(false);\n  if (!loaded.current) {\n    loaded.current = true;\n    setItems(loadInitial(tabId));\n  }\n  const [matched, setMatched] = useState(0);\n\n  useEffect(() => {\n    const socket = createSocket(tabId);\n    socket.onMessage((message) => {\n      if (filter && message.text.includes(filter)) setMatched((n) => n + 1);\n    });\n    socket.connect();\n    return () => socket.close();\n  }, [tabId, filter, createSocket]);\n\n  return (\n    <section>\n      <textarea data-testid={'note-' + tabId} value={note} onChange={(event) => setNote(event.target.value)} />\n      <span data-testid={'items-' + tabId}>{items.join('|')}</span>\n      <span data-testid={'matched-' + tabId}>{matched}</span>\n    </section>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- Activity 的语义三分法：DOM 保留、state 保留（含 textarea/滚动/视频时间码这类 DOM 内部状态）、**Effect 全量 cleanup**。所以\"保活\"保的是状态，不是订阅——正好是工单后台要的。\n- 初次渲染即 hidden：会预渲染（因此 `use()`/Suspense 的数据源能被预热），但 Effect 不跑，所以 `useEffect` 里的取数/socket 都不会预热。要知道这个差别，否则\"预热\"策略是错的。\n- `useEffectEvent` 让\"事件语义\"（读最新值、不进依赖）从 Effect 里剥离出去：`filter` 变了不重启订阅，回调里仍是最新值。它是编译器时代的 `exhaustive-deps` 逃生舱——替代过去手写 `callbackRef.current` 转发。\n- 订阅生命周期要用**计数**测：`createSocket`/`connect`/`close` 次数配对，是判题环境里唯一稳定的信号（jsdom 无网络无布局）。快速 A→B→A 时如果不做 `disposed` 保护，旧 socket 的消息仍会写状态。\n- `useEffectEvent` 的返回值 identity 每次 render 都变：不许进依赖数组、不许传给子组件、只能在 Effect 内调用（进了 deps 就等于把 filter 塞回去）。\n- `video/audio` 不会自动暂停，需要在 `useLayoutEffect` 的 cleanup 里显式 `pause()`；`Activity` 还是 Selective Hydration 的单元，能让 tab 按钮先可交互。\n\n面试追问：\n1. 隐藏期间收到消息该怎么办？（要么根本不订阅（本题答案），要么缓冲进 store，绝不能 setState）\n2. 三个 tab 共享一条连接、每 tab 一个订阅，怎么设计引用计数？（连接层单例 + 订阅计数，最后一个 hidden 才关）\n3. 为什么不用 CSS 隐藏 + `content-visibility`？（省绘制但不省订阅与内存；两者解决的是不同问题）\n4. 若把 `filter` 改成 store 里的字段，本题哪几处要变？（useSyncExternalStore 订阅 filter，Effect 依赖仍不含它，见 0007）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/react19-concurrency.md#14-activity192",
+    "addedBy": "content-agent-fe"
+  }
+}

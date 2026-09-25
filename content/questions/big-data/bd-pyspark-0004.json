@@ -1,0 +1,324 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0004",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "墙上时间、UTC 瞬时与集团日切：跨 4 个时区 + DST 边界的归属",
+  "statement": "## 背景与数据规模\n设备埋点 `device_events`（日均 **11 亿行**，来源是全球五个大区）以「**当地墙上时间 + IANA 时区名**」两列投递到湖里。\n集团统一口径是：**所有指标按 `Asia/Shanghai` 的日历日切**，湖内落库统一存 UTC 瞬时。\n上一版作业把墙上时间字符串直接 `substring(ts_wall,1,10)` 当业务日，导致美洲区报表每天「少掉 8 小时、多出一天的尾巴」，\n并且有人用 `from_utc_timestamp` 与 `to_utc_timestamp` 互相反了方向，出现「差 16 小时」的二次转换事故。\n\n## 输入\n临时视图 `device_events`（每个用例单独灌入，`spark.table('device_events')`）：\n- `device_id STRING`\n- `event_id STRING`\n- `ts_wall STRING`：`biz_zone` 所指时区的**墙上时间**，格式 `yyyy-MM-dd HH:mm:ss`；可能为 NULL 或非法文本\n- `biz_zone STRING`：IANA 时区名。判题环境只会出现 `Asia/Shanghai` / `Asia/Tokyo` / `America/New_York` / `Europe/Berlin` 四个合法值，以及 `NULL`、空串、非法名（如 `Mars/Olympus`）三种「未知」\n> 注意：`ts_wall` 是**无时区语义的日历时间**，语义上对应 Spark 的 `timestamp_ntz`；而湖内存储与跨引擎交换必须是带时区语义的 UTC 瞬时（`timestamp`）。两种类型混用是这类事故的第一现场。\n\n## 口径定义（必须严格实现）\n1. **未知时区兜底**：`biz_zone` 不在上述四个合法值内（含 NULL/空串/非法名）时，一律**按 UTC 解释** `ts_wall`，并把该行的 `zone_bucket` 记为 `UNKNOWN_AS_UTC`（生产上这类行应同时进质量告警，但不得丢行、更不得抛异常——非法时区名传给 `to_utc_timestamp` 会直接失败，必须先做白名单判断）。\n2. `ts_utc` = 该事件对应的 **UTC 瞬时**。\n3. `biz_date` = `ts_utc` 在 **`Asia/Shanghai`** 下的日历日，输出为 `yyyy-MM-dd` 字符串。注意它与 `zone_bucket` 无关：东京设备也按上海日切归属。\n4. `ts_wall` 为 NULL 或无法解析的行**整行丢弃**。\n5. 按 `(biz_date, zone_bucket)` 聚合：\n   - `unique_devices`：组内去重 `device_id` 数（同一设备出现在两个时区会被两个组各计一次，这是口径允许的「按来源分桶」）\n   - `event_count`：组内行数\n   - `first_utc` / `last_utc`：组内 `ts_utc` 的最小/最大值，输出为 `yyyy-MM-dd HH:mm:ss` 字符串（**UTC**，不是墙上时间，也不是上海时间）\n\n## 输出\nDataFrame，列**必须严格是** `biz_date, zone_bucket, unique_devices, event_count, first_utc, last_utc`。\n判题按行集合比对（行序不敏感）；生产写法请 `orderBy('biz_date','zone_bucket')`。\n\n## 约束\n- 禁止 `collect()`/`toPandas()`；禁止用「偏移小时数」硬编码（`+8`/`-5`）代替时区库——`America/New_York` 在夏令时是 UTC-4、冬令时是 UTC-5，硬编码会在 3 月/11 月的边界日双重出错。\n- 判题 SparkSession 的 `spark.sql.session.timeZone` 固定为 `UTC`，ANSI 关闭；这与线上一致（Spark 4.0 起 ANSI 默认开启，届时非法 cast 会抛异常，你要说清迁移动作）。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "timezone-utc-boundary",
+    "timestamp-ntz",
+    "day-cut-semantics",
+    "dst",
+    "pyspark",
+    "modern:spark-4-ansi-default"
+  ],
+  "cases": [
+    {
+      "name": "基础：四个时区的同一 UTC 瞬时都归属同一个上海业务日",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "event_id": "e1",
+            "ts_wall": "2026-09-01 08:00:00",
+            "biz_zone": "Asia/Shanghai"
+          },
+          {
+            "device_id": "d2",
+            "event_id": "e2",
+            "ts_wall": "2026-09-01 09:00:00",
+            "biz_zone": "Asia/Tokyo"
+          },
+          {
+            "device_id": "d3",
+            "event_id": "e3",
+            "ts_wall": "2026-08-31 20:00:00",
+            "biz_zone": "America/New_York"
+          },
+          {
+            "device_id": "d4",
+            "event_id": "e4",
+            "ts_wall": "2026-09-01 02:00:00",
+            "biz_zone": "Europe/Berlin"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Asia/Shanghai",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 00:00:00",
+          "last_utc": "2026-09-01 00:00:00"
+        },
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Asia/Tokyo",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 00:00:00",
+          "last_utc": "2026-09-01 00:00:00"
+        },
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "America/New_York",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 00:00:00",
+          "last_utc": "2026-09-01 00:00:00"
+        },
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Europe/Berlin",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 00:00:00",
+          "last_utc": "2026-09-01 00:00:00"
+        }
+      ],
+      "note": "纽约那行墙上时间是 08-31，但业务日是 09-01——用 substring(ts_wall,1,10) 必错。"
+    },
+    {
+      "name": "日切边界：上海墙钟 23:59:59 与 00:00:00 属于两个业务日",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "event_id": "e1",
+            "ts_wall": "2026-08-31 23:59:59",
+            "biz_zone": "Asia/Shanghai"
+          },
+          {
+            "device_id": "d2",
+            "event_id": "e2",
+            "ts_wall": "2026-09-01 00:00:00",
+            "biz_zone": "Asia/Shanghai"
+          },
+          {
+            "device_id": "d3",
+            "event_id": "e3",
+            "ts_wall": "2026-09-01 00:00:01",
+            "biz_zone": "Asia/Shanghai"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-08-31",
+          "zone_bucket": "Asia/Shanghai",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-08-31 15:59:59",
+          "last_utc": "2026-08-31 15:59:59"
+        },
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Asia/Shanghai",
+          "unique_devices": 2,
+          "event_count": 2,
+          "first_utc": "2026-08-31 16:00:00",
+          "last_utc": "2026-08-31 16:00:01"
+        }
+      ],
+      "note": "上海业务日 2026-09-01 的 UTC 窗口起点是 2026-08-31 16:00:00——first_utc 必须是 UTC 而不是本地。"
+    },
+    {
+      "name": "夏令时边界：NY 切换日前后同样墙钟的 UTC 偏移不同",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "event_id": "e1",
+            "ts_wall": "2026-03-08 01:30:00",
+            "biz_zone": "America/New_York"
+          },
+          {
+            "device_id": "d2",
+            "event_id": "e2",
+            "ts_wall": "2026-03-08 03:30:00",
+            "biz_zone": "America/New_York"
+          },
+          {
+            "device_id": "d3",
+            "event_id": "e3",
+            "ts_wall": "2026-11-01 00:30:00",
+            "biz_zone": "America/New_York"
+          },
+          {
+            "device_id": "d4",
+            "event_id": "e4",
+            "ts_wall": "2026-11-01 03:00:00",
+            "biz_zone": "America/New_York"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-03-08",
+          "zone_bucket": "America/New_York",
+          "unique_devices": 2,
+          "event_count": 2,
+          "first_utc": "2026-03-08 06:30:00",
+          "last_utc": "2026-03-08 07:30:00"
+        },
+        {
+          "biz_date": "2026-11-01",
+          "zone_bucket": "America/New_York",
+          "unique_devices": 2,
+          "event_count": 2,
+          "first_utc": "2026-11-01 04:30:00",
+          "last_utc": "2026-11-01 08:00:00"
+        }
+      ],
+      "note": "01:30 是 EST(+UTC-5)、03:30 是 EDT(+UTC-4)：墙上时间差 2 小时但 UTC 只差 1 小时。硬编码 -5 会把 03:30 算成 08:30。"
+    },
+    {
+      "name": "未知时区与脏时间边界：NULL/空串/非法 zone 按 UTC 兜底，非法 ts 丢弃",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "event_id": "e1",
+            "ts_wall": "2026-09-01 12:00:00",
+            "biz_zone": null
+          },
+          {
+            "device_id": "d2",
+            "event_id": "e2",
+            "ts_wall": "2026-09-01 20:00:00",
+            "biz_zone": ""
+          },
+          {
+            "device_id": "d3",
+            "event_id": "e3",
+            "ts_wall": "2026-09-01 18:00:00",
+            "biz_zone": "Mars/Olympus"
+          },
+          {
+            "device_id": "d4",
+            "event_id": "e4",
+            "ts_wall": "not-a-time",
+            "biz_zone": "Asia/Shanghai"
+          },
+          {
+            "device_id": "d5",
+            "event_id": "e5",
+            "ts_wall": null,
+            "biz_zone": "Asia/Tokyo"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "UNKNOWN_AS_UTC",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 12:00:00",
+          "last_utc": "2026-09-01 12:00:00"
+        },
+        {
+          "biz_date": "2026-09-02",
+          "zone_bucket": "UNKNOWN_AS_UTC",
+          "unique_devices": 2,
+          "event_count": 2,
+          "first_utc": "2026-09-01 18:00:00",
+          "last_utc": "2026-09-01 20:00:00"
+        }
+      ],
+      "note": "把非法 zone 直接喂给 to_utc_timestamp 会让整个作业抛 IllegalArgumentException（error 而不是 fail）。"
+    },
+    {
+      "name": "空事件流：无任何事件返回零行",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": []
+      },
+      "expected": [],
+      "note": "空分区不得产出全 null 的一行。"
+    },
+    {
+      "name": "单设备跨时区：同一设备在两个来源桶各计一次 UV",
+      "input": {
+        "view": "device_events",
+        "schema": "device_id string, event_id string, ts_wall string, biz_zone string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "event_id": "e1",
+            "ts_wall": "2026-09-01 10:00:00",
+            "biz_zone": "Asia/Shanghai"
+          },
+          {
+            "device_id": "d1",
+            "event_id": "e2",
+            "ts_wall": "2026-09-01 10:00:00",
+            "biz_zone": "Europe/Berlin"
+          },
+          {
+            "device_id": "d1",
+            "event_id": "e3",
+            "ts_wall": "2026-09-01 23:00:00",
+            "biz_zone": "America/New_York"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Asia/Shanghai",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 02:00:00",
+          "last_utc": "2026-09-01 02:00:00"
+        },
+        {
+          "biz_date": "2026-09-01",
+          "zone_bucket": "Europe/Berlin",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-01 08:00:00",
+          "last_utc": "2026-09-01 08:00:00"
+        },
+        {
+          "biz_date": "2026-09-02",
+          "zone_bucket": "America/New_York",
+          "unique_devices": 1,
+          "event_count": 1,
+          "first_utc": "2026-09-02 03:00:00",
+          "last_utc": "2026-09-02 03:00:00"
+        }
+      ],
+      "note": "同一 UTC 墙钟在两个时区是不同的瞬时；纽约那行跨到了业务日 09-02。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\nZONES = ['Asia/Shanghai', 'Asia/Tokyo', 'America/New_York', 'Europe/Berlin']\nBIZ_ZONE = 'Asia/Shanghai'\n\n\ndef solve(spark):\n    src = spark.table('device_events')\n    known = F.col('biz_zone').isin(ZONES)\n    prepared = (\n        src.withColumn('wall', F.when(F.col('ts_wall').isNotNull(), F.to_timestamp('ts_wall')))\n        .withColumn('zone_bucket', F.when(known, F.col('biz_zone')).otherwise(F.lit('UNKNOWN_AS_UTC')))\n        .filter(F.col('wall').isNotNull())\n        .withColumn(\n            'ts_utc',\n            F.when(known, F.to_utc_timestamp(F.col('wall').cast('timestamp_ntz'), F.col('biz_zone')))\n             .otherwise(F.col('wall')),\n        )\n        .withColumn('biz_date', F.date_format(F.from_utc_timestamp(F.col('ts_utc'), F.lit(BIZ_ZONE)), 'yyyy-MM-dd'))\n    )\n    return (\n        prepared.groupBy('biz_date', 'zone_bucket')\n        .agg(\n            F.countDistinct('device_id').alias('unique_devices'),\n            F.count(F.lit(1)).alias('event_count'),\n            F.date_format(F.min('ts_utc'), 'yyyy-MM-dd HH:mm:ss').alias('first_utc'),\n            F.date_format(F.max('ts_utc'), 'yyyy-MM-dd HH:mm:ss').alias('last_utc'),\n        )\n        .orderBy('biz_date', 'zone_bucket')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    return (\n        spark.table('device_events')\n        .filter(F.col('ts_wall').isNotNull())\n        .withColumn('biz_date', F.substring('ts_wall', 1, 10))\n        .withColumn(\n            'zone_bucket',\n            F.when(F.col('biz_zone').isNull() | (F.col('biz_zone') == F.lit('')), F.lit('UNKNOWN_AS_UTC'))\n             .otherwise(F.col('biz_zone')),\n        )\n        .withColumn('ts_utc', F.date_format(F.to_timestamp('ts_wall'), 'yyyy-MM-dd HH:mm:ss'))\n        .groupBy('biz_date', 'zone_bucket')\n        .agg(\n            F.countDistinct('device_id').alias('unique_devices'),\n            F.count(F.lit(1)).alias('event_count'),\n            F.min('ts_utc').alias('first_utc'),\n            F.max('ts_utc').alias('last_utc'),\n        )\n    )\n"
+  },
+  "answer": "## 参考要点\n1. 将「墙上时间」显式建模为 `timestamp_ntz`（无时区语义的日历时间），再用 **`to_utc_timestamp(ntz, zone)`** 得到 UTC 瞬时；反向展示用 `from_utc_timestamp(instant, zone)`。两者方向相反，写反就是「差两倍偏移」的经典事故（Shanghai→UTC→Shanghai 会 +16 小时）。判题 session tz 是 UTC，因此 `date_format` 直接把值当 UTC 显示，语义自洽。\n2. 未知时区必须**先做白名单/归一**再调函数：非法 zone 名会让 `to_utc_timestamp` 抛 `IllegalArgumentException`（判题里表现为 error 而不是数值错），生产表现为整个 stage 失败；兜底策略要与业务确认（按 UTC？按发送端默认区？直接隔离），并配一条「未知时区行数 > 阈值」的质量规则，否则口径漂移是静默的。\n3. 业务日切与来源时区是两件事：`biz_date` 恒按 `Asia/Shanghai` 算，`zone_bucket` 只是来源分桶；两者混在一起就会出现「东京设备的 8 月 31 日晚流量掉进 9 月 1 日」这类争议。财务/法务口径要单列（多地法人可能按各自时区日切），不能强行统一。\n4. DST 只能交给 IANA tzdb：硬编码偏移在美欧的切换日、闰秒、以及「本地时间不存在/出现两次」的窗口必然出错。要注意 `2026-03-08 02:30`（不存在）与 `2026-11-01 01:30`（出现两次）这类值的解析规则必须由你显式选定并写进文档（Spark 走 `ZonedDateTime` 的 resolver，会向未来偏移）；本题刻意避开了这两个不可解析/歧义点，但面试一定会追问。\n5. 工程治理：湖内**只存 UTC 瞬时 + 原始 zone 名**（不要存「已换算的本地日期字符串」——那样日切口径就被永久焊死，改口径要重刷历史）；展示层再做转换；`from_utc_timestamp` 的结果仍是 `timestamp`，二次转换必错，必要时把展示层输出固化成 string。\n6. 迁移与成本：Spark 4.0 起 ANSI 默认开启，`to_timestamp` 遇到脏值的行为、`spark.sql.ansi.enabled` 与 `timestamp_ntz` 的默认解析策略都要在升级验证矩阵里；同时注意 `date_format` + 窗口的写法会阻断分区裁剪，日切口径若用于过滤，应额外落一个物化的 `biz_date` 列（而不是每次现算），否则每天全表扫。\n\n## 追问\n- 「上游某天开始把 `ts_wall` 改成本地时间但没通知，你怎么发现？」→ 对同一流做「事件时间与摄入时间差」的分布监控（p50/p99 直方图突变）+ 与另一路可信时间源比对偏移量 + 跨时区行数突变，而不是等人查数。\n- 「为什么不用 `spark.sql.session.timeZone=Asia/Shanghai` 一把梭？」→ session tz 会同时影响解析与展示，跨引擎（Trino/ClickHouse/Flink）读同一张表时各自 session tz 不同，数字就会对不上；正确做法是 session 固定 UTC、口径写进 SQL 与语义层。\n- 「这题的数据量下你怎么减少函数开销？」→ 把 `biz_date` 作为**派生的分区/排序列**在写入时算好（一次成本），下游只读列；否则 11 亿行每次查询都要过两次时区函数（且这些表达式会阻断下推与统计裁剪）。",
+  "estimatedMinutes": 28,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/pyspark-correctness-and-perf.md#pyspark-semantic-traps",
+    "addedBy": "content-agent-bd"
+  }
+}

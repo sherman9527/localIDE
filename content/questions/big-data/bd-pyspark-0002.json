@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0002",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "join 右表多版本导致行数膨胀：先收敛维度再广播（结果行数必须等于左表）",
+  "statement": "## 背景与数据规模\n订单明细 `order_lines`（日均 **2.4 亿行**）要关联商品维度拿「下单时点的国家/区域」。维度表 `dim_listing_version` 是**版本化拉链**（每次属性变更追加一行，不覆盖），头部 listing 有 30+ 个版本。\n上一版作业直接 `orders.join(dim, 'listing_id', 'left')`，结果**行数从 2.4 亿膨胀到 7.1 亿**，下游 GMV 直接翻倍且没有任何报错——这是典型的「一对多膨胀型倾斜」静默事故。\n\n## 输入\n1. 临时视图 `dim_listing_version`（判题器在建表阶段灌入，全题固定，代表线上维度快照）：\n   `listing_id STRING, country STRING, region STRING, updated_at STRING(yyyy-MM-dd HH:mm:ss UTC), ver BIGINT`\n2. 临时视图 `order_lines`（每个用例单独灌入，`def solve(spark)` 里用 `spark.table('order_lines')`）：\n   `order_id STRING, listing_id STRING(可能为 NULL), gmv DOUBLE`\n\n维度表的重复版本是**故意**造成的：`L1` 有 3 行（其中 2 行 `updated_at` 相同、`ver` 不同），`L2` 有 2 行（`updated_at` 与 `ver` 全都相同、只有 `country` 不同）——用来钉死你的 tie-break。\n\n## 口径定义（必须严格实现）\n1. 每个 `listing_id` 只保留**一个生效版本**，裁决顺序：`updated_at` 最大 → 并列取 `ver` 最大 → 再并列取 `country` 字典序**最小**。（三级排序键写完才保证结果确定，`first()` / `last()` 是非确定函数，禁止使用。）\n2. `order_lines` 与收敛后的维度做 **LEFT JOIN**：**输出行数必须与 `order_lines` 完全相同**（这是本题的硬判据）。\n3. 关联用**等值语义**：`listing_id IS NULL` 的订单不算匹配（NULL 不等于任何值），但**必须保留**，其 `country`/`region` 输出 NULL；同理 `listing_id='LX'` 这种维度里不存在的键也要保留并输出 NULL。\n4. 维度表里没有的 `listing_id`、以及维度表内 `updated_at` 为 NULL 的版本，都不参与「最新」比较（数据已保证不会出现，写健壮即可）。\n\n## 输出\nDataFrame，列**必须严格是** `order_id, listing_id, country, region, gmv`（名字与个数不符即判负）。判题按行集合比对（行序不敏感），但生产写法要求 `orderBy('order_id')` 保证可复现。\n\n## 约束与追问点\n- 禁止 `collect()` / `toPandas()`；禁止 `join` 之后再 `dropDuplicates('order_id')`「把膨胀压回去」（那会把不同订单真值删掉，且当左表本身有重复 order_id 时静默丢数据）。\n- 收敛后的维度只有 3 行 → 应显式 `F.broadcast(...)` 或用 `/*+ BROADCAST */`：本机能跑通不代表线上——线上这张维度表 18 GB，`spark.sql.autoBroadcastJoinThreshold` 默认 8 MB 时根本不会广播，你要说清「什么规模以下广播、以上怎么办（map-side/sort-merge join、分桶、倾斜 key 单独拆出来）」。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "join-strategy",
+    "data-skew",
+    "broadcast-join",
+    "dimension-dedup",
+    "pyspark",
+    "modern:spark-4-2-nearest-by"
+  ],
+  "cases": [
+    {
+      "name": "基础：多版本维度收敛后一对一",
+      "input": {
+        "view": "order_lines",
+        "schema": "order_id string, listing_id string, gmv double",
+        "rows": [
+          {
+            "order_id": "o1",
+            "listing_id": "L1",
+            "gmv": 100.25
+          },
+          {
+            "order_id": "o2",
+            "listing_id": "L2",
+            "gmv": 50.5
+          },
+          {
+            "order_id": "o3",
+            "listing_id": "L3",
+            "gmv": 12.25
+          }
+        ]
+      },
+      "expected": [
+        {
+          "order_id": "o1",
+          "listing_id": "L1",
+          "country": "DE",
+          "region": "EMEA",
+          "gmv": "100.25"
+        },
+        {
+          "order_id": "o2",
+          "listing_id": "L2",
+          "country": "JP",
+          "region": "APAC",
+          "gmv": "50.5"
+        },
+        {
+          "order_id": "o3",
+          "listing_id": "L3",
+          "country": "SG",
+          "region": "APAC",
+          "gmv": "12.25"
+        }
+      ],
+      "note": "L1 三条版本里 updated_at 并列的两条按 ver 取 3（DE/EMEA）；L2 两条 updated_at+ver 全并列，按 country 字典序取 JP。"
+    },
+    {
+      "name": "边界：NULL 关联键与维度缺失键必须保留且为 NULL",
+      "input": {
+        "view": "order_lines",
+        "schema": "order_id string, listing_id string, gmv double",
+        "rows": [
+          {
+            "order_id": "n1",
+            "listing_id": null,
+            "gmv": 1.5
+          },
+          {
+            "order_id": "n2",
+            "listing_id": "LX",
+            "gmv": 2.5
+          },
+          {
+            "order_id": "n3",
+            "listing_id": "L3",
+            "gmv": 3.5
+          }
+        ]
+      },
+      "expected": [
+        {
+          "order_id": "n1",
+          "listing_id": "null",
+          "country": "null",
+          "region": "null",
+          "gmv": "1.5"
+        },
+        {
+          "order_id": "n2",
+          "listing_id": "LX",
+          "country": "null",
+          "region": "null",
+          "gmv": "2.5"
+        },
+        {
+          "order_id": "n3",
+          "listing_id": "L3",
+          "country": "SG",
+          "region": "APAC",
+          "gmv": "3.5"
+        }
+      ],
+      "note": "join 条件写成 <=> 会把 NULL 键误配上（本题维度无 NULL 键，但线上有——语义要按等值判断）。"
+    },
+    {
+      "name": "单条订单命中三版本维度：绝不允许膨胀",
+      "input": {
+        "view": "order_lines",
+        "schema": "order_id string, listing_id string, gmv double",
+        "rows": [
+          {
+            "order_id": "s1",
+            "listing_id": "L1",
+            "gmv": 9.25
+          }
+        ]
+      },
+      "expected": [
+        {
+          "order_id": "s1",
+          "listing_id": "L1",
+          "country": "DE",
+          "region": "EMEA",
+          "gmv": "9.25"
+        }
+      ]
+    },
+    {
+      "name": "空输入：左表零行返回零行",
+      "input": {
+        "view": "order_lines",
+        "schema": "order_id string, listing_id string, gmv double",
+        "rows": []
+      },
+      "expected": [],
+      "note": "右表仍有多版本；不能因为广播/交叉而造出行。"
+    },
+    {
+      "name": "重复：同一 listing 多笔订单（左表自身重复不折叠）",
+      "input": {
+        "view": "order_lines",
+        "schema": "order_id string, listing_id string, gmv double",
+        "rows": [
+          {
+            "order_id": "d1",
+            "listing_id": "L2",
+            "gmv": 1.25
+          },
+          {
+            "order_id": "d2",
+            "listing_id": "L2",
+            "gmv": 1.25
+          },
+          {
+            "order_id": "d3",
+            "listing_id": "L2",
+            "gmv": 1.25
+          },
+          {
+            "order_id": "d4",
+            "listing_id": "L1",
+            "gmv": 1.25
+          },
+          {
+            "order_id": "d5",
+            "listing_id": "L1",
+            "gmv": 1.25
+          }
+        ]
+      },
+      "expected": [
+        {
+          "order_id": "d1",
+          "listing_id": "L2",
+          "country": "JP",
+          "region": "APAC",
+          "gmv": "1.25"
+        },
+        {
+          "order_id": "d2",
+          "listing_id": "L2",
+          "country": "JP",
+          "region": "APAC",
+          "gmv": "1.25"
+        },
+        {
+          "order_id": "d3",
+          "listing_id": "L2",
+          "country": "JP",
+          "region": "APAC",
+          "gmv": "1.25"
+        },
+        {
+          "order_id": "d4",
+          "listing_id": "L1",
+          "country": "DE",
+          "region": "EMEA",
+          "gmv": "1.25"
+        },
+        {
+          "order_id": "d5",
+          "listing_id": "L1",
+          "country": "DE",
+          "region": "EMEA",
+          "gmv": "1.25"
+        }
+      ],
+      "note": "5 行进 5 行出——行数守恒是这道题的核心不变量。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW dim_listing_version AS SELECT * FROM VALUES ('L1','US','NAmerica','2026-01-01 00:00:00',CAST(1 AS BIGINT)), ('L1','FR','EMEA','2026-03-01 00:00:00',CAST(2 AS BIGINT)), ('L1','DE','EMEA','2026-03-01 00:00:00',CAST(3 AS BIGINT)), ('L2','JP','APAC','2026-02-15 00:00:00',CAST(7 AS BIGINT)), ('L2','KR','APAC','2026-02-15 00:00:00',CAST(7 AS BIGINT)), ('L3','SG','APAC','2026-01-20 00:00:00',CAST(1 AS BIGINT)) AS t(listing_id, country, region, updated_at, ver)"
+    ],
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    dim = spark.table('dim_listing_version')\n    win = Window.partitionBy('listing_id').orderBy(\n        F.col('updated_at').desc(), F.col('ver').desc(), F.col('country').asc()\n    )\n    latest = (\n        dim.withColumn('rk', F.row_number().over(win))\n        .filter(F.col('rk') == 1)\n        .select('listing_id', 'country', 'region')\n    )\n    orders = spark.table('order_lines')\n    return (\n        orders.join(F.broadcast(latest), 'listing_id', 'left')\n        .select('order_id', 'listing_id', 'country', 'region', 'gmv')\n        .orderBy('order_id')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    orders = spark.table('order_lines')\n    dim = spark.table('dim_listing_version')\n    return (\n        orders.join(dim, 'listing_id', 'left')\n        .select('order_id', 'listing_id', 'country', 'region', 'gmv')\n    )\n"
+  },
+  "answer": "## 参考要点\n1. **先收敛再关联**：把版本化维度用 `row_number() over (partition by listing_id order by updated_at desc, ver desc, country asc) = 1` 压成一对一，或等价的 `max(struct(updated_at, ver, country, region))` 预聚合（后者少一次 shuffle 排序，但 struct 比较会带上整行，注意列顺序即裁决顺序）。关键不变式：**join 之后行数 == join 之前左表行数**，这一条应该写成上线卡口（DQC 断言）而不是靠 code review。\n2. tie-break 必须显式写全三级：`updated_at` 并列（L1 的 ver 2/3）与 `ver` 也并列（L2 的 JP/KR）在真实拉链里天天发生；只写 `order by updated_at desc` 时 `row_number` 结果是**不确定的**（同一作业两次跑出不同国家），这是「数据偶发不一致」的经典根因。用 `first()`/`last()` 更错——它们不带顺序语义。\n3. 外连接语义：NULL 关联键保留但配不上；谓词必须写在 join 之前的子查询里，写成 `LEFT JOIN ... WHERE dim.x = ...` 会退化成 inner join（把没匹配的订单独吃掉，GMV 反过来少一截）。\n4. join 策略与规模：3 行维度当然广播；线上 18 GB 维度要分档——小于 `autoBroadcastJoinThreshold` 走 BroadcastHashJoin；再大用**分桶 join**（两侧同 bucket 数 + 同分桶列，省掉两侧 shuffle，但桶数改了要全量重刷，代价要讲）、或对倾斜 key 做 **skew 拆分（头部 listing 单独广播 + 长尾走 SMJ）**；`spark.sql.adaptive.skewJoin.enabled` 只能拆「单分区过大」，拆不掉「一个 key 上有 30 个版本 × 10 万订单」的行膨胀，膨胀必须靠改写（先去重/先聚合）解决。\n5. 迁移提醒：Spark 4.2 提供 `NEAREST BY`（top-K 最近邻 join 原语）与 `QUALIFY`，`QUALIFY row_number() ... = 1` 能把「窗口过滤」写成一行、少一层子查询、也方便优化器下推；但本题的膨胀根因在语义层，换语法不会消失。\n\n## 追问\n- 「你如何证明上线后不再膨胀？」→ 加断言作业：`assert count(join) == count(left)`，并按 `listing_id` 输出 fanout 分布 p50/p99/max 进 DQC。\n- 「维度表在当天被改过，历史订单的国家归属要不要变？」→ 这是 **时点正确性**问题：应 join 订单时点的版本（`booking.ts between valid_from and valid_to`），而不是「最新版本」；本题口径明确取最新版本，真实业务里要两条口径同时提供并显式命名。\n- 「广播构建失败会怎样？」→ 广播在 driver 收集 + 每 executor 一份副本；构建阶段失败会拖垮整个 stage，`autoBroadcastJoinThreshold` 调大前必须先看 executor 内存与网络（广播 18 GB 会直接把作业打死）。",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/pyspark-correctness-and-perf.md#join-strategy",
+    "addedBy": "content-agent-bd"
+  }
+}

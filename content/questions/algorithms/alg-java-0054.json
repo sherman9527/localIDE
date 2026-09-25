@@ -1,0 +1,390 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0054",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "Seata AT 的\"默认全局读未提交\"跑成时刻表：普通读、FOR UPDATE 与回滚后的幽灵值",
+  "statement": "## 背景\n\nSeata 官方 AT 模式文档里有三句话常被背成八股，但合起来是一条可以判分的规则【源 S5】：\n\n1. 一阶段\"把业务数据与回滚日志（UNDO_LOG）在**同一个本地事务**中提交\"，提交完就释放本地锁；\n   二阶段提交是**异步**的，回滚靠一阶段的回滚日志反向补偿；\n2. \"**在数据库本地隔离级别读已提交或以上的基础上，Seata（AT 模式）的默认全局隔离级别是读未提交**\"；\n3. \"出于总体性能考虑，Seata 并没有对所有 SELECT 语句进行代理，**仅针对 FOR UPDATE 的 SELECT 语句**\"，\n   被代理的读要申请全局锁，锁被持有时\"释放本地锁并重试\"。\n\n第 2 条不是措辞：一阶段本地事务**已经提交**，所以任何普通 SELECT 都能读到这个值，\n可它所属的全局事务还没走完二阶段（甚至可能回滚）。这就是\"全局意义上的读未提交\"。\n\n（下面第 3、4 个输出码与\"等锁超时\"的判据是按【推】补全的**本题设定**，\n官方文档只给了\"默认读未提交\"和\"只代理 FOR UPDATE\"这两条事实。）\n\n## 任务\n\n实现 `public static int[] atIsolationView(int initialValue, int maxWaitTicks, int[] readTick, int[] readKind, int[] txCommitTick, int[] txFinishTick, int[] txValue, int[] txOutcome)`。\n\n一行数据（例如被两个全局事务先后更新的库存），初始值 `initialValue`。\n\n**写侧**：第 `i` 个全局事务分支在 `txCommitTick[i]` 完成一阶段本地提交，把行值写成 `txValue[i]`；\n在 `[txCommitTick[i], txFinishTick[i])` 这段区间内它**持有该行的全局锁**（本地事务已提交、\n全局事务未终审）；`txFinishTick[i]` 是二阶段结束时刻，`txOutcome[i]`：`0` = 全局提交、`1` = 全局回滚\n（回滚 ⇒ 行值退回它写入之前的样子）。\n\n**读侧**：`readTick[r]` 是读请求到达的整数时刻，`readKind[r]`：`0` = 普通 `SELECT`（不被代理）、\n`1` = `SELECT ... FOR UPDATE`（被代理）。要求读时刻**严格递增**。\n\n输出是一个长度 `2 × 读请求数` 的数组：第 `r` 个读的结果是\n`(out[2r] = 读到的值, out[2r+1] = 判定码)`。\n\n## 判定码（**这是本题的契约，从上到下命中即止**）\n\n| 码 | 含义 |\n| --- | --- |\n| `0` | 干净：读到的是\"全局事务已终审且提交\"的值（或初始值） |\n| `1` | 读到**未终审**的值，但该分支最终提交 ⇒ 值是对的，只是当时不保证 |\n| `2` | `FOR UPDATE` 被全局锁挡住 ⇒ 等到锁释放后才读，值干净 |\n| `3` | 读到**未终审**的值，而该分支最终**回滚** ⇒ 这个值后来根本不存在过（幽灵读） |\n| `4` | `FOR UPDATE` 等待时长超过 `maxWaitTicks` ⇒ 放弃，值输出 `-1` |\n\n规则：\n\n- **普通读**看见的是\"本地已提交视图\"：`txCommitTick <= t` 的最后一个分支的 `txValue`\n  （没有分支提交过就是 `initialValue`）。若该分支此时仍在锁区间内（`txFinishTick > t`），\n  按它的最终结局判 `1` 或 `3`。\n- **`FOR UPDATE` 读**绝不接受未终审的值：若时刻 `t` 有分支持锁，就跳到\"该分支二阶段结束\"的时刻再看，\n  如此反复（一次跳一个持有者），只要跳过一次就记 `2`；\n  若**累计等待** `> maxWaitTicks` 则记 `4`、值 `-1`。\n- 一个分支已经终审回滚时，它对行值的写入**不算数**：行值继续往前退（用例「两笔全局事务」就是这条）。\n\n## 参数校验（抛 `IllegalArgumentException`，消息必须一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `initialValue < 0` 或某个 `txValue < 0` | `value must be non-negative` |\n| `maxWaitTicks < 0` | `max wait must be non-negative` |\n| 任一数组为 null，或 `readTick`/`readKind` 长度不等，或四个写侧数组长度不等 | `array length mismatch` |\n| 任一时刻为负 | `negative tick` |\n| `readKind[r]` 不是 0/1 | `read kind must be 0 or 1` |\n| `txFinishTick[i] <= txCommitTick[i]` | `finish must be after commit` |\n| 两个分支的锁区间 `[commit, finish)` 重叠 | `overlapping global locks` |\n| `readTick` 不是严格递增 | `read ticks must increase` |\n\n**\"锁区间重叠\"必须是异常而不是\"挑一个信\"**：全局锁的全部意义就是同一行同一时刻只有一个分支\n处于\"已提交未终审\"状态。给出重叠的 trace 说明这份现场记录本身就不可信，\n硬编出一个答案等于在假数据上做归因。\n\n## 这题真正考的东西\n\n把\"AT 默认全局读未提交\"变成一件**能在现场认出来的事**：\n`code=1` 是\"值最终是对的，但你当时不该信它\"，`code=3` 是\"你信过的值后来消失了\"，\n而 `code=2` 是\"被代理的读付了等锁的代价换来干净\"。\n素材 §2 追问「AT 与热点行优化同用一行时的吞吐与死锁风险」说的就是这个：\n全局锁把行锁等待搬到了 TC 层，**普通读不付这个代价，所以也拿不到这个保证**。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "seata-at",
+    "global-lock",
+    "read-uncommitted",
+    "undo-log",
+    "select-for-update",
+    "modern:distributed-transaction"
+  ],
+  "cases": [
+    {
+      "name": "基线：全局锁窗口内普通读读到未终审的值，FOR UPDATE 等到终审后读到干净值",
+      "input": [
+        100,
+        20,
+        [
+          5,
+          12,
+          18
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          250
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [
+        100,
+        0,
+        250,
+        1,
+        250,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：读时刻恰好等于二阶段结束时刻 ⇒ 锁已释放，普通读也算干净",
+      "input": [
+        100,
+        20,
+        [
+          15,
+          16
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          250
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [
+        250,
+        0,
+        250,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "危害用例：普通读撞进\"提交未终审\"，而该分支最终回滚 ⇒ 读到的是幽灵值",
+      "input": [
+        100,
+        20,
+        [
+          12
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          250
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        250,
+        3
+      ],
+      "visible": true,
+      "note": "code=3 的含义是\"这个值后来根本不存在过\"——AT 默认全局读未提交的唯一真实代价，不是抽象的隔离级别名词"
+    },
+    {
+      "name": "等锁超时：FOR UPDATE 要等的时长超过 maxWaitTicks ⇒ 放弃并记 retry，值输出 -1",
+      "input": [
+        100,
+        3,
+        [
+          11
+        ],
+        [
+          1
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          250
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [
+        -1,
+        4
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何读请求 ⇒ 空数组（不许返回初始值）",
+      "input": [
+        100,
+        20,
+        [],
+        [],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          250
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "退化：一个分支都没有 ⇒ 所有读都读到初始值且判为干净",
+      "input": [
+        7,
+        20,
+        [
+          3,
+          9
+        ],
+        [
+          0,
+          1
+        ],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        7,
+        0,
+        7,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "两笔全局事务：后一笔写入覆盖前一笔，回滚要退回前一笔的值",
+      "input": [
+        100,
+        20,
+        [
+          6,
+          12,
+          22
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          20
+        ],
+        [
+          15,
+          25
+        ],
+        [
+          250,
+          300
+        ],
+        [
+          1,
+          0
+        ]
+      ],
+      "expected": [
+        100,
+        0,
+        250,
+        3,
+        300,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：两个分支的全局锁区间重叠 ⇒ 这份 trace 在 AT 下不可能发生",
+      "input": [
+        100,
+        20,
+        [
+          12
+        ],
+        [
+          0
+        ],
+        [
+          10,
+          12
+        ],
+        [
+          15,
+          20
+        ],
+        [
+          250,
+          300
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "overlapping global locks"
+    },
+    {
+      "name": "非法：二阶段结束时刻不晚于本地提交时刻",
+      "input": [
+        100,
+        20,
+        [
+          5
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          10
+        ],
+        [
+          250
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "finish must be after commit"
+    },
+    {
+      "name": "非法：读请求时刻不是严格递增（同一时刻两条读没法定序）",
+      "input": [
+        100,
+        20,
+        [
+          5,
+          5
+        ],
+        [
+          0,
+          1
+        ],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "read ticks must increase"
+    },
+    {
+      "name": "非法：maxWaitTicks 为负",
+      "input": [
+        100,
+        -1,
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "max wait must be non-negative"
+    },
+    {
+      "name": "非法：读数组长度不一致",
+      "input": [
+        100,
+        20,
+        [
+          5
+        ],
+        [
+          0,
+          1
+        ],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "array length mismatch"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三个函数就够：`holder(t)`（谁在持锁）、`producer(t)`（本地已提交视图是谁写的）、\n`valueAt(t)`（递归退回报错的分支）。读侧按 `readKind` 分两条路，`FOR UPDATE` 那条是一个\n\"跳到持有者的 finish 再看\"的循环，配一个 `maxWaitTicks` 的出口。\n\n**基线（initial=100、maxWait=20、读 `[5,12,18]`、类型 `[0,0,1]`、单笔分支\ncommit=10/finish=15/value=250/outcome=0）输出 `[100,0, 250,1, 250,0]`**：\n\n| 读 | 时刻 | 发生了什么 | 值 / 码 |\n| --- | --- | --- | --- |\n| r0 | 5 | 没有任何分支提交过 ⇒ 读初始值 | 100 / `0` |\n| r1 | 12 | 一阶段已提交、二阶段未完 ⇒ 普通读看得见（这就是\"全局读未提交\"） | 250 / `1` |\n| r2 | 18 | `FOR UPDATE`：t=18 已无持有者，不用等 | 250 / `0` |\n\n注意 r2 是 `0` 不是 `2`：**没等过就别记成\"付过代价\"**。等锁次数是全局锁竞争的直接指标，\n多记一次就会把\"其实没有竞争\"的作业报成\"有竞争但扛住了\"。\n\n**用例「危害用例」把 outcome 换成 1**（同一笔分支最终回滚），读时刻 12 输出 `250 / 3`。\n这条和基线的 r1 差在**结局**而不是差在读法 —— 这正是\"默认读未提交\"最不好受的形态：\n读到 250 的那次调用完全可能已经把\"库存还有货\"告诉了用户，而这一笔后来回滚了。\n**`code=1` 与 `code=3` 必须分开数**：前者是\"运气好\"，后者是事故。把它们并成一格，\n大盘上就只有\"读到了未提交数据 N 次\"，而这数字大到没人知道该先修哪个。\n\n**用例「等锁超时」（maxWait=3、t=11 的 FOR UPDATE）输出 `[-1, 4]`**：\n持有者到 15 才放锁，需要等 `15 - 11 = 4 > 3` ⇒ 放弃。\n官方对代理读的说明是\"锁被持有则**释放本地锁并重试**\"——本题把\"重试到什么时候算完\"\n写成显式契约（【推】），因为不写就没有可判的边界，而线上恰恰死在这个边界上。\n\n**用例「两笔全局事务」是回滚退值链**：\n`commit=[10,20] / finish=[15,25] / value=[250,300] / outcome=[1,0]`，读 `[6,12,22]`\n⇒ 输出 `[100,0, 250,3, 300,1]`（由模型算出，不是手算的）。\n三条读各测一件事：t=6 没有任何分支提交过 ⇒ 初始值 100 / `0`；\nt=12 落在第 1 笔的锁区间里且它后来回滚 ⇒ 幽灵值 250 / `3`；\nt=22 落在**第 2 笔**的锁区间里（20 ≤ 22 < 25），所以读到的仍是第 2 笔写的 300，\n但因为它尚未终审 ⇒ 码 `1`。关键在于第 1 笔的回滚**不牵连**第 2 笔：\n它的补偿在 15 时刻就已经做完，第 2 笔是在\"已经退回 100\"的状态上写的。\n`valueAt` 只在\"该分支已终审且 outcome=回滚\"时才往前退一格 ——\n写成\"只要 outcome=1 就当它没写过\"会在 t=12 那次读上给出 100，\n把\"读到了幽灵值\"这件事故**从结果里抹掉**。\n\n**为什么\"锁区间重叠\"要拒绝**：AT 的写隔离三条里最硬的一条是\"本地事务提交前需先拿到全局锁\"。\n重叠的 trace 意味着现场数据本身被记错了（比如两个分支的 finish 抄串了）。\n把它当成\"随便挑一个可见值\"来模拟，得出的漏读数字会**看起来完全合理**——\n这是最难查的一类分析错误，因为它连\"结果不对\"这个信号都没有。\n\n**工程延伸（面试追问点）**\n\n1. 想要全局 RC 怎么办？（把读写成 `SELECT ... FOR UPDATE` 让 TC 代理它；\n   代价是每次读都可能等全局锁，素材 §4 考点 2 提醒的正是这一点：\n   **全局锁把行锁等待搬到了 TC 层**，等锁的超时与重试要单独监控。）\n2. 回滚为什么可能被卡住？（tx1 二阶段回滚要重新拿本地锁做反向补偿，\n   若 tx2 正在等全局锁且持有本地锁，tx1 的回滚会失败并**一直重试**，\n   直到 tx2 等锁超时回滚本地事务把本地锁放掉【源 S5】。\n   所以\"回滚比提交慢\"在 AT 里是机制而非偶发。）\n3. 为什么 `initialValue` 与 `-1` 都是合法输出？（一个是\"没人写过\"，一个是\"我没读到\"。\n   把它们混成一个值，`code=4` 的读就会伪装成\"数据本来就是 100\"。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] atIsolationView(int initialValue, int maxWaitTicks, int[] readTick, int[] readKind, int[] txCommitTick, int[] txFinishTick, int[] txValue, int[] txOutcome)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  private static int initialValueHolder;\n  private static int[] commitT, finishT, valueT, outcomeT;\n\n  public static int[] atIsolationView(int initialValue, int maxWaitTicks, int[] readTick, int[] readKind,\n                                      int[] txCommitTick, int[] txFinishTick, int[] txValue, int[] txOutcome) {\n    if (initialValue < 0) throw new IllegalArgumentException(\"value must be non-negative\");\n    if (maxWaitTicks < 0) throw new IllegalArgumentException(\"max wait must be non-negative\");\n    if (readTick == null || readKind == null || txCommitTick == null || txFinishTick == null\n        || txValue == null || txOutcome == null) throw new IllegalArgumentException(\"array length mismatch\");\n    if (readTick.length != readKind.length) throw new IllegalArgumentException(\"array length mismatch\");\n    if (txCommitTick.length != txFinishTick.length || txCommitTick.length != txValue.length\n        || txCommitTick.length != txOutcome.length) throw new IllegalArgumentException(\"array length mismatch\");\n    for (int i = 0; i < readTick.length; i++) {\n      if (readTick[i] < 0) throw new IllegalArgumentException(\"negative tick\");\n      if (readKind[i] != 0 && readKind[i] != 1) throw new IllegalArgumentException(\"read kind must be 0 or 1\");\n      if (i > 0 && readTick[i] <= readTick[i - 1]) throw new IllegalArgumentException(\"read ticks must increase\");\n    }\n    for (int i = 0; i < txCommitTick.length; i++) {\n      if (txCommitTick[i] < 0 || txFinishTick[i] < 0) throw new IllegalArgumentException(\"negative tick\");\n      if (txValue[i] < 0) throw new IllegalArgumentException(\"value must be non-negative\");\n      if (txOutcome[i] != 0 && txOutcome[i] != 1) throw new IllegalArgumentException(\"outcome must be 0 or 1\");\n      if (txFinishTick[i] <= txCommitTick[i]) throw new IllegalArgumentException(\"finish must be after commit\");\n    }\n    for (int i = 1; i < txCommitTick.length; i++) {\n      boolean disjoint = txCommitTick[i] >= txFinishTick[i - 1] || txCommitTick[i - 1] >= txFinishTick[i];\n      if (!disjoint) throw new IllegalArgumentException(\"overlapping global locks\");\n    }\n    initialValueHolder = initialValue;\n    commitT = txCommitTick; finishT = txFinishTick; valueT = txValue; outcomeT = txOutcome;\n    int n = commitT.length;\n\n    List<Integer> out = new ArrayList<>();\n    for (int r = 0; r < readTick.length; r++) {\n      int t = readTick[r];\n      if (readKind[r] == 1) {\n        int cur = t;\n        boolean waited = false;\n        boolean timedOut = false;\n        for (int guard = 0; guard <= n; guard++) {\n          int h = holder(cur);\n          if (h < 0) break;\n          cur = finishT[h];\n          waited = true;\n          if (cur - t > maxWaitTicks) { timedOut = true; break; }\n        }\n        if (timedOut) { out.add(-1); out.add(4); continue; }\n        out.add(valueAt(cur));\n        out.add(waited ? 2 : 0);\n      } else {\n        int p = producer(t);\n        out.add(valueAt(t));\n        if (p < 0) { out.add(0); }\n        else if (finishT[p] > t) { out.add(outcomeT[p] == 1 ? 3 : 1); }\n        else { out.add(0); }\n      }\n    }\n    int[] res = new int[out.size()];\n    for (int i = 0; i < out.size(); i++) res[i] = out.get(i);\n    return res;\n  }\n\n  /** 时刻 t 谁持有全局锁：已本地提交（一阶段）但全局事务还没二阶段结束的那个分支。 */\n  private static int holder(int t) {\n    for (int i = 0; i < commitT.length; i++) if (commitT[i] <= t && t < finishT[i]) return i;\n    return -1;\n  }\n\n  /** 本地已提交视图：commitTick <= t 的最后一个分支的写入值；它若已终审回滚则继续往前退。 */\n  private static int valueAt(int t) {\n    int p = producer(t);\n    if (p < 0) return initialValueHolder;\n    if (outcomeT[p] == 0 || finishT[p] > t) return valueT[p];\n    return valueAt(commitT[p] - 1);              // 回滚后：退回写入之前的样子\n  }\n\n  private static int producer(int t) {\n    int best = -1;\n    for (int i = 0; i < commitT.length; i++) {\n      if (commitT[i] <= t && (best < 0 || commitT[i] > commitT[best])) best = i;\n    }\n    return best;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"AT 就是读已提交\"版：只要本地提交了就能读、并且把回滚分支当成从没写过。\n  // 症状：全局锁窗口这个概念消失，code 只剩 0 —— 线上表现为\"隔离级别没说错啊，\n  // 怎么对账就是差几笔\"，而那几笔正是读到未终审值后又被回滚的。\n  public static int[] atIsolationView(int initialValue, int maxWaitTicks, int[] readTick, int[] readKind,\n                                      int[] txCommitTick, int[] txFinishTick, int[] txValue, int[] txOutcome) {\n    if (readTick == null || readKind == null || txCommitTick == null || txFinishTick == null\n        || txValue == null || txOutcome == null) throw new IllegalArgumentException(\"array length mismatch\");\n    if (readTick.length != readKind.length) throw new IllegalArgumentException(\"array length mismatch\");\n    if (txCommitTick.length != txFinishTick.length || txCommitTick.length != txValue.length\n        || txCommitTick.length != txOutcome.length) throw new IllegalArgumentException(\"array length mismatch\");\n    if (initialValue < 0) throw new IllegalArgumentException(\"value must be non-negative\");\n    for (int i = 0; i < readTick.length; i++) {\n      if (readTick[i] < 0) throw new IllegalArgumentException(\"negative tick\");\n      if (readKind[i] != 0 && readKind[i] != 1) throw new IllegalArgumentException(\"read kind must be 0 or 1\");\n      if (i > 0 && readTick[i] <= readTick[i - 1]) throw new IllegalArgumentException(\"read ticks must increase\");\n    }\n    for (int i = 0; i < txCommitTick.length; i++) {\n      if (txCommitTick[i] < 0 || txFinishTick[i] < 0) throw new IllegalArgumentException(\"negative tick\");\n      if (txValue[i] < 0) throw new IllegalArgumentException(\"value must be non-negative\");\n      if (txOutcome[i] != 0 && txOutcome[i] != 1) throw new IllegalArgumentException(\"outcome must be 0 or 1\");\n      if (txFinishTick[i] <= txCommitTick[i]) throw new IllegalArgumentException(\"finish must be after commit\");\n    }\n    for (int i = 1; i < txCommitTick.length; i++) {\n      boolean disjoint = txCommitTick[i] >= txFinishTick[i - 1] || txCommitTick[i - 1] >= txFinishTick[i];\n      if (!disjoint) throw new IllegalArgumentException(\"overlapping global locks\");\n    }\n    int[] out = new int[readTick.length * 2];\n    for (int r = 0; r < readTick.length; r++) {\n      int t = readTick[r];\n      int v = initialValue;\n      for (int i = 0; i < txCommitTick.length; i++) {\n        if (txCommitTick[i] <= t && txOutcome[i] == 0) v = txValue[i];\n      }\n      out[2 * r] = v;\n      out[2 * r + 1] = 0;\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（交易与分布式事务方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 2（AT 模式的写隔离、全局锁与\"默认全局隔离级别是读未提交\"、仅代理 SELECT FOR UPDATE；素材 §4 出题建议\"简化 TC：本地事务 + 全局锁 + 等锁超时的状态机\"。判定码 3/4 与等锁超时判据是【推】，题面已写成本题设定）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:47.209Z"
+  }
+}

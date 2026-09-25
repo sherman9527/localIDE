@@ -1,0 +1,277 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0018",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "48 小时承诺 × 缺货三态 × 风控打标的徽标：要不要赔与还要不要发是两个字段",
+  "statement": "## 背景\n\n拼多多官网对消费者的承诺列表里有四条：**全场包邮、7 天退换、假一赔十、48 小时发货**，\n配合\"发货超时赔付\"，说明**超卖/缺货在这套体系里是一条有状态机的正式流程**，不是客服个案。\n订单上同时挂着**三条独立的状态线**：\n\n```\nstock_out_handle_status : -1 无缺货处理 / 0 缺货待处理 / 1 缺货已处理\nrisk_control_status     :  0 正常订单 / 1 审核中订单\nconfirm_status          :  0 未成交 / 1 已成交 / 2 已取消\ngroup_status            :  0 拼团中 / 1 已成团 / 2 团失败\n```\n\n列表页要为每行订单渲染**一个**徽标。难点不在画图，在\"三条线互相冲突时听谁的\"。\n\n## 你要实现的入口\n\n```ts\nexport interface OrderRow {\n  stockOutHandleStatus: -1 | 0 | 1;\n  riskControlStatus: 0 | 1;\n  confirmStatus: 0 | 1 | 2;\n  groupStatus: 0 | 1 | 2;\n  paidAtSec: number;             // 支付时刻（epoch 秒）\n  shippedAtSec: number | null;   // null = 还没发货\n  nowSec: number;\n}\n\nexport function fulfillmentBadge(row: OrderRow): {\n  level: 'ok' | 'watch' | 'breach' | 'blocked' | 'muted';\n  label: string;\n  payoutEligible: boolean;\n  inShipQueue: boolean;\n}\n```\n\n## 判定优先级（从上到下，命中即止）\n\n| 顺序 | 条件 | `level` | `label` | `payoutEligible` | `inShipQueue` |\n| --- | --- | --- | --- | --- | --- |\n| 1 | `confirmStatus === 2` | `muted` | `已取消` | `false` | `false` |\n| 2 | `riskControlStatus === 1` | `blocked` | `审核中 · 不进发货队列` | `false` | `false` |\n| 3 | `stockOutHandleStatus === 0` | `breach` | `缺货待处理 · 触发赔付` | `true` | `false` |\n| 4 | `stockOutHandleStatus === 1` | `watch` | `缺货已处理` | `true` | `false` |\n| 5 | `groupStatus === 2` | `watch` | `团失败 · 待回补` | `false` | `false` |\n| 6 | 超时（见下） | `breach` | `未发货已超 48 小时` 或 `已发货但超 48 小时` | `true` | `shippedAtSec === null` |\n| 7 | 未发货且 `elapsed > 42 小时` | `watch` | `临近 48 小时` | `false` | `true` |\n| 8 | 已发货（未超时） | `ok` | `已发货` | `false` | `false` |\n| 9 | 其余（未发货、未超时） | `ok` | `待发货` | `false` | `true` |\n\n`elapsed` = 已发货时用 `shippedAtSec − paidAtSec`，未发货时用 `nowSec − paidAtSec`。\n48 小时 = `172800` 秒，42 小时 = `151200` 秒。**两个阈值都是严格大于**：\n正好 48 小时不算超时（那是\"最后一秒发货也合规\"）。\n\n第 6 行的 `label` 有两种：已发货用 `已发货但超 48 小时`，未发货用 `未发货已超 48 小时`。\n\n## 抛错（`throw new Error(...)`，消息文本必须一致）\n\n- `row` 是 `null` / `undefined` ⇒ `row must be an object`\n- 任一状态列取值不在其枚举内 ⇒ `unknown <字段名>`（字段名按接口里的驼峰名，\n  如 `unknown stockOutHandleStatus`）\n- `paidAtSec` / `nowSec` 不是非负整数 ⇒ `timestamps must be non-negative integers`\n- `shippedAtSec` 既不是 `null` 也不是非负整数 ⇒ `shippedAtSec must be null or a non-negative integer`\n\n校验顺序：先整行，再四个状态列（按 `stockOutHandleStatus`、`riskControlStatus`、\n`confirmStatus`、`groupStatus` 的顺序），再 `paidAtSec`/`nowSec`，最后 `shippedAtSec`。\n\n不许引入第三方依赖。\n\n## 这题真正考的东西\n\n- **`payoutEligible` 与 `inShipQueue` 必须是两个输出**：\n  审核中的单**不能进发货队列**，但素材里\"审核中单不应进入赔付计算\"同样重要 ——\n  两者常常相反，压成一个布尔就必然有一边错。\n- **缺货标记优先于时效**：已经登记缺货的单，不必再算\"还剩几小时\"，\n  否则会出现\"缺货 + 还有 20 小时\"这种自相矛盾的徽标。\n- **团失败不产生赔付**：那是\"钱要退\"而不是\"货没发\"，混进赔付口径会虚增成本。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "fulfillment-sla",
+    "state-machine-merge",
+    "payout-eligibility",
+    "threshold-boundary",
+    "modern:marketplace-rules"
+  ],
+  "cases": [
+    {
+      "name": "基线：付款后 30 小时未发货 ⇒ 待发货，进队列，不赔付",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 0,
+          "groupStatus": 0,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 108000
+        }
+      ],
+      "expected": {
+        "level": "ok",
+        "label": "待发货",
+        "payoutEligible": false,
+        "inShipQueue": true
+      },
+      "visible": true
+    },
+    {
+      "name": "缺货待处理：既判违约又不许进发货队列",
+      "input": [
+        {
+          "stockOutHandleStatus": 0,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 3600
+        }
+      ],
+      "expected": {
+        "level": "breach",
+        "label": "缺货待处理 · 触发赔付",
+        "payoutEligible": true,
+        "inShipQueue": false
+      },
+      "visible": true
+    },
+    {
+      "name": "审核中优先于缺货：赔付与队列都要关停",
+      "input": [
+        {
+          "stockOutHandleStatus": 0,
+          "riskControlStatus": 1,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 3600
+        }
+      ],
+      "expected": {
+        "level": "blocked",
+        "label": "审核中 · 不进发货队列",
+        "payoutEligible": false,
+        "inShipQueue": false
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：正好 48 小时不算超时（严格大于才违约）",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 1000,
+          "shippedAtSec": null,
+          "nowSec": 173800
+        }
+      ],
+      "expected": {
+        "level": "watch",
+        "label": "临近 48 小时",
+        "payoutEligible": false,
+        "inShipQueue": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：48 小时后再多一秒 ⇒ 违约，且已经发货的单也要被追认",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": 172801,
+          "nowSec": 200000
+        }
+      ],
+      "expected": {
+        "level": "breach",
+        "label": "已发货但超 48 小时",
+        "payoutEligible": true,
+        "inShipQueue": false
+      },
+      "visible": true
+    },
+    {
+      "name": "团失败：不赔付（钱要退不是要赔），但要进\"待回补\"视野",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 2,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 3600
+        }
+      ],
+      "expected": {
+        "level": "watch",
+        "label": "团失败 · 待回补",
+        "payoutEligible": false,
+        "inShipQueue": false
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：已取消的单最优先，缺货标记一概不许覆盖它",
+      "input": [
+        {
+          "stockOutHandleStatus": 0,
+          "riskControlStatus": 1,
+          "confirmStatus": 2,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 999999
+        }
+      ],
+      "expected": {
+        "level": "muted",
+        "label": "已取消",
+        "payoutEligible": false,
+        "inShipQueue": false
+      },
+      "visible": true
+    },
+    {
+      "name": "临近超时：42 小时未发货 ⇒ watch，仍在队列里",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 155000
+        }
+      ],
+      "expected": {
+        "level": "watch",
+        "label": "临近 48 小时",
+        "payoutEligible": false,
+        "inShipQueue": true
+      },
+      "visible": true
+    },
+    {
+      "name": "非法：未知的缺货处理状态",
+      "input": [
+        {
+          "stockOutHandleStatus": 7,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": null,
+          "nowSec": 1
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown stockOutHandleStatus"
+    },
+    {
+      "name": "非法：时间戳为负",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": -5,
+          "shippedAtSec": null,
+          "nowSec": 1
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "timestamps must be non-negative integers"
+    },
+    {
+      "name": "非法：发货时间类型不对（既不是 null 也不是非负整数）",
+      "input": [
+        {
+          "stockOutHandleStatus": -1,
+          "riskControlStatus": 0,
+          "confirmStatus": 1,
+          "groupStatus": 1,
+          "paidAtSec": 0,
+          "shippedAtSec": "123",
+          "nowSec": 1
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "shippedAtSec must be null or a non-negative integer"
+    },
+    {
+      "name": "非法：整行是 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "row must be an object"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一条 `if` 链按表里的优先级排下来，加一个\"两个输出\"的返回结构。\n真正的设计决定只有一个：**`payoutEligible`（要不要赔）与 `inShipQueue`（还要不要发）\n是两个独立字段**，因为它们在\"审核中\"这一行上是**反的** ——\n不赔（还不能定性），但也不发（风控压着）。压成一个布尔必然有一边错。\n\n**基线八种输入各打一条规则**：\n`已取消 + 审核中 + 缺货 + 距付款很久`  ⇒ `已取消`（优先级 1：终局状态最优先，\n否则一个已经取消的单还在提示\"缺货待处理\"，客服会去做一件没意义的事）；\n`审核中 + 缺货待处理` ⇒ `blocked`（**赔付也要关停**：素材原话是\n\"审核中的单不能进发货队列，也不能被自动缺货处理误伤\"）；\n`缺货待处理 + 正常 + 已成交成团` ⇒ `breach` 且 `inShipQueue: false`。\n\n**两条边界用例是这道题的判分核心**：\n`elapsed == 172800`（正好 48 小时）⇒ **不是违约**，落进 `watch / 临近 48 小时` ——\n**严格大于**才算超时，因为\"最后一秒发货\"仍然合规；\n`elapsed == 172801` 且**已经发货** ⇒ `已发货但超 48 小时` + `payoutEligible: true` +\n`inShipQueue: false`。\n后一条是\"追认赔付\"：货发出去了不表示超时没发生，消费者承诺是按发货时刻算的。\n只测\"未发货超时\"的用例覆盖不到这条分支，而它恰好是实际赔付最多的一类。\n\n**`elapsed` 的算法在两侧不同**：已发货时用 `shippedAtSec − paidAtSec`（事实），\n未发货时用 `nowSec − paidAtSec`（进行中的等待）。\n把它统一成 `nowSec − paidAtSec` 的实现会让所有历史订单随着时间推移全部变红 ——\n**这是\"徽标随刷新变多\"的经典成因**，也是\"同一个字段名承载两种语义\"的代价。\n\n**为什么 `groupStatus === 2`（团失败）不给赔付资格**：\n团失败的资金处置是**退款**，不是**赔付**。\n把两者混进同一个 `payoutEligible`，赔付成本会被团失败的数量污染 ——\n而素材里\"成团才算成交\"这条业务规则在数据侧最容易被忘的就是这一点。\n`inShipQueue: false` 同样重要：没成团的单压根不该被仓配看见。\n\n**工程延伸（面试追问点）**\n\n1. 阈值为什么写成常量而不是配置？（真实系统必须是配置：大促期承诺会变（活动商品 72 小时），\n   而且阈值要能**按订单成交时刻**取值 —— 事后改配置会把历史单全部重判。\n   所以配置要版本化 + 与订单快照一起存。）\n2. 列表页要排序吗？（要按 `(payoutEligible desc, elapsed desc)`，\n   但**不能**按 `level` 排：`level` 是展示语义，`breach` 里同时有缺货与超时两种责任人，\n   按它排会把两类工单混成一批。）\n3. 这个函数该放在前端还是服务端？（**判定放服务端，展示映射放前端**。\n   理由与可见性那道题一样：赔付是真金白银，不能由浏览器时间决定；\n   而文案与 tone 是 UI 契约，前端持有。朴素解把两条合在一起，\n   用户机器时钟偏了就能改变赔付结果。）\n4. 怎么防\"三条状态线再加一条\"时这里失配？（给这份优先级表写**契约测试**：\n   枚举笛卡尔积全跑一遍，断言\"每个 reason 恰好命中一次\"。\n   新增状态线时它会红，而不是靠 code review。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "badge.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { fulfillmentBadge } from './Solution';\n\n/**\n * 断言由 gen.py 里同一个 badge() 模型生成，不手抄。\n * 契约型用例断言到消息：四条\"都该抛错\"的用例否则会被收敛成同一条代码路径。\n */\ndescribe('fulfillmentBadge：48 小时承诺 × 缺货三态 × 风控打标', () => {\n  it(\"基线：付款后 30 小时未发货 ⇒ 待发货，进队列，不赔付\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 0, \"groupStatus\": 0, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 108000})).toEqual({\"level\": \"ok\", \"label\": \"待发货\", \"payoutEligible\": false, \"inShipQueue\": true});\n  });\n  it(\"缺货待处理：既判违约又不许进发货队列\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": 0, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 3600})).toEqual({\"level\": \"breach\", \"label\": \"缺货待处理 · 触发赔付\", \"payoutEligible\": true, \"inShipQueue\": false});\n  });\n  it(\"审核中优先于缺货：赔付与队列都要关停\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": 0, \"riskControlStatus\": 1, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 3600})).toEqual({\"level\": \"blocked\", \"label\": \"审核中 · 不进发货队列\", \"payoutEligible\": false, \"inShipQueue\": false});\n  });\n  it(\"边界：正好 48 小时不算超时（严格大于才违约）\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 1000, \"shippedAtSec\": null, \"nowSec\": 173800})).toEqual({\"level\": \"watch\", \"label\": \"临近 48 小时\", \"payoutEligible\": false, \"inShipQueue\": true});\n  });\n  it(\"边界：48 小时后再多一秒 ⇒ 违约，且已经发货的单也要被追认\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": 172801, \"nowSec\": 200000})).toEqual({\"level\": \"breach\", \"label\": \"已发货但超 48 小时\", \"payoutEligible\": true, \"inShipQueue\": false});\n  });\n  it(\"团失败：不赔付（钱要退不是要赔），但要进\\\"待回补\\\"视野\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 2, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 3600})).toEqual({\"level\": \"watch\", \"label\": \"团失败 · 待回补\", \"payoutEligible\": false, \"inShipQueue\": false});\n  });\n  it(\"退化：已取消的单最优先，缺货标记一概不许覆盖它\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": 0, \"riskControlStatus\": 1, \"confirmStatus\": 2, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 999999})).toEqual({\"level\": \"muted\", \"label\": \"已取消\", \"payoutEligible\": false, \"inShipQueue\": false});\n  });\n  it(\"临近超时：42 小时未发货 ⇒ watch，仍在队列里\", () => {\n    expect(fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 155000})).toEqual({\"level\": \"watch\", \"label\": \"临近 48 小时\", \"payoutEligible\": false, \"inShipQueue\": true});\n  });\n  it(\"非法：未知的缺货处理状态\", () => {\n    expect(() => fulfillmentBadge({\"stockOutHandleStatus\": 7, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": null, \"nowSec\": 1} as never)).toThrow(\"unknown stockOutHandleStatus\");\n  });\n  it(\"非法：时间戳为负\", () => {\n    expect(() => fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": -5, \"shippedAtSec\": null, \"nowSec\": 1} as never)).toThrow(\"timestamps must be non-negative integers\");\n  });\n  it(\"非法：发货时间类型不对（既不是 null 也不是非负整数）\", () => {\n    expect(() => fulfillmentBadge({\"stockOutHandleStatus\": -1, \"riskControlStatus\": 0, \"confirmStatus\": 1, \"groupStatus\": 1, \"paidAtSec\": 0, \"shippedAtSec\": \"123\", \"nowSec\": 1} as never)).toThrow(\"shippedAtSec must be null or a non-negative integer\");\n  });\n  it(\"非法：整行是 null\", () => {\n    expect(() => fulfillmentBadge(null as never)).toThrow(\"row must be an object\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "export interface OrderRow {\n  stockOutHandleStatus: number;\n  riskControlStatus: number;\n  confirmStatus: number;\n  groupStatus: number;\n  paidAtSec: number;\n  shippedAtSec: number | null;\n  nowSec: number;\n}\n\nexport interface Badge {\n  level: string;\n  label: string;\n  payoutEligible: boolean;\n  inShipQueue: boolean;\n}\n\nconst LIMIT_SEC = 172800;   // 48 小时（题面假设）\nconst SOON_SEC = 151200;    // 剩余 6 小时就提醒\n\nfunction isNonNegInt(v: unknown): boolean {\n  return typeof v === 'number' && Number.isInteger(v) && v >= 0;\n}\n\nexport function fulfillmentBadge(row: OrderRow): Badge {\n  if (row === null || row === undefined) throw new Error('row must be an object');\n  const allowed: Record<string, number[]> = {\n    stockOutHandleStatus: [-1, 0, 1],\n    riskControlStatus: [0, 1],\n    confirmStatus: [0, 1, 2],\n    groupStatus: [0, 1, 2],\n  };\n  for (const name of ['stockOutHandleStatus', 'riskControlStatus', 'confirmStatus', 'groupStatus']) {\n    const v = (row as any)[name];\n    if (!allowed[name].includes(v)) throw new Error('unknown ' + name);\n  }\n  if (!isNonNegInt(row.paidAtSec) || !isNonNegInt(row.nowSec)) {\n    throw new Error('timestamps must be non-negative integers');\n  }\n  if (row.shippedAtSec !== null && !isNonNegInt(row.shippedAtSec)) {\n    throw new Error('shippedAtSec must be null or a non-negative integer');\n  }\n\n  const shipped = row.shippedAtSec;\n  const elapsed = (shipped === null ? row.nowSec : shipped) - row.paidAtSec;\n\n  if (row.confirmStatus === 2) {\n    return { level: 'muted', label: '已取消', payoutEligible: false, inShipQueue: false };\n  }\n  if (row.riskControlStatus === 1) {\n    return { level: 'blocked', label: '审核中 · 不进发货队列',\n             payoutEligible: false, inShipQueue: false };\n  }\n  if (row.stockOutHandleStatus === 0) {\n    return { level: 'breach', label: '缺货待处理 · 触发赔付',\n             payoutEligible: true, inShipQueue: false };\n  }\n  if (row.stockOutHandleStatus === 1) {\n    return { level: 'watch', label: '缺货已处理', payoutEligible: true, inShipQueue: false };\n  }\n  if (row.groupStatus === 2) {\n    return { level: 'watch', label: '团失败 · 待回补', payoutEligible: false, inShipQueue: false };\n  }\n  if (elapsed > LIMIT_SEC) {\n    return { level: 'breach',\n             label: shipped === null ? '未发货已超 48 小时' : '已发货但超 48 小时',\n             payoutEligible: true, inShipQueue: shipped === null };\n  }\n  if (shipped === null && elapsed > SOON_SEC) {\n    return { level: 'watch', label: '临近 48 小时', payoutEligible: false, inShipQueue: true };\n  }\n  if (shipped !== null) {\n    return { level: 'ok', label: '已发货', payoutEligible: false, inShipQueue: false };\n  }\n  return { level: 'ok', label: '待发货', payoutEligible: false, inShipQueue: true };\n}",
+    "naiveSolution": "export function fulfillmentBadge(row: any): any {\n  // \"只看有没有发货\"版：缺货三态与风控打标被忽略，赔付与发货队列被压成同一个布尔。\n  // 症状有两处：审核中的单被送去发货（并计入超时赔付），缺货的单却还在队列里转。\n  const late = (row.shippedAtSec === null ? row.nowSec : row.shippedAtSec) - row.paidAtSec > 43200;\n  const done = row.shippedAtSec !== null;\n  return {\n    level: late ? 'breach' : 'ok',\n    label: done ? '已发货' : '待发货',\n    payoutEligible: late,\n    inShipQueue: !done && !late,\n  };\n}"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "PDD",
+    "role": "前端工程（商家后台 / 履约列表方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 5（`stock_out_handle_status` 三态 + 官网\"48 小时发货\"承诺 + 发货超时赔付）与考点 8「审核中的单不能进发货队列，也不能被自动缺货处理误伤」。note：素材本身未提出前端题，这里落在**已有官方状态枚举**上，不引入前端栈断言",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.114Z"
+  }
+}

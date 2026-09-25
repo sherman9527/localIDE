@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0013",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "遥测看板的降级渲染：把\"不知道\"和\"是 0\"分开，把\"没值\"和\"没到齐\"分开",
+  "statement": "## 背景\n\n一个亿级设备遥测看板。数据是**端上尽力而为上传**的 —— 所以\"这一格的数还没到\"是常态，不是异常。\n凌晨三点看板上出现过一次事故级误读：某个 03:00 的分区只到了 12%，\n组件把缺失渲染成 `0`，值班同学据此判断\"日活暴跌\"并拉了一次 P1。\n\n你要实现这个指标卡组件 `MetricCard`。它的职责不是好看，而是**绝不把\"不知道\"画成\"是 0\"**。\n\n## 契约（必须完全一致，判题按这个调用你）\n\n```tsx\nexport interface MetricCardProps {\n  label: string;\n  value: number | null;   // null = 这一格的数还没到\n  complete: boolean;      // 该时间桶的数据是否已完整（服务端 readiness 判定结果）\n  readiness: number;      // 0..1 分区到达率\n  updatedAt: number;      // ms epoch，数据最后更新时间\n  now: number;            // ms epoch，**由调用方注入**的当前时间\n  staleAfterMs: number;   // 超过这个时长没更新就算过期\n}\n\nexport function MetricCard(props: MetricCardProps): JSX.Element;\n```\n\n## 渲染规则（逐条都是判分点）\n\n1. 根元素：`<div data-testid=\"metric-card\" data-partial=\"...\" data-stale=\"...\">`，\n   两个 data 属性的值必须是字符串 `\"true\"` / `\"false\"`（不是缺省、不是 `undefined`）。\n2. `data-partial` **只由 `complete` 决定**：`complete === false` ⇒ `\"true\"`。\n   它和\"这一格有没有值\"是两件事 —— 有值的分区也可能只到了 12%。\n3. 数值位置：`<span data-testid=\"metric-value\">`，\n   `value === null` 时渲染文本 `未到`；否则渲染 `String(value)`。\n4. `complete === false` 时额外渲染 `<span data-testid=\"metric-readiness\">`，\n   内容是 `${Math.round(readiness * 100)}%`；`complete === true` 时**不得**渲染它。\n5. `data-stale`：`now - updatedAt > staleAfterMs` ⇒ `\"true\"`，否则 `\"false\"`。\n6. **组件不许读系统时钟**（不许 `Date.now()`、不许 `new Date()`）—— 时间只从 props 来。\n   判题会用同一份 props 换 `now` 重渲染，读系统时钟的实现会答错。\n7. 不许引入任何第三方依赖，只能用 React 与 JSX。\n\n## 这题真正考的东西\n\n- `value || '未到'` 是最顺手的写法，它把**合法读数 0** 变成了\"未到\"。\n  日活、错误数、延迟分位这些指标 0 是有意义的值，不是缺失。要用 `value === null` 判。\n- 用 `value == null` 推 `data-partial` 是第二个错：一个已经完整（`complete=true`）但恰好\n  值为 null 的格子会被标成 partial；反过来一个只到了 12% 的分区（有值）会被标成完整 ——\n  **后者才是那次 P1 的根因**：看板显示\"完整\"，人就按真值决策了。\n- 新鲜度判定读 `Date.now()` 的实现，在测试里可能碰巧对，但线上会在\n  时钟回拨、SSR 水合、以及\"补数据风暴时 `updatedAt` 比 `now` 还新\"的场景下闪断误报。\n\n## 交付\n\n写一个 `Solution.tsx` 导出 `MetricCard`。判题会用上面 6 条规则逐条断言。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "data-quality",
+    "null-vs-zero",
+    "rendering-contract",
+    "injected-clock",
+    "modern:observability-ui"
+  ],
+  "cases": [
+    {
+      "name": "缺失格渲染\"未到\"而不是 0",
+      "input": {
+        "value": null,
+        "complete": true
+      },
+      "expected": "metric-value 文本为 '未到'",
+      "visible": true
+    },
+    {
+      "name": "零值边界：0 是合法读数，不许当成缺失",
+      "input": {
+        "value": 0,
+        "complete": true
+      },
+      "expected": "metric-value 文本为 '0'（不是 '未到'）",
+      "visible": true,
+      "note": "这条专打 `value || 未到`"
+    },
+    {
+      "name": "未完整时标 partial 并给出到达率",
+      "input": {
+        "value": 7,
+        "complete": false,
+        "readiness": 0.12
+      },
+      "expected": "data-partial='true' 且 metric-readiness 文本为 '12%'",
+      "visible": true,
+      "note": "有值但没到齐 —— 正是那次 P1 的形状"
+    },
+    {
+      "name": "完整时不标 partial 也不显示百分比",
+      "input": {
+        "value": 7,
+        "complete": true
+      },
+      "expected": "data-partial='false' 且 metric-readiness 不存在",
+      "visible": true
+    },
+    {
+      "name": "过期判定用注入的 now，不读系统时钟",
+      "input": {
+        "now": "updatedAt+60001 → updatedAt+1000",
+        "staleAfterMs": 60000
+      },
+      "expected": "data-stale 先 'true' 后 'false'（同一份 props 只换 now）",
+      "visible": true,
+      "note": "读 Date.now() 的实现两次结果相同，必挂"
+    },
+    {
+      "name": "迟到数据补齐后同一组件从 partial 收敛为完整",
+      "input": {
+        "第一次": "value=null, complete=false",
+        "第二次": "value=42, complete=true"
+      },
+      "expected": "partial true→false、值 '未到'→'42'、百分比徽标消失",
+      "visible": true
+    }
+  ],
+  "answer": "## 参考实现\n\n见 `Solution.tsx`：`partial = !complete`、`stale = now - updatedAt > staleAfterMs`、\n数值用 `value === null` 三分支，`data-*` 一律输出 `'true' / 'false'` 字符串。\n\n**三个判分点对应三种真实故障**\n\n1. `value || '未到'`（用例 2 打它）：JS 的 falsy 把 `0`、`''`、`NaN` 全吞掉。\n   指标卡上 0 是合法读数 —— 错误数为 0、延迟分位为 0（缓存全命中）都会发生。\n   正确判据是 `value === null`，即\"上游明确说了这一格没有值\"。\n2. 用 `value == null` 推 `data-partial`（用例 3 打它）：把\"完整性\"和\"有没有值\"混成一个信号。\n   真实事故里那个 03:00 分区**是有值的**（到了 12% 的设备），所以按这个错法它会显示\"完整\"，\n   于是人拿它当真值做决策 —— 这比显示\"未到\"更危险，因为看板上再也没有任何地方说\"这是残缺数据\"。\n3. 读 `Date.now()`（用例 5 打它）：判题用同一份 props 只换 `now` 重渲染，\n   读系统时钟的实现两次都会得到同一个答案。\n   线上更贵：SSR 水合时服务端与客户端时间不同 → 首屏闪烁；\n   补数据风暴时 `updatedAt > now` → 差值为负，`> staleAfterMs` 永远 false，过期数据被当真值。\n\n**为什么 `data-*` 要输出字符串而不是布尔**\n\nReact 会把 `data-foo={false}` 渲染成 `data-foo=\"false\"`，看起来没事；\n但 `data-foo={undefined}` 会**整个属性都不出现**，于是\"没判定\"和\"判定为 false\"在 DOM 上不可区分 ——\n自动化断言和 CSS 选择器都会踩。判题要求的是可区分，所以实现里显式写三元。\n\n**工程延伸（面试追问点）**\n\n1. 缺失到底该显示什么？（`未到` 只说\"没有\"，不说\"什么时候会有\"。生产看板通常还要给\n   承诺时间（SLA）与\"当前到齐比例\"，并把这三件事一起进一个 `data-quality` 语义，\n   这样下游截图/导出也不会丢掉质量信息。）\n2. 为什么 `now` 要注入而不是组件内部取？（可测性只是一半；另一半是**同一个页面上所有卡片\n   必须用同一个\"现在\"**，否则不同组件渲染时刻不同，会造成\"过期时间\"互相矛盾，\n   而且刷新时整页会先后跳变。）\n3. 迟到数据怎么收敛？（服务端把 readiness 作为数据的一部分下发，组件纯渲染；\n   绝不在前端用\"上次见过多少\"去推断完整性 —— 那会把一次抖动固化成状态。）\n4. 聚合层级怎么办？（小时不完整但天完整是常态。要在**每个粒度各自**标 partial，\n   而不是让天级覆盖小时级；否则用户下钻时看到两套矛盾的数。）\n5. 这类\"缺失渲染成 0\"的 bug 为什么反复出现？（因为 `0` 和 `null` 在多数图表库里\n   走同一条数值轴。真正的修法是在数据层就把\"值\"与\"是否有值\"分开建模（如 `T | Missing`），\n   而不是在每个组件里记得判 —— 本题是这条原则的最小落地。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "metric-card.test.tsx",
+        "content": "import { render, screen } from '@testing-library/react';\nimport { describe, expect, it } from 'vitest';\nimport { MetricCard } from './Solution';\n\nconst base = {\n  label: '日活设备',\n  value: 42 as number | null,\n  complete: true,\n  readiness: 1,\n  updatedAt: 1_000_000,\n  now: 1_000_000,\n  staleAfterMs: 60_000,\n};\n\nconst card = () => screen.getByTestId('metric-card');\nconst valueText = () => screen.getByTestId('metric-value').textContent;\n\ndescribe('MetricCard：把\"不知道\"和\"是 0\"分开', () => {\n  it('缺失格渲染\"未到\"而不是 0', () => {\n    render(<MetricCard {...base} value={null} />);\n    expect(valueText()).toBe('未到');\n  });\n\n  it('零值边界：0 是合法读数，不许当成缺失', () => {\n    render(<MetricCard {...base} value={0} />);\n    expect(valueText()).toBe('0');\n  });\n\n  it('未完整时标 partial 并给出到达率', () => {\n    render(<MetricCard {...base} value={7} complete={false} readiness={0.12} />);\n    expect(card().getAttribute('data-partial')).toBe('true');\n    expect(screen.getByTestId('metric-readiness').textContent).toBe('12%');\n  });\n\n  it('完整时不标 partial 也不显示百分比', () => {\n    render(<MetricCard {...base} value={7} complete readiness={1} />);\n    expect(card().getAttribute('data-partial')).toBe('false');\n    expect(screen.queryByTestId('metric-readiness')).toBeNull();\n  });\n\n  it('过期判定用注入的 now，不读系统时钟', () => {\n    const { rerender } = render(<MetricCard {...base} now={base.updatedAt + 60_001} />);\n    expect(card().getAttribute('data-stale')).toBe('true');\n    rerender(<MetricCard {...base} now={base.updatedAt + 1_000} />);\n    expect(card().getAttribute('data-stale')).toBe('false');\n  });\n\n  it('迟到数据补齐后同一组件从 partial 收敛为完整', () => {\n    const { rerender } = render(<MetricCard {...base} value={null} complete={false} readiness={0.12} />);\n    expect(card().getAttribute('data-partial')).toBe('true');\n    expect(valueText()).toBe('未到');\n    rerender(<MetricCard {...base} value={42} complete readiness={1} />);\n    expect(card().getAttribute('data-partial')).toBe('false');\n    expect(valueText()).toBe('42');\n    expect(screen.queryByTestId('metric-readiness')).toBeNull();\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "interface MetricCardProps {\n  label: string;\n  value: number | null;\n  complete: boolean;\n  readiness: number;\n  updatedAt: number;\n  now: number;\n  staleAfterMs: number;\n}\n\nexport function MetricCard(props: MetricCardProps) {\n  const { label, value, complete, readiness, updatedAt, now, staleAfterMs } = props;\n  // partial 只看\"这一桶完整吗\"，不看\"这一格有没有值\" —— 两者混用就是那次 P1 的根因\n  const partial = !complete;\n  // 时间一律来自 props：读 Date.now() 的实现会在时钟回拨/水合/补数风暴里闪断误报\n  const stale = now - updatedAt > staleAfterMs;\n\n  return (\n    <div data-testid=\"metric-card\" data-partial={partial ? 'true' : 'false'} data-stale={stale ? 'true' : 'false'}>\n      <span className=\"metric-label\">{label}</span>\n      <span data-testid=\"metric-value\">{value === null ? '未到' : String(value)}</span>\n      {partial ? <span data-testid=\"metric-readiness\">{`${Math.round(readiness * 100)}%`}</span> : null}\n      {stale ? <span className=\"metric-stale-note\">最后更新于 {updatedAt}，可能已过期</span> : null}\n    </div>\n  );\n}",
+    "naiveSolution": "function MetricCard(props: any) {\n  // 生产事故版：把\"没值\"当\"没到齐\"，把 0 当缺失\n  const missing = props.value == null;\n  return (\n    <div data-testid=\"metric-card\" data-partial={missing ? 'true' : 'false'}>\n      <span className=\"metric-label\">{props.label}</span>\n      <span data-testid=\"metric-value\">{props.value || '未到'}</span>\n      {missing ? <span data-testid=\"metric-readiness\">{`${Math.round((props.readiness ?? 0) * 100)}%`}</span> : null}\n    </div>\n  );\n}\n\nexport { MetricCard };"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 前端可观测性 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/apple-telemetry-pipelines.md 草稿 C（03:00 分区只到 12% 被当真值）；手册 §4 只讲管道侧，未做成前端可判分契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T11:21:43.327Z"
+  }
+}

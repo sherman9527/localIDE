@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0009",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实现行级错误边界与部分失败降级",
+  "statement": "## 场景\n\n财务对账页一张 800 行的工单表，每行要把原始数据渲染成明细（金额格式化、时区换算、附件缩略图）。线上最刺眼的一类工单：**一行的脏数据把整张表打成了白屏**（表级边界接管），运营只能刷新碰运气。真实根因往往是\"行级降级没做\"：坏数据只占 1/800，却牺牲了另外 799 行。同时还有两类噪声：① 用户切走导致的 AbortError 被当成故障上报，错误率虚高；② 同一行每次重渲染都上报一次，一条事故刷出 40 条告警。\n\n## 契约（提交写在 `Solution.tsx`）\n\n```tsx\nexport interface Ticket { id: string; raw: unknown }\n\nexport interface TicketTableProps {\n  tickets: Ticket[] | null | undefined;\n  renderDetail: (ticket: Ticket) => ReactNode;   // 脏数据时会抛错\n  onRowError?: (ticketId: string, error: unknown) => void;\n}\n\nexport function TicketTable(props: TicketTableProps): JSX.Element;\n```\n\nDOM 契约（测试按 testid 断言）：\n\n- 正常行：`<span data-testid=\"cell-<id>\">{renderDetail(ticket)}</span>`；\n- 失败行：`data-testid=\"row-error-<id>\"`，文案 `本行暂不可用`；\n- 取消行：`data-testid=\"row-cancelled-<id>\"`，文案 `本行已取消`；\n- 空数组：`data-testid=\"empty\"`，文案 `暂无数据`；\n- 汇总：`data-testid=\"summary\"`，文案固定为 共 + 总行数 + 行（例如 3 行数据就是 `共 3 行`）。\n\n## 硬性要求\n\n1. **行级边界**：某行 `renderDetail` 抛错只替换该行，其余行的 `cell-*` 节点必须还在（外层不得整体降级）。两个坑都会让你接不住错：① `<Boundary>{renderDetail(ticket)}</Boundary>` —— children 在**父组件**里就求值了，抛错点在边界之外；② 在边界自己的 `render()` 里调用那段逻辑 —— 边界接不住**自己**抛的错。正确做法是把脏数据的渲染放进边界的一个**后代组件**（render prop 交给后代执行）。\n2. **取消不是错误**：抛出的对象 `name === 'AbortError'` 时渲染 `row-cancelled-<id>`，并且**不调用 `onRowError`**。\n3. **上报去重**：同一个行边界生命周期内，同一行只上报一次（用例连渲染三轮，`onRowError` 只能被调用一次）。\n4. **原样上报**：`onRowError(id, error)` 的第二个参数必须是抛出的那个值本身（业务码可能挂在任意字段上，不许 `new Error(String(e))` 重包）。\n5. **契约破坏要抛**：`tickets` 不是数组时，组件自身抛错让外层边界接管（测试提供了 `TableBoundary`），不许\"看起来像空表\"骗过用户；空数组则渲染 `empty` 空态，两者语义必须分开。\n6. 恢复路径：外层边界 `reset()` 后再次渲染合法数据时必须正常工作（边界状态属于边界，别把错误缓存进模块作用域）。\n\n## 不许做什么\n\n- 不许用 try/catch 包住 `renderDetail` 后返回 `null`：吞掉错误就没有上报与降级文案，也无法区分取消；\n- 不许只做表级边界（这正是本题要消灭的写法）；\n- 不许在渲染期调用 `onRowError`（会随重渲染重复上报）；上报要放在 `componentDidCatch`（提交后阶段）；\n- 不许引入 react-error-boundary 等第三方库（沙箱不 `npm install`）。\n\n## 判分\n\n6 个用例：空态、单行降级、重复渲染只报一次、取消不算错误、契约破坏抛给边界且可恢复、错误对象原样上报。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "error-boundary",
+    "partial-failure",
+    "observability",
+    "large-list",
+    "cancellation"
+  ],
+  "cases": [
+    {
+      "name": "无数据时渲染空态且不抛错",
+      "input": {
+        "tickets": []
+      },
+      "expected": "empty='暂无数据'，外层边界未接管（onCatch 调用 0 次）"
+    },
+    {
+      "name": "单行脏数据只降级该行",
+      "input": {
+        "tickets": 3,
+        "throwingRow": "t2"
+      },
+      "expected": "cell-t1='退款'、cell-t3='发票'、row-error-t2='本行暂不可用'、cell-* 节点数 2、summary='共 3 行'、外层边界未接管",
+      "note": "表级边界的实现会让整表消失"
+    },
+    {
+      "name": "重复渲染同一坏行只上报一次",
+      "input": {
+        "renders": 3
+      },
+      "expected": "onRowError 调用 1 次且首参为 t1"
+    },
+    {
+      "name": "取消分类不算错误且不上报监控",
+      "input": {
+        "throw": "AbortError"
+      },
+      "expected": "row-cancelled-t3='本行已取消'，onRowError 调用 0 次，其它行正常"
+    },
+    {
+      "name": "契约破坏整体抛给外层边界且 reset 后可恢复",
+      "input": {
+        "tickets": null,
+        "thenReset": true,
+        "thenValid": true
+      },
+      "expected": "先 table-failed（onCatch ≥1 次）；reset 后仍 table-failed（坏数据不换 key 不会自愈）；换合法数据并再 reset 后 cell-t2 正常、summary='共 3 行'"
+    },
+    {
+      "name": "坏行的错误对象原样交给上报回调",
+      "input": {
+        "throw": "{status:422,...}"
+      },
+      "expected": "onRowError 第二参 toBe 抛出的那个对象本身"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "ticket-table.test.tsx",
+        "content": "import { fireEvent, render, screen } from '@testing-library/react';\nimport { Component } from 'react';\nimport { expect, it, vi } from 'vitest';\nimport { TicketTable } from './Solution';\n\nclass TableBoundary extends Component<{ children: React.ReactNode; onCatch: (e: unknown) => void }, { err: unknown }> {\n  state = { err: null as unknown };\n  static getDerivedStateFromError(error: unknown) {\n    return { err: error };\n  }\n  componentDidCatch(error: unknown) {\n    this.props.onCatch(error);\n  }\n  render() {\n    if (this.state.err !== null) {\n      return <button data-testid=\"reset\" onClick={() => this.setState({ err: null })}>table-failed</button>;\n    }\n    return this.props.children;\n  }\n}\n\nconst TICKETS = [\n  { id: 't1', raw: { title: '退款', amount: 12 } },\n  { id: 't2', raw: { title: '改签', amount: 30 } },\n  { id: 't3', raw: { title: '发票', amount: 7 } },\n];\n\nfunction abortError() {\n  const e = new Error('signal aborted');\n  e.name = 'AbortError';\n  return e;\n}\n\nit('无数据时渲染空态且不抛错', () => {\n  const onCatch = vi.fn();\n  render(\n    <TableBoundary onCatch={onCatch}>\n      <TicketTable tickets={[]} renderDetail={(row) => row.raw.title} />\n    </TableBoundary>,\n  );\n  expect(screen.getByTestId('empty').textContent).toBe('暂无数据');\n  expect(onCatch).not.toHaveBeenCalled();\n});\n\nit('单行脏数据只降级该行', () => {\n  const onCatch = vi.fn();\n  const onRowError = vi.fn();\n  render(\n    <TableBoundary onCatch={onCatch}>\n      <TicketTable\n        tickets={TICKETS}\n        onRowError={onRowError}\n        renderDetail={(row) => {\n          if (row.id === 't2') throw new Error('bad payload');\n          return row.raw.title;\n        }}\n      />\n    </TableBoundary>,\n  );\n  expect(screen.getByTestId('cell-t1').textContent).toBe('退款');\n  expect(screen.getByTestId('cell-t3').textContent).toBe('发票');\n  expect(screen.getByTestId('row-error-t2').textContent).toBe('本行暂不可用');\n  expect(document.querySelectorAll('[data-testid^=\"cell-\"]').length).toBe(2);\n  expect(onCatch).not.toHaveBeenCalled();\n  expect(screen.getByTestId('summary').textContent).toBe('共 3 行');\n});\n\nit('重复渲染同一坏行只上报一次', () => {\n  const onRowError = vi.fn();\n  const boom = () => {\n    throw new Error('boom');\n  };\n  const { rerender } = render(\n    <TicketTable tickets={TICKETS.slice(0, 1)} onRowError={onRowError} renderDetail={boom} />,\n  );\n  rerender(<TicketTable tickets={TICKETS.slice(0, 1)} onRowError={onRowError} renderDetail={boom} />);\n  rerender(<TicketTable tickets={TICKETS.slice(0, 1)} onRowError={onRowError} renderDetail={boom} />);\n  expect(onRowError.mock.calls.length).toBe(1);\n  expect(onRowError.mock.calls[0][0]).toBe('t1');\n});\n\nit('取消分类不算错误且不上报监控', () => {\n  const onRowError = vi.fn();\n  render(\n    <TicketTable\n      tickets={TICKETS}\n      onRowError={onRowError}\n      renderDetail={(row) => {\n        if (row.id === 't3') throw abortError();\n        return row.raw.title;\n      }}\n    />,\n  );\n  expect(screen.getByTestId('row-cancelled-t3').textContent).toBe('本行已取消');\n  expect(onRowError).not.toHaveBeenCalled();\n  expect(screen.getByTestId('cell-t1').textContent).toBe('退款');\n});\n\nit('契约破坏整体抛给外层边界且 reset 后可恢复', () => {\n  const onCatch = vi.fn();\n  const view = render(\n    <TableBoundary onCatch={onCatch}>\n      <TicketTable tickets={null} renderDetail={(row) => row.raw.title} />\n    </TableBoundary>,\n  );\n  expect(screen.getByTestId('reset').textContent).toBe('table-failed');\n  expect(onCatch.mock.calls.length).toBeGreaterThanOrEqual(1);\n  fireEvent.click(screen.getByTestId('reset'));\n  expect(screen.getByTestId('reset').textContent).toBe('table-failed');\n  view.rerender(\n    <TableBoundary onCatch={onCatch}>\n      <TicketTable tickets={TICKETS} renderDetail={(row) => row.raw.title} />\n    </TableBoundary>,\n  );\n  fireEvent.click(screen.getByTestId('reset'));\n  expect(screen.getByTestId('cell-t2').textContent).toBe('改签');\n  expect(screen.getByTestId('summary').textContent).toBe('共 3 行');\n});\n\nit('坏行的错误对象原样交给上报回调', () => {\n  const onRowError = vi.fn();\n  const marker = { status: 422, message: 'amount too large' };\n  render(\n    <TicketTable\n      tickets={TICKETS}\n      onRowError={onRowError}\n      renderDetail={(row) => {\n        if (row.id === 't1') throw marker;\n        return row.raw.title;\n      }}\n    />,\n  );\n  expect(onRowError.mock.calls.length).toBe(1);\n  expect(onRowError.mock.calls[0][1]).toBe(marker);\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { Component } from 'react';\nimport type { ErrorInfo, ReactNode } from 'react';\n\nexport interface Ticket {\n  id: string;\n  raw: unknown;\n}\n\nexport interface TicketTableProps {\n  tickets: Ticket[] | null | undefined;\n  renderDetail: (ticket: Ticket) => ReactNode;\n  onRowError?: (ticketId: string, error: unknown) => void;\n}\n\n/** 取消不是故障：名字为 AbortError 的抛出走独立 UI，且不进监控上报。 */\nfunction isCancellation(error: unknown): boolean {\n  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';\n}\n\ninterface RowBoundaryState {\n  failed: boolean;\n  cancelled: boolean;\n}\n\n/**\n * 边界接不住\"自己 render 里\"抛的错，只接得住后代组件的。所以脏数据的渲染要放进\n * 一个真正的后代（RowContent），而不是在父级求值好当 children 传进来。\n */\nfunction RowContent({ render }: { render: () => ReactNode }) {\n  return <>{render()}</>;\n}\n\n/**\n * 每行一个边界：只降级坏行。上报去重靠 reported 标记，避免\"每次重渲染都报一次\"刷爆监控。\n */\nclass RowBoundary extends Component<{ ticketId: string; render: () => ReactNode; onRowError?: (id: string, error: unknown) => void }, RowBoundaryState> {\n  state: RowBoundaryState = { failed: false, cancelled: false };\n  private reported = false;\n\n  static getDerivedStateFromError(error: unknown): RowBoundaryState {\n    return { failed: true, cancelled: isCancellation(error) };\n  }\n\n  componentDidCatch(error: unknown, _info: ErrorInfo) {\n    if (this.reported || isCancellation(error)) return;\n    this.reported = true;\n    this.props.onRowError?.(this.props.ticketId, error);\n  }\n\n  render() {\n    if (this.state.cancelled) return <span data-testid={'row-cancelled-' + this.props.ticketId}>本行已取消</span>;\n    if (this.state.failed) return <span data-testid={'row-error-' + this.props.ticketId}>本行暂不可用</span>;\n    return (\n      <span data-testid={'cell-' + this.props.ticketId}>\n        <RowContent render={this.props.render} />\n      </span>\n    );\n  }\n}\n\nexport function TicketTable({ tickets, renderDetail, onRowError }: TicketTableProps): ReactNode {\n  // 契约破坏（不是数组）必须显式抛给外层边界，不能渲染半张表骗过用户\n  if (!Array.isArray(tickets)) {\n    throw new Error('TicketTable 契约破坏：tickets 必须是数组');\n  }\n  if (tickets.length === 0) return <span data-testid=\"empty\">暂无数据</span>;\n  return (\n    <table>\n      <tbody>\n        {tickets.map((ticket) => (\n          <tr key={ticket.id}>\n            <td>\n              <RowBoundary ticketId={ticket.id} onRowError={onRowError} render={() => renderDetail(ticket)} />\n            </td>\n          </tr>\n        ))}\n      </tbody>\n      <tfoot>\n        <tr>\n          <td>\n            <span data-testid=\"summary\">{'共 ' + tickets.length + ' 行'}</span>\n          </td>\n        </tr>\n      </tfoot>\n    </table>\n  );\n}\n",
+    "naiveSolution": "import { Component } from 'react';\n\nclass WholeTableBoundary extends Component {\n  state = { err: false };\n  static getDerivedStateFromError() {\n    return { err: true };\n  }\n  componentDidCatch(error, _info) {\n    if (this.props.onRowError) this.props.onRowError('table', error);\n  }\n  render() {\n    if (this.state.err) return <span data-testid=\"row-error-table\">本行暂不可用</span>;\n    return this.props.children;\n  }\n}\n\nexport function TicketTable({ tickets, renderDetail, onRowError }) {\n  if (!Array.isArray(tickets)) throw new Error('契约破坏');\n  return (\n    <WholeTableBoundary onRowError={onRowError}>\n      <table>\n        <tbody>\n          {(tickets || []).map((ticket) => (\n            <tr key={ticket.id}>\n              <td>\n                <span data-testid={'cell-' + ticket.id}>{renderDetail(ticket)}</span>\n              </td>\n            </tr>\n          ))}\n        </tbody>\n      </table>\n    </WholeTableBoundary>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- 错误边界是**提交后**阶段：`getDerivedStateFromError` 只算派生 UI（必须是纯函数），上报放 `componentDidCatch`；两者都要，因为 render 阶段可能重放多次。\n- 边界粒度 = 故障半径。行级边界把\"1/800 脏数据\"变成 1 行降级；表级边界把整页变成白屏。**部分失败要建模成数据**（Result/每行状态），边界只是兜底。\n- 取消、业务可重试失败、契约破坏是三类不同的事：AbortError 不该进错误率分子；4xx 契约错误该告警而不是重试；只有\"这一行的数据坏了\"才降级这一行。\n- 上报去重是工程细节但常考：边界实例上的 `reported` 标记，避免同一事故被重渲染放大成几十条告警（React 19 的重复渲染 + StrictMode 会立刻暴露这类写法）。\n- 契约破坏要\"响亮地失败\"：`tickets` 不是数组就抛，让外层边界接管；返回空数组等于把故障伪装成\"今天没数据\"，是更难查的事故。\n- 恢复语义：边界自己的 `reset` 只是重放同一份 props，坏数据仍在就会再次抛错——真正的恢复要么换 key 重挂，要么由上层换数据；这题把它写成用例（reset 后仍是 table-failed）就是为了让候选人说清这点。\n\n面试追问：\n1. 为什么 `renderDetail` 抛错能被行级边界接住，但事件回调里抛错不行？（后者不在渲染期，需要 window.onerror / unhandledrejection 兜底）\n2. SSR/水合阶段坏数据抛错，恢复路径和这里有什么不同？（hydration 错误要整棵子树重挂，边界 reset 不换 key 修不好）\n3. 800 行都套边界会不会太贵？（边界是 fiber，成本远低于订阅；真要控成本就在虚拟窗口内挂边界）\n4. 你想把\"哪些行降级了\"上报给后端，字段怎么设计？（行 id + 渲染阶段标签 + 组件栈 + lane，才能复现）",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/data-fetching-and-errors.md#14-错误边界与可恢复性",
+    "addedBy": "content-agent-fe"
+  }
+}

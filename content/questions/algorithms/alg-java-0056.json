@@ -1,0 +1,344 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0056",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "Seata TCC 分支生命周期：空回滚要落标记、悬挂的 Try 要拒绝、二阶段必须幂等",
+  "statement": "## 背景\n\nSeata 官方 TCC 模式文档给的是**结构要求**【源 S35】：全局事务整体是两阶段提交模型，\n每个分支事务必须具备\"**一阶段 prepare 行为 + 二阶段 commit / rollback 行为**\"，\n也就是把\"资源预留 / 取消预留\"写进业务接口。\n\n而真正在面试里区分高下的是**二阶段消息不可靠时会发生什么**。\nTC 到分支的 Confirm/Cancel 是网络调用，会重试、会重排、会在\"一阶段还没到\"时先到 ——\n于是有三个经典坑。素材按【推】处理它们（§7 第 5 条说明 Seata 的部署与控制台正文\n在本环境取不到可引用内容），本题把它们写成**显式契约**：\n\n| 坑 | 现象 | 必须的防护 |\n| --- | --- | --- |\n| **空回滚** | Cancel 先于 Try 到达（Try 丢包/重排），业务 cancel 面对的是\"从没预留的资源\" | 不许执行业务 cancel，但要**留下\"已回滚\"的标记** |\n| **悬挂** | 空回滚的标记没落，随后 Try 到达 ⇒ 资源被预留，而全局事务早已终止 | 见到\"已回滚\"标记的 Try **必须拒绝** |\n| **重复提交** | TC 没收到 Ack ⇒ 重试下发同一个 Confirm | 幂等：业务方法**只执行一次** |\n\n## 任务\n\n实现 `public static int[] tccBranchLifecycle(int[] xid, int[] bid, int[] action)`，\n按**到达顺序**处理这些事件（三个数组等长，第 i 条事件属于分支 `(xid[i], bid[i])`，\n`action`：`0` = Try/prepare、`1` = Confirm、`2` = Cancel/rollback），返回十个计数：\n\n```\n{tryAccepted, confirmAccepted, cancelAccepted, emptyRollback, suspendedTry,\n orphanConfirm, cancelAfterConfirm, confirmAfterCancel, idempotentReplay, businessCalls}\n```\n\n## 分支状态机与判据（**逐条实现**）\n\n每个分支的私有状态：`NONE → TRIED → CONFIRMED | CANCELLED`，\n外加一个 `EMPTY`（空回滚标记：Cancel 到过但从没有 Try）。\n\n| 当前状态 | 事件 | 结果 |\n| --- | --- | --- |\n| `NONE` | Try | → `TRIED`；`tryAccepted++`；`businessCalls++` |\n| `TRIED` | Confirm | → `CONFIRMED`；`confirmAccepted++`；`businessCalls++` |\n| `TRIED` | Cancel | → `CANCELLED`；`cancelAccepted++`；`businessCalls++` |\n| `NONE` | Cancel | → `EMPTY`；`cancelAccepted++`；**`emptyRollback++`**；**`businessCalls` 不加**（这就是空回滚：什么都不用做，但标记必须落） |\n| `NONE` | Confirm | `orphanConfirm++`，状态不变（**不许凭空创建一个已提交的分支**） |\n| `EMPTY` / `CANCELLED` | Try | `suspendedTry++`，状态**保持**（拒掉悬挂的 Try；若把状态改成 `TRIED`，下一轮 Cancel 会真的去释放一个不存在的预留） |\n| `EMPTY` / `CANCELLED` | Confirm | `confirmAfterCancel++`（已终止的分支不能再提交） |\n| `CONFIRMED` | Cancel | `cancelAfterConfirm++`（已终审不能反向补偿；只能走对账/数据订正） |\n| 任一状态 | 与状态相符的**重复**事件 | `idempotentReplay++`，**不重复执行业务方法** |\n\n三条不变量，答题时最好自己写出来：\n\n1. `businessCalls == tryAccepted + confirmAccepted + cancelAccepted − emptyRollback`\n   （空回滚那次 cancel 不计业务调用）；\n2. `EMPTY` 是**吸收态**：它只会被 Try 撞出 `suspendedTry`，永远不会变成 `TRIED`。\n   把它写成可覆盖的状态就是悬挂的成因；\n3. `CONFIRMED` 与 `CANCELLED` 都是终态 —— 本题**不实现**\"补偿的补偿\"，\n   因为它们出现就意味着必须有人去改数据（对账订正），而不是让 TC 再试一次。\n\n## 参数校验（抛 `IllegalArgumentException`，消息一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| 任一数组为 null 或三者长度不等 | `array length mismatch` |\n| `xid[i] < 0` 或 `bid[i] < 0` | `negative transaction id` |\n| `action[i]` 不是 0/1/2 | `unknown branch action` |\n\n**`action` 的非法值必须炸而不是忽略**：\"静默丢弃一条分支指令\"会让全局事务永远停在\n\"有一个分支不明结局\"的状态，而那正是 TC 最贵的故障。\n\n## 这题真正考的东西\n\n素材 §2 追问 6 的原话是：\"回查里你应该查什么？（只能查**本地事务状态表**，\n不能'再执行一次本地事务'；答'重跑'直接判负）\"。这题是同一件事的 TCC 版：\n**二阶段指令是可重放、可乱序的**，所以分支必须把\"我处理到哪一步\"作为**数据**记下来，\n而不是作为内存里的调用栈。空回滚标记、终态、幂等，都是这一条的具体形态。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "seata-tcc",
+    "empty-rollback",
+    "suspension-guard",
+    "idempotency",
+    "two-phase-commit",
+    "modern:distributed-transaction"
+  ],
+  "cases": [
+    {
+      "name": "基线：正常两阶段 try -> confirm，业务方法各执行一次",
+      "input": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          0,
+          1
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "空回滚：Cancel 先到（网络重排），只落标记、业务 cancel 一次都不许调",
+      "input": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          0
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "第二个事件是迟到的 Try ⇒ 悬挂、被拒绝；全程 business 调用 0 次"
+    },
+    {
+      "name": "悬挂的代价：Try 被拒之后连 Confirm 也不许提交（EMPTY 是吸收态）",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          2,
+          0,
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "幂等重放：TC 重复下发 try/try 与 confirm/confirm，业务只执行两次",
+      "input": [
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          0,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "已终审的分支不许反向：confirm 之后再 cancel ⇒ 拒绝而不是补偿一次",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          1,
+          2
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "反向也要判：空回滚之后又收到 confirm ⇒ 记 confirmAfterCancel",
+      "input": [
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：同一全局事务的两个分支互不干扰（状态按 xid+bid 记，不是按 xid）",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          1,
+          2,
+          1
+        ],
+        [
+          0,
+          0,
+          1
+        ]
+      ],
+      "expected": [
+        2,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        3
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：空事件流 ⇒ 十个计数全 0",
+      "input": [
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：action 不是 0/1/2",
+      "input": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          5
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown branch action"
+    },
+    {
+      "name": "非法：三个数组长度不一致",
+      "input": [
+        [
+          1,
+          1
+        ],
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "array length mismatch"
+    },
+    {
+      "name": "非法：事务号为负（xid/bid 都是非负整数）",
+      "input": [
+        [
+          -1
+        ],
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative transaction id"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一张状态表 + 十个计数器。核心是两句话：\n**\"没有 Try 的 Cancel 要落标记但不能碰业务\"、\"有标记的 Try 要拒绝但不能改状态\"**。\n\n**基线 `{1,1,0,0,0,0,0,0,0,2}`**：Try 一次、Confirm 一次，业务方法各执行一次 ⇒ 2 次调用。\n\n**用例「空回滚」（事件序 `cancel, try`）⇒ `{0,0,1,1,1,0,0,0,0,0}`**。\n这十个数字里最值钱的是最后一个：`businessCalls = 0`。\n资源从来没被预留过，所以\"执行一次业务 cancel\"就是**对一个不存在的预留做减法**\n（真实形态：把冻结金额多解出来一份 = 超卖）。\n而 `suspendedTry = 1` 是这条防护的第二半：那个迟到的 Try 如果放进来，\n它就成了一条永远不会有人来收尾的悬挂预留。\n**`emptyRollback` 与 `suspendedTry` 必须分成两列**：\n前者是\"这次 cancel 是空的\"，后者是\"这个 Try 不该再来\"，\n并成一列就没法回答\"我们的悬挂率是多少\"这种问题。\n\n**用例「悬挂的代价」（`cancel, try, confirm`）⇒ `{0,0,1,1,1,0,0,1,0,0}`**：\n`confirmAfterCancel = 1`。这条是本题最重要的一处判断 ——\n**空回滚标记必须是吸收态**。如果实现把 `EMPTY` 当成\"已取消的普通分支\"、\n又允许后续 Try 把它拉回 `TRIED`，那么这条 Confirm 就会被接受，\n于是\"资源从没预留 → 被提交\"，账面上多出一份库存/余额。\n\n**用例「已终审的分支不许反向」（`try, confirm, cancel`）⇒ `{1,1,0,0,0,0,1,0,0,2}`**：\n`cancelAfterConfirm = 1`，而 `businessCalls` 仍是 2（Try + Confirm）。\n\"cancel 重试三次总会成功\"是危险直觉：二阶段的语义是\"要么提交要么回滚\"，\n**已提交之后到达的 Cancel 是 TC 的 bug 或消息重排，不是可以再执行一次的指令**。\n真执行一次就是\"把已经生效的业务反向补偿掉\"，而这一步没有任何日志能解释。\n\n**用例「幂等重放」（`try, try, confirm, confirm`）⇒ `{1,1,0,0,0,0,0,0,2,2}`**：\n`idempotentReplay = 2`、`businessCalls = 2` —— 四条指令、两次业务调用。\n朴素解给的是 `{1,2,0,…,businessCalls=4}`：它把每一次重复 Confirm 都当成一次真提交，\n**账户被加两次钱**。（它的 `orphanConfirm` 永远是 0 —— 因为它压根没有\n\"这个分支 Try 过吗\"这一问，而那正是空回滚/悬挂/孤儿三件事的唯一防线。）\n\n**用例「边界：同一全局事务的两个分支」**（`(1,1,try) (1,2,try) (1,1,confirm)`）⇒\n`{2,1,0,0,0,0,0,0,0,3}`：分支状态必须以 `(xid, bid)` 为键。\n按 `xid` 记状态是实现里最常见的偷懒，它在\"一个全局事务两个分支\"这种最基本的场景就错了\n—— 分支 B 的 Try 会被误判成 A 的重放，于是**第二次预留被静默丢弃**（少扣一次库存）。\n\n**用例「退化：空事件流」⇒ 十个 0**，包括 `businessCalls = 0`。\n这条看着像凑数，其实钉的是\"计数器的初值不是 null 也不是 1\"：\n把 `businessCalls` 初始化成 1 的实现会在所有用例上多一次调用，\n而在空事件流上它给出的 1 最容易被读成\"总该有一次吧\"。\n\n**工程延伸（面试追问点）**\n\n1. 这套状态记在哪？（**业务库里的分支事务表**，与 prepare 的资源变更同一个本地事务。\n   记在 Redis 会丢 —— 素材考点 5 引 Tair：主备异步复制、HA 切换可能丢锁丢状态【源 S33】；\n   记在内存会在重启后失忆。）\n2. TCC 与 AT 的取舍？（素材考点 1：AT 零侵入但受全局锁限制、**热点行场景会退化**；\n   TCC 语义与性能最好但补偿成本落在业务代码上【源 S5/S35】＋【推】。\n   本题这十个计数器就是\"落在业务代码上的成本\"长什么样。）\n3. 终态分支的账怎么平？（对账 + 数据订正，而且要留证据链：\n   素材 §1.1 说\"三层一致性各自要能举一个失效场景\"，`cancelAfterConfirm` 就是其中一层的现场。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] tccBranchLifecycle(int[] xid, int[] bid, int[] action)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.HashMap;\nimport java.util.Map;\n\npublic class Solution {\n  private static final int NONE = 0, TRIED = 1, CONFIRMED = 2, CANCELLED = 3, EMPTY = 4;\n\n  public static int[] tccBranchLifecycle(int[] xid, int[] bid, int[] action) {\n    if (xid == null || bid == null || action == null) throw new IllegalArgumentException(\"array length mismatch\");\n    int n = xid.length;\n    if (bid.length != n || action.length != n) throw new IllegalArgumentException(\"array length mismatch\");\n\n    Map<Long, Integer> state = new HashMap<>();\n    int tryOk = 0, confirmOk = 0, cancelOk = 0, emptyRollback = 0, suspended = 0;\n    int orphanConfirm = 0, cancelAfterConfirm = 0, confirmAfterCancel = 0, replay = 0, business = 0;\n\n    for (int i = 0; i < n; i++) {\n      if (xid[i] < 0 || bid[i] < 0) throw new IllegalArgumentException(\"negative transaction id\");\n      if (action[i] != 0 && action[i] != 1 && action[i] != 2) {\n        throw new IllegalArgumentException(\"unknown branch action\");\n      }\n      long key = (long) xid[i] * 1000003L + bid[i];\n      int st = state.getOrDefault(key, NONE);\n      if (action[i] == 0) {\n        if (st == NONE) { state.put(key, TRIED); tryOk++; business++; }\n        else if (st == CANCELLED || st == EMPTY) { suspended++; }      // 防悬挂\n        else { replay++; }                                            // 重复 Try：幂等\n      } else if (action[i] == 1) {\n        if (st == TRIED) { state.put(key, CONFIRMED); confirmOk++; business++; }\n        else if (st == NONE) { orphanConfirm++; }                     // 防孤儿确认\n        else if (st == CANCELLED || st == EMPTY) { confirmAfterCancel++; }\n        else { replay++; }\n      } else {\n        if (st == TRIED) { state.put(key, CANCELLED); cancelOk++; business++; }\n        else if (st == NONE) { state.put(key, EMPTY); cancelOk++; emptyRollback++; }  // 空回滚\n        else if (st == CONFIRMED) { cancelAfterConfirm++; }\n        else { replay++; }\n      }\n    }\n    return new int[] {tryOk, confirmOk, cancelOk, emptyRollback, suspended,\n                      orphanConfirm, cancelAfterConfirm, confirmAfterCancel, replay, business};\n  }\n}",
+    "naiveSolution": "import java.util.HashMap;\nimport java.util.Map;\n\npublic class Solution {\n  // \"TCC 就是三个方法名\"版：任何 cancel 都当正常回滚、任何 confirm 都当正常提交，\n  // 既不认空回滚也不防悬挂 —— 于是\"资源从没预留却被回滚\"和\"回滚之后又被提交\"都算成功。\n  public static int[] tccBranchLifecycle(int[] xid, int[] bid, int[] action) {\n    if (xid == null || bid == null || action == null) throw new IllegalArgumentException(\"array length mismatch\");\n    int n = xid.length;\n    if (bid.length != n || action.length != n) throw new IllegalArgumentException(\"array length mismatch\");\n    Map<Long, Integer> seen = new HashMap<>();\n    int tryOk = 0, confirmOk = 0, cancelOk = 0, replay = 0, business = 0;\n    for (int i = 0; i < n; i++) {\n      if (xid[i] < 0 || bid[i] < 0) throw new IllegalArgumentException(\"negative transaction id\");\n      if (action[i] != 0 && action[i] != 1 && action[i] != 2) {\n        throw new IllegalArgumentException(\"unknown branch action\");\n      }\n      long key = (long) xid[i] * 1000003L + bid[i];\n      int c = seen.getOrDefault(key, 0);\n      if (action[i] == 0) {\n        if (c == 0) { tryOk++; business++; } else { replay++; }\n      } else if (action[i] == 1) {\n        confirmOk++; business++;\n      } else {\n        cancelOk++; business++;\n      }\n      seen.put(key, c + 1);\n    }\n    return new int[] {tryOk, confirmOk, cancelOk, 0, 0, 0, 0, 0, replay, business};\n  }\n}"
+  },
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（分布式事务与资金链路方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 1（TCC 分支必须具备\"一阶段 prepare + 二阶段 commit/rollback\"【源 S35】）＋ §2 追问 6（\"只能查本地事务状态表，不能再执行一次本地事务\"）。空回滚/悬挂/幂等三防的具体判据在 Seata 文档正文里没有逐条给出（素材 §7 第 5 条），本题按【推】写成显式状态机契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:48.666Z"
+  }
+}

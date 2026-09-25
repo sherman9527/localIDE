@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0004",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "用 useOptimistic 实现乐观点赞与自动回滚",
+  "statement": "## 场景\n\n内容详情页的点赞按钮：移动端网络 RTT 300ms+，用户点下去如果 300ms 后才变红，就会连点三次，最后计数 +3。老代码是\"自己 `setLiked(next)`，失败再 `setLiked(!next)` 手动回滚\"——线上出现过一次回滚把**别人的点赞**也抹掉了（期间 base 被轮询接口更新了）。重构方向是用 React 19 的 `useOptimistic`：乐观值由 **真值 + 待提交的 reducer 增量**推导，Action 失败时真值没变，乐观值自然消失，不需要手写 undo。\n\n## 契约（提交写在 `Solution.tsx`）\n\n```tsx\nexport interface LikeButtonProps {\n  baseCount: number;                    // 服务端确认过的计数\n  onLike: (liked: boolean) => Promise<void>;  // 写接口，reject 表示保存失败\n}\n\nexport function LikeButton(props: LikeButtonProps): JSX.Element;\n```\n\nDOM 契约（测试按这些 testid 断言）：\n\n- `data-testid=\"count\"`：显示 `baseCount + (乐观 liked ? 1 : 0)`；\n- `data-testid=\"pending\"`：文本必须是 `String(isPending)`（`'true'` / `'false'`）；\n- `data-testid=\"toast\"`：失败时文本 `save-failed`，成功或空闲时为空串；\n- `data-testid=\"like\"`：提交按钮，pending 期间必须 `disabled`（用 `useTransition`/`useActionState` 给出的 pending，不要自己 `useState` 一个布尔）。\n\n## 硬性要求\n\n1. 乐观值必须来自 `useOptimistic(base, reducer)`，reducer 是**纯函数** `(current, next) => next`；`setOptimistic` 只能在 Action / `startTransition` 内调用（用例监视 `console.error`，出现 React 告警即判负）。\n2. 失败**不许** rethrow 到错误边界（那是渲染期崩溃通道，不该用来表达\"保存失败\"），要在 Action 内 `try/catch`，然后把 `toast` 置为 `save-failed`；回弹靠\"真值未更新\"自动完成，**不许写手动 undo**（类似 `setLiked(!next)` 的补偿代码）。\n3. pending 期间按钮禁用，因此重复点击不得产生第二次 `onLike` 调用。\n4. 成功后把真值 `liked` 更新为乐观值，界面计数不闪烁（不允许\"先回 0 再回 1\"）。\n\n## 不许做什么\n\n- 不许用 `useState` 自己维护 pending/optimistic 两套布尔（那是本题要消灭的东西）；\n- 不许 `await` 之后再无条件 `setLiked(next)`：期间 base 可能已被别人改过，这正是'回滚抹掉别人点赞'的根因；\n- 不许引入第三方状态库（沙箱不 `npm install`）；jsdom 里也没有 `AbortSignal.any`/`structuredClone`。\n\n## 判分\n\n5 个用例由 `like.test.tsx` 真渲染断言：初始态、单次点击的乐观态与禁用、重复点击不重复写、失败回弹 + toast、成功后收敛与二次撤销。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:react19-actions",
+    "use-optimistic",
+    "forms",
+    "pending-state"
+  ],
+  "cases": [
+    {
+      "name": "未点赞时显示基准计数且无提示",
+      "input": {
+        "baseCount": 7
+      },
+      "expected": "count='7'，按钮无 disabled，toast=''"
+    },
+    {
+      "name": "单次点击立即显示乐观计数并禁用按钮",
+      "input": {
+        "click": 1,
+        "beforeResolve": true
+      },
+      "expected": "count='8'、disabled=true、pending='true'，且 console.error 无告警（expected []）",
+      "note": "setOptimistic 在 Action 外调用会打告警并闪回"
+    },
+    {
+      "name": "重复点击在请求返回前不产生第二次写",
+      "input": {
+        "clicks": 3
+      },
+      "expected": "onLike 调用序列 [true]，count 仍为 1"
+    },
+    {
+      "name": "请求失败后乐观计数回弹并提示失败",
+      "input": {
+        "reject": "Error(422)"
+      },
+      "expected": "count 回到 '7'、toast='save-failed'、按钮恢复可点",
+      "note": "回弹靠真值未更新，不许手写 undo"
+    },
+    {
+      "name": "成功后计数收敛且再次点击可撤销点赞",
+      "input": {
+        "resolve": true,
+        "thenClick": true
+      },
+      "expected": "先 '8'，第二次点击乐观值 '7'，onLike 序列 [true,false]"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "like.test.tsx",
+        "content": "import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';\nimport { expect, it, vi } from 'vitest';\nimport { LikeButton } from './Solution';\n\nfunction makeWriter() {\n  const calls: boolean[] = [];\n  const deferred: { resolve: () => void; reject: (e: unknown) => void } = {\n    resolve: () => undefined,\n    reject: () => undefined,\n  };\n  const onLike = (liked: boolean) => {\n    calls.push(liked);\n    return new Promise<void>((res, rej) => {\n      deferred.resolve = res;\n      deferred.reject = rej;\n    });\n  };\n  return { calls, onLike, deferred };\n}\n\nit('未点赞时显示基准计数且无提示', () => {\n  const w = makeWriter();\n  render(<LikeButton baseCount={7} onLike={w.onLike} />);\n  expect(screen.getByTestId('count').textContent).toBe('7');\n  expect(screen.getByTestId('like').hasAttribute('disabled')).toBe(false);\n  expect(screen.getByTestId('toast').textContent).toBe('');\n});\n\nit('单次点击立即显示乐观计数并禁用按钮', async () => {\n  const noise: string[] = [];\n  vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => noise.push(a.map(String).join(' ')));\n  const w = makeWriter();\n  render(<LikeButton baseCount={7} onLike={w.onLike} />);\n  fireEvent.click(screen.getByTestId('like'));\n  expect(screen.getByTestId('count').textContent).toBe('8');\n  expect(screen.getByTestId('like').hasAttribute('disabled')).toBe(true);\n  expect(screen.getByTestId('pending').textContent).toBe('true');\n  await act(async () => { w.deferred.resolve(); await new Promise((r) => setTimeout(r, 0)); });\n  expect(noise).toEqual([]);\n});\n\nit('重复点击在请求返回前不产生第二次写', async () => {\n  const w = makeWriter();\n  render(<LikeButton baseCount={0} onLike={w.onLike} />);\n  fireEvent.click(screen.getByTestId('like'));\n  fireEvent.click(screen.getByTestId('like'));\n  fireEvent.click(screen.getByTestId('like'));\n  expect(w.calls).toEqual([true]);\n  expect(screen.getByTestId('count').textContent).toBe('1');\n  await act(async () => { w.deferred.resolve(); await new Promise((r) => setTimeout(r, 0)); });\n  expect(w.calls).toEqual([true]);\n});\n\nit('请求失败后乐观计数回弹并提示失败', async () => {\n  const w = makeWriter();\n  render(<LikeButton baseCount={7} onLike={w.onLike} />);\n  fireEvent.click(screen.getByTestId('like'));\n  expect(screen.getByTestId('count').textContent).toBe('8');\n  await act(async () => { w.deferred.reject(new Error('422')); await new Promise((r) => setTimeout(r, 0)); });\n  expect(screen.getByTestId('count').textContent).toBe('7');\n  expect(screen.getByTestId('toast').textContent).toBe('save-failed');\n  expect(screen.getByTestId('like').hasAttribute('disabled')).toBe(false);\n  expect(w.calls).toEqual([true]);\n});\n\nit('成功后计数收敛且再次点击可撤销点赞', async () => {\n  const w = makeWriter();\n  render(<LikeButton baseCount={7} onLike={w.onLike} />);\n  fireEvent.click(screen.getByTestId('like'));\n  await act(async () => { w.deferred.resolve(); await new Promise((r) => setTimeout(r, 0)); });\n  expect(screen.getByTestId('count').textContent).toBe('8');\n  expect(screen.getByTestId('toast').textContent).toBe('');\n  fireEvent.click(screen.getByTestId('like'));\n  expect(screen.getByTestId('count').textContent).toBe('7');\n  await act(async () => { w.deferred.resolve(); await new Promise((r) => setTimeout(r, 0)); });\n  expect(w.calls).toEqual([true, false]);\n  expect(screen.getByTestId('count').textContent).toBe('7');\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { useOptimistic, useState, useTransition } from 'react';\nimport type { FormEvent } from 'react';\n\nexport interface LikeButtonProps {\n  baseCount: number;\n  onLike: (liked: boolean) => Promise<void>;\n}\n\nexport function LikeButton({ baseCount, onLike }: LikeButtonProps) {\n  const [liked, setLiked] = useState(false);\n  const [toast, setToast] = useState('');\n  const [optimisticLiked, toggle] = useOptimistic(liked, (state: boolean, next: boolean) => next);\n  const [isPending, start] = useTransition();\n\n  async function submit(event: FormEvent<HTMLFormElement>) {\n    event.preventDefault();\n    const next = !optimisticLiked;\n    start(async () => {\n      // setOptimistic 必须在 Action/transition 内调用，否则会出现\"闪一下又回弹\"\n      toggle(next);\n      try {\n        await onLike(next);\n        setLiked(next);\n        setToast('');\n      } catch {\n        // 不 rethrow：真值没更新，乐观态由 React 自动回弹，不需要手写 undo\n        setToast('save-failed');\n      }\n    });\n  }\n\n  const count = baseCount + (optimisticLiked ? 1 : 0);\n\n  return (\n    <form onSubmit={submit}>\n      <span data-testid=\"count\">{count}</span>\n      <span data-testid=\"pending\">{String(isPending)}</span>\n      <span data-testid=\"toast\">{toast}</span>\n      <button data-testid=\"like\" type=\"submit\" disabled={isPending}>\n        like\n      </button>\n    </form>\n  );\n}\n",
+    "naiveSolution": "import { useState } from 'react';\n\nexport function LikeButton({ baseCount, onLike }: { baseCount: number; onLike: (liked: boolean) => Promise<void> }) {\n  const [liked, setLiked] = useState(false);\n  const [toast, setToast] = useState('');\n  async function handleClick() {\n    const next = !liked;\n    setLiked(next);\n    try {\n      await onLike(next);\n      setToast('');\n    } catch {\n      setLiked(!next);\n      setToast('save-failed');\n    }\n  }\n  return (\n    <div>\n      <span data-testid=\"count\">{baseCount + (liked ? 1 : 0)}</span>\n      <span data-testid=\"pending\">{String(false)}</span>\n      <span data-testid=\"toast\">{toast}</span>\n      <button data-testid=\"like\" onClick={handleClick}>like</button>\n    </div>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- `useOptimistic(base, reducer)` 返回的是\"**base 被所有待提交 Action 的 reducer 重放后的值**\"：Action pending 期间读它是乐观值，Action 失败（base 未变）时它自动回到 base，因此**不需要任何补偿代码**；Action 成功时 base 变化 + 待提交队列清空，两者收敛，所以不会闪。\n- reducer 必须是纯函数：pending 期间若 base 被别的来源（轮询/他人写）更新，React 会用新 base **重放** reducer；写成\"忽略 current 直接 return next\" 是最常用的翻转语义，写成闭包捕获外部可变状态就会错。\n- `setOptimistic` 只在 Action / `startTransition` 回调里有效，所以提交必须走 `<form action>` / `onSubmit` 里 preventDefault + `start(async () => {...})`，或者直接用 `useActionState` 的 dispatch。\n- 业务失败不该用异常冒泡到错误边界：边界是\"渲染期崩溃\"通道，用它表达 422 会让整页降级。`catch` 后写 toast，让乐观值自然回弹。\n- 按钮 pending 期间 `disabled` 是\"重复点击不重复写\"的第一道闸；真正的第二道是**幂等键**（见 fe-react-0005 / fe-react-0002）。\n\n面试追问：\n1. 如果同一屏有 50 个卡片共享一个列表 base，回弹粒度怎么定？（reducer 按 id 增删，而不是整体布尔翻转）\n2. 多个 Action 并发时 `useOptimistic` 的值是什么？（按队列顺序对 base 逐个重放；因此 reducer 要能处理同 key 多次增量）\n3. 为什么不用 `useTransition` 的 `isPending` 自己拼乐观值？（那就是回到手写 undo，且丢掉了\"base 变化后重放\"的能力）\n4. 写请求要不要带 Idempotency-Key？（要，键应来自字段快照而非时间戳，见 0005）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/react19-concurrency.md#13-actionsuseactionstate-useformstatus-useoptimistic",
+    "addedBy": "content-agent-fe"
+  }
+}

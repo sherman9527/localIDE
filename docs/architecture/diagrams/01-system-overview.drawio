@@ -1,0 +1,122 @@
+<mxfile host="Electron" modified="2026-09-20T00:00:00.000Z" agent="arena-doc" version="24.0.0" type="device">
+  <diagram id="sys-overview" name="01-分层与端口">
+    <mxGraphModel dx="1400" dy="900" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1300" pageHeight="890" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="每日刷题竞技场 · 分层与端口" style="text;html=1;align=left;verticalAlign=middle;fontSize=20;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="900" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="四个子系统之间只通过 ports.ts 相遇；shared/ 是它们唯一的共同语言（见页底）" style="text;html=1;align=left;verticalAlign=middle;fontSize=12;fontColor=#6B7280;" vertex="1" parent="1">
+          <mxGeometry x="40" y="44" width="1000" height="22" as="geometry" />
+        </mxCell>
+
+        <mxCell id="web" value="&lt;b&gt;浏览器 · http://localhost:7788&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;React 19 + Vite 5 构建产物，由同一个 Fastify 用 @fastify/static 吐出（单端口，没有第二个服务）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=13;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="76" width="1220" height="52" as="geometry" />
+        </mxCell>
+
+        <mxCell id="webToday" value="Today（首屏，同步进 bundle）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="138" width="290" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="webQ" value="Question · lazy() + CodeMirror 6" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="350" y="138" width="290" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="webBank" value="Bank · lazy()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="660" y="138" width="290" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="webProg" value="Progress · lazy()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="970" y="138" width="290" height="32" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cr" value="&lt;b&gt;组合根 server/src/index.ts&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;启动顺序：日志维护 → 清扫残留沙箱 → 注册可选 runner → 探测栈 → 开库 → buildApp → listen&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F3F5;strokeColor=#666666;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="200" width="900" height="56" as="geometry" />
+        </mxCell>
+        <mxCell id="crNote" value="&lt;font style=&quot;font-size:11px&quot;&gt;HTTP 层 server/src/api/app.ts&lt;br&gt;traceId 钩子 · publicQuestion() 脱敏&lt;br&gt;SSE /api/judge/stream&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;dashed=1;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="960" y="200" width="300" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="portsBand" value="" style="rounded=0;html=1;fillColor=#F7F3FB;strokeColor=#9673A6;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="282" width="1220" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="portsLabel" value="server/src/ports.ts —— 唯一的跨层契约（测试塞假实现即可，不必真装 JDK 也能跑 API 测试）" style="text;html=1;align=left;fontSize=11;fontStyle=2;fontColor=#6A4C93;" vertex="1" parent="1">
+          <mxGeometry x="48" y="286" width="1100" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="pBank" value="&lt;b&gt;BankPort&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;all / visible / byId / hide / unhide / hiddenIds / ingest&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="308" width="290" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="pJudge" value="&lt;b&gt;JudgePort&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;run(req, question, onEvent) / probe(kind)&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="350" y="308" width="290" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="pGrade" value="&lt;b&gt;GradePort&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;grade(q, answer, traceId) / available()&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="660" y="308" width="290" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="pStore" value="&lt;b&gt;ProgressStore · Clock&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;record / attemptsByDay / bestByQuestion / historyFor · 注入时钟&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="970" y="308" width="290" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bank" value="&lt;b&gt;题库 server/src/bank&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;loader.ts　读 JSON + zod 校验&lt;br&gt;hide.ts　软删除账本（原子写）&lt;br&gt;ingest.ts　append-only 入库&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#B85C00&quot;&gt;&lt;b&gt;不许&lt;/b&gt;：import 游戏层、&lt;br&gt;覆盖或删除已有题目&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5FBEC;strokeColor=#82B366;strokeWidth=2;fontSize=12;verticalAlign=top;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="390" width="290" height="196" as="geometry" />
+        </mxCell>
+        <mxCell id="judge" value="&lt;b&gt;判题 server/src/judge&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;registry.ts　按 judgeKind 派发 + probe&lt;br&gt;workspace.ts　一次判题一个沙箱 + sweepStaleDirs&lt;br&gt;process.ts　超时 / 输出截断 / 杀进程&lt;br&gt;guards.ts　提交白名单（防越权）&lt;br&gt;runners/　java-junit · react-vitest · mysql&lt;br&gt;　　　　　redis · pyspark · spark-scala&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;strokeWidth=2;fontSize=12;verticalAlign=top;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="350" y="390" width="290" height="196" as="geometry" />
+        </mxCell>
+        <mxCell id="llm" value="&lt;b&gt;评分 server/src/llm&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;rubric.ts　剥 code fence → 取第一个平衡&lt;br&gt;JSON → clamp → 按 rubric 逐项归一&lt;br&gt;provider.ts　bridge → qodercli → copilot → manual&lt;br&gt;cli.ts / settings.ts&lt;br&gt;scripts/llm-bridge.mjs　宿主 :7799 + token&lt;/font&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;color:#B85C00&quot;&gt;全链失败也只返回人工自检表，不返回 5xx；&lt;br&gt;每次降级写一条 grade/fallback（warn）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;strokeWidth=2;fontSize=12;verticalAlign=top;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="660" y="390" width="290" height="196" as="geometry" />
+        </mxCell>
+        <mxCell id="game" value="&lt;b&gt;游戏 server/src/game&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;daily.ts　今日套餐 / 练习池 / 复习顶槽&lt;br&gt;review.ts　SM-2 二值退化排期&lt;br&gt;xp.ts　best-per-question / 套餐奖励&lt;br&gt;streak.ts · weekly.ts · adaptive.ts · achievements.ts&lt;br&gt;db/index.ts　node:sqlite（WAL + user_version）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;strokeWidth=2;fontSize=12;verticalAlign=top;spacing=8;" vertex="1" parent="1">
+          <mxGeometry x="970" y="390" width="290" height="196" as="geometry" />
+        </mxCell>
+
+        <mxCell id="stContent" value="&lt;b&gt;content/&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;questions/　7 类共 99 题&lt;br&gt;knowledge/ · curriculum/ · jd-cache/&lt;br&gt;hidden.json　软删除账本&lt;/font&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#595959&quot;&gt;进 git（题与知识库是资产）&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#82B366;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="616" width="290" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="stJudge" value="&lt;b&gt;data/judge/ · data/.spark-worker/&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;每次判题一个 mkdtemp 目录，跑完必删&lt;br&gt;被杀留下的残留由启动时 / Spark 重启前清扫&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#D79B00;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="616" width="290" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="stHost" value="&lt;b&gt;宿主 CLI（容器外）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;qodercli / copilot 已登录会话&lt;br&gt;容器是 linux，调不到宿主 .exe → 走桥&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#B8547D;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="660" y="616" width="290" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="stDb" value="&lt;b&gt;data/arena.db · data/logs/&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;attempts（每次判分/评分一条）&lt;br&gt;settings（当日套餐缓存、复习本）&lt;br&gt;JSONL 日志保留 28 天 · 不进 git&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#1F9E7E;fontSize=12;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="970" y="616" width="290" height="92" as="geometry" />
+        </mxCell>
+
+        <mxCell id="shared" value="&lt;b&gt;shared/ —— 唯一契约层（976 行，零 IO、零业务逻辑）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;question.ts：QuestionSchema + 7 类判题形态 + publicQuestion() 脱敏　·　judge.ts：JudgeResult / JudgeEvent / Runner　·　api.ts：HTTP 出入参&lt;br&gt;game.ts：XP_RULES / DAILY_PLAN / REVIEW_LADDER / LEAGUES　·　attempt.ts：套餐与进度推导　·　day.ts：日期纯函数　·　taxonomy.ts：类别与技术栈&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF8E1;strokeColor=#D6B656;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="752" width="1220" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="eWebApi" value="&lt;font style=&quot;font-size:11px&quot;&gt;fetch / SSE&lt;/font&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#6C8EBF;strokeWidth=2;fontColor=#333333;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="webBank" target="cr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eCrPorts" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#9673A6;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="cr" target="portsBand">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBank" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82B366;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pBank" target="bank">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eJudge" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#D79B00;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pJudge" target="judge">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eGrade" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#B8547D;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pGrade" target="llm">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eStore" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1F9E7E;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pStore" target="game">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eBankFs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#82B366;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="bank" target="stContent">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eJudgeFs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#D79B00;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="judge" target="stJudge">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eLlmFs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#B8547D;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="llm" target="stHost">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="eGameFs" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1F9E7E;strokeWidth=2;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="game" target="stDb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

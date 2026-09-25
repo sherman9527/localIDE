@@ -1,0 +1,381 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0019",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "小时表是分天表的一次真相？先把对不上的原因分成六类，再谈重算",
+  "statement": "## 输入\n\nPySpark 3.5（判题容器内）。已注册一张表 `report_rows`：\n\n```\nreport_rows(\n  row_id INT, layer STRING,          -- 'hourly' | 'daily'\n  bill_date STRING,                  -- 'yyyy-MM-dd'\n  ad_plan_id STRING,\n  charge_fen BIGINT,                 -- 消耗金额，单位**分**（整数）\n  click_cnt INT,\n  ingest_batch INT,                  -- 1 = 首次入库；>1 = 回补批次写进来的晚到数据\n  caliber_version STRING)            -- 口径版本，如 'v1' / 'v2'\n```\n\n## 背景\n\n官方广告接口存在**分层报表**：`pdd.ad.api.report.hourly.report.query`、\n`report.daily.report.query`、`report.entity.report.query`（分级）。\n小时与分天同时存在，就意味着必须先回答一句话：**谁是一次真相。**\n本题的立场是：**小时层是一次真相，分天层是投影**；\n`daily` 行是\"用 `ingest_batch = 1` 那批小时数据算出来的快照\"，晚到的数据只会让重算值变大。\n\n## 任务\n\n按 `(bill_date, ad_plan_id)` 输出一行差异分类，列固定为：\n\n```\nbill_date, ad_plan_id, daily_charge_fen, recomputed_charge_fen, diff_charge_fen, diff_type\n```\n\n- `recomputed_charge_fen` = 该 key 下**所有** `layer = 'hourly'` 行的 `charge_fen` 之和；\n- `daily_charge_fen` = 该 key 的 `daily` 行的 `charge_fen`；\n- `diff_charge_fen` = `recomputed − daily`（任一侧缺失时为 `null`）；\n- 按 `bill_date` 升序、再按 `ad_plan_id` 升序。\n\n## `diff_type` 判定（**优先级从上到下，命中即止**）\n\n| 顺序 | 条件 | `diff_type` | 含义 |\n| --- | --- | --- | --- |\n| 1 | 有小时数据、**没有** daily 行 | `lost` | 聚合层丢数（最严重：报表整块少一块） |\n| 2 | 有 daily 行、**没有**任何小时数据 | `hourly-missing` | 明细层缺口，反向不可重算 |\n| 3 | daily 的 `caliber_version` **不等于**该 key 小时行的**最大** `caliber_version` | `caliber-change` | 口径变更未同步到聚合层 |\n| 4 | `diff = 0` | `match` | 对得上 |\n| 5 | `diff` 恰好等于该 key 上 `ingest_batch > 1` 的行之和 | `late-arrival` | 差额被晚到回补完全解释 |\n| 6 | 其余 | `unexplained` | 真差异：要人去看的那一条 |\n\n三条口径纪律：\n\n- **口径变更优先于金额比较**：口径不同的两个数相减没有意义，\n  报成 `late-arrival` 或 `unexplained` 都是把治理问题伪装成算术问题。\n- **`late-arrival` 要求\"恰好等于\"**：只看\"差额为正就算晚到\"的实现会把\n  `unexplained` 全部吞掉 —— 而差额为正但**不等于**回补量，恰恰说明还有一笔没被解释。\n- 缺失侧的金额输出 `null`，**不许填 0**（0 是\"这一天消耗为零\"，null 是\"这一层没有这一行\"）。\n\n## 约束\n\n不许 `collect()` 到驱动侧；金额全程整数（分），不许出现浮点比较。\n\n## 这题真正考的东西\n\n素材里那句\"广告小时数据和分天数据对不上，你的立场是什么\"的标准答案是：\n**先说谁是一次真相，再说晚到回补窗口，最后说不回溯的口径变更协议。**\n这题把这三句话变成六个分类，写完你就知道自己在哪一句上没有实现。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "report-layering",
+    "late-arrival",
+    "caliber-change",
+    "integrity-classification",
+    "modern:metric-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：六类差异各命中一次",
+      "input": {
+        "view": "report_rows",
+        "schema": "row_id int, layer string, bill_date string, ad_plan_id string, charge_fen bigint, click_cnt int, ingest_batch int, caliber_version string",
+        "rows": [
+          {
+            "row_id": 1,
+            "layer": "hourly",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p1",
+            "charge_fen": 1000,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 2,
+            "layer": "hourly",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p1",
+            "charge_fen": 500,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 3,
+            "layer": "daily",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p1",
+            "charge_fen": 1500,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 4,
+            "layer": "hourly",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p2",
+            "charge_fen": 800,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 5,
+            "layer": "hourly",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p2",
+            "charge_fen": 200,
+            "click_cnt": 1,
+            "ingest_batch": 2,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 6,
+            "layer": "daily",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p2",
+            "charge_fen": 800,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 7,
+            "layer": "hourly",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p3",
+            "charge_fen": 700,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 8,
+            "layer": "daily",
+            "bill_date": "2026-05-01",
+            "ad_plan_id": "p3",
+            "charge_fen": 500,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 9,
+            "layer": "hourly",
+            "bill_date": "2026-05-02",
+            "ad_plan_id": "p4",
+            "charge_fen": 300,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 10,
+            "layer": "hourly",
+            "bill_date": "2026-05-02",
+            "ad_plan_id": "p5",
+            "charge_fen": 400,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v2"
+          },
+          {
+            "row_id": 11,
+            "layer": "daily",
+            "bill_date": "2026-05-02",
+            "ad_plan_id": "p5",
+            "charge_fen": 400,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 12,
+            "layer": "daily",
+            "bill_date": "2026-05-02",
+            "ad_plan_id": "p6",
+            "charge_fen": 900,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "bill_date": "2026-05-01",
+          "ad_plan_id": "p1",
+          "daily_charge_fen": 1500,
+          "recomputed_charge_fen": 1500,
+          "diff_charge_fen": 0,
+          "diff_type": "match"
+        },
+        {
+          "bill_date": "2026-05-01",
+          "ad_plan_id": "p2",
+          "daily_charge_fen": 800,
+          "recomputed_charge_fen": 1000,
+          "diff_charge_fen": 200,
+          "diff_type": "late-arrival"
+        },
+        {
+          "bill_date": "2026-05-01",
+          "ad_plan_id": "p3",
+          "daily_charge_fen": 500,
+          "recomputed_charge_fen": 700,
+          "diff_charge_fen": 200,
+          "diff_type": "unexplained"
+        },
+        {
+          "bill_date": "2026-05-02",
+          "ad_plan_id": "p4",
+          "daily_charge_fen": null,
+          "recomputed_charge_fen": 300,
+          "diff_charge_fen": null,
+          "diff_type": "lost"
+        },
+        {
+          "bill_date": "2026-05-02",
+          "ad_plan_id": "p5",
+          "daily_charge_fen": 400,
+          "recomputed_charge_fen": 400,
+          "diff_charge_fen": 0,
+          "diff_type": "caliber-change"
+        },
+        {
+          "bill_date": "2026-05-02",
+          "ad_plan_id": "p6",
+          "daily_charge_fen": 900,
+          "recomputed_charge_fen": null,
+          "diff_charge_fen": null,
+          "diff_type": "hourly-missing"
+        }
+      ],
+      "visible": true,
+      "note": "p1 match / p2 late-arrival / p3 unexplained / p4 lost / p5 caliber-change / p6 hourly-missing"
+    },
+    {
+      "name": "晚到但差额大于回补量：必须落进 unexplained，不许被\"正差额\"吞掉",
+      "input": {
+        "view": "report_rows",
+        "schema": "row_id int, layer string, bill_date string, ad_plan_id string, charge_fen bigint, click_cnt int, ingest_batch int, caliber_version string",
+        "rows": [
+          {
+            "row_id": 1,
+            "layer": "hourly",
+            "bill_date": "2026-05-03",
+            "ad_plan_id": "p7",
+            "charge_fen": 1000,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 2,
+            "layer": "hourly",
+            "bill_date": "2026-05-03",
+            "ad_plan_id": "p7",
+            "charge_fen": 300,
+            "click_cnt": 1,
+            "ingest_batch": 3,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 3,
+            "layer": "daily",
+            "bill_date": "2026-05-03",
+            "ad_plan_id": "p7",
+            "charge_fen": 900,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "bill_date": "2026-05-03",
+          "ad_plan_id": "p7",
+          "daily_charge_fen": 900,
+          "recomputed_charge_fen": 1300,
+          "diff_charge_fen": 400,
+          "diff_type": "unexplained"
+        }
+      ],
+      "visible": true,
+      "note": "回补只解释得了 300 分，而差额是 400 分 ⇒ 还有一笔没被解释 ⇒ unexplained"
+    },
+    {
+      "name": "边界：口径相同的两侧都为零 ⇒ match 而不是 caliber-change",
+      "input": {
+        "view": "report_rows",
+        "schema": "row_id int, layer string, bill_date string, ad_plan_id string, charge_fen bigint, click_cnt int, ingest_batch int, caliber_version string",
+        "rows": [
+          {
+            "row_id": 1,
+            "layer": "hourly",
+            "bill_date": "2026-05-04",
+            "ad_plan_id": "p8",
+            "charge_fen": 0,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v2"
+          },
+          {
+            "row_id": 2,
+            "layer": "daily",
+            "bill_date": "2026-05-04",
+            "ad_plan_id": "p8",
+            "charge_fen": 0,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v2"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "bill_date": "2026-05-04",
+          "ad_plan_id": "p8",
+          "daily_charge_fen": 0,
+          "recomputed_charge_fen": 0,
+          "diff_charge_fen": 0,
+          "diff_type": "match"
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何报表行 ⇒ 零行输出",
+      "input": {
+        "view": "report_rows",
+        "schema": "row_id int, layer string, bill_date string, ad_plan_id string, charge_fen bigint, click_cnt int, ingest_batch int, caliber_version string",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "多个回补批次叠加：late 是它们的和，不是最大那条",
+      "input": {
+        "view": "report_rows",
+        "schema": "row_id int, layer string, bill_date string, ad_plan_id string, charge_fen bigint, click_cnt int, ingest_batch int, caliber_version string",
+        "rows": [
+          {
+            "row_id": 1,
+            "layer": "hourly",
+            "bill_date": "2026-05-05",
+            "ad_plan_id": "p9",
+            "charge_fen": 600,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 2,
+            "layer": "hourly",
+            "bill_date": "2026-05-05",
+            "ad_plan_id": "p9",
+            "charge_fen": 100,
+            "click_cnt": 1,
+            "ingest_batch": 2,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 3,
+            "layer": "hourly",
+            "bill_date": "2026-05-05",
+            "ad_plan_id": "p9",
+            "charge_fen": 150,
+            "click_cnt": 1,
+            "ingest_batch": 3,
+            "caliber_version": "v1"
+          },
+          {
+            "row_id": 4,
+            "layer": "daily",
+            "bill_date": "2026-05-05",
+            "ad_plan_id": "p9",
+            "charge_fen": 600,
+            "click_cnt": 1,
+            "ingest_batch": 1,
+            "caliber_version": "v1"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "bill_date": "2026-05-05",
+          "ad_plan_id": "p9",
+          "daily_charge_fen": 600,
+          "recomputed_charge_fen": 850,
+          "diff_charge_fen": 250,
+          "diff_type": "late-arrival"
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两条聚合 + 一次 **full outer join** + 一条按优先级写死的 `when` 链。\n`fullouter` 不是可选项：丢数（有小时无分天）与反向缺口（有分天无小时）\n只有在双向连接下才同时看得见 —— 用 `left` 连接的实现会**永远报不出 `lost`**，\n而 `lost` 是唯一\"报表整块少一块\"的那一类。\n\n**基线那组数据六个分类各命中一次**（具体分类以模型输出为准，这也是 expected 交给代码算的原因）。\n其中最值得盯的是两对：\n`late-arrival` 与 `unexplained` 都满足\"重算值 > 分天值\"，\n差别只在**差额是否恰好等于回补批次之和**。差额为正但不等于回补量，\n说明回补之外还有一笔没被解释 —— 用\"差额为正就算晚到\"的实现会把这一类全部吞掉，\n而它正是\"每天少一点、谁也说不清少在哪\"的那种事故。\n\n**口径变更必须排在金额比较之前**（第 3 优先）。\n`v2` 的小时数据对 `v1` 的分天结果，相减得到的是一个**没有意义的数**：\n它同时混合了\"晚到\"和\"口径改了\"两个原因。把它报成金额差异，\n下游会去做一件完全错误的事（追数据），而正确答案是去改聚合层的版本声明。\n这也对应素材里那句\"**不回溯的口径变更必须公告 + 冻结可比区间**\"。\n\n**缺失侧输出 `null` 而不是 0**：`0` 的业务含义是\"这一天消耗为零\"，\n`null` 才是\"这一层根本没有这一行\"。把 `lost` 的金额兜成 0 之后，\n`diff_charge_fen` 会等于整天的重算值，看起来像\"一笔巨大的晚到\"，\n于是这条真事故被伪装成一个回补事故。\n\n**为什么全程整数**：`SUM(DOUBLE)` 的尾差会让 `diff == 0` 在\"本该相等\"的行上成立不了，\n于是 `match` 行大面积变成 `unexplained`。\n一旦被迫用 `abs(diff) < 0.005` 这种容差，就再也分不清\"0.4 分的尾差\"与\"4 分的真差异\"，\n而分单位下 4 分是**真钱**。素材里金额字段本来就是 `DECIMAL(12,2)`，\n落到 Spark 里就用整数分或 Decimal，不要用 double。\n\n**工程延伸（面试追问点）**\n\n1. 一次真相为什么选小时层而不是分天层？（小时层粒度更细、可以直接追溯到点击日志，\n   且晚到数据总是先落到小时层。反选分天层的系统，重算历史时要靠上一层的上一层，\n   链路长度决定了修复窗口。）\n2. `caliber_version` 谁负责写？（**生成方**写，不是消费方猜。\n   所以 DWD/聚合层每输出一行都要带上\"我用的是哪一版口径\"，\n   这题把它做成列就是这个意思。）\n3. 回补窗口要多长？（由计费争议期决定，不是由\"我们一般回补 3 天\"决定：\n   退款回冲、跨天归因、券归属都可能把消耗推到很多天之后。\n   窗口之外必须**冻结**，而冻结要公告 —— 否则同比环比在窗口边界上突然全部错位。）\n4. 这六个分类怎么变成告警？（只有 `lost` 与 `unexplained` 阻断发布；\n   `late-arrival` 是常态、进看板；`caliber-change` 应该**在变更公告后自动消失**，\n   如果它长期存在说明有一层没跟着改口径 —— 那是最贵的静默。\n   `hourly-missing` 单独一条：它意味着明细被清理得太早，要改保留期。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('report_rows')\n\n    hourly = (r.filter(F.col('layer') == 'hourly')\n              .groupBy('bill_date', 'ad_plan_id')\n              .agg(F.sum('charge_fen').cast('long').alias('recomputed_charge_fen'),\n                   F.max('caliber_version').alias('hourly_caliber'),\n                   F.sum(F.when(F.col('ingest_batch') > 1, F.col('charge_fen'))\n                         .otherwise(F.lit(0))).cast('long').alias('late_charge_fen')))\n\n    daily = (r.filter(F.col('layer') == 'daily')\n             .select('bill_date', 'ad_plan_id',\n                     F.col('charge_fen').cast('long').alias('daily_charge_fen'),\n                     F.col('caliber_version').alias('daily_caliber')))\n\n    j = hourly.join(daily, ['bill_date', 'ad_plan_id'], 'fullouter')\n\n    diff = (F.when(F.col('recomputed_charge_fen').isNotNull()\n                   & F.col('daily_charge_fen').isNotNull(),\n                   F.col('recomputed_charge_fen') - F.col('daily_charge_fen')))\n    return (j.select('bill_date', 'ad_plan_id', 'daily_charge_fen', 'recomputed_charge_fen',\n                     diff.alias('diff_charge_fen'),\n                     F.when(F.col('daily_charge_fen').isNull(), F.lit('lost'))\n                      .when(F.col('recomputed_charge_fen').isNull(), F.lit('hourly-missing'))\n                      .when(F.col('daily_caliber') != F.col('hourly_caliber'),\n                            F.lit('caliber-change'))\n                      .when(diff == 0, F.lit('match'))\n                      .when(diff == F.col('late_charge_fen'), F.lit('late-arrival'))\n                      .otherwise(F.lit('unexplained')).alias('diff_type'))\n            .orderBy('bill_date', 'ad_plan_id'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # \"对不上就是晚到\"版：不声明一次真相层、不看口径版本、把缺失侧兜成 0。\n    # 症状是分类列里永远只有 match 和 late-arrival，真正的丢数与口径变更被吞干净。\n    r = spark.table('report_rows')\n    hourly = (r.filter(F.col('layer') == 'hourly')\n              .groupBy('bill_date', 'ad_plan_id')\n              .agg(F.sum('charge_fen').alias('recomputed_charge_fen')))\n    daily = (r.filter(F.col('layer') == 'daily')\n             .select('bill_date', 'ad_plan_id',\n                     F.col('charge_fen').alias('daily_charge_fen')))\n    j = hourly.join(daily, ['bill_date', 'ad_plan_id'], 'left')\n    return (j.select('bill_date', 'ad_plan_id',\n                     F.coalesce('daily_charge_fen', F.lit(0)).alias('daily_charge_fen'),\n                     F.col('recomputed_charge_fen'),\n                     (F.col('recomputed_charge_fen') - F.coalesce('daily_charge_fen', F.lit(0)))\n                     .alias('diff_charge_fen'),\n                     F.when(F.col('recomputed_charge_fen')\n                            == F.coalesce('daily_charge_fen', F.lit(0)), F.lit('match'))\n                     .otherwise(F.lit('late-arrival')).alias('diff_type'))\n            .orderBy('bill_date', 'ad_plan_id'))"
+  },
+  "estimatedMinutes": 34,
+  "source": {
+    "company": "PDD",
+    "role": "数据研发（报表与口径分层方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-data-and-recommendation.md#4 考点 8（`pdd.ad.api.report.hourly/daily/entity` 三层报表官方接口 + 素材建议 judgeKind=pyspark「小时表 → 分天表重算 + 差异分类（晚到/回补/口径变更/丢数）」）＋ §2 追问 7；素材给了分类维度，未给优先级与判据",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.112Z"
+  }
+}

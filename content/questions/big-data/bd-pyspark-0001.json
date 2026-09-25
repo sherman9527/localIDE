@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0001",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "匿名流量占九成的 UV：热点 key 拆分 + 两阶段精确去重",
+  "statement": "## 背景与数据规模\n`item_page_events` 是商品详情页曝光明细（生产规模：日均 **42 亿行 / 约 3.1 TB 压缩后**，按 UTC 日期分区）。\n`user_id` 分布极度倾斜：未登录流量被上游统一改写成字面量 `'anonymous'`，在头部商品上占比可达 **90%+**。\n线上作业写成 `groupBy(dt, item_id).agg(countDistinct('user_id'))` 后，单个 reduce task 输入 **8.2 GB**，而 p50 只有 **40 MB**（max/p50 ≈ 200），stage 天天撞 SLA。\n本题要求你按「**先把热点桶从 distinct 状态里摘出去，再做两阶段聚合**」的思路重写出正确且可分流的语义。\n\n## 输入\n判题器每题灌入临时视图 `item_page_events`（`def solve(spark)` 里用 `spark.table('item_page_events')` 读取），列：\n- `event_id STRING` 事件号（不参与口径，仅为可读性）\n- `item_id STRING` 商品 ID，**可能为 NULL、空串或纯空白**\n- `user_id STRING` 可能为 NULL 或字面量 `'anonymous'`\n- `event_ts STRING` UTC 墙上时间，合法格式 `yyyy-MM-dd HH:mm:ss`；**存在脏值**（空串、非时间文本、月份越界如 `2026-13-45 10:00:00`）\n\n## 口径定义（必须逐条严格实现）\n1. `stat_date` = `event_ts` 解析出的 **UTC 日期**，输出为 `yyyy-MM-dd` **字符串**。`event_ts` 为 NULL / 空串 / 无法解析的行**整行丢弃**（生产上应落 quarantine 表，本题只要求不参与统计）。\n2. 分组键为 `(stat_date, item_id)`，其中 `item_id` 需归一：`trim` 后为 NULL 或空串 → 落 `'unknown'`。\n3. **匿名流量**定义：`user_id IS NULL OR user_id = 'anonymous'`（两者同一个桶）。非匿名即实名流量。\n4. 指标：\n   - `uniq_users`：实名用户的**精确去重个数**（同一 user_id 在同一 `stat_date + item_id` 内多次曝光只算 1）；该组全是匿名时为 `0`。\n   - `anon_events`：匿名流量的**事件行数**（匿名不做去重——这正是把 90% 数据摘出 distinct 状态的依据）。\n   - `total_events`：该组有效行数（恒等于「实名去重前的行数 + 匿名行数」）。\n\n## 输出\n返回 DataFrame，列**必须严格是** `stat_date, item_id, uniq_users, anon_events, total_events`（名字与个数都对不上即判负）。\n判题按**行集合**比对（行序不敏感）；生产写法请自带 `orderBy('stat_date','item_id')`。\n\n## 约束与考点\n- 禁止 `collect()` / `toPandas()`（判题只看结果，但面试追问会让你解释为什么）。\n- 期望做法：匿名分支与实名分支拆开——实名分支先 `groupBy(date, item, user)` 做局部去重、再 `count` 上卷（两阶段），匿名分支只做 `count`；最后一 `union`/`join` 合并。直接 `countDistinct('user_id')` 在 90% 倾斜下会把匿名行全部塞进 distinct 状态。\n- 不要指望 `spark.sql.adaptive.skewJoin.enabled`：AQE 的倾斜拆分只治 **shuffle join** 的分区不均，对 `groupBy` 单 key 的天然倾斜无效。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "data-skew",
+    "two-phase-aggregation",
+    "exact-count-distinct",
+    "spark-shuffle-internals",
+    "modern:spark-4-aqe"
+  ],
+  "cases": [
+    {
+      "name": "基础：同日同人重复曝光只算一个 UV",
+      "input": {
+        "view": "item_page_events",
+        "schema": "event_id string, item_id string, user_id string, event_ts string",
+        "rows": [
+          { "event_id": "e1", "item_id": "I1", "user_id": "u_a", "event_ts": "2026-09-01 10:00:00" },
+          { "event_id": "e2", "item_id": "I1", "user_id": "u_a", "event_ts": "2026-09-01 10:05:00" },
+          { "event_id": "e3", "item_id": "I1", "user_id": "u_b", "event_ts": "2026-09-01 11:00:00" },
+          { "event_id": "e4", "item_id": "I2", "user_id": "anonymous", "event_ts": "2026-09-01 12:00:00" }
+        ]
+      },
+      "expected": [
+        { "stat_date": "2026-09-01", "item_id": "I1", "uniq_users": 2, "anon_events": 0, "total_events": 3 },
+        { "stat_date": "2026-09-01", "item_id": "I2", "uniq_users": 0, "anon_events": 1, "total_events": 1 }
+      ],
+      "note": "u_a 两次曝光只算 1 个 UV；全匿名组的 uniq_users 必须是 0 而不是 1。"
+    },
+    {
+      "name": "边界：同一用户跨 UTC 日各计一次 UV",
+      "input": {
+        "view": "item_page_events",
+        "schema": "event_id string, item_id string, user_id string, event_ts string",
+        "rows": [
+          { "event_id": "e1", "item_id": "I1", "user_id": "u_a", "event_ts": "2026-09-01 23:59:59" },
+          { "event_id": "e2", "item_id": "I1", "user_id": "u_a", "event_ts": "2026-09-02 00:00:00" },
+          { "event_id": "e3", "item_id": "I1", "user_id": "u_b", "event_ts": "2026-09-02 08:00:00" }
+        ]
+      },
+      "expected": [
+        { "stat_date": "2026-09-01", "item_id": "I1", "uniq_users": 1, "anon_events": 0, "total_events": 1 },
+        { "stat_date": "2026-09-02", "item_id": "I1", "uniq_users": 2, "anon_events": 0, "total_events": 2 }
+      ],
+      "note": "去重域是 (stat_date, item_id) 而不是全局；日切边界 23:59:59 与 00:00:00 属于两天。"
+    },
+    {
+      "name": "极端倾斜：单商品 90% 匿名流量（null 与 anonymous 同桶）",
+      "input": {
+        "view": "item_page_events",
+        "schema": "event_id string, item_id string, user_id string, event_ts string",
+        "rows": [
+          { "event_id": "e1", "item_id": "I9", "user_id": "u_a", "event_ts": "2026-09-01 01:00:00" },
+          { "event_id": "e2", "item_id": "I9", "user_id": "u_b", "event_ts": "2026-09-01 01:00:01" },
+          { "event_id": "a1", "item_id": "I9", "user_id": "anonymous", "event_ts": "2026-09-01 01:00:02" },
+          { "event_id": "a2", "item_id": "I9", "user_id": "anonymous", "event_ts": "2026-09-01 01:00:03" },
+          { "event_id": "a3", "item_id": "I9", "user_id": null, "event_ts": "2026-09-01 01:00:04" },
+          { "event_id": "a4", "item_id": "I9", "user_id": null, "event_ts": "2026-09-01 01:00:05" },
+          { "event_id": "a5", "item_id": "I9", "user_id": "anonymous", "event_ts": "2026-09-01 01:00:06" },
+          { "event_id": "a6", "item_id": "I9", "user_id": "anonymous", "event_ts": "2026-09-01 01:00:07" },
+          { "event_id": "a7", "item_id": "I9", "user_id": null, "event_ts": "2026-09-01 01:00:08" },
+          { "event_id": "a8", "item_id": "I9", "user_id": "u_a", "event_ts": "2026-09-01 01:00:09" }
+        ]
+      },
+      "expected": [
+        { "stat_date": "2026-09-01", "item_id": "I9", "uniq_users": 2, "anon_events": 7, "total_events": 10 }
+      ],
+      "note": "u_a 重复出现仍是 1 人；NULL 与 'anonymous' 共 7 行全部计入 anon_events。"
+    },
+    {
+      "name": "空分区：当日无任何有效事件返回零行",
+      "input": {
+        "view": "item_page_events",
+        "schema": "event_id string, item_id string, user_id string, event_ts string",
+        "rows": []
+      },
+      "expected": [],
+      "note": "空 DataFrame 不能抛异常，也不得凭空产出一行 0。"
+    },
+    {
+      "name": "脏时间与空 item 边界：非法 ts 丢弃、NULL/空白 item 归 unknown",
+      "input": {
+        "view": "item_page_events",
+        "schema": "event_id string, item_id string, user_id string, event_ts string",
+        "rows": [
+          { "event_id": "e1", "item_id": null, "user_id": "u_a", "event_ts": "2026-09-01 10:00:00" },
+          { "event_id": "e2", "item_id": "   ", "user_id": "u_b", "event_ts": "2026-09-01 10:00:00" },
+          { "event_id": "e3", "item_id": "I3", "user_id": "u_c", "event_ts": "not-a-time" },
+          { "event_id": "e4", "item_id": "I3", "user_id": "u_c", "event_ts": "2026-13-45 10:00:00" },
+          { "event_id": "e5", "item_id": "I3", "user_id": null, "event_ts": "2026-09-01 22:00:00" },
+          { "event_id": "e6", "item_id": "I3", "user_id": "u_d", "event_ts": "" },
+          { "event_id": "e7", "item_id": "I3", "user_id": "u_d", "event_ts": "2026-09-01 09:00:00" }
+        ]
+      },
+      "expected": [
+        { "stat_date": "2026-09-01", "item_id": "I3", "uniq_users": 1, "anon_events": 1, "total_events": 2 },
+        { "stat_date": "2026-09-01", "item_id": "unknown", "uniq_users": 2, "anon_events": 0, "total_events": 2 }
+      ],
+      "note": "e3/e4/e6 三行必须被丢弃（用 substring 直接截断会把它们算进来）；e2 的纯空白要与 NULL 同桶。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 75000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\nANON = 'anonymous'\n\n\ndef solve(spark):\n    keyed = (\n        spark.table('item_page_events')\n        .withColumn('stat_date', F.substring(F.to_timestamp('event_ts'), 1, 10))\n        .filter(F.col('stat_date').isNotNull())\n        .withColumn('item_key', F.coalesce(F.nullif(F.trim('item_id'), F.lit('')), F.lit('unknown')))\n        .withColumn('is_anon', F.col('user_id').isNull() | (F.col('user_id') == F.lit(ANON)))\n    )\n    anon = (\n        keyed.filter(F.col('is_anon'))\n        .groupBy('stat_date', 'item_key')\n        .agg(F.count(F.lit(1)).alias('anon_events'))\n    )\n    users = (\n        keyed.filter(~F.col('is_anon'))\n        .groupBy('stat_date', 'item_key', 'user_id')\n        .agg(F.count(F.lit(1)).alias('hits'))\n        .groupBy('stat_date', 'item_key')\n        .agg(F.count(F.lit(1)).alias('uniq_users'))\n    )\n    total = keyed.groupBy('stat_date', 'item_key').agg(F.count(F.lit(1)).alias('total_events'))\n    return (\n        total.join(anon, ['stat_date', 'item_key'], 'left')\n        .join(users, ['stat_date', 'item_key'], 'left')\n        .fillna({'uniq_users': 0, 'anon_events': 0})\n        .select(\n            'stat_date',\n            F.col('item_key').alias('item_id'),\n            'uniq_users',\n            'anon_events',\n            'total_events',\n        )\n        .orderBy('stat_date', 'item_id')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    return (\n        spark.table('item_page_events')\n        .withColumn('stat_date', F.substring('event_ts', 1, 10))\n        .groupBy('stat_date', 'item_id')\n        .agg(\n            F.countDistinct('user_id').alias('uniq_users'),\n            F.lit(0).alias('anon_events'),\n            F.count(F.lit(1)).alias('total_events'),\n        )\n    )\n"
+  },
+  "answer": "## 参考要点\n1. **先分类倾斜根因再动手**：这是「key 天然集中（匿名桶）」型倾斜，不是 shuffle join 倾斜，所以 AQE 的 `skewJoin` 拆分不会触发；`shuffle.partitions` 从 200 调到 4096 也只是把 8.2 GB 的大分区切成更多 4 GB 的碎片（单 key 无法被拆）。真正能做的是**让热点桶不进入 distinct 状态**。\n2. 拆分支：匿名行只需要行数（不需要去重），单独 `filter + groupBy + count`；实名行走两阶段——先 `groupBy(date, item, user)`（第一次 shuffle 就把同一用户的多条曝光在 map 侧局部合并掉），再 `count(*)` 上卷得到精确 UV。两阶段的中间态是「组内 distinct 用户数」量级而不是「组内行数」量级，这就是省下 8 GB 的地方。\n3. 语义钉死三件事：去重域 = `(stat_date, item_id)`；日切按 UTC 且用 `to_timestamp` 解析（`substring` 截断会把 `2026-13-45`、空串等脏值算进来）；`item_id` 的 NULL / 空串 / 纯空白统一落 `unknown`（否则写出时产生 `__HIVE_DEFAULT_PARTITION__` 与一堆肉眼看不见的分区）。\n4. 精度取舍：产品口径如果可以接受 1.5% 误差，正解是 `approx_count_distinct`（HLL，常量内存、天然抗倾斜）或预聚合 `user_id → bitmap`；精确 UV 才需要上面这套改写。面试要主动交代这条分岔。\n\n## 追问\n- 「为什么匿名桶算事件数而不是访客数？」——因为访客数在匿名场景不可辨识，把它当 1 会低估、当 N 会高估；正确产品口径应该单独命名（如 `anon_hits`），并在语义层标注不可与 UV 相加。\n- 「max/p50 = 200 这个比值你从哪里取？」——event log / Spark 4.x SQL plan metrics 与 `Task Stage Task Data` 的 `shuffle bytes written` per-task 分布，而不是看 UI 平均数。\n- 「Spark 4.x 上你重跑这个作业要重新验证什么？」——ANSI 默认开启（脏值 cast 由 null 变抛异常，必须 `try_cast` 或先隔离）、shuffle spill 压缩默认转 ZSTD（CPU/IO 平衡点移动）、AQE 默认参数、以及 4.1 起基于校验和的 shuffle 重试。\n- 「如果要求同时输出 7 日 UV 呢？」——跨天不可加：不能对日 UV 求和，必须回到 `(user_id, 日窗口)` 明细或存 HLL 中间态上卷。",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/spark-shuffle-tuning.md#data-skew",
+    "addedBy": "content-agent-bd"
+  }
+}

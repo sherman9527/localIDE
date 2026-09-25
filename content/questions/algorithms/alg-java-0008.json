@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0008",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "带 TTL 的 LRU 访问轨迹回放与驱逐归因",
+  "statement": "## 背景\n\n缓存治理评审：给你一段线上访问轨迹（按时间非递减），要求**离线回放**并输出\"被驱逐的 key 序列\"，用来评估驱逐策略是否合理（命中率崩掉的根因往往是\"过期条目没被回收\"或\"读不续期导致热键被踢\"）。\n\n策略钉死如下（这就是判分口径，不许按自己的偏好改）：\n\n- 容量 `capacity`，`ttlMillis <= 0` 表示**永不过期**；\n- 条目在时刻 `now` 过期 ⟺ `ttlMillis > 0 && now - entry.lastTouch >= ttlMillis`；\n- 访问某 key：若存在且未过期 → **命中**：更新 `lastTouch = now` 并提升为\"最近使用\"；\n- 若存在但已过期 → 静默丢弃该条目（**不计入驱逐序列**），并按 miss 处理；\n- miss → 插入新条目（作为最近使用）；若插入后 `size > capacity`，从**最久未使用端**驱逐恰好一个条目，并把它的 key **追加到驱逐序列**。\n\n## 入口\n\n```java\npublic static int[] replayEvictions(int capacity, int ttlMillis, int[] keys, int[] times)\n```\n\n- `keys[i]` / `times[i]` 是第 i 次访问的 key 与时刻（毫秒，`times` 非递减）；\n- 返回被驱逐 key 的序列，**按发生顺序**（长度可以是 0）。\n\n## 不变式与硬约束\n\n1. `capacity >= 1`，否则抛 `IllegalArgumentException`。\n2. **过期只懒式回收**：只允许在\"访问该 key 时\"或\"它落到 LRU 尾且需要腾容量时\"处理过期条目。**禁止每次操作全表扫描**——那是 O(capacity) 每次操作，而且会把\"过期静默丢弃\"错报成驱逐（判分专门杀这一点）。\n3. 读命中必须**同时**更新 recency 与 TTL（两个都要，缺一即错）。\n4. 一次插入最多驱逐一个条目（因为插入前 `size == capacity`）。\n5. 期望结构：`LinkedHashMap(capacity, 0.75f, accessOrder=true)` + 手工过期判断；或 `HashMap` + 双向链表。平均每次操作 O(1)。\n6. 注意 `LinkedHashMap` 的 `removeEldestEntry` 只在 `put` 之后被调用，且它无法表达\"读续期 + 过期判定\"，所以**不能一把梭**——要能说清为什么。\n\n## 输出契约\n\n返回 `int[]`（新数组），空驱逐返回长度 0 的数组。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "lru-cache",
+    "ttl-eviction",
+    "linked-hash-map",
+    "lazy-deletion",
+    "modern:cache-eviction"
+  ],
+  "cases": [
+    {
+      "name": "空操作序列不产生驱逐",
+      "input": [
+        2,
+        100,
+        [],
+        []
+      ],
+      "expected": []
+    },
+    {
+      "name": "容量 1 的退化输入",
+      "input": [
+        1,
+        0,
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          0,
+          1,
+          2
+        ]
+      ],
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "读命中续期改变驱逐对象",
+      "input": [
+        2,
+        0,
+        [
+          1,
+          2,
+          1,
+          3
+        ],
+        [
+          0,
+          10,
+          20,
+          30
+        ]
+      ],
+      "expected": [
+        2
+      ]
+    },
+    {
+      "name": "过期条目被静默丢弃不算驱逐",
+      "input": [
+        2,
+        100,
+        [
+          1,
+          2,
+          1
+        ],
+        [
+          0,
+          10,
+          200
+        ]
+      ],
+      "expected": []
+    },
+    {
+      "name": "过期条目仍占容量时按 LRU 尾驱逐",
+      "input": [
+        2,
+        100,
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          0,
+          10,
+          200
+        ]
+      ],
+      "expected": [
+        1
+      ]
+    },
+    {
+      "name": "时刻并列的批量访问",
+      "input": [
+        2,
+        0,
+        [
+          1,
+          2,
+          2,
+          3
+        ],
+        [
+          5,
+          5,
+          5,
+          5
+        ]
+      ],
+      "expected": [
+        1
+      ]
+    },
+    {
+      "name": "续期与过期混合的长轨迹",
+      "input": [
+        2,
+        100,
+        [
+          1,
+          2,
+          1,
+          3,
+          4
+        ],
+        [
+          0,
+          10,
+          50,
+          120,
+          130
+        ]
+      ],
+      "expected": [
+        2,
+        1
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] replayEvictions(int capacity, int ttlMillis, int[] keys, int[] times)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * accessOrder=true 的 LinkedHashMap：get 命中会把条目移到最近使用端，\n   * 过期判断只在\"访问该 key\"与\"需要腾容量时看 LRU 尾\"两处发生 —— 纯懒式回收，\n   * 因此不存在全表扫描，每次操作摊销 O(1)。\n   * 条目值里存 lastTouch；ttlMillis <= 0 表示永不过期。\n   */\n  public static int[] replayEvictions(int capacity, int ttlMillis, int[] keys, int[] times) {\n    if (capacity < 1) throw new IllegalArgumentException(\"capacity must be >= 1\");\n    java.util.LinkedHashMap<Integer, int[]> cache =\n        new java.util.LinkedHashMap<Integer, int[]>(16, 0.75f, true);\n    java.util.List<Integer> evicted = new java.util.ArrayList<>();\n    for (int op = 0; op < keys.length; op++) {\n      int key = keys[op];\n      long now = times[op];\n      int[] meta = cache.get(key);                     // 命中即提升 recency\n      if (meta != null) {\n        if (ttlMillis <= 0 || now - meta[0] < ttlMillis) {\n          meta[0] = (int) now;                        // 读续期：recency 与 TTL 一起更新\n          continue;\n        }\n        cache.remove(key);                            // 过期：静默丢弃，不算驱逐\n      }\n      cache.put(key, new int[] { (int) now });\n      while (cache.size() > capacity) {\n        java.util.Iterator<Integer> eldestIt = cache.keySet().iterator();\n        Integer eldest = eldestIt.next();             // accessOrder=true 的头 = 最久未使用\n        eldestIt.remove();\n        evicted.add(eldest);\n      }\n    }\n    int[] out = new int[evicted.size()];\n    for (int i = 0; i < out.length; i++) out[i] = evicted.get(i);\n    return out;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：每次操作前全表扫描，把所有过期条目都当成\"驱逐\"上报。\n  // 复杂度退化为 O(capacity) 每次操作，并且把\"过期静默丢弃\"错误地算进驱逐序列。\n  public static int[] replayEvictions(int capacity, int ttlMillis, int[] keys, int[] times) {\n    if (capacity < 1) throw new IllegalArgumentException(\"capacity must be >= 1\");\n    java.util.LinkedHashMap<Integer, Integer> cache =\n        new java.util.LinkedHashMap<Integer, Integer>(16, 0.75f, true);\n    java.util.List<Integer> evicted = new java.util.ArrayList<>();\n    for (int op = 0; op < keys.length; op++) {\n      long now = times[op];\n      java.util.Iterator<java.util.Map.Entry<Integer, Integer>> sweep = cache.entrySet().iterator();\n      while (sweep.hasNext()) {\n        java.util.Map.Entry<Integer, Integer> e = sweep.next();\n        if (ttlMillis > 0 && now - e.getValue() >= ttlMillis) {\n          sweep.remove();\n          evicted.add(e.getKey());\n        }\n      }\n      Integer last = cache.get(keys[op]);\n      cache.put(keys[op], (int) now);\n      if (last != null) continue;\n      while (cache.size() > capacity) {\n        Integer eldest = cache.keySet().iterator().next();\n        evicted.add(eldest);\n        cache.remove(eldest);\n      }\n    }\n    int[] out = new int[evicted.size()];\n    for (int i = 0; i < out.length; i++) out[i] = evicted.get(i);\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：`LinkedHashMap(16, 0.75f, true)` 提供 O(1) 的 recency 提升与\"头即最久未使用\"；TTL 存在条目里，只在两个地方判定——访问该 key 时（过期则静默丢弃后按 miss 处理）与腾容量时（从尾部驱逐）。整体摊销 O(1)/操作，驱逐序列只由容量路径产生。\n\n**判分点**：\n- \"过期静默丢弃不算驱逐\"：全表扫描的朴素实现会把过期 key 也上报，序列凭空多出条目。生产上这会让\"驱逐原因\"指标（capacity vs expiry）彻底失真。\n- \"过期仍占容量\"：容量满时驱逐的仍然是 LRU 尾（哪怕它同时已过期），而不是\"先扫掉所有过期再决定\"——所以输出是 `[1]` 而不是 `[1,2]`。\n- \"读命中续期改变驱逐对象\"：`get` 不移 recency 的实现（比如用 `HashMap` + 只在 put 时维护顺序）会踢掉刚被访问的热 key。\n\n**为什么 `removeEldestEntry` 不够用**：它只在 `put` 后被调用、且只能表达\"size 超限就丢最老\"；无法表达 (a) 读续期、(b) 过期条目优先被视作\"死条目\"、(c) 驱逐归因。要 TTL + LRU + 精确归因，就必须手写 `HashMap<K,Node>` + 双向链表（`ArrayDeque` 不行，中间摘除要 O(1)）。\n\n**Java 21 口径**：`LinkedHashMap` 实现了 `SequencedMap`，可用 `firstEntry()/lastEntry()/pollFirstEntry()/reversed()` 替掉 `keySet().iterator().next()` 这类\"猜迭代顺序\"的写法（判题镜像是 JDK 17，所以参考解用 17 兼容写法；21 下 `pollFirstEntry()` 更干净）。注意 `reversed()` 是**视图**，遍历中删除要小心。\n\n**复杂度**：每次操作摊销 O(1)，空间 O(capacity)。若改成\"每次操作扫全表\"就是 O(capacity)/操作，`capacity=1e5` 的缓存直接崩。\n\n**面试追问**：\n1. 并发下这套怎么办？（`LinkedHashMap` 的 `accessOrder=true` 让 `get` 成为结构性修改，无同步会形成链表成环/丢更新；`synchronized` 包住 get 又把吞吐打回单线程。正解：分片（`Striped`/按 key hash 分 N 个小 LRU）、Caffeine 的 W-TinyLFU + 驱逐后台线程、或 `ConcurrentLinkedDeque` + 惰性 recency（不在每次读时移动节点，改为批量重排）。）\n2. 懒删除的内存上界？（过期条目最多堆积 `capacity` 个（容量满时一定会被踢），但\"命中率\"会随死条目增多而下降——所以要给\"过期但未回收\"的条目数打点，超阈值时主动做一轮尾部清扫。）\n3. `size()` 与\"有效条目数\"分离会坑到谁？（背压与命中率统计：`size()==capacity` 不代表满了，驱逐策略与告警阈值都该用有效条目数。）\n4. 若要 LFU 怎么办？（`key→(value,freq)` + `freq→双向链表` + `minFreq`；最高频 bug 是\"删除时只有 `freq == minFreq` 且该桶空了才更新 minFreq\"。）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-collections-heaps.md#12-lru--lfu--带-ttl-的缓存本类别最稳的生产味题",
+    "addedBy": "content-agent-alg"
+  }
+}

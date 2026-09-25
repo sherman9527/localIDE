@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0008",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "缓存击穿的 single-flight：抢不到锁的人不许删锁，回填必须带条件",
+  "statement": "## 背景\n\n热点 key 过期的一瞬间，成百上千个请求同时发现\"缓存没有\"，一起打向数据库 —— 这就是缓存击穿。\n标准解法是 **single-flight**：只让一个请求去回源，其余的直接等。\n听起来一句话，真正出事的是三处细节：**抢锁用的命令、回填用的命令、释放锁的条件**。\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL`/`SCRIPT`/`FCALL`/`KEYS`/`FLUSHDB`/`CONFIG`/`DEBUG`/`SORT`/`OBJECT`/`SELECT`\n（判题器直接拒），所以\"用 Lua 做 owner 校验\"不在本题解空间内。\n\n## 判题方式（先读这段）\n\n判题**不模拟并发，也不让时间流逝**。它做三件事：\n1. 按下面的\"初始状态\"把 Redis 摆好；\n2. 按顺序执行你提交的**这一份命令脚本**（每行一条，`#` 开头是注释）；\n3. 逐条执行校验命令并比对最终状态。\n\n所以：你写的是\"针对这个已知场景的一段安全脚本\"，而**每一条会改状态的命令都必须自己带上条件**\n（`NX` / `XX`），因为脚本里没有\"先读再判断\"的分支可用。\nTTL 判题器读不到（它没法等），但下面的规则仍然要求你写 —— 那是真实事故的原因。\n\n## 初始状态\n\n```\ncache:user:1 = v1            （命中，且 lock:user:1 = owner-b 正被别人持有）\ncache:user:2 = __EMPTY__     （空值哨兵：DB 里确认没有这个用户）\ncache:user:3 = v3            （存在，lock 空闲）\ncache:user:4 不存在           （首次回源，lock 空闲）\ncache:user:5 不存在           （房源刚下架被淘汰，本次是后台预热）\n```\n\n## 同一毫秒到达的 5 个事件（必须全部处理）\n\n| 事件 | 情况 | 必须发生 | 绝对不许发生 |\n| --- | --- | --- | --- |\n| R1 | `user:1` **缓存命中**，但顺手想抢 `lock:user:1` 去刷新 | 尝试抢锁且**抢不到** | 覆盖 `lock:user:1` 的值；删掉 `lock:user:1`；回填 `cache:user:1` |\n| R2 | `user:2` 读到空值哨兵 | 什么都不做（直接返回\"不存在\"） | 删掉哨兵；把它当成\"未缓存\"去回源并覆盖 |\n| R3 | `user:3` 需要回源刷新 | 抢到 `lock:user:3` → 回填新值 → **释放自己那把锁** | 回填后忘记释放（其余请求 5 秒内全被挡） |\n| R4 | `user:4` 缓存里没有，首次回源 | 抢到 `lock:user:4` → 回填 → 释放 | 回填时用 `XX`（key 本来就不存在，会被静默丢掉） |\n| R5 | 后台预热 `user:5`，它可能已经被下架淘汰 | **只做原地刷新**：key 还在才写 | 用普通 `SET` 把已下架的 key 复活 |\n\n回填的值与 TTL 由你定，但校验命令会读这几个确定值，**必须照用**：\n`cache:user:3` 回填 `v3-refreshed`，`cache:user:4` 回填 `v4-fetched`；\n两个锁都用 token `arena-t1` / `arena-t3` / `arena-t4`（对应 R1/R3/R4），锁 TTL 5 秒，缓存 TTL 300 秒。\n\n## 这题真正考的东西\n\n1. **抢锁必须是条件写**：`SET lock:k v EX 5` 与 `SET lock:k v EX 5 NX` 的差别，\n   就是\"人人都以为自己是那个回源的人\"。\n2. **不许删不属于自己的锁**：R1 抢锁失败，如果它结尾照例 `DEL lock:user:1`，\n   就把 `owner-b` 正在用的锁删了 —— 于是第三个请求又能抢进来，击穿照旧发生，\n   而且**监控上看锁的命中率还是正常的**。这是三个经典事故里最难查的一个。\n3. **空值哨兵是防穿透的，不是脏数据**：把它删掉等于把\"DB 里根本没有\"这个事实丢掉，\n   下一次同样不存在的 id 又来打 DB。\n4. **`NX` 与 `XX` 用反方向**：R4 用 `XX` 会静默不写（症状是\"缓存永远填不上\"），\n   R5 用普通 `SET` 会复活已下架数据（症状是\"下架的房源还能下单\"）。\n\n只交一段命令脚本，不需要写代码。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "cache-stampede",
+    "distributed-lock",
+    "negative-cache",
+    "conditional-write",
+    "modern:cache-integrity"
+  ],
+  "cases": [
+    {
+      "name": "抢锁失败的人不许覆盖别人的锁",
+      "input": [
+        "GET lock:user:1"
+      ],
+      "expected": "owner-b",
+      "visible": true,
+      "note": "裸 SET 会把它改成 arena-t1 —— 覆盖后 owner-b 再也释放不了自己的锁"
+    },
+    {
+      "name": "抢锁失败的人更不许删掉别人的锁",
+      "input": [
+        "EXISTS lock:user:1"
+      ],
+      "expected": 1,
+      "visible": true,
+      "note": "finally 里无条件 DEL 的实现这里给 0；这是击穿修了三次还在的根因"
+    },
+    {
+      "name": "没抢到锁就不该回源：命中的缓存值保持原样",
+      "input": [
+        "GET cache:user:1"
+      ],
+      "expected": "v1",
+      "visible": true
+    },
+    {
+      "name": "空值哨兵必须留着（它是防穿透的，不是脏数据）",
+      "input": [
+        "EXISTS cache:user:2"
+      ],
+      "expected": 1,
+      "visible": true,
+      "note": "把哨兵 DEL 掉 = 下一次同一个不存在的 id 再打一遍 DB"
+    },
+    {
+      "name": "R3 释放了自己的锁（否则 5 秒内该 key 无人能回源）",
+      "input": [
+        "EXISTS lock:user:3"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "R3 的回填真的落盘了",
+      "input": [
+        "GET cache:user:3"
+      ],
+      "expected": "v3-refreshed",
+      "visible": true
+    },
+    {
+      "name": "首次回源不能被 XX 静默丢掉：R4 的值必须在",
+      "input": [
+        "GET cache:user:4"
+      ],
+      "expected": "v4-fetched",
+      "visible": true,
+      "note": "R4 用 SET ... XX 时这里返回 nil —— 症状是\"缓存永远填不上\"而日志一切正常"
+    },
+    {
+      "name": "预热不许复活已下架的 key",
+      "input": [
+        "EXISTS cache:user:5"
+      ],
+      "expected": 0,
+      "visible": true,
+      "note": "普通 SET 会把它写成 1 —— 下架的房源又能下单"
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nSET lock:user:1 arena-t1 EX 5 NX     # 抢不到 ⇒ 什么都不做\n# R2：一个命令都不发\nSET lock:user:3 arena-t3 EX 5 NX\nSET cache:user:3 v3-refreshed EX 300\nDEL lock:user:3\nSET lock:user:4 arena-t4 EX 5 NX\nSET cache:user:4 v4-fetched EX 300\nDEL lock:user:4\nSET cache:user:5 v5-warm EX 300 XX   # 已下架 ⇒ 不复活\n```\n\n**R1 之后 `GET lock:user:1` 必须还是 `owner-b`、`EXISTS lock:user:1` 必须是 1。**\n这两条断言打在同一个事故上：抢锁失败的人走了\"抢不到也照样往下走\"的路径 ——\n裸 `SET` 把别人的 token 换成自己的（覆盖），或者 `finally { DEL }` 把别人的锁删了（误删）。\n两者都会让 single-flight **看起来在工作**：锁一直存在、一直有人抢，\n但同一时刻其实有多个请求在回源。这就是\"缓存击穿修了三次还在\"的原因。\n\n**为什么脚本里没有 owner 校验也敢说安全**：这段脚本是**为这一个场景写死的** ——\n`DEL lock:user:3` 之所以正确，是因为同一个脚本里前面那条 `SET ... NX` 在这个初始状态下必然成功。\n线上不是这样：条件写之后要分支，Redis 侧没有分支，所以真实系统只有三条路 ——\n① `EVAL` 里做 `if redis.call('GET',KEYS[1])==ARGV[1] then DEL`（本题禁掉了，考的就是你知道该禁）；\n② 锁本身换成**可比较的数据结构**：`ZADD lock 1 <reqId>` 抢、`ZREM lock <reqId>` 放，\n   天然只删自己的成员，还顺手支持\"最多 N 个回源名额\"；\n③ 干脆不释放，靠 TTL 到期 —— 代价是回源成功后仍有 TTL 秒的等待窗口。\n第 ② 条是这套题里最值得答出来的：它把\"owner 校验\"从流程问题变成了**数据建模**问题。\n\n**空值哨兵为什么不能删**：`cache:user:2 = __EMPTY__` 记录的不是数据，是\"DB 里确认没有\"这个事实。\n删掉它，下一次同一个不存在的 id（爬虫扫号段时会成千上万次）又会走完\n\"缓存 miss → 抢锁 → 回源 → DB 说没有 → 不写缓存\"，等于对同一个问题反复打 DB —— 这是**穿透**，\n和击穿是两件事：击穿是\"有一个热 key 过期\"，穿透是\"查的 key 根本不存在，缓存救不了\"。\n\n**`NX` / `XX` 用反的两种症状**（R4 / R5）：\nR4 用 `XX` 时 key 不存在 ⇒ 写不进去 ⇒ 缓存永远是空的，每个请求都回源，\n而锁也被正常释放，**日志上一切正常**，只有 DB QPS 涨了。\nR5 用普通 `SET` 时把下架的 key 写回去 ⇒ 脏数据复活，下游按\"这是可订的\"处理。\n两个方向都要求\"回填命令本身带条件\"，而不是靠调用方记住自己是谁。\n\n**判分点之外必须做到的两件事**（判题读不到，但面试要主动说）：\n1. 回填写 `EX` 而不是裸 `SET`：没有 TTL 的缓存条目永远不会再更新，\n   \"回源成功但忘带过期\"是永久脏数据，比击穿更难查。\n2. TTL 加抖动（`300 + rand(0, 60)`）：同一个批处理灌进去的 key 若共享同一个 TTL，\n   会在同一时刻集体过期 —— 那是**雪崩**，它和击穿的区别是\"一次性影响一批 key\"。\n   真实系统还会再加一层\"逻辑过期\"：值里存 `expireAt`，过期后仍返回旧值、异步刷新，\n   用一点点数据新鲜度换掉整个等待窗口。\n\n**工程延伸（面试追问点）**\n\n1. 为什么不用互斥锁而用\"等待-重试\"？（回源方之外的请求可以短暂 sleep 后重读缓存；\n   但重试次数与退避必须封顶，否则 DB 慢的时候这些重试会自己变成一场放大攻击。）\n2. 抢锁失败但持有者挂了怎么办？（TTL 就是给它准备的 —— 所以 TTL 必须 **大于** P99 回源耗时，\n   小于\"用户能接受的等待\"。这两个约束冲突时，说明回源路径本身要拆：\n   把最慢的那一段挪到异步，别让它坐在锁里。）\n3. 怎么知道这套机制在起作用？（盯三个数：single-flight 的**合并比**（回源次数 / miss 次数）、\n   锁等待超时率、以及空值哨兵的命中率。合并比接近 1 说明锁没起作用。）\n4. 多级缓存下这题怎么变？（本地 LRU + Redis + DB：击穿要**在每一级都做**，\n   否则本地层会绕过 Redis 的锁。常见做法是把回源权收在一层，其它层只做只读复制。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL cache:user:1 cache:user:2 cache:user:3 cache:user:4 cache:user:5",
+      "DEL lock:user:1 lock:user:3 lock:user:4",
+      "SET cache:user:1 v1",
+      "SET cache:user:2 __EMPTY__",
+      "SET cache:user:3 v3",
+      "SET lock:user:1 owner-b"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# R1：缓存命中 + 锁被别人占着 —— 条件抢锁会失败，这正是我们要的结果\nSET lock:user:1 arena-t1 EX 5 NX\n# （不许 DEL lock:user:1：那把锁不是我们的；也不许回填 cache:user:1）\n\n# R2：空值哨兵 —— 一个命令都不发，直接按\"不存在\"返回\n\n# R3：抢到锁 → 回填 → 只释放自己确知持有的那把\nSET lock:user:3 arena-t3 EX 5 NX\nSET cache:user:3 v3-refreshed EX 300\nDEL lock:user:3\n\n# R4：首次回源，key 本来不存在 ⇒ 必须普通 SET（XX 会静默丢掉）\nSET lock:user:4 arena-t4 EX 5 NX\nSET cache:user:4 v4-fetched EX 300\nDEL lock:user:4\n\n# R5：预热不许复活已下架的 key ⇒ XX = 只刷新还在的\nSET cache:user:5 v5-warm EX 300 XX",
+    "naiveSolution": "# \"照抄博客\"版：三步都写，但每步都不带条件\nSET lock:user:1 arena-t1 EX 5\nSET cache:user:1 v1-refreshed EX 300\nDEL lock:user:1\nDEL cache:user:2\nSET lock:user:3 arena-t3 EX 5\nSET cache:user:3 v3-refreshed EX 300\nSET lock:user:4 arena-t4 EX 5\nSET cache:user:4 v4-fetched EX 300\nSET cache:user:5 v5-warm EX 300"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理平台 / 缓存与存储 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#6,#7（原文把击穿/穿透/雪崩背成三段定义，\"Redis 分布式锁的缺陷\"只答了\"锁误删\"一句；未做成可判分条件）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:30:51.831Z"
+  }
+}

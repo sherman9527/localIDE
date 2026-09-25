@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0023",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "连续批处理准入：先扣硬占用，再按最短 prompt 优先塞满剩余 KV",
+  "statement": "## 背景\n\n你在写连续批处理（continuous batching）的准入控制。显存里有一批**正在跑的请求**，\n每个还需要 `runningRemaining[i]` 个 KV 槽位才能跑完；等待队列里有 `waitingPrompts[j]` 个\n新请求各自的 prompt 长度（新请求进来至少要先占下自己 prompt 那么大的 KV）。\n\n**正在跑的请求不能被抢占**——它们的 `runningRemaining` 之和是硬占用，必须先从预算里扣掉。\n剩下的空间里，你要让**新进来的请求数最多**。\n\n## 关键约束\n\n新请求的 KV 一旦分配就整段占到自己结束，所以「让进来的数量最多」= 对 waiting 按 prompt\n长度**升序**排序后尽量塞满剩余预算。\n\n按到达顺序（FIFO）塞是错的，而且错得很典型：\n\n```\nrunning=[0]  waiting=[4,3,3]  budget=6\nFIFO：先试 4，剩 2 塞不下 3 就停 → 进 1 个\n升序：3+3=6 → 进 2 个\n```\n\n线上表现是「显存明明还有余量，吞吐却上不去」，因为一个大 prompt 堵住了后面所有小请求。\n\n## 你要实现的入口\n\n```java\npublic static int admitWaiting(int[] runningRemaining, int[] waitingPrompts, int kvBudget)\n```\n\n- 返回值：最多能准入多少个新请求；\n- `runningRemaining` 之和已经 `>= kvBudget` 时返回 `0`（没有新请求能进，但**不许抛异常**——\n  这是稳态，不是错误，推理集群大部分时间都处于这个状态）；\n- 数组为空一律合法，返回 `0`。\n\n## 约定\n\n1. 任何元素 `< 0`（含 `kvBudget`）都是脏数据，抛 `IllegalArgumentException`。\n2. **求和必须在 `long` 域做**：`runningRemaining` 里两个接近 `Integer.MAX_VALUE` 的值在 `int`\n   域相加会溢出成负数，于是\"剩余预算\"变成天文正数，准入控制形同虚设、直接 OOM。\n3. 允许对 `waitingPrompts` 排序（可以复制后排序，不许改动调用方传入的数组内容）。\n\n## 复杂度要求\n\n`O(W log W)` 时间（W = waitingPrompts 长度）；`O(W)` 额外空间上限（排序副本）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "llm-inference",
+    "greedy-scheduling",
+    "overflow-contract",
+    "backpressure",
+    "modern:inference-gateway"
+  ],
+  "cases": [
+    {
+      "name": "正常：扣掉硬占用后按升序塞进 2 个",
+      "input": [
+        [
+          100,
+          200
+        ],
+        [
+          50,
+          60,
+          5000
+        ],
+        1000
+      ],
+      "expected": 2,
+      "note": "left=700，50+60=110 可进，5000 进不去"
+    },
+    {
+      "name": "running 吃满预算：返回 0 且不抛异常",
+      "input": [
+        [
+          600,
+          600
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        1000
+      ],
+      "expected": 0,
+      "note": "这是稳态不是错误"
+    },
+    {
+      "name": "大 prompt 塞不下时小 prompt 仍须继续尝试",
+      "input": [
+        [
+          0
+        ],
+        [
+          9,
+          1,
+          1,
+          1
+        ],
+        4
+      ],
+      "expected": 3,
+      "note": "升序后 9 排在最后，1+1+1=3 ≤ 4 全进；\"遇到塞不下就停\"的实现得 0"
+    },
+    {
+      "name": "到达顺序与升序的差：waiting=[4,3,3] 预算 6",
+      "input": [
+        [
+          0
+        ],
+        [
+          4,
+          3,
+          3
+        ],
+        6
+      ],
+      "expected": 2,
+      "note": "升序 3+3=6 进 2 个；FIFO 先试 4、剩 2 塞不下 3 就停 → 只进 1 个"
+    },
+    {
+      "name": "int 累加溢出：三个 1e9 在 int 域回绕成负",
+      "input": [
+        [
+          1000000000,
+          1000000000,
+          1000000000
+        ],
+        [
+          1
+        ],
+        1500000000
+      ],
+      "expected": 0,
+      "note": "真值 used=3e9 > 1.5e9 应返回 0；int 回绕成 -1.29e9 → 误判预算充足 → 准入并 OOM"
+    },
+    {
+      "name": "贴边：剩余预算恰好等于一个 prompt",
+      "input": [
+        [
+          900
+        ],
+        [
+          100
+        ],
+        1000
+      ],
+      "expected": 1
+    },
+    {
+      "name": "零长度退化：waiting 为空",
+      "input": [
+        [
+          10
+        ],
+        [],
+        100
+      ],
+      "expected": 0
+    }
+  ],
+  "answer": "**思路**：先扣硬占用 `Σ runningRemaining`，剩余预算 `left`；对 waiting **升序排序**后依次塞，\n遇到第一个塞不下的就 `break`（升序意味着后面只会更大）。`O(W log W)`。\n\n**为什么排序而不是 FIFO**：目标是\"准入数量最多\"，这是分数背包在\"每件物品价值=1\"时的特例，\n贪心取最小者即最优；FIFO 会被一个大 prompt 堵住全部小请求。用例 `[9,1,1,1] / budget=4`：\nFIFO 进 0 个，升序进 3 个。\n\n**为什么求和必须用 `long`**：`runningRemaining` 里两个接近 `Integer.MAX_VALUE` 的值在 `int` 域\n相加回绕成负，`left = budget − (负数)` 变成天文正数 → 全部准入 → 显存 OOM，\n而且 OOM 发生在几百毫秒之后，跟准入决策在日志上已经断链。用例 G 就是杀这个的。\n\n**`used >= budget` 为什么返回 0 而不是抛错**：推理集群绝大多数时刻都是满的，把它当错误会让\n监控全是噪声、调用方也没法处理。区分\"没有空间\"（正常）与\"数据是脏的\"（异常）是契约设计的关键。\n\n**工程延伸（面试追问点）**：\n1. 真实引擎里新请求还要预留**生成阶段**的增长空间，`w` 不该只是 prompt 长度。怎么改？（按 `prompt + expectedOutput × 平均增量` 估，或用历史分位数；估小了会中途 OOM，估大了会欠载）。\n2. 只按\"数量最多\"准入合理吗？（不合理：会把长 SLO 请求永远饿死。要加优先级 aging，或按\"单位 KV 的边际吞吐\"排序）。\n3. 排序开销在热路径上能接受吗？（W 通常几十到几百，可接受；更大时用计数排序/部分排序 `quickselect` 只要前 k 小）。\n4. 多租户下这个准入函数怎么扩展？（每租户一条 quota 线，准入需同时满足全局 left 与租户 quota；否则一个租户的大批量会吃掉全部空间）。\n5. 准入后请求跑不完（实际生成比预估长）怎么办？（预留水位 + 抢占最晚到达者；抢占要把它的 KV 落盘或丢弃重算，DeepSeek/月之暗面这类长上下文场景里成本很高）。",
+  "runner": {
+    "className": "Solution",
+    "signature": "int admitWaiting(int[] runningRemaining, int[] waitingPrompts, int kvBudget)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.Arrays;\n\npublic class Solution {\n  public static int admitWaiting(int[] runningRemaining, int[] waitingPrompts, int kvBudget) {\n    if (kvBudget < 0) throw new IllegalArgumentException(\"negative budget\");\n    long used = 0L;\n    for (int r : runningRemaining) {\n      if (r < 0) throw new IllegalArgumentException(\"negative remaining\");\n      used += r;                       // long 域累加：两个 Integer.MAX_VALUE 相加也不会回绕\n    }\n    if (used >= kvBudget) return 0;    // 稳态而非错误：不许抛\n    long left = kvBudget - used;\n\n    int[] sorted = waitingPrompts.clone();\n    for (int w : sorted) {\n      if (w < 0) throw new IllegalArgumentException(\"negative prompt length\");\n    }\n    Arrays.sort(sorted);               // 升序：让进来的数量最多\n\n    int admitted = 0;\n    for (int w : sorted) {\n      if (w <= left) {                 // 贴边允许：恰好等于剩余预算就该进\n        left -= w;\n        admitted++;\n      } else {\n        break;                         // 已升序，后面只会更大\n      }\n    }\n    return admitted;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 生产里最常见的版本：按到达顺序塞、塞不下就停，且用 int 累加\n  public static int admitWaiting(int[] runningRemaining, int[] waitingPrompts, int kvBudget) {\n    int used = 0;\n    for (int r : runningRemaining) used += r;\n    if (used >= kvBudget) return 0;\n    int left = kvBudget - used;\n    int admitted = 0;\n    for (int w : waitingPrompts) {\n      if (w <= left) {\n        left -= w;\n        admitted++;\n      } else {\n        break;                         // 没排序就 break：会被一个大 prompt 截断\n      }\n    }\n    return admitted;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理引擎 / 调度 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#36（原文讲静态 vs 连续批处理的概念，未给出可判分的准入语义）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-20T16:13:37.351Z"
+  }
+}

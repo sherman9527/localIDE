@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0006",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "Kafka 与反压链路：分区键设计、重复与乱序、lag 增长到 4 亿条时你先做什么",
+  "statement": "## 场景（Airbnb / Apple 实时采集方向，30 分钟）\n采集总线：**Kafka 4.x（KRaft，380 个 topic、峰值 620 万 records/s、日均 2.6 TB/分钟级流入）**，下游三类消费者：\n① Flink SQL 聚合（写 Paimon/Iceberg 主键表）；② Spark Structured Streaming 微批写湖；③ 裸 Java 消费者把事件推给外部 webhook / 第三方 API。\n上周一起连环故障：某个下游作业因为「外部接口限流」变慢，**反压沿链路上传导致同 broker 集群上 5 个无关作业 lag 一起增长，峰值 4 亿条**，早报表迟到 3.5 小时；同时上游网关重启导致**大量重复事件（同 `event_id` 不同 offset）**，并且新增了一个枚举值 `CANCELLED_LATE`。\n另有历史包袱：topic 分区数从 48 起就没动过；有人按 `user_id` 分区（头部大账号造成热点），有人按 round-robin（下游聚合无法本地去重）；单次消息最大 4 MB、`max.partition.fetch.bytes` 与下游批大小互相打架；湖侧抱怨「Kafka 提交频率决定我们的文件数」。\n\n## 请回答\n1. **反压的定位与止血**：从 lag 曲线到根因的判断顺序（哪个 topic/consumer group、是 broker 端 produce/fetch 限流、还是消费端能力不足、还是外部依赖变慢）；**先做什么能立刻止血**、什么绝对不能做（例如直接重启作业/扩大 batch 掩盖问题）；跨作业隔离怎么做到「一个慢消费者拖不垮集群」。\n2. **分区数与 key 设计**：48 个分区够不够（按吞吐/单分区吞吐/下游并行度/有序域推导）；key 选择的三角约束（同 key 有序、避免热点、下游算子可并行）；热点 key（头部卖家/大账号）你怎么办；分区数改动后历史数据与下游语义的影响。\n3. **重复、乱序与新增枚举**：三类消费者分别会怎样坏（offset 级去重 vs 业务级去重的区别、Flink state 幂等键、Spark `dropDuplicates` 与 state TTL 过期后的重复、webhook 的外部副作用必须自有幂等键）；新增枚举值导致 `CASE` 落 ELSE 的静默错分，最少要做哪三件事。\n4. **端到端语义与连接器**：at-least-once 默认下「效果一次」怎么保证（事务 sink / 两阶段提交 / 主键 upsert + version 裁决的差别与代价）；Kafka 4.x 的队列语义（share groups）适合替代什么（工作队列 + 事件总线合一）、又**不适合**什么（严格有序、扇出型流处理）；DLQ / quarantine / retry topic 的设计与放大风险。\n5. **保留、成本与湖侧耦合**：retention 与回填能力（能重放多久 = 你的事故恢复半径）、消息大小与压缩（`zstd` vs `lz4` 的 CPU/延迟权衡）、提交频率与下游文件数/compaction 的耦合；跨集群/跨区复制（MirrorMaker 类）的语义风险（乱序、重复、事务中断）。\n\n要求：每一步都要给可观测指标（lag 的哪种口径、fetch/produce 字节、per-partition 直方图）与量化判据，并明确「恢复期间对下游说了什么」。",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "kafka-operations",
+    "backpressure",
+    "partition-keying",
+    "duplicate-and-ordering",
+    "dlq-quarantine",
+    "modern:kafka-4.2"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "notes": "看的是「反压时的判断顺序 + 分区与 key 的推导 + 重复/乱序的真实后果」，能明确拒绝错误动作与能给出正确动作同样重要。",
+    "points": [
+      {
+        "label": "反压定位顺序与止血动作（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：给出**可复现的判断链**（按 topic/group 看 lag 增长率与消费速率差、区分 lag 是「消费慢」还是「生产突增」→ 看 broker 端 produce/fetch 字节与 request 队列时间、`max.lag.secs` 与 per-partition 分布 → 看消费者端每算子 busy/backpressure 与外部依赖 RT/限流计数）；明确**止血优先级**（降级/暂停非核心消费者、给核心 group 预留带宽配额、把外部依赖改成异步有限并发 + 熔断 + 退避、必要时把该 topic 的新数据先落到缓冲 topic/湖再补处理），并明确禁止的动作（盲目重启作业导致重复处理与冷启动、把 batch 调大掩盖慢消费、直接扩 topic 分区）；解释「一个慢消费者拖垮无关作业」的根因（共享 broker 的 netty 线程/fetch 预算/页缓存与 noisy neighbor）并给出隔离方案（按业务等级分集群/分 topic、配额与限流、消费者分组隔离）。"
+      },
+      {
+        "label": "分区数与 key 的量化推导（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：分区数不是拍脑袋——给出「目标吞吐 ÷ 单分区可持续吞吐（写 + 顺序读）→ 分区数，再乘并行度余量」的推导并说明**分区数不能无限加**（生产者/消费者的每分区开销、文件与索引碎片、事务 marker、rebalance 与 leader 迁移成本、下游 per-partition 文件数放大）；key 选择要同时说明有序域、热点与并行度三角：round-robin 破坏下游按 key 去重/聚合的本地性，`user_id` 会把头部大账号打成热分区（并给出办法：加盐/二级 key（`user_id + shard`）、把热点 key 单独 topic、或把「严格有序」降级为「按实体有序 + 下游版本裁决」）；诚实说明加分区后**同一 key 的历史与新增会落到不同分区**（有序语义被破坏），必须同步下游幂等/排序机制。"
+      },
+      {
+        "label": "重复、乱序与新增枚举的具体后果（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：分别说三类消费者会怎样坏——Flink：只有 checkpoint 保证的内部一次，业务重复会重复计数（需要按 `event_id + version` 做状态幂等键，且注意状态 TTL 与迟到窗口耦合）；Spark Structured Streaming：`dropDuplicates` 是**有状态**的，state/watermark 过期后旧 key 再来会再次通过（去重窗口必须 ≥ 最大重复跨度，并配 sink 侧主键 upsert 兜底）；裸消费者 + webhook：外部副作用无法靠下游去重，必须自带幂等键（调用方 ID + 服务端去重 + 重试与对账），并说明「EOS 挡不住上游把同一业务事件发两次」。新增枚举值：`CASE` 显式 `ELSE 'UNKNOWN'` + UNKNOWN 占比阻塞规则 + 枚举注册与契约通知（CI 里 diff），并指出这是**契约破坏**而不是「代码没写好」。"
+      },
+      {
+        "label": "端到端语义与连接器取舍（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：区分三件事——事务 sink（两阶段提交，提交跟随 checkpoint，代价是可见性延迟与「部分提交」问题）、主键 upsert（效果一次但不是事务，读侧可能看到中间态）、at-least-once + 幂等（最工程化的默认）；说明连接器默认 at-least-once 与 `exactly-once` 配置的真实差异（source 可重放 + sink 事务才算端到端）；对 Kafka 4.x 队列语义（share groups / KIP-932）能说明它替代的是「工作队列 + DLQ 式重试」而**不适合**替代需要 key 有序或扇出的流处理，并提到结构化键/元数据类改进（引用需核实到具体版本与 GA 状态）；DLQ 设计要给出重试退避、放大防护（重试风暴导致 lag 二次爆炸）、以及隔离数据回补的幂等要求。"
+      },
+      {
+        "label": "保留、成本与湖侧耦合（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：retention 与「事故恢复半径」挂钩（能重放多久决定是否需要外部回填路径），并区分按时间/按大小保留与 compacted topic 的适用；压缩算法与消息大小（`zstd` 高压缩省带宽但吃 CPU、`lz4` 低延迟；4 MB 大消息拆分或改走对象存储引用 `ObjRef` 模式，需核实可用性）；明确 Kafka 提交频率 → 下游文件数 → compaction 预算的耦合（微批越短文件越碎，湖侧要么攒批要么自动 compaction，成本要一起算）；跨区复制（MirrorMaker 类）要指出事务/顺序/去重被破坏的风险与应对（下游按 event_id 去重 + 单写主）。"
+      },
+      {
+        "label": "沟通与运维闭环（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：恢复期间对下游的明确动作（影响面清单、迟到数据的时间窗与预计补齐时间、是否需要下游屏蔽该窗口指标、事后差异报告）；把「lag 增长率 + 消费速率差 + 外部依赖限流次数」做成一等 SLO 指标；故障后留下可执行改进（分区/配额/熔断参数化、契约新增枚举告警、值班手册一页图）与一次演练验证。只描述技术动作、完全不提对业务方沟通的 ≤ 本考点半分。"
+      }
+    ]
+  },
+  "answer": "## 参考要点\n1. **反压是容量问题不是参数问题**：定位顺序是「谁的 lag 在涨 → 是生产突增还是消费变慢 → 消费端哪个算子瓶颈 → 是否外部依赖限流」。止血靠隔离与降级（核心 group 预留配额、暂停/降级非核心消费者、外部调用改异步有限并发 + 熔断 + 指数退避 + 幂等重试），而不是重启作业（重启会触发重放与冷启动，短时更糟）或加大 batch（只是把延迟藏起来）。「一个慢消费者拖垮无关作业」的根因是共享 broker 的 fetch 预算/netty 线程/页缓存，解法是配额与分级集群。\n2. **分区数是推导出来的**：目标吞吐 ÷ 单分区可持续吞吐（写与顺序读都受单分区限制），再留并行度余量；但分区数放大每分区开销、事务 marker、rebalance/leader 迁移成本与下游 per-partition 文件数。key 设计要承认「有序域 = 分区」，`user_id` 有头部热点就加盐/二级分片或把热点单独 topic，round-robin 会破坏下游按 key 的本地去重。**增加分区会改变 key→分区映射，从而破坏既有有序语义**——这句话是本题的分水岭。\n3. 三类消费者的重复/乱序后果各不相同，共同点是**必须按业务键（`event_id` + version）幂等**而不是按 offset：Flink 内部一次不等于业务一次；Spark `dropDuplicates` 的状态过期后旧 key 会再次通过（去重窗口 ≥ 重复到达跨度 + sink 侧 upsert 兜底，呼应 bd-pyspark-0001/0005）；webhook 是外部副作用，必须自有幂等键与对账。新增枚举值属于契约破坏：`ELSE 'UNKNOWN'` + 占比阻塞规则 + 注册与 CI diff。\n4. 语义层：事务 sink（跟随 checkpoint 提交、可见性延迟、要确认多分区提交是否原子）、主键 upsert（效果一次、可能读到中间态）、at-least-once + 幂等（默认最工程化）。Kafka 4.x 的 share groups 把「队列语义 + 重试/DLQ」搬进 broker，适合工作队列型消费（每条一个 worker、可重试），不适合需要 key 有序或扇出的流算子链——引用时核实版本与 GA 状态。\n5. 成本与耦合：retention = 恢复半径；压缩与消息大小影响 CPU/带宽与下游批大小；提交频率决定湖侧文件数与 compaction 预算，必须一起算账；跨区复制会破坏事务与有序，要单写主 + 下游去重。\n6. 治理：lag 增长率/消费速率差/限流次数做成 SLO，恢复期主动给业务方影响面与补齐时间，故障后一次演练验证。\n\n## 追问\n- 「620 万 records/s 下 rebalance 抖动怎么治？」→ 减少 group 内分区重平衡次数（`group.instance.id`/静态成员、cooperative 增量分配、消费者数变更纳入发布窗口）、按 topic 拆 group、避免大 batch 导致的长轮询与 heartbeat 超时。\n- 「为什么不直接用 Flink 的 Kafka connector 事务就够了？」→ 只能保证 Flink 到 Kafka/湖这一段；下游 webhook、第三方写入仍在链路外，端到端「效果一次」需要业务幂等键与对账；且事务提交周期与湖侧小文件/可见性延迟直接冲突，要一起定。\n- 「上游网关重复率 0.7%，你选择在哪一层去重？」→ 给出去重位置的成本对比（网关/采集侧最便宜但需状态；湖侧 upsert 幂等最稳；OLAP 侧预聚合最脆弱），并解释为什么「越靠近源头越好，但必须有最后一道主键 upsert」。",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/streaming-lakehouse-flink-paimon-iceberg.md#stream-ingest-contracts",
+    "addedBy": "content-agent-bd"
+  }
+}

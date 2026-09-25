@@ -1,0 +1,868 @@
+{
+  "generatedAt": "2026-09-19T05:50:29.535Z",
+  "offline": true,
+  "corpus": {
+    "jdEntries": 55,
+    "companies": [
+      "Airbnb",
+      "Apple"
+    ],
+    "companyCounts": {
+      "Airbnb": 37,
+      "Apple": 18
+    },
+    "sourceTypes": {
+      "history-manual": 2,
+      "live-crawl": 53
+    },
+    "cacheFiles": [
+      "content/jd-cache/airbnb-2026-09-19.json",
+      "content/jd-cache/apple-2026-09-19.json"
+    ],
+    "historyFiles": [
+      "content/jd-cache/history/airbnb-backend-engineer.md",
+      "content/jd-cache/history/apple-data-engineer.md"
+    ],
+    "chars": 166900,
+    "newestCrawl": "2026-09-19T05:36:08.089Z"
+  },
+  "weightsByCategory": {
+    "hot-interviews": 358,
+    "big-data": 203,
+    "agent-design": 61,
+    "system-design": 51,
+    "algorithms": 27,
+    "sql": 13,
+    "frontend": 11
+  },
+  "skills": [
+    {
+      "tag": "airbnb-ecosystem",
+      "label": "Airbnb 生态",
+      "category": "hot-interviews",
+      "mentions": 272,
+      "jdCount": 37,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8209244?gh_jid=8209244",
+        "https://careers.airbnb.com/positions/8024316?gh_jid=8024316",
+        "https://careers.airbnb.com/positions/7421419?gh_jid=7421419",
+        "https://careers.airbnb.com/positions/7716341?gh_jid=7716341"
+      ]
+    },
+    {
+      "tag": "ml-platform",
+      "label": "ML / 数据科学协作",
+      "category": "big-data",
+      "mentions": 100,
+      "jdCount": 32,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7955579?gh_jid=7955579",
+        "https://careers.airbnb.com/positions/8065789?gh_jid=8065789",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/7858738?gh_jid=7858738"
+      ]
+    },
+    {
+      "tag": "marketplace",
+      "label": "Marketplace / 搜索排序（Airbnb 画像）",
+      "category": "hot-interviews",
+      "mentions": 72,
+      "jdCount": 22,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7834495?gh_jid=7834495",
+        "https://careers.airbnb.com/positions/8078019?gh_jid=8078019",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723",
+        "https://careers.airbnb.com/positions/8065789?gh_jid=8065789"
+      ]
+    },
+    {
+      "tag": "agent",
+      "label": "Agent 与工具调用",
+      "category": "agent-design",
+      "mentions": 23,
+      "jdCount": 13,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7747259?gh_jid=7747259",
+        "https://careers.airbnb.com/positions/8074897?gh_jid=8074897",
+        "https://careers.airbnb.com/positions/8130355?gh_jid=8130355",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/8123037?gh_jid=8123037"
+      ]
+    },
+    {
+      "tag": "llm",
+      "label": "LLM",
+      "category": "agent-design",
+      "mentions": 21,
+      "jdCount": 13,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/6757302?gh_jid=6757302",
+        "https://jobs.apple.com/en-us/details/200676320/data-engineer-customer-analytics-is-t-ai-data-platforms?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200676311/data-engineer-is-t-ai-data-platforms?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200684577/software-engineer-data-solutions-ai-data-platforms-aidp?team=SFTWR",
+        "https://careers.airbnb.com/positions/7421419?gh_jid=7421419"
+      ]
+    },
+    {
+      "tag": "observability",
+      "label": "可观测性与 SLO",
+      "category": "system-design",
+      "mentions": 18,
+      "jdCount": 5,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8029497?gh_jid=8029497",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://careers.airbnb.com/positions/6757302?gh_jid=6757302",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8070705?gh_jid=8070705"
+      ]
+    },
+    {
+      "tag": "java",
+      "label": "Java / JVM",
+      "category": "algorithms",
+      "mentions": 16,
+      "jdCount": 12,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8029497?gh_jid=8029497",
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224"
+      ]
+    },
+    {
+      "tag": "spark",
+      "label": "Apache Spark",
+      "category": "big-data",
+      "mentions": 12,
+      "jdCount": 7,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://careers.airbnb.com/positions/7421419?gh_jid=7421419",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356"
+      ]
+    },
+    {
+      "tag": "feature-store",
+      "label": "特征平台",
+      "category": "big-data",
+      "mentions": 11,
+      "jdCount": 7,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/8065789?gh_jid=8065789",
+        "https://careers.airbnb.com/positions/8129371?gh_jid=8129371"
+      ]
+    },
+    {
+      "tag": "llm-evals-guardrails",
+      "label": "评测与护栏",
+      "category": "agent-design",
+      "mentions": 11,
+      "jdCount": 6,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7716341?gh_jid=7716341",
+        "https://careers.airbnb.com/positions/7858738?gh_jid=7858738",
+        "https://careers.airbnb.com/positions/7955579?gh_jid=7955579",
+        "https://careers.airbnb.com/positions/7975743?gh_jid=7975743",
+        "https://careers.airbnb.com/positions/8024316?gh_jid=8024316"
+      ]
+    },
+    {
+      "tag": "python",
+      "label": "Python",
+      "category": "algorithms",
+      "mentions": 11,
+      "jdCount": 10,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/7858738?gh_jid=7858738",
+        "https://careers.airbnb.com/positions/7955579?gh_jid=7955579"
+      ]
+    },
+    {
+      "tag": "apple-ecosystem",
+      "label": "Apple 生态",
+      "category": "hot-interviews",
+      "mentions": 10,
+      "jdCount": 5,
+      "companies": [
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/details/200677381/sr-data-engineer-icloud?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200677823/senior-data-engineer-icloud?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200673278/staff-data-engineer?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200681997/data-engineer-apple-ads?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200684319/data-engineer-data-products-apple-ads?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "data-governance-privacy",
+      "label": "数据治理与隐私",
+      "category": "big-data",
+      "mentions": 9,
+      "jdCount": 5,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356",
+        "https://careers.airbnb.com/positions/8130817?gh_jid=8130817",
+        "https://jobs.apple.com/en-us/details/200681997/data-engineer-apple-ads?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200676311/data-engineer-is-t-ai-data-platforms?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200684319/data-engineer-data-products-apple-ads?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "microservices",
+      "label": "微服务 / 分布式",
+      "category": "system-design",
+      "mentions": 8,
+      "jdCount": 4,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8197816?gh_jid=8197816",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7834495?gh_jid=7834495",
+        "https://careers.airbnb.com/positions/8029984?gh_jid=8029984"
+      ]
+    },
+    {
+      "tag": "data-quality",
+      "label": "数据质量与契约",
+      "category": "big-data",
+      "mentions": 7,
+      "jdCount": 5,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356",
+        "https://careers.airbnb.com/positions/6757302?gh_jid=6757302",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "olap",
+      "label": "OLAP 引擎",
+      "category": "big-data",
+      "mentions": 7,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "scala",
+      "label": "Scala / Spark JVM 内部机制",
+      "category": "big-data",
+      "mentions": 7,
+      "jdCount": 7,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7592146?gh_jid=7592146",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356",
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723"
+      ]
+    },
+    {
+      "tag": "flink",
+      "label": "Apache Flink",
+      "category": "big-data",
+      "mentions": 6,
+      "jdCount": 3,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7421419?gh_jid=7421419"
+      ]
+    },
+    {
+      "tag": "kubernetes",
+      "label": "Kubernetes",
+      "category": "system-design",
+      "mentions": 6,
+      "jdCount": 6,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/8065789?gh_jid=8065789",
+        "https://careers.airbnb.com/positions/8209244?gh_jid=8209244",
+        "https://jobs.apple.com/en-us/details/200672605/platform-data-engineer?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "security",
+      "label": "安全与授权",
+      "category": "system-design",
+      "mentions": 6,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8209244?gh_jid=8209244"
+      ]
+    },
+    {
+      "tag": "storage-engine",
+      "label": "存储引擎 / 事务与复制",
+      "category": "sql",
+      "mentions": 6,
+      "jdCount": 4,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8130817?gh_jid=8130817",
+        "https://careers.airbnb.com/positions/8175521?gh_jid=8175521",
+        "https://careers.airbnb.com/positions/8082863?gh_jid=8082863",
+        "https://careers.airbnb.com/positions/8123037?gh_jid=8123037"
+      ]
+    },
+    {
+      "tag": "typescript",
+      "label": "TypeScript",
+      "category": "frontend",
+      "mentions": 6,
+      "jdCount": 4,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8189189?gh_jid=8189189",
+        "https://careers.airbnb.com/positions/8209061?gh_jid=8209061",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "airflow",
+      "label": "Airflow 编排",
+      "category": "big-data",
+      "mentions": 5,
+      "jdCount": 5,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723",
+        "https://careers.airbnb.com/positions/8065789?gh_jid=8065789",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "iceberg",
+      "label": "Apache Iceberg",
+      "category": "big-data",
+      "mentions": 5,
+      "jdCount": 3,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356"
+      ]
+    },
+    {
+      "tag": "kafka",
+      "label": "Kafka / 事件总线",
+      "category": "big-data",
+      "mentions": 5,
+      "jdCount": 4,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/8039723?gh_jid=8039723"
+      ]
+    },
+    {
+      "tag": "rag",
+      "label": "RAG 与向量检索",
+      "category": "agent-design",
+      "mentions": 5,
+      "jdCount": 4,
+      "companies": [
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/details/200676320/data-engineer-customer-analytics-is-t-ai-data-platforms?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200674485/sr-data-engineer-services-special-projects?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200676311/data-engineer-is-t-ai-data-platforms?team=SFTWR",
+        "https://jobs.apple.com/en-us/details/200684577/software-engineer-data-solutions-ai-data-platforms-aidp?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "trino",
+      "label": "Trino / Presto",
+      "category": "big-data",
+      "mentions": 5,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true"
+      ]
+    },
+    {
+      "tag": "data-modeling",
+      "label": "数据建模 / 数仓 / 语义层",
+      "category": "big-data",
+      "mentions": 4,
+      "jdCount": 3,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224",
+        "https://careers.airbnb.com/positions/7998356?gh_jid=7998356",
+        "https://careers.airbnb.com/positions/8129371?gh_jid=8129371"
+      ]
+    },
+    {
+      "tag": "etl",
+      "label": "ETL / 数据管道",
+      "category": "big-data",
+      "mentions": 4,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22",
+        "https://careers.airbnb.com/positions/8070705?gh_jid=8070705"
+      ]
+    },
+    {
+      "tag": "redis",
+      "label": "Redis / 缓存存储",
+      "category": "sql",
+      "mentions": 4,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "telemetry",
+      "label": "端侧遥测与隐私管道（Apple 画像）",
+      "category": "hot-interviews",
+      "mentions": 4,
+      "jdCount": 4,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/6757302?gh_jid=6757302",
+        "https://careers.airbnb.com/positions/8130355?gh_jid=8130355",
+        "https://careers.airbnb.com/positions/8211765?gh_jid=8211765",
+        "https://jobs.apple.com/en-us/details/200679473/aiml-data-engineer?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "grpc",
+      "label": "gRPC / Thrift",
+      "category": "system-design",
+      "mentions": 3,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "react",
+      "label": "React",
+      "category": "frontend",
+      "mentions": 3,
+      "jdCount": 3,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8189189?gh_jid=8189189",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "api-design",
+      "label": "API 契约设计",
+      "category": "system-design",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8130817?gh_jid=8130817"
+      ]
+    },
+    {
+      "tag": "beam",
+      "label": "Apache Beam（批流统一模型）",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 1,
+      "companies": [
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "cicd",
+      "label": "CI/CD 与发布",
+      "category": "system-design",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "clickhouse",
+      "label": "ClickHouse",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "dagster",
+      "label": "Dagster / 现代编排",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "dbt",
+      "label": "dbt 分层建模",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "hudi",
+      "label": "Apache Hudi",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "iac",
+      "label": "IaC",
+      "category": "system-design",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://careers.airbnb.com/positions/8209244?gh_jid=8209244"
+      ]
+    },
+    {
+      "tag": "nosql",
+      "label": "NoSQL / 检索引擎",
+      "category": "sql",
+      "mentions": 2,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true"
+      ]
+    },
+    {
+      "tag": "paimon",
+      "label": "Apache Paimon",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "pyspark",
+      "label": "PySpark",
+      "category": "big-data",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb",
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true",
+        "https://jobs.apple.com/en-us/search?search=%22data%20engineer%22"
+      ]
+    },
+    {
+      "tag": "scalability",
+      "label": "可扩展性与可用性",
+      "category": "system-design",
+      "mentions": 2,
+      "jdCount": 2,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7463421?gh_jid=7463421",
+        "https://careers.airbnb.com/positions/8197816?gh_jid=8197816"
+      ]
+    },
+    {
+      "tag": "caching",
+      "label": "缓存架构",
+      "category": "system-design",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8130817?gh_jid=8130817"
+      ]
+    },
+    {
+      "tag": "cloud",
+      "label": "云平台",
+      "category": "system-design",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8209244?gh_jid=8209244"
+      ]
+    },
+    {
+      "tag": "context-engineering",
+      "label": "上下文工程与微调",
+      "category": "agent-design",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7463421?gh_jid=7463421"
+      ]
+    },
+    {
+      "tag": "data-lake",
+      "label": "湖仓 / 列式文件格式",
+      "category": "big-data",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Apple"
+      ],
+      "sampleUrls": [
+        "https://jobs.apple.com/en-us/details/200673278/staff-data-engineer?team=SFTWR"
+      ]
+    },
+    {
+      "tag": "hive",
+      "label": "Hadoop / Hive 体系",
+      "category": "big-data",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/7708224?gh_jid=7708224"
+      ]
+    },
+    {
+      "tag": "javascript",
+      "label": "JavaScript / Node 工具链",
+      "category": "frontend",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://careers.airbnb.com/positions/8189189?gh_jid=8189189"
+      ]
+    },
+    {
+      "tag": "mysql",
+      "label": "MySQL",
+      "category": "sql",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true"
+      ]
+    },
+    {
+      "tag": "web-performance",
+      "label": "Web 性能",
+      "category": "frontend",
+      "mentions": 1,
+      "jdCount": 1,
+      "companies": [
+        "Airbnb"
+      ],
+      "sampleUrls": [
+        "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs?content=true"
+      ]
+    }
+  ]
+}

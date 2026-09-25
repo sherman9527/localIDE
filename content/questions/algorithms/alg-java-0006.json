@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0006",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "网关热键探测的 Misra-Gries 流式统计",
+  "statement": "## 背景\n\n接入网关要实时找出\"热 key\"（热点分片、缓存穿透的根因），但内存只允许维护 `k` 个计数器（k 通常 16~64）。理论保证：**真实频次严格超过 n/(k+1) 的 key 一定落在候选集里**，所以需要第二遍精确计数把误报剔除——这就是 Misra-Gries（Space-Saving 家族）的用法。\n\n用 `HashMap` 统计全量 key 频次是\"能跑通用例但架构上错\"的答案：它把内存写成了随 key 基数增长。\n\n## 入口\n\n```java\npublic static int[] heavyHitters(int[] stream, int k)\n```\n\n- 返回所有真实频次满足 `freq * (k + 1) > stream.length` 的 key，**升序**（判题要确定序，不许依赖哈希迭代顺序）；\n- `stream` 为空或 `k <= 0` → 返回 `int[0]`（0 个计数器意味着不可报告任何 key）；\n- 阈值是**严格大于**：频次恰好等于 n/(k+1) 的 key 必须被剔除。\n\n## 不变式与硬约束\n\n1. 第一遍扫描**只允许 k 个计数器**（不许 `HashMap` 全量计数）；第二遍允许重读输入做精确复核（本题输入已在内存）。\n2. 比较频次与阈值时不许用浮点除法（`freq > n / (double)(k+1)` 在 n 大时有精度风险），要写成整数比较 `freq * (k + 1) > n`，且在 `long` 域乘。\n3. 候选集内的 key 必须唯一（同一 key 不得重复报告），输出升序。\n4. 复杂度：朴素数组实现 O(n·k) 最坏（可优化到 O(n log k)）；判分规模 n ≤ 2000、k ≤ 8。\n\n## 输出契约\n\n返回 `int[]`（升序、去重）。空集返回长度 0 的数组，不要返回 `null`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "streaming-aggregation",
+    "misra-gries",
+    "memory-budget",
+    "priority-queue",
+    "modern:heavy-hitter-sketch"
+  ],
+  "cases": [
+    {
+      "name": "空流返回空数组",
+      "input": [
+        [],
+        2
+      ],
+      "expected": []
+    },
+    {
+      "name": "单元素流",
+      "input": [
+        [
+          7
+        ],
+        2
+      ],
+      "expected": [
+        7
+      ]
+    },
+    {
+      "name": "全部重复的退化流",
+      "input": [
+        [
+          5,
+          5,
+          5,
+          5
+        ],
+        2
+      ],
+      "expected": [
+        5
+      ]
+    },
+    {
+      "name": "频次并列恰好等于阈值时不报告",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        2
+      ],
+      "expected": []
+    },
+    {
+      "name": "单热键混在噪声里",
+      "input": [
+        [
+          9,
+          9,
+          9,
+          1,
+          2,
+          3,
+          4
+        ],
+        2
+      ],
+      "expected": [
+        9
+      ]
+    },
+    {
+      "name": "两个热键需升序输出",
+      "input": [
+        [
+          3,
+          3,
+          3,
+          1,
+          1,
+          1,
+          2
+        ],
+        2
+      ],
+      "expected": [
+        1,
+        3
+      ]
+    },
+    {
+      "name": "k=3 时候选必须第二遍复核",
+      "input": [
+        [
+          4,
+          4,
+          1,
+          2,
+          4,
+          3,
+          4,
+          2,
+          4,
+          1,
+          4,
+          2,
+          4,
+          3,
+          4,
+          5
+        ],
+        3
+      ],
+      "expected": [
+        4
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] heavyHitters(int[] stream, int k)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * Misra-Gries：第一遍最多维护 k 个计数器（命中 ++；不命中且有槽就新增；\n   * 否则全体 -1 并压缩掉归零者），第二遍只对候选 key 精确复核 freq * (k+1) > n。\n   * 内存 O(k)，两遍扫描。\n   */\n  public static int[] heavyHitters(int[] stream, int k) {\n    if (stream.length == 0 || k <= 0) return new int[0];\n    int[] cand = new int[k];\n    int[] cnt = new int[k];\n    int m = 0;\n    for (int v : stream) {\n      int pos = -1;\n      for (int t = 0; t < m; t++) {\n        if (cand[t] == v) { pos = t; break; }\n      }\n      if (pos >= 0) { cnt[pos]++; continue; }\n      if (m < k) { cand[m] = v; cnt[m] = 1; m++; continue; }\n      int w = 0;\n      for (int t = 0; t < m; t++) {\n        if (--cnt[t] > 0) {          // 一轮抵消：k 个计数器各减 1，归零的候选被压缩掉\n          cand[w] = cand[t];\n          cnt[w] = cnt[t];\n          w++;\n        }\n      }\n      m = w;\n    }\n    java.util.TreeSet<Integer> hit = new java.util.TreeSet<>();\n    for (int t = 0; t < m; t++) {\n      long freq = 0;\n      for (int v : stream) {\n        if (v == cand[t]) freq++;\n      }\n      if (freq * (k + 1L) > stream.length) hit.add(cand[t]);   // 整数比较，不用浮点阈值\n    }\n    int[] out = new int[hit.size()];\n    int idx = 0;\n    for (int v : hit) out[idx++] = v;\n    return out;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：全量 HashMap 计数后取\"频次前 k 名\"。内存随 key 基数增长（网关预算立刻被打爆），\n  // 而且完全没有阈值概念 —— 不达标的 key 也会被报告出来。\n  public static int[] heavyHitters(int[] stream, int k) {\n    java.util.Map<Integer, Integer> count = new java.util.HashMap<>();\n    for (int v : stream) count.merge(v, 1, Integer::sum);\n    java.util.List<Integer> keys = new java.util.ArrayList<>(count.keySet());\n    keys.sort((x, y) -> {\n      int c = Integer.compare(count.get(y), count.get(x));\n      return c != 0 ? c : Integer.compare(x, y);\n    });\n    int want = Math.min(Math.max(k, 0), keys.size());\n    int[] out = new int[want];\n    for (int t = 0; t < want; t++) out[t] = keys.get(t);\n    java.util.Arrays.sort(out);\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：Misra-Gries。维护至多 k 个 `(key, count)`：命中 +1；未命中且有槽位则新增；否则全体 -1 并删掉归零者。不变式：\"一次抵消消掉了 1 个该 key 的真实出现 + 1 个其它 key 的出现\"，所以频次 > n/(k+1) 的 key 不可能被抵消光 → 候选集是真热键的**超集**，第二遍复核把误报剔除。\n\n**为什么必须两遍**：MG 的计数器是\"抵消后的净值\"，不等于真实频次。只跑一遍就拿 `count` 判阈值是典型错解（既可能漏也可能误报）。第二遍的代价是一次顺序重扫——这是\"两遍扫输入\"与\"一遍扫但内存 O(不同 key 数)\"的取舍，也正是本题的工程点。\n\n**判分点对照**：\n- \"频次并列恰好等于阈值\" → 考严格大于；写成 `>=` 或用 double 阈值都会在这里判负。\n- \"两个热键需升序输出\" → 考输出确定序：`TreeSet` 或显式排序，不能靠 `HashMap` 迭代顺序（跨 JDK 版本会变）。\n- \"k=3 时候选必须第二遍复核\" → MG 候选可能包含不达标 key，直接输出候选就错。\n- \"全部重复的退化流\" → 抵消分支不能进入，考计数器的 +1 路径与 m<k 的边界。\n\n**复杂度**：时间 O(n·k)（数组线性查找候选），用 `TreeMap`/哈希索引可降到 O(n log k) / O(n)；额外空间 O(k)。n=2e5、k=64 时约 1.3e7 次比较，完全可接受。\n\n**面试追问**：\n1. 为什么不用 Count-Min Sketch？（CMS 只高估不低估，给不出\"真实频次下界\"；MG 给的是超集保证，二者语义不同。要精确剔除时 CMS 也得配合候选复核。）\n2. 无界流且只能一遍扫？（Space-Saving：计数器满时替换最小者并继承其计数，误差界 n/k；或 MG + 周期衰减以适应热度漂移。）\n3. 多机分片怎么做全局 Top-K？（每分片跑 MG → 合并候选（超集可合并）→ 全局复核。这就是生产里 top-k 聚合的两阶段范式。）\n4. O(k) 内存是下界吗？（对抗输入：k+1 个 key 频次相同，任何只存 k 个计数器的算法都无法区分\"完全均匀\"与\"其中一个是热的\"。）\n5. `HashMap.merge(k, v, f)` 的语义陷阱？（`f` 返回 null 才是**删除**该键，参数 v 为 null 直接 NPE；用它做\"计数清零\"是惯用法，别记反。）",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-collections-heaps.md#11-hashmap-的真实行为考点在你能不能用输入把它打爆",
+    "addedBy": "content-agent-alg"
+  }
+}

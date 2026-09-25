@@ -1,0 +1,445 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0017",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "Agent trace 汇总：环要有跳数上限，端到端耗时不能拿 span 时长累加",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。一个 Agent 运行时把每次任务展开成 span 树：\n\n```\ntrace_span(trace_id INT, span_id INT PRIMARY KEY, parent_span_id INT NULL,\n           kind VARCHAR(8),            -- llm | tool | guard\n           tool_key VARCHAR(24) NULL,  -- 仅 kind='tool' 有值：被调的工具标识\n           started_ms BIGINT, finished_ms BIGINT NULL,   -- 相对 trace 起点的毫秒；NULL = 未完成\n           status VARCHAR(8))          -- ok | error\n```\n\n## 任务\n\n按 `trace_id` 升序，每个 trace 输出一行：\n\n```\ntrace_id, llm_steps, tool_calls, dup_tool_calls, max_depth, wall_ms, cycle_flag\n```\n\n## 口径（逐条都是判分点）\n\n1. `llm_steps` = 该 trace 内 `kind='llm'` 的 span 数；\n   `tool_calls` = `kind='tool'` 的 span 数。\n2. `dup_tool_calls` = `tool_calls − 不同 tool_key 的个数`。\n   也就是说同一工具被调 3 次记 2。**只统计 `kind='tool'` 的行**\n   （非 tool 的 `tool_key` 一律是 `NULL`，把它算进\"不同个数\"会让差值失真）。\n3. **深度**：根 span 深度 1，孩子 = 父 + 1。\n   **孤儿**（`parent_span_id` 指向本表里不存在的 span）**按根处理**（深度 1）。\n   `max_depth` = 该 trace 内所有 span 的最大深度。\n4. **环**：从任一 span 出发沿 `parent_span_id` 往上走，\n   **最多走 64 跳**；若仍然回不到根（遇到重复访问的 span，或跳数用尽），\n   该 trace 记 `cycle_flag = 1` 且 **`max_depth = 0`**。\n   为什么要有跳数上限而不是\"直接递归到死\"：递归 CTE 碰上环就是一条永不收敛的查询，\n   而线上 trace 表里出现环是**运行时 bug 的正常产物**（父指针写错、重试复用了 span id），\n   聚合查询不能因为一条坏数据把整张报表拖挂。\n5. `wall_ms` = 在**已完成**（`finished_ms IS NOT NULL`）的 span 上取\n   `MAX(finished_ms) − MIN(started_ms)`；一条 trace 里没有任何完成 span ⇒ `0`（不是 `NULL`）。\n   注意是墙钟跨度：并发子 span 的时间是重叠的，**不许把各 span 时长相加**。\n6. `status` 本题不参与判定（不要按成功/失败过滤行 —— 失败的 span 照样要计数，\n   空转的循环恰恰是最需要被看到的）。\n\n只交一条 `SELECT` / `WITH` 查询。允许使用递归 CTE。\n\n## 这题真正考的东西\n\n- **`SUM(每个 span 的时长)` 不等于端到端耗时**：并发的兄弟 span 会被重复计入，\n  而 Agent 运行时**大量使用并发工具调用**。用错了这个指标，\n  \"优化并行度\"会让报表显示耗时上升。\n- **深度要沿父链算**，不能靠 `kind` 猜层级（`llm → tool → guard` 不是固定的三层，\n  复核环里会出现 `tool → llm → tool`）。\n- **坏数据必须被聚合而不是被丢弃**：孤儿、环、未完成，全都是\"这条 trace 有病\"的信号，\n  把它们过滤掉的查询看起来更干净，但正好把故障样本删了。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "trace-aggregation",
+    "recursive-cte",
+    "cycle-detection",
+    "wall-clock-vs-sum",
+    "modern:agent-ops"
+  ],
+  "cases": [
+    {
+      "name": "基线：五条 trace 各测一条口径（含环、孤儿、未完成）",
+      "input": [],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            1,
+            0,
+            0,
+            90,
+            1
+          ],
+          [
+            4,
+            1,
+            3,
+            1,
+            4,
+            130,
+            0
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "trace1 dup=1 depth=4 wall=540；trace3 环；trace4 孤儿按根；trace5 无完成 ⇒ 0"
+    },
+    {
+      "name": "删掉环上的一条：这条 trace 立刻变成正常的深度链",
+      "input": [
+        "DELETE FROM trace_span WHERE span_id = 31"
+      ],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            0,
+            0,
+            1,
+            50,
+            0
+          ],
+          [
+            4,
+            1,
+            3,
+            1,
+            4,
+            130,
+            0
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "期望里 trace3 消失（只剩 30 一条 ⇒ 深度 1、cycle 0）—— 证明环是真的在判"
+    },
+    {
+      "name": "并发的两个工具改成串行：墙钟不变、但 dup 仍在",
+      "input": [
+        "UPDATE trace_span SET started_ms = 400 WHERE span_id = 12"
+      ],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            1,
+            0,
+            0,
+            90,
+            1
+          ],
+          [
+            4,
+            1,
+            3,
+            1,
+            4,
+            130,
+            0
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "墙钟是跨度不是累加：把并发改串行，SUM(时长) 会变而 wall_ms 不该变"
+    },
+    {
+      "name": "把孤儿接回一个真实存在的父：深度整体下移一层",
+      "input": [
+        "UPDATE trace_span SET parent_span_id = 43 WHERE span_id = 40"
+      ],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            1,
+            0,
+            0,
+            90,
+            1
+          ],
+          [
+            4,
+            1,
+            3,
+            1,
+            0,
+            130,
+            1
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "43→40→41→42→43 成环 ⇒ trace4 的 cycle_flag 变 1、max_depth 变 0"
+    },
+    {
+      "name": "重复调用同一个 key：dup 加一、深度与墙钟不动",
+      "input": [
+        "INSERT INTO trace_span VALUES (4, 44, 41, 'tool', 'a', 95, 115, 'ok')"
+      ],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            1,
+            0,
+            0,
+            90,
+            1
+          ],
+          [
+            4,
+            1,
+            4,
+            2,
+            4,
+            130,
+            0
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "trace4 tool_calls 3→4、dup 1→2"
+    },
+    {
+      "name": "让唯一完成的 span 变成未完成：wall_ms 归 0 而不是 NULL",
+      "input": [
+        "DELETE FROM trace_span WHERE span_id = 50",
+        "INSERT INTO trace_span VALUES (5, 51, NULL, 'tool', 'only', 0, NULL, 'error')"
+      ],
+      "expected": {
+        "columns": [
+          "trace_id",
+          "llm_steps",
+          "tool_calls",
+          "dup_tool_calls",
+          "max_depth",
+          "wall_ms",
+          "cycle_flag"
+        ],
+        "rows": [
+          [
+            1,
+            2,
+            2,
+            1,
+            4,
+            540,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            0,
+            3,
+            900,
+            0
+          ],
+          [
+            3,
+            1,
+            1,
+            0,
+            0,
+            90,
+            1
+          ],
+          [
+            4,
+            1,
+            3,
+            1,
+            4,
+            130,
+            0
+          ],
+          [
+            5,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "没有任何 finished_ms ⇒ 0；把 NULL 吐出来的实现在这里露出来"
+    }
+  ],
+  "answer": "## 基线手算一遍（用来核对 expected 是不是真的对）\n\n- **trace 1**：`llm` 有 10、13 ⇒ 2；`tool` 有 11、12 ⇒ 2，`tool_key` 都是 `search` ⇒ dup = 2−1 = **1**；\n  深度 10=1、11/12=2、13=3、14=4 ⇒ `max_depth=4`；\n  墙钟 = `max(finished)=540 − min(started)=0` = **540**。\n  注意 11 与 12 是**并发**的（都从 120 起）：`SUM(时长)` 会得到\n  `(400−120)+(380−120)+(120−0)+(520−400)+(540−520) = 500` —— 比真实跨度还大，\n  而如果把 13/14 串在 12 后面，重复计得更多。\n- **trace 2**：llm 2（20、23）、tool 2（calc/fetch ⇒ dup=0）、深度 21/22=2、23=3 ⇒ 3；\n  23 未完成 ⇒ 墙钟只看到 20/21/22 ⇒ `900−0 = 900`。\n  失败的 22 照样计数 —— 它是\"工具挂了但 Agent 继续往下推\"的样本。\n- **trace 3**：30 的父是 31、31 的父是 30 ⇒ 环 ⇒ `cycle_flag=1`、`max_depth=0`。\n- **trace 4**：40 的父 99 不存在 ⇒ 孤儿按根算 ⇒ 40=1、41=2、42=3、43=4；\n  tool 3 个、`tool_key` 有 a/b 两种 ⇒ dup = **1**；墙钟 = `130−0 = 130`。\n- **trace 5**：唯一的 span 未完成 ⇒ `wall_ms=0`（不是 NULL），`tool_calls=1`、`dup=0`、深度 1。\n\n**为什么 `WHERE parent 存在` 是这道题最贵的一个错**：孤儿 span 是\"父指针写坏了\"的**唯一证据**。\n过滤掉它，报表立刻变干净，而运行时那个 bug 再也没有可观测的痕迹。\n正确做法是把孤儿按根处理（它确实没有可见的上游），并在深度上继续算。\n\n**环必须有跳数上限**：MySQL 的递归 CTE 没有内置的环检测，\n`WITH RECURSIVE` 碰上环要么跑到 `cte_max_recursion_depth`（默认 18446744073709551615 ⇒ 实际是\n要么卡死要么爆内存）。工程做法两种：\n① 递归里带 `depth < 64` 的上限，超出即视为环（本答案这种）；\n② 路径物化成字符串再判断是否重复访问（可读性差、成本随链长增长）。\n两者都比\"赌线上没有环\"好 —— **Agent 运行时写坏父指针是常态而不是异常**，\n尤其是重试路径复用 `span_id` 的实现。\n\n**`wall_ms` 的口径要显式选**：本题定义为\n\"已完成 span 的最晚 `finished_ms` 减去全部 span 的最早 `started_ms`\"。\n它既不是关键路径长度（那需要拓扑排序 + 资源模型），也不是 `SUM(时长)`（会把并发算成串行）。\n报表上\"端到端耗时\"这四个字如果不写成公式，两个团队能给出差 3 倍的数 ——\n而这道题真正的判分点就在这句上。\n\n**工程延伸（面试追问点）**\n\n1. 环路深度是检测出来了，怎么定位到是谁写坏的？（要的是\"成环的那对 span 的 kind 与创建顺序\"：\n   `finished_ms` 更早的一方不该是较晚一方的后代 —— 时序矛盾比拓扑环更容易归因。）\n2. `dup_tool_calls` 为什么要减\"不同 key 数\"而不是找\"重复次数 ≥2 的 key 数\"？\n   （前者量的是**浪费掉的调用数**（3 次同调用记 2），后者量的是\"有几个工具被重复\"。\n   做成本归因要用前者，做异常检测用后者。本题要的是成本。）\n3. 真上线时这张表怎么撑住？（`trace_id` 分桶 + 只保留 `cycle_flag=1`/`dup>0` 的明细，\n   其余走预聚合。报表用预聚合、下钻用采样后的明细 —— 40 亿级的 trace 明细全量可查是不成立的。）\n4. 为什么本题不按 `status='ok'` 过滤？（一旦过滤，\"失败的循环\"与\"没跑完的任务\"\n   就从指标里消失了，而这两类正是 Agent 平台最该被看见的样本。\n   状态应该是一个**分组维度**，不是聚合的前置条件。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS trace_span",
+      "CREATE TABLE trace_span (trace_id INT NOT NULL, span_id INT PRIMARY KEY, parent_span_id INT NULL, kind VARCHAR(8) NOT NULL, tool_key VARCHAR(24) NULL, started_ms BIGINT NOT NULL, finished_ms BIGINT NULL, status VARCHAR(8) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO trace_span VALUES (1, 10, NULL, 'llm', NULL, 0, 120, 'ok'), (1, 11, 10, 'tool', 'search', 120, 400, 'ok'), (1, 12, 10, 'tool', 'search', 120, 380, 'ok'), (1, 13, 12, 'llm', NULL, 400, 520, 'ok'), (1, 14, 13, 'guard', NULL, 520, 540, 'ok'), (2, 20, NULL, 'llm', NULL, 0, 100, 'ok'), (2, 21, 20, 'tool', 'calc', 100, 160, 'ok'), (2, 22, 20, 'tool', 'fetch', 100, 900, 'error'), (2, 23, 22, 'llm', NULL, 900, NULL, 'error'), (3, 30, 31, 'llm', NULL, 0, 50, 'ok'), (3, 31, 30, 'tool', 'search', 50, 90, 'ok'), (4, 40, 99, 'llm', NULL, 0, 70, 'ok'), (4, 41, 40, 'tool', 'a', 70, 90, 'ok'), (4, 42, 41, 'tool', 'a', 90, 110, 'ok'), (4, 43, 42, 'tool', 'b', 110, 130, 'ok'), (5, 50, NULL, 'tool', 'only', 0, NULL, 'error')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH RECURSIVE walk AS (\n  -- 从每个 span 出发沿 parent 往上爬；hops = 已经爬了几跳\n  SELECT s.trace_id, s.span_id AS start_id, s.span_id AS cur, 0 AS hops, 0 AS cyc\n  FROM trace_span s\n  UNION ALL\n  SELECT w.trace_id, w.start_id, p.parent_span_id, w.hops + 1,\n         CASE WHEN p.parent_span_id = w.start_id THEN 1     -- 爬回自己 ⇒ 环\n              WHEN w.hops + 1 >= 64 THEN 1                 -- 跳数用尽也按环处理\n              ELSE 0 END\n  FROM walk w\n  JOIN trace_span p ON p.span_id = w.cur\n  WHERE w.cyc = 0 AND w.hops < 64\n    AND p.parent_span_id IS NOT NULL\n    -- 父指针指向表里不存在的 span ⇒ 就地停下：cur 才是根（多爬一跳会把深度算大 1）\n    AND EXISTS (SELECT 1 FROM trace_span g WHERE g.span_id = p.parent_span_id)\n), span_depth AS (\n  SELECT trace_id,\n         start_id,\n         MAX(cyc) AS cyc,\n         CASE WHEN MAX(cyc) = 1 THEN NULL ELSE MAX(hops) + 1 END AS depth\n  FROM walk\n  GROUP BY trace_id, start_id\n), roll AS (\n  SELECT t.trace_id,\n         SUM(t.kind = 'llm')  AS llm_steps,\n         SUM(t.kind = 'tool') AS tool_calls,\n         SUM(t.kind = 'tool')\n           - COUNT(DISTINCT CASE WHEN t.kind = 'tool' THEN t.tool_key END) AS dup_tool_calls\n  FROM trace_span t\n  GROUP BY t.trace_id\n), wall AS (\n  SELECT trace_id, COALESCE(MAX(finished_ms) - MIN(started_ms), 0) AS wall_ms\n  FROM trace_span\n  WHERE finished_ms IS NOT NULL\n  GROUP BY trace_id\n)\nSELECT r.trace_id,\n       r.llm_steps,\n       r.tool_calls,\n       r.dup_tool_calls,\n       CASE WHEN MAX(sd.cyc) = 1 THEN 0 ELSE COALESCE(MAX(sd.depth), 0) END AS max_depth,\n       COALESCE(w.wall_ms, 0) AS wall_ms,\n       MAX(sd.cyc) AS cycle_flag\nFROM roll r\nLEFT JOIN span_depth sd ON sd.trace_id = r.trace_id\nLEFT JOIN wall w ON w.trace_id = r.trace_id\nGROUP BY r.trace_id, r.llm_steps, r.tool_calls, r.dup_tool_calls, w.wall_ms\nORDER BY r.trace_id",
+    "naiveSolution": "-- \"报表能出数就行\"版：端到端耗时用 SUM 累加、深度按 kind 猜、坏数据直接过滤\nSELECT t.trace_id,\n       SUM(CASE WHEN t.kind = 'llm' THEN 1 ELSE 0 END)                  AS llm_steps,\n       SUM(CASE WHEN t.kind = 'tool' THEN 1 ELSE 0 END)                 AS tool_calls,\n       SUM(CASE WHEN t.kind = 'tool' THEN 1 ELSE 0 END)\n         - COUNT(DISTINCT t.tool_key)                                    AS dup_tool_calls,\n       COUNT(DISTINCT t.kind)                                            AS max_depth,\n       SUM(CASE WHEN t.finished_ms IS NOT NULL\n                THEN t.finished_ms - t.started_ms ELSE 0 END)           AS wall_ms,\n       0                                                                 AS cycle_flag\nFROM trace_span t\nWHERE t.parent_span_id IS NULL\n   OR EXISTS (SELECT 1 FROM trace_span p WHERE p.span_id = t.parent_span_id)  -- 丢孤儿\nGROUP BY t.trace_id\nORDER BY t.trace_id"
+  },
+  "estimatedMinutes": 32,
+  "source": {
+    "company": "DeepSeek",
+    "role": "Agent 平台 / 可观测性 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#79,#69,#67（原文只列\"要采集链路数据\"与\"重复调用是常见问题\"，未给可判分的深度/环/墙钟口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T16:08:03.985Z"
+  }
+}

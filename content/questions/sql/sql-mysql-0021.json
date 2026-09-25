@@ -1,0 +1,454 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0021",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "四行口径卡：pay_amount 恒等式体检、promotion_type=30 不双计、抽奖与拼内购单列",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。字段语义按拼多多开放平台官方文档。\n\n```\norders(order_sn INT PK, goods_amount, discount_amount, post_amount, service_fee, pay_amount,\n       platform_discount, seller_discount, capital_free_discount,      -- 以下均 DECIMAL(12,2)\n       confirm_status,          -- 0 未成交 / 1 已成交 / 2 已取消\n       group_status,            -- 0 拼团中 / 1 已成团 / 2 团失败\n       is_lucky_flag,           -- 1 非抽奖订单 / 2 抽奖订单\n       mkt_biz_type,            -- 0 普通订单 / 1 拼内购订单\n       risk_control_status,     -- 0 正常 / 1 审核中\n       stock_out_handle_status) -- -1 无缺货处理 / 0 缺货待处理 / 1 已处理\norder_promotions(order_sn INT, promotion_type INT, promotion_amount DECIMAL(12,2))\n```\n\n## 任务\n\n输出**四行口径卡**，按 `seq` 升序，列名与顺序必须是：\n\n```\nseq, caliber, order_cnt, pay_sum, platform_subsidy_sum, broken_identity_cnt, risk_hold_cnt\n```\n\n| seq | `caliber`（字符串必须一字不差） | 成员 |\n| --- | --- | --- |\n| 1 | `main-all` | 主口径全集（见下方\"排除集\"） |\n| 2 | `main-confirmed` | 主口径 ∩ `confirm_status = 1` |\n| 3 | `main-group-confirmed` | 主口径 ∩ `confirm_status = 1 AND group_status = 1` |\n| 4 | `excluded-lucky-or-inner` | `is_lucky_flag = 2` **或** `mkt_biz_type = 1` |\n\n## 口径（这张表就是判分点）\n\n1. **排除集**：抽奖订单（`is_lucky_flag = 2`）与拼内购订单（`mkt_biz_type = 1`）\n   **不进前三条主口径**，它们单独成第 4 行。\n   这条设计的可验证后果：`第 1 行 order_cnt + 第 4 行 order_cnt = 全表行数`。\n2. `pay_sum` = 该口径内 `pay_amount` 之和（`pay_amount` 官方含邮费与服务费）。\n3. `platform_subsidy_sum` = 该口径内每单的**平台真实让利**之和，每单算法：\n   `platform_discount + Σ(promotion_amount WHERE promotion_type <> 30)`。\n   **`promotion_type = 30`（以旧换新优惠）一律不加** —— 官方字段注释写明\n   \"优惠金额已包含平台优惠金额里\"，再加一次就是双计。\n4. `broken_identity_cnt` = 该口径内**不满足官方恒等式**的单数：\n   `ABS(pay_amount − (goods_amount − discount_amount + post_amount + service_fee)) >= 0.01`。\n   容差 `0.01` 是本题给的，不要自己收紧到 0（分位差就是这么来的），也不要放宽到\"看起来差不多\"。\n5. `risk_hold_cnt` = 该口径内 `risk_control_status = 1` 的单数。\n   **审核中单不剔除、不额外处理，只要求被单列出来** ——\n   它会改变数据可见性（收件人字段变空串），所以是\"要盯的量\"而不是\"要扔的量\"。\n\n只提交**一条** `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- 会不会把 `promotion_type = 30` 加两遍（双计不会报错，只会让补贴复盘数字变好看）；\n- 有没有**显式声明分母**：`main-confirmed` 与 `main-group-confirmed` 的差就是\"已支付但没成团\"，\n  说不清这一条等于没做过交易口径；\n- 恒等式校验是**指标**而不是**闸门**：改价、赔付都会临时破坏恒等式，\n  写入时强校验会挡业务，所以要输出\"坏了几单 + 涉及金额\"，而不是让查询失败。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "amount-caliber",
+    "metric-denominator",
+    "double-counting",
+    "identity-check",
+    "modern:finance-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：主口径 6 单、排除集 2 单，恒等式坏 1 单",
+      "input": [],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            6,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            2,
+            "main-confirmed",
+            5,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "main-all 与 excluded 的 order_cnt 相加 = 8 = 全表行数（自检不变量）"
+    },
+    {
+      "name": "双计陷阱：给 order_sn=2 再加一条 type=30 的明细，平台让利不许变",
+      "input": [
+        "INSERT INTO order_promotions VALUES (2, 30, '7.00')"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            6,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            2,
+            "main-confirmed",
+            5,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "加进来的是\"已包含在平台优惠里\"的那一类 ⇒ 正确实现结果与基线完全相同；把明细全加起来会凭空多出 7.00"
+    },
+    {
+      "name": "容差边界：把坏单修到一分不差，broken 归零",
+      "input": [
+        "UPDATE orders SET pay_amount = '18.00' WHERE order_sn = 5"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            6,
+            180.01,
+            1032.48,
+            0,
+            1
+          ],
+          [
+            2,
+            "main-confirmed",
+            5,
+            180.01,
+            1032.48,
+            0,
+            1
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139.01,
+            1025.48,
+            0,
+            1
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "团失败但已支付：删掉它只影响 main-confirmed，不影响成团口径",
+      "input": [
+        "DELETE FROM orders WHERE order_sn = 2"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            5,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            2,
+            "main-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "order_sn=2 是 confirm_status=1 且 group_status=2 —— 它只在第 2 行里，所以第 2 行少 1 单、第 3 行一分不变。这两行之差就是\"已收未成交\""
+    },
+    {
+      "name": "边界：审核中占比升高只改 risk_hold_cnt，不改任何金额",
+      "input": [
+        "UPDATE orders SET risk_control_status = 1 WHERE order_sn = 1",
+        "UPDATE orders SET risk_control_status = 1 WHERE order_sn = 8"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            6,
+            180,
+            1032.48,
+            1,
+            3
+          ],
+          [
+            2,
+            "main-confirmed",
+            5,
+            180,
+            1032.48,
+            1,
+            3
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            3
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "排除集扩张：再来一条抽奖单，三条主口径一律不动",
+      "input": [
+        "INSERT INTO orders VALUES (9, '10.00', '0.00', '0.00', '0.00', '10.00', '0.00', '0.00', '0.00', 1, 1, 2, 0, 0, -1)"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            6,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            2,
+            "main-confirmed",
+            5,
+            180,
+            1032.48,
+            1,
+            1
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            4,
+            139,
+            1025.48,
+            1,
+            1
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            3,
+            107,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "is_lucky_flag=2 ⇒ 落进第 4 行。主口径三条若跟着变了，说明排除集没做对"
+    },
+    {
+      "name": "零金额订单只进数量不进金额，且不能把 SUM 变成 NULL",
+      "input": [
+        "DELETE FROM orders WHERE order_sn = 1",
+        "DELETE FROM orders WHERE order_sn = 2",
+        "DELETE FROM orders WHERE order_sn = 5",
+        "DELETE FROM orders WHERE order_sn = 6",
+        "DELETE FROM orders WHERE order_sn = 8"
+      ],
+      "expected": {
+        "columns": [
+          "seq",
+          "caliber",
+          "order_cnt",
+          "pay_sum",
+          "platform_subsidy_sum",
+          "broken_identity_cnt",
+          "risk_hold_cnt"
+        ],
+        "rows": [
+          [
+            1,
+            "main-all",
+            1,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            2,
+            "main-confirmed",
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            3,
+            "main-group-confirmed",
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            4,
+            "excluded-lucky-or-inner",
+            2,
+            97,
+            14,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "主口径只剩 order_sn=7（0.00 已取消）⇒ pay_sum 必须是 0 而不是 NULL；空集时 SUM 返回 NULL，不兜住就会让看板整列变空"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个 `tagged` CTE 把每单的四个属性（属不属于主口径、平台让利、恒等式是否成立、是否审核中）\n算完，再对着四行口径卡做**一次**条件聚合。这样四条口径看的是同一批行、同一套让利算法 ——\n和\"每条口径各写一段 SQL 再 UNION\"相比，后者迟早在不同段里漂移。\n\n**基线四行对得上账**（用来核对 expected 是不是真的对）：\n主口径 6 单、排除集 2 单，合计 8 = 全表行数（这条不变量是最省事的自检）。\n主口径全集 `pay_sum` = 89.00 + 41.00 + 17.99 + 32.00 + 0.00 + 0.01 = 180.00。\n平台让利：`order_sn=1` 是 12.00（那笔 `type=30` 的 5.00 **不加**），\n`order_sn=2` 是 4.00 + 3.00 = 7.00（`type=10` 才加），\n`order_sn=8` 是 999.98（同样不加那笔 999.98 的 `type=30`）。\n恒等式只坏在 `order_sn=5`：公式给 18.00、表上记 17.99，差 0.01 ⇒ 正好落在 `>= 0.01` 这一侧。\n\n**双计为什么最难发现**：把 `type=30` 加进去，`platform_subsidy_sum` 只会**变大**，\n而\"平台让利变大\"在复盘会上通常是好消息 —— 没有任何一方有动力去质疑它。\n这正是官方要把\"已包含\"写进字段注释的原因：**这不是提示，是约束**。\n\n**容差 0.01 的两侧都要有用例**（用例「容差边界」）：\n差 0.01 判坏、差 0.00 判好。写成 `> 0.01` 的实现会漏掉真实存在的分位差\n（改价与分摊回冲都会产生恰好一分的差），写成 `<> 0` 又会把 `DECIMAL` 显示差异算成事故。\n\n**\"已成交\"与\"已成团\"是两个维度**（`main-confirmed` 与 `main-group-confirmed` 的差）：\n基线上差的是 `order_sn=2` —— 它 `confirm_status=1`（钱付了）但 `group_status=2`（团失败）。\n这一格在财务上是\"已收未成交\"，在客服口径里是\"要退款或要补团\"，在供给侧是\"占掉的库存要回补\"。\n**说不清这一格有多少钱，就等于没在这家公司做过交易口径。**\n\n**审核中只列不剔**：`risk_control_status=1` 不改变成交额口径，\n但它改变**数据可见性**（收件人字段返回空串），所以要单独出一个数。\n把它顺手 `WHERE` 掉是常见的错：之后\"地址缺失率\"上升就永远查不到原因（见同方向另一道题）。\n\n**工程延伸（面试追问点）**\n\n1. 为什么恒等式做成指标而不是约束？（改价、赔付、分摊回冲都会**临时**破坏它；\n   写入时强校验会挡正常业务。正确做法是照写不误 + 把 `broken` 做成 DQC 指标，\n   超阈值阻断**结算**而不是阻断下单。）\n2. 退款怎么摊？（按出资比例摊，不按面额：一笔优惠由三方出时，退一件要按\n   `各出资额 / goods_amount` 拆，否则会出现\"退款额 > 实付额\"。）\n3. 抽奖单为什么要排除？（`is_lucky_flag=2` 的单不代表一次真实的商品成交\n   —— 它的\"客单价/转化率/补贴效率\"全部失真。混进主口径会让这些指标长期偏低，\n   而偏低的方向恰好与\"活动效果好\"相反，所以很容易长期没人查。）\n4. 第 4 行为什么也要出金额？（排除集本身要有规模感：如果它从 2 单变成 2000 单，\n   前三条口径的分母其实已经被换掉了 —— 这是\"新增枚举把报表打穿\"的同一家族。）\n5. 口径变更怎么办？（四行口径卡的 `caliber` 字符串是**契约**：改名等于让所有下游看板失配。\n   新增口径要加 seq，不许改老 seq 的含义。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS orders",
+      "DROP TABLE IF EXISTS order_promotions",
+      "CREATE TABLE orders (order_sn INT PRIMARY KEY, goods_amount DECIMAL(12,2) NOT NULL, discount_amount DECIMAL(12,2) NOT NULL, post_amount DECIMAL(12,2) NOT NULL, service_fee DECIMAL(12,2) NOT NULL, pay_amount DECIMAL(12,2) NOT NULL, platform_discount DECIMAL(12,2) NOT NULL, seller_discount DECIMAL(12,2) NOT NULL, capital_free_discount DECIMAL(12,2) NOT NULL, confirm_status TINYINT NOT NULL, group_status TINYINT NOT NULL, is_lucky_flag TINYINT NOT NULL, mkt_biz_type TINYINT NOT NULL, risk_control_status TINYINT NOT NULL, stock_out_handle_status TINYINT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE order_promotions (order_sn INT, promotion_type INT NOT NULL, promotion_amount DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO orders VALUES (1, '100.00', '20.00', '6.00', '3.00', '89.00', '12.00', '6.00', '2.00', 1, 1, 1, 0, 0, -1), (2, '50.00', '10.00', '0.00', '1.00', '41.00', '4.00', '6.00', '0.00', 1, 2, 1, 0, 0, -1), (3, '30.00', '5.00', '5.00', '0.00', '30.00', '5.00', '0.00', '0.00', 0, 0, 2, 0, 0, -1), (4, '80.00', '15.00', '0.00', '2.00', '67.00', '9.00', '6.00', '0.00', 1, 1, 1, 1, 0, -1), (5, '20.00', '5.00', '2.00', '1.00', '17.99', '3.00', '2.00', '0.00', 1, 1, 1, 0, 0, 0), (6, '40.00', '8.00', '0.00', '0.00', '32.00', '8.00', '0.00', '0.00', 1, 1, 1, 0, 1, -1), (7, '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', '0.00', 2, 2, 1, 0, 0, -1), (8, '999.99', '999.98', '0.00', '0.00', '0.01', '999.98', '0.00', '0.00', 1, 1, 1, 0, 0, -1)",
+      "INSERT INTO order_promotions VALUES (1, 30, '5.00'), (2, 10, '3.00'), (4, 30, '9.00'), (6, 20, '2.50'), (8, 30, '999.98')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 9000,
+    "referenceSolution": "WITH promo_extra AS (\n  SELECT p.order_sn, SUM(p.promotion_amount) AS extra_amount\n  FROM order_promotions p\n  WHERE p.promotion_type <> 30          -- 30 = 以旧换新，官方注释：已包含在平台优惠里\n  GROUP BY p.order_sn\n), tagged AS (\n  SELECT o.order_sn,\n         o.pay_amount,\n         o.risk_control_status,\n         o.confirm_status,\n         o.group_status,\n         CASE WHEN o.is_lucky_flag <> 2 AND o.mkt_biz_type <> 1 THEN 1 ELSE 0 END AS in_main,\n         o.platform_discount + COALESCE(e.extra_amount, 0) AS platform_subsidy,\n         CASE WHEN ABS(o.pay_amount - (o.goods_amount - o.discount_amount\n                                       + o.post_amount + o.service_fee)) >= 0.01\n              THEN 1 ELSE 0 END AS broken\n  FROM orders o\n  LEFT JOIN promo_extra e ON e.order_sn = o.order_sn\n), calibers AS (\n  SELECT 1 AS seq, 'main-all' AS caliber\n  UNION ALL SELECT 2, 'main-confirmed'\n  UNION ALL SELECT 3, 'main-group-confirmed'\n  UNION ALL SELECT 4, 'excluded-lucky-or-inner'\n)\nSELECT c.seq,\n       c.caliber,\n       COUNT(t.order_sn) AS order_cnt,\n       COALESCE(SUM(t.pay_amount), 0) AS pay_sum,\n       COALESCE(SUM(t.platform_subsidy), 0) AS platform_subsidy_sum,\n       COALESCE(SUM(t.broken), 0) AS broken_identity_cnt,\n       COALESCE(SUM(t.risk_control_status = 1), 0) AS risk_hold_cnt\nFROM calibers c\nLEFT JOIN tagged t\n  ON (c.seq = 1 AND t.in_main = 1)\n  OR (c.seq = 2 AND t.in_main = 1 AND t.confirm_status = 1)\n  OR (c.seq = 3 AND t.in_main = 1 AND t.confirm_status = 1 AND t.group_status = 1)\n  OR (c.seq = 4 AND t.in_main = 0)\nGROUP BY c.seq, c.caliber\nORDER BY c.seq",
+    "naiveSolution": "-- \"所有优惠都要加一遍才保险\"版：把\"已包含\"当注释没写，\n-- 并且把抽奖单/拼内购混进主口径 —— 三个错误同时犯。\nWITH tagged AS (\n  SELECT o.order_sn, o.pay_amount, o.confirm_status, o.group_status, o.risk_control_status,\n         o.platform_discount + COALESCE((SELECT SUM(p.promotion_amount) FROM order_promotions p\n                                         WHERE p.order_sn = o.order_sn), 0) AS platform_subsidy,\n         0 AS broken\n  FROM orders o\n)\nSELECT 1 AS seq, 'main-all' AS caliber, COUNT(*) AS order_cnt, SUM(pay_amount) AS pay_sum,\n       SUM(platform_subsidy) AS platform_subsidy_sum, 0 AS broken_identity_cnt,\n       SUM(risk_control_status = 1) AS risk_hold_cnt\nFROM tagged\nUNION ALL\nSELECT 2, 'main-confirmed', COUNT(*), SUM(pay_amount), SUM(platform_subsidy), 0,\n       SUM(risk_control_status = 1)\nFROM tagged WHERE confirm_status = 1\nORDER BY seq"
+  },
+  "estimatedMinutes": 32,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（交易/结算方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#5 题面草稿 A 第 1–3 问（`pay_amount`/`discount_amount` 官方公式、`promotion_type=30 已包含`、三口径成交与抽奖/拼内购分桶、缺货赔付敞口）＋ 考点 5",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.119Z"
+  }
+}

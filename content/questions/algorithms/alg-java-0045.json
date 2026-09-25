@@ -1,0 +1,312 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0045",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "收件人字段的三态语义：密文 / 空串 / 没返回，按\"状态 + 风控\"判定并跑满状态组合",
+  "statement": "## 背景\n\n拼多多开放平台的订单收件人字段（`receiver_address` / `receiver_name` / `receiver_phone`）\n官方注释原文是：\n\n> 订单状态为待发货状态，**且订单未被风控打标的情况下返回密文数据；其余情况返回空字符串**\n\n再加上 `risk_control_status`＝`0 正常订单 / 1 审核中订单`，这个字段实际上有**三种语义**：\n\n1. **密文** —— 有权看、也确实在；\n2. **空串** —— 数据在，但规则不让你看（状态不对，或风控压着）；\n3. **根本没有这一列** —— 上游没给。\n\n把它们统一成\"空值\"就丢信息。真实系统里\"空串\"通常是**权限/风控结果**而不是数据缺失；\n下游一旦拿空串参与 join 或 `count(distinct)`，就会把\"审核中的单\"统计成\"地址缺失率上升\"。\n\n## 你要实现的入口\n\n```java\npublic static String[] resolveReceiverAll(int[] orderStatuses, int[] riskFlags, String[] storedForms)\n```\n\n三个数组**等长**，第 `i` 行是一次判定；返回 `String[]`，每格是 `value + \":\" + reason`。\n\n## 输入取值\n\n- `orderStatuses[i]` ∈ `{1 待发货, 2 已发货待签收, 3 已签收}`；\n- `riskFlags[i]` ∈ `{0 正常, 1 审核中}`；\n- `storedForms[i]` ∈ `\"cipher\"`（库里存的是密文） / `\"plain\"`（存的是明文） / `\"absent\"`（这一列没返回）。\n\n## 判定与优先级（这张表就是判分点）\n\n按顺序命中即止：\n\n| 顺序 | 条件 | `value` | `reason` |\n| --- | --- | --- | --- |\n| 1 | `storedForms[i] == \"absent\"` | `empty` | `no-column` |\n| 2 | `orderStatuses[i] != 1` | `empty` | `not-awaiting-shipment` |\n| 3 | `riskFlags[i] == 1` | `empty` | `risk-hold` |\n| 4 | `storedForms[i] == \"plain\"` | `empty` | `not-ciphered` |\n| 5 | 其余（待发货 + 未打标 + 密文） | `cipher` | `ok` |\n\n为什么是这个优先级：`no-column` 是**管道故障**（最该被单独看见，压过一切业务原因）；\n状态与风控是**该不该给**，值没加密是**给了也不能用**。\n把 2/3 的顺序换一下，\"审核中且已发货\"的单就会被归成不同的桶 —— 本题按表判分。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- 三个数组长度不一致 ⇒ `length mismatch`\n- `orderStatuses[i] == 5` ⇒ `filter value 5 is not a real status`\n  （官方增量接口的 `order_status` 里 **5 = 全部是筛选值**，它不是订单的真实状态；\n  落到存储层里说明有人把查询条件写进了数据，必须先炸出来）\n- `orderStatuses[i]` 不是 1/2/3/5 ⇒ `unknown order status`\n- `riskFlags[i]` 不是 0/1 ⇒ `unknown risk control status`\n- `storedForms[i]` 不在三种形态里 ⇒ `unknown stored form`\n\n单行内的校验顺序就按上面列出的先后。\n\n## 复杂度\n\n`O(n)`；不许为了查表把整个输入拷两遍。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "field-visibility",
+    "pii-handling",
+    "state-machine-coverage",
+    "data-lineage",
+    "modern:privacy-engineering"
+  ],
+  "cases": [
+    {
+      "name": "基线：唯一能看见密文的那一种组合",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": [
+        "cipher:ok"
+      ],
+      "visible": true,
+      "note": "待发货 + 未打标 + 密文 ⇒ cipher:ok"
+    },
+    {
+      "name": "风控审核中：数据在、状态对，就是不给看",
+      "input": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": [
+        "empty:risk-hold"
+      ],
+      "visible": true,
+      "note": "必须与\"没有数据\"分得开，否则下游把审核中单算成地址缺失"
+    },
+    {
+      "name": "已发货待签收：状态本身就不该返回收件人",
+      "input": [
+        [
+          2
+        ],
+        [
+          0
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": [
+        "empty:not-awaiting-shipment"
+      ],
+      "visible": true
+    },
+    {
+      "name": "这一列根本没返回：管道问题优先于一切业务原因",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          "absent"
+        ]
+      ],
+      "expected": [
+        "empty:no-column"
+      ],
+      "visible": true
+    },
+    {
+      "name": "库里是明文：能取到也不许当密文下发",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          "plain"
+        ]
+      ],
+      "expected": [
+        "empty:not-ciphered"
+      ],
+      "visible": true,
+      "note": "\"能解密\"与\"该下发\"是两件事"
+    },
+    {
+      "name": "边界：18 条全组合（3 状态 × 2 风控 × 3 存储形态）逐条判定",
+      "input": [
+        [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        [
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1
+        ],
+        [
+          "cipher",
+          "plain",
+          "absent",
+          "cipher",
+          "plain",
+          "absent",
+          "cipher",
+          "plain",
+          "absent",
+          "cipher",
+          "plain",
+          "absent",
+          "cipher",
+          "plain",
+          "absent",
+          "cipher",
+          "plain",
+          "absent"
+        ]
+      ],
+      "expected": [
+        "cipher:ok",
+        "empty:not-ciphered",
+        "empty:no-column",
+        "empty:risk-hold",
+        "empty:risk-hold",
+        "empty:no-column",
+        "empty:not-awaiting-shipment",
+        "empty:not-awaiting-shipment",
+        "empty:no-column",
+        "empty:not-awaiting-shipment",
+        "empty:not-awaiting-shipment",
+        "empty:no-column",
+        "empty:not-awaiting-shipment",
+        "empty:not-awaiting-shipment",
+        "empty:no-column",
+        "empty:not-awaiting-shipment",
+        "empty:not-awaiting-shipment",
+        "empty:no-column"
+      ],
+      "visible": true,
+      "note": "分支覆盖 + 优先级是否真按表实现，单例过了不代表组合过"
+    },
+    {
+      "name": "非法：筛选值 5 出现在数据里（有人把查询条件写成了状态）",
+      "input": [
+        [
+          5
+        ],
+        [
+          0
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "filter value 5 is not a real status"
+    },
+    {
+      "name": "非法：未知订单状态",
+      "input": [
+        [
+          9
+        ],
+        [
+          0
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown order status"
+    },
+    {
+      "name": "非法：未知风控标记",
+      "input": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown risk control status"
+    },
+    {
+      "name": "非法：未知存储形态",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          "hashed"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown stored form"
+    },
+    {
+      "name": "非法：三个数组长度不一致",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          0
+        ],
+        [
+          "cipher"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "length mismatch"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个五行的优先级表加一次线性扫描 —— 题不难，**难在承认\"空\"有三种**。\n朴素解把三态压成\"有没有值\"，于是 `reason` 全变成同一个词，\n下游那条\"地址缺失率\"指标就把管道故障、状态变化、风控收紧三件事混成了一个数。\n\n**基线四种输入各打一条分支**：\n`1/0/cipher` ⇒ `cipher:ok`（唯一能看见密文的那一种组合）；\n`1/1/cipher` ⇒ `empty:risk-hold`（数据在、状态也对，是风控压着）；\n`2/0/cipher` ⇒ `empty:not-awaiting-shipment`（已发货就不该再给收件人信息）；\n`1/0/absent` ⇒ `empty:no-column`（**这一列根本没回来**，和上面三种是不同性质的问题）。\n\n**边界用例是 18 条全组合**（3 状态 × 2 风控 × 3 存储形态）。它考两件事：\n① 分支覆盖有没有漏（\"已发货 + 审核中 + 明文\"这种现实中少见的组合，\n   写 `switch` 漏 default 的实现会在这里翻出来）；\n② 优先级是否真的按表实现，而不是\"碰巧在每个单例上都对\"。\n\n**为什么 `order_status = 5` 必须炸而不是判成\"非待发货\"**：\n官方的 `order_status` 枚举里 `5 = 全部` 是**筛选值**，它和 1/2/3 这些**枚举值**混在同一列语义里\n（素材把这条列为\"新增枚举把报表打穿\"的教科书场景）。\n如果库里真出现 5，说明有人把查询条件写成了数据 —— 那是脏数据，\n把它静默判成 `not-awaiting-shipment` 就等于替这次污染背书。\n\n**明文为什么也不许下发**（`not-ciphered`）：官方语义是\"返回**密文**数据\"。\n库里躺着明文本身就是合规事故（PIPL 下的个人敏感信息），\n\"能解密\"与\"该下发\"是两件事，把明文当密文发出去，泄露发生在出口而不是存储。\n\n**工程延伸（面试追问点）**\n\n1. 数仓侧怎么落地？（在 DWD 就把它拆成两列：`receiver_value` + `visibility_reason`。\n   下游所有\"缺失率\"必须引用 reason 而不是猜值，否则永远查不清。）\n2. 解密动作本身呢？（要作为**字段级权限 + 审计对象**：谁、什么时候、为哪个订单解了密。\n   监管取证要求逐单可举证，\"我们没泄露\"得拿得出访问记录。）\n3. 为什么状态会影响可见性？（发货之后平台不再持有投递必需的个人信息，\n   这是最小必要原则的工程实现。理解这一层才不会想着\"绕过它把地址补全\"。）\n4. 这套语义变了怎么通知下游？（`visibility_reason` 是**枚举**，新增取值必须版本化，\n   并要求下游\"未知值显式落到 unmapped 桶 + 告警\"，而不是 `ELSE` 分支吞掉。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "String[] resolveReceiverAll(int[] orderStatuses, int[] riskFlags, String[] storedForms)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.Arrays;\nimport java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  private static final Set<String> STORED = new HashSet<>(Arrays.asList(\"cipher\", \"plain\", \"absent\"));\n\n  public static String[] resolveReceiverAll(int[] orderStatuses, int[] riskFlags, String[] storedForms) {\n    if (orderStatuses.length != riskFlags.length || orderStatuses.length != storedForms.length) {\n      throw new IllegalArgumentException(\"length mismatch\");\n    }\n    String[] out = new String[orderStatuses.length];\n    for (int i = 0; i < orderStatuses.length; i++) {\n      int status = orderStatuses[i];\n      int risk = riskFlags[i];\n      String stored = storedForms[i];\n      if (status != 1 && status != 2 && status != 3 && status != 5) {\n        throw new IllegalArgumentException(\"unknown order status\");\n      }\n      if (status == 5) throw new IllegalArgumentException(\"filter value 5 is not a real status\");\n      if (risk != 0 && risk != 1) throw new IllegalArgumentException(\"unknown risk control status\");\n      if (!STORED.contains(stored)) throw new IllegalArgumentException(\"unknown stored form\");\n      // 优先级：管道没给 > 状态不该给 > 风控压着 > 值没加密 > 正常\n      if (\"absent\".equals(stored)) out[i] = \"empty:no-column\";\n      else if (status != 1) out[i] = \"empty:not-awaiting-shipment\";\n      else if (risk == 1) out[i] = \"empty:risk-hold\";\n      else if (\"plain\".equals(stored)) out[i] = \"empty:not-ciphered\";\n      else out[i] = \"cipher:ok\";\n    }\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"空值就是没有数据\"版：三种语义压成一个布尔，reason 一律是 missing。\n  // 症状是\"地址缺失率一周涨 40%\"被当成采集故障查了三天，而真相是风控打标比例变了。\n  public static String[] resolveReceiverAll(int[] orderStatuses, int[] riskFlags, String[] storedForms) {\n    String[] out = new String[orderStatuses.length];\n    for (int i = 0; i < orderStatuses.length; i++) {\n      boolean has = !\"absent\".equals(storedForms[i]);\n      out[i] = (has ? \"cipher\" : \"empty\") + \":missing\";\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（交易/隐私与合规方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 4（`receiver_*` 官方注释\"待发货且未被风控打标返回密文，其余返回空串\"、`risk_control_status` 0/1、`order_status` 含筛选值 5）＋ 考点 5（素材建议\"可见性判定函数的状态组合覆盖\"为 java-junit 题，未给判定表）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.109Z"
+  }
+}

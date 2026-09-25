@@ -1,0 +1,359 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0006",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Sessionization：30 分钟切分、心跳不桥接、重复投递与跨零点（窗口帧 + gaps & islands）",
+  "statement": "## 背景与数据规模\n用户行为明细 `user_events`（日均 **28 亿行、3.6 亿用户**）要产出会话级宽表，供增长漏斗与实验平台使用（Airbnb 风格的 session 口径）。\n现状是三份互相矛盾的 SQL：批口径用「两次事件间隔 > 30 分钟」，实时口径用 Flink session window（`State TTL` 45 分钟），还有人把心跳事件也算进会话——双跑对账永远对不上，且**跨 UTC 零点**的会话被劈成两段。\n本题把批口径钉死，要求你产出**唯一确定**的会话结果。\n\n## 输入\n临时视图 `user_events`（每个用例单独灌入，`spark.table('user_events')`）：\n- `user_id STRING`\n- `event_type STRING`：取值包含 `search` / `detail` / `pay` / `heartbeat`，也可能出现未定义的新枚举值（视为普通事件参与切分与计数）\n- `event_ts STRING`：UTC 时间，格式 `yyyy-MM-dd HH:mm:ss`，可能为 NULL 或非法文本\n\n## 口径定义（必须严格实现，按此顺序）\n1. `event_ts` 为 NULL 或无法解析的行**整行丢弃**。\n2. **先去重**：`(user_id, event_type, event_ts)` 三者完全相同的行视为 at-least-once 重复投递，只保留一条（注意：同一用户同一毫秒的**不同** `event_type` 是两条合法事件，不得折叠）。\n3. **心跳不参与任何计算**：`event_type = 'heartbeat'` 的行既不计入 `event_count`，也不影响切分（不桥接两个远隔 > 30 分钟的事件），也不参与 `start_ts`/`end_ts`。孤立心跳（附近没有非心跳事件）不产生任何会话。\n4. **切分规则**：对剩余事件按 `(user_id, ts)` 升序，相邻间隔 **严格大于 1800 秒**才开新会话（恰好 1800 秒属于同一会话）。\n5. **会话编号**：`session_seq` 在每个 `user_id` 内从 **1** 开始，按会话起始时间升序连续编号（用累计 `sum(is_new)` 的窗口帧实现，帧必须是 `rows between unbounded preceding and current row`，用默认的 RANGE 帧在「同一用户同一时间戳」上会得到不同结果）。\n6. 指标：\n   - `start_ts` / `end_ts`：会话内最早/最晚**非心跳**事件时间，`yyyy-MM-dd HH:mm:ss` 字符串（UTC）\n   - `duration_sec` = `end_ts` 与 `start_ts` 的秒差（单事件会话为 0）\n   - `event_count`：会话内去重后的非心跳事件数\n   - `has_detail`：会话内是否出现过 `event_type = 'detail'`（布尔）\n\n## 输出\nDataFrame，列**必须严格是** `user_id, session_seq, start_ts, end_ts, duration_sec, event_count, has_detail`。\n判题按行集合比对（行序不敏感）；生产写法请 `orderBy('user_id','session_seq')`。\n\n## 约束与追问\n- 禁止 `collect()`/`toPandas()`；禁止用自连接（`a.ts <= b.ts`）算会话——28 亿行的规模下它会变成笛卡尔积。\n- 追问会让你对比：Flink session window 的 `allowedLateness`/侧输出与本批口径的差异；为什么「乱序到达 + 30 分钟 gap + 状态 45 分钟过期」的实时会话数必然小于批；以及为什么跨零点会话不能按日期分区切开算。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "sessionization",
+    "gaps-and-islands",
+    "window-frame",
+    "late-data",
+    "pyspark",
+    "modern:flink-2.3"
+  ],
+  "cases": [
+    {
+      "name": "基础：间隔恰好 1800 秒不切分",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u1",
+            "event_type": "search",
+            "event_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "user_id": "u1",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 10:20:00"
+          },
+          {
+            "user_id": "u1",
+            "event_type": "pay",
+            "event_ts": "2026-09-01 10:50:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u1",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 10:00:00",
+          "end_ts": "2026-09-01 10:50:00",
+          "duration_sec": 3000,
+          "event_count": 3,
+          "has_detail": true
+        }
+      ],
+      "note": "第二段间隔正好 1800 秒，属于同一会话（> 才切）。"
+    },
+    {
+      "name": "边界：1801 秒必须切成两个会话且 seq 连续",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u2",
+            "event_type": "search",
+            "event_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "user_id": "u2",
+            "event_type": "pay",
+            "event_ts": "2026-09-01 10:30:01"
+          },
+          {
+            "user_id": "u2",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 11:00:01"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u2",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 10:00:00",
+          "end_ts": "2026-09-01 10:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": false
+        },
+        {
+          "user_id": "u2",
+          "session_seq": 2,
+          "start_ts": "2026-09-01 10:30:01",
+          "end_ts": "2026-09-01 11:00:01",
+          "duration_sec": 1800,
+          "event_count": 2,
+          "has_detail": true
+        }
+      ]
+    },
+    {
+      "name": "心跳边界：不桥接、不计数、孤立心跳不产生会话",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u3",
+            "event_type": "search",
+            "event_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "user_id": "u3",
+            "event_type": "heartbeat",
+            "event_ts": "2026-09-01 10:10:00"
+          },
+          {
+            "user_id": "u3",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 11:00:00"
+          },
+          {
+            "user_id": "u4",
+            "event_type": "search",
+            "event_ts": "2026-09-01 12:00:00"
+          },
+          {
+            "user_id": "u4",
+            "event_type": "heartbeat",
+            "event_ts": "2026-09-01 12:05:00"
+          },
+          {
+            "user_id": "u5",
+            "event_type": "heartbeat",
+            "event_ts": "2026-09-01 13:00:00"
+          },
+          {
+            "user_id": "u5",
+            "event_type": "heartbeat",
+            "event_ts": "2026-09-01 13:20:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u3",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 10:00:00",
+          "end_ts": "2026-09-01 10:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": false
+        },
+        {
+          "user_id": "u3",
+          "session_seq": 2,
+          "start_ts": "2026-09-01 11:00:00",
+          "end_ts": "2026-09-01 11:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": true
+        },
+        {
+          "user_id": "u4",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 12:00:00",
+          "end_ts": "2026-09-01 12:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": false
+        }
+      ],
+      "note": "u3 的 60 分钟间隔不能被 10 分钟心跳桥接；u5 只有心跳，结果里绝不能出现 u5。"
+    },
+    {
+      "name": "重复：同用户同类型同毫秒的三次投递只算一次",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u6",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 08:00:00"
+          },
+          {
+            "user_id": "u6",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 08:00:00"
+          },
+          {
+            "user_id": "u6",
+            "event_type": "detail",
+            "event_ts": "2026-09-01 08:00:00"
+          },
+          {
+            "user_id": "u6",
+            "event_type": "search",
+            "event_ts": "2026-09-01 08:00:00"
+          },
+          {
+            "user_id": "u6",
+            "event_type": "pay",
+            "event_ts": "2026-09-01 08:10:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u6",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 08:00:00",
+          "end_ts": "2026-09-01 08:10:00",
+          "duration_sec": 600,
+          "event_count": 3,
+          "has_detail": true
+        }
+      ],
+      "note": "三条重复 detail 折成 1；同时刻不同事件类型（search）必须保留——只有按 (user,type,ts) 三元组去重才得到 3。"
+    },
+    {
+      "name": "跨 UTC 零点：会话不能按日期分区被劈成两段",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u7",
+            "event_type": "search",
+            "event_ts": "2026-09-30 23:50:00"
+          },
+          {
+            "user_id": "u7",
+            "event_type": "pay",
+            "event_ts": "2026-10-01 00:10:00"
+          },
+          {
+            "user_id": "u8",
+            "event_type": "detail",
+            "event_ts": "2026-09-30 23:00:00"
+          },
+          {
+            "user_id": "u8",
+            "event_type": "pay",
+            "event_ts": "2026-10-01 01:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u7",
+          "session_seq": 1,
+          "start_ts": "2026-09-30 23:50:00",
+          "end_ts": "2026-10-01 00:10:00",
+          "duration_sec": 1200,
+          "event_count": 2,
+          "has_detail": false
+        },
+        {
+          "user_id": "u8",
+          "session_seq": 1,
+          "start_ts": "2026-09-30 23:00:00",
+          "end_ts": "2026-09-30 23:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": true
+        },
+        {
+          "user_id": "u8",
+          "session_seq": 2,
+          "start_ts": "2026-10-01 01:00:00",
+          "end_ts": "2026-10-01 01:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": false
+        }
+      ],
+      "note": "u8 间隔 2 小时被正确切开；按天分区各自算会话的实现会让 u7 变成两段、duration 归零。"
+    },
+    {
+      "name": "单条事件与脏时间：非法 ts 丢弃后该用户可能无任何会话",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": [
+          {
+            "user_id": "u9",
+            "event_type": "scroll",
+            "event_ts": "2026-09-01 05:00:00"
+          },
+          {
+            "user_id": "u10",
+            "event_type": "search",
+            "event_ts": "oops"
+          },
+          {
+            "user_id": "u11",
+            "event_type": "search",
+            "event_ts": null
+          },
+          {
+            "user_id": "u12",
+            "event_type": "video_play",
+            "event_ts": "2026-09-01 06:00:00"
+          },
+          {
+            "user_id": "u12",
+            "event_type": "video_play",
+            "event_ts": "2026-09-01 06:29:59"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "user_id": "u9",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 05:00:00",
+          "end_ts": "2026-09-01 05:00:00",
+          "duration_sec": 0,
+          "event_count": 1,
+          "has_detail": false
+        },
+        {
+          "user_id": "u12",
+          "session_seq": 1,
+          "start_ts": "2026-09-01 06:00:00",
+          "end_ts": "2026-09-01 06:29:59",
+          "duration_sec": 1799,
+          "event_count": 2,
+          "has_detail": false
+        }
+      ],
+      "note": "未知枚举（scroll/video_play）按普通事件处理；u10/u11 不得出现在结果里。"
+    },
+    {
+      "name": "空事件流：零事件返回零行",
+      "input": {
+        "view": "user_events",
+        "schema": "user_id string, event_type string, event_ts string",
+        "rows": []
+      },
+      "expected": []
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 80000,
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\nGAP_SEC = 1800\n\n\ndef solve(spark):\n    rows = (\n        spark.table('user_events')\n        .withColumn('ts', F.to_timestamp('event_ts'))\n        .filter(F.col('ts').isNotNull())\n        .dropDuplicates(['user_id', 'event_type', 'event_ts'])\n        .filter(F.col('event_type') != 'heartbeat')\n    )\n    by_user = Window.partitionBy('user_id').orderBy('ts')\n    marked = (\n        rows.withColumn('prev_ts', F.lag('ts').over(by_user))\n        .withColumn(\n            'is_new',\n            F.when(\n                F.col('prev_ts').isNull()\n                | ((F.unix_timestamp('ts') - F.unix_timestamp('prev_ts')) > F.lit(GAP_SEC)),\n                F.lit(1),\n            ).otherwise(F.lit(0)),\n        )\n        .withColumn(\n            'session_seq',\n            F.sum('is_new').over(by_user.rowsBetween(Window.unboundedPreceding, Window.currentRow)),\n        )\n    )\n    return (\n        marked.groupBy('user_id', 'session_seq')\n        .agg(\n            F.date_format(F.min('ts'), 'yyyy-MM-dd HH:mm:ss').alias('start_ts'),\n            F.date_format(F.max('ts'), 'yyyy-MM-dd HH:mm:ss').alias('end_ts'),\n            (F.unix_timestamp(F.max('ts')) - F.unix_timestamp(F.min('ts'))).alias('duration_sec'),\n            F.count(F.lit(1)).alias('event_count'),\n            (F.sum(F.when(F.col('event_type') == 'detail', F.lit(1)).otherwise(F.lit(0))) > F.lit(0)).alias('has_detail'),\n        )\n        .select('user_id', 'session_seq', 'start_ts', 'end_ts', 'duration_sec', 'event_count', 'has_detail')\n        .orderBy('user_id', 'session_seq')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    rows = (\n        spark.table('user_events')\n        .withColumn('ts', F.to_timestamp('event_ts'))\n        .filter(F.col('ts').isNotNull())\n    )\n    by_user = Window.partitionBy('user_id').orderBy('ts')\n    marked = rows.withColumn(\n        'gap', F.unix_timestamp('ts') - F.unix_timestamp(F.lag('ts').over(by_user))\n    ).withColumn(\n        'session_seq',\n        F.sum(F.when(F.col('gap').isNull() | (F.col('gap') >= 1800), F.lit(1)).otherwise(F.lit(0)))\n        .over(by_user),\n    )\n    return marked.groupBy('user_id', 'session_seq').agg(\n        F.date_format(F.min('ts'), 'yyyy-MM-dd HH:mm:ss').alias('start_ts'),\n        F.date_format(F.max('ts'), 'yyyy-MM-dd HH:mm:ss').alias('end_ts'),\n        F.max('gap').alias('duration_sec'),\n        F.count(F.lit(1)).alias('event_count'),\n        (F.max(F.when(F.col('event_type') == 'detail', F.lit(1)).otherwise(F.lit(0))) > F.lit(0)).alias('has_detail'),\n    ).select('user_id', 'session_seq', 'start_ts', 'end_ts', 'duration_sec', 'event_count', 'has_detail')\n"
+  },
+  "answer": "## 参考要点\n1. 顺序即语义：**解析 → 去重 → 剔除心跳 → 切分 → 编号**。心跳若在切分之后才被剔除，就会出现「心跳把 60 分钟的两段缝成一段」（case3）；去重若在用之后做，会把同毫秒的合法不同事件折叠掉。这类「算子顺序」就是批流对账差异的真实来源。\n2. `duration_sec` 必须是 `max(ts) - min(ts)`，不能拿「最后一个 gap」当会话时长（naive 用 `max(gap)` 在单事件会话上得到 null、在多事件会话上得到相邻间隔）。\n3. 窗口帧：`sum(is_new) over (partition by user order by ts rows between unbounded preceding and current row)`。默认帧是 RANGE（order by 列值相等时把同伴行一起计入），本题去重后同一用户仍可能有同毫秒不同事件（case4），RANGE 帧会让这些行的 `session_seq` 相同或跳号——「结果偶尔多/少一个会话」的隐蔽根因之一。\n4. 切分阈值写成常量 `> 1800`（严格大于），并在题面/注释里给出依据：来自「会话间隔分布」的经验分位数（p99.5 会话内最大相邻间隔），而不是拍脑袋 30 分钟。真要改口径必须连同历史重算范围一起决策。\n5. 批流一致的不可可能性要说清：Flink session window 有 `allowedLateness` 与 state 过期，超迟事件要么丢弃要么侧输出，所以实时会话数 ≤ 批；对账要按「会话关闭时间」对齐窗口，且差异样本要能归因（迟到 / 心跳处理差异 / 去重域差异）。Spark 侧 4.2 有 `session_window()` 与流式非 outer join 的 update mode，可以显著缩小差异但仍不等价。\n6. 性能：28 亿行必须**按天 + 按用户分桶**读（`repartition('event_date', buckets('user_id'))`），否则一个用户的事件散在 2000 个分区里，`partitionBy(user)` 的窗口会放大成全局 shuffle；会话表按「会话起始日」分区，跨零点会话归起始日并保留 `end_ts` 跨日标记，避免按天劈开。高基数 `count(distinct user)` 类下游指标改用 HLL/bitmap 中间态，禁止跨天相加。\n\n## 追问\n- 「为什么不用 `MATCH_RECOGNIZE` / Spark 4.2 的 `session_window()`？」→ 表达更清晰、且能让引擎用专门的流式状态算子（避免自比较 + 累计求和的两次 shuffle），但语义边界要验证：`session_window` 的 gap 判定基于事件时间且允许迟到，与本题「纯批、按到达集合全量重算」的结果在乱序场景可能不同。\n- 「会话级 UV 与天级 UV 的关系？」→ 不可加：会话数可加、跨会话用户数不可加；实验平台要的是「按曝光时点的用户会话」，语义层必须给指标打上可加性标志。\n- 「怎么测这份实现的资源开销？」→ 看 shuffle write bytes 与 per-partition 记录直方图（`user_id` 上有爬虫型超级用户 → 单 key 倾斜，需要热点拆分或近似），而不是只看总时长。",
+  "estimatedMinutes": 35,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/pyspark-correctness-and-perf.md#analytics-sql-patterns",
+    "addedBy": "content-agent-bd"
+  }
+}

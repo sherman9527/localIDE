@@ -1,0 +1,366 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0035",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "联系人发现的防枚举：所有拒绝路径与\"零命中\"返回同一个数组",
+  "statement": "## 背景\n\n\"我是否在你的通讯录里\"是联系人发现的原语（PSI / OPRPIR 类）。\n它的危险不在密码学部分，而在**服务层响应**：只要\"被拒绝\"与\"没匹配上\"这两种情况\n在响应里可区分，攻击者就得到一个**二值预言机** —— 逐条提交、观察差异，\n就能把服务端集合枚举出来。2025 年公开披露的那类联系人发现缺陷正是这个形状。\n\n本题只考这一层：**让所有拒绝路径与\"零命中\"不可区分**，同时仍然把非法输入炸出来。\n\n## 你要实现的入口\n\n```java\npublic static int[] probe(int[] candidates, int[] known, int batchLimit, int quotaLeft,\n                          boolean attestationOk, int repeatScore, int stepUpThreshold)\n```\n\n- `candidates`：本次批量提交的哈希（顺序有意义，位置要一一对应）；\n- `known`：服务端持有的哈希集合；\n- 其余四个是策略参数：单批上限、本次调用后剩余的请求配额、设备证明是否通过、\n  该调用方的\"重复探测分数\"与它的 step-up 阈值。\n\n## 授权判定\n\n请求**被授权**当且仅当四条同时成立：\n\n```\nattestationOk\n&& candidates.length <= batchLimit\n&& quotaLeft > 0\n&& repeatScore <= stepUpThreshold\n```\n\n## 输出规则（判分点全部在这里）\n\n1. 被授权 ⇒ 返回长度等于 `candidates.length` 的数组，第 `i` 项 = `candidates[i]` 是否在 `known` 里\n   （`1` / `0`）。`candidates` 里出现重复值时，各位置**独立**判定。\n2. **未被授权 ⇒ 返回长度仍然等于 `candidates.length` 的全 `0` 数组。**\n   不抛异常、不返回 `null`、不返回更短或更长的数组、不用 `-1`/`2` 这类状态码区分拒绝原因。\n   也就是说：超批量、无 attestation、配额耗尽、探测分数超阈、以及\"确实谁都没匹配上\"\n   这五种情况，在调用方看到的响应里必须是**同一个东西**。\n3. 数组要**保持输入顺序**（不许排序、不许去重后返回、不许只返回命中的下标）。\n   返回\"命中下标列表\"是最糟的一种泄漏 —— 长度本身就是命中数。\n4. `candidates` 为空数组 ⇒ 返回长度为 0 的数组（这是正常情况，不是非法输入）。\n\n## 非法输入（抛 `IllegalArgumentException`）\n\n这些是**协议错误**而不是策略拒绝，所以允许炸（调用方写错了代码，不该伪装成\"没匹配上\"）：\n`candidates` 或 `known` 为 `null`；任一元素为负数；`batchLimit <= 0`；\n`quotaLeft < 0`、`repeatScore < 0`、`stepUpThreshold < 0`。\n\n不许引入第三方依赖。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "anti-enumeration",
+    "psi",
+    "side-channel",
+    "response-uniformity",
+    "modern:privacy-engineering"
+  ],
+  "cases": [
+    {
+      "name": "正常命中：逐位掩码、顺序保持",
+      "input": [
+        [
+          11,
+          22,
+          33
+        ],
+        [
+          33,
+          11,
+          99
+        ],
+        500,
+        10,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        1,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "[1,0,1] —— 22 不在服务端集合里"
+    },
+    {
+      "name": "谁都没匹配上：与四种拒绝完全同形",
+      "input": [
+        [
+          7,
+          8
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        500,
+        10,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "[0,0] —— 和下面四条拒绝的期望值一模一样，这正是本题要的东西"
+    },
+    {
+      "name": "超批量：全 0 而不是抛错或短数组",
+      "input": [
+        [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        [
+          1,
+          2
+        ],
+        4,
+        10,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "泄漏点：返回 -2 或更短数组的实现等于把 batchLimit 交给调用方反推"
+    },
+    {
+      "name": "没有 attestation：全 0",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        500,
+        10,
+        false,
+        0,
+        5
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "即使三条全在服务端集合里，也只能返回 [0,0,0]"
+    },
+    {
+      "name": "配额耗尽：全 0",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        500,
+        0,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "探测分数超阈：需要 step-up，但响应不区分",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        500,
+        10,
+        true,
+        6,
+        5
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "repeatScore 6 > 阈值 5 ⇒ 与零命中同形；step-up 走带外流程"
+    },
+    {
+      "name": "恰好等于阈值与恰好等于批量上限都算通过",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          2
+        ],
+        3,
+        1,
+        true,
+        5,
+        5
+      ],
+      "expected": [
+        0,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "边界都是闭的：<= batchLimit、quotaLeft > 0、repeatScore <= stepUpThreshold"
+    },
+    {
+      "name": "重复提交同一个哈希：各位置独立判定",
+      "input": [
+        [
+          42,
+          42,
+          7
+        ],
+        [
+          42
+        ],
+        500,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "[1,1,0] —— 去重后返回就丢了调用方的位置信息，那是另一个 bug"
+    },
+    {
+      "name": "退化：提交了空批次",
+      "input": [
+        [],
+        [
+          1,
+          2
+        ],
+        500,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "长度为 0 的数组，不是 null 也不是异常"
+    },
+    {
+      "name": "退化：服务端集合为空",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [],
+        500,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：candidates 为 null",
+      "input": [
+        null,
+        [
+          1
+        ],
+        500,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：known 里有负数",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          -1
+        ],
+        500,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：batchLimit 为 0",
+      "input": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        0,
+        3,
+        true,
+        0,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：配额为负",
+      "input": [
+        [
+          1
+        ],
+        [
+          1
+        ],
+        500,
+        -1,
+        true,
+        0,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n**先算授权、再碰数据**：`authorized` 只依赖调用方自己提供的量\n（`candidates.length`、四个策略参数）与 `attestationOk`，判定为假就直接返回\n`new int[candidates.length]`（Java 天然全 0），**连 `known` 都不遍历**。\n合法路径才建 `HashSet` 逐位比对。\n\n**为什么长度可以保留而内容必须归零**：返回长度由 `candidates.length` 决定，\n而那是调用方自己选的 —— 长度里不含任何服务端状态。\n反过来，任何\"拒绝时返回更短/更长/不同形状\"的做法，都会把服务端的一个布尔量\n（是否超配额、分数是否超阈）映射成一次可观测的差异，\n攻击者用一次提交就能读一个比特。枚举一个 N 元素的集合只需要 `log`与常数次这类读取，\n所以**一次可区分的拒绝就等于开了一个口子**。\n\n**三种典型泄漏形态，对应三种常见写法**：\n1. 用错误码区分拒绝原因（`-1`/`-2`/`-3`）—— 最直接，等于自带枚举协议；\n2. 返回**命中项列表**而不是等长掩码 —— 数组长度就是命中数，\n   一次请求就能二分定位\"这一条命中没有\"；\n3. 拒绝时干脆抛异常 —— 异常在网关侧通常变成 5xx 与不同的响应体与耗时，\n   与 200 空结果一眼可分。\n\n**为什么非法输入反而允许抛错**（题面 §非法输入）：\n`null`、负哈希、`batchLimit <= 0` 这些是**调用方写错代码**，\n不是\"策略拒绝了个好请求\"。把它们也伪装成\"没匹配上\"会让人 debug 到死，\n而且它们与\"某条 candidate 是否命中\"没有任何关系 —— 不携带集合信息，所以不构成预言机。\n判据是：**这个差异是否由用户提交的内容决定**。由内容决定的差异必须统一，\n由代码错误决定的差异应该响。\n\n**统一化之后还剩什么洞**（这是这题真正的延伸，面试必答）：\n1. **时延**：命中路径要遍历 `known` 建集合、拒绝路径直接返回 —— 两者耗时差一个量级。\n   缓解：授权与否都走同样的工作量（对 `known` 做定长扫描或用预建的 Bloom/字典，\n   或对拒绝路径补一段固定 sleep —— 后者脆，容易被 GPU/负载差异打穿）。\n2. **计数侧信道**：即使内容不可区分，\"这个账号一天发了多少请求\"在\n   服务端的指标/日志里是存在的，只要**攻击者看不到**就安全 ——\n   所以真正要保证的是\"风控侧的可见性\"与\"调用方的可见性\"是两套通道，\n   绝不能为了给用户\"申诉依据\"而把前者透出（申诉只说\"需要进一步验证\"）。\n3. **配额信号本身**：把 `quotaLeft` 变成不可见之后，合法的厚用户会困惑\n   \"为什么我搜了半天没人在线\"。产品出路是**账号级**的配额提示\n   （\"今日查询次数已用完\"，与具体查询内容无关），而不是每次查询响应里的一个比特。\n\n**工程延伸（面试追问点）**\n\n1. 慢速分布式枚举怎么防？（单账号限流挡不住\"一万个账号每人查 20 次\"。\n   要有**批次指纹**维度的重复分数（同一 `batchHash` 反复出现就是探测），\n   以及跨账号的聚合检测 —— 这就是 `repeatScore` 的由来。）\n2. PSI 那一层还要不要？（要。服务层统一化只是关掉侧信道，\n   密码学求交解决的是\"服务端不该看到我没提交过什么\"。两者是正交的两层，\n   缺了前者实现再有密码学也是漏的。）\n3. step-up 该长什么样？（它必须是一个**与内容无关**的、对所有人一致的升级流程\n   （二次确认、延迟放行），而不是\"你这条被怀疑了\"。否则 step-up 自己就成了预言机。）\n4. 审计怎么记才有用又不泄漏？（记 `callerId + batchDigest + 决策 + 剩余配额档位`，\n   **不记**明文哈希 —— 否则审计日志本身变成一份\"谁查了谁\"的集合，\n   而这正是隐私需求要防的东西。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] probe(int[] candidates, int[] known, int batchLimit, int quotaLeft, boolean attestationOk, int repeatScore, int stepUpThreshold)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  public static int[] probe(int[] candidates, int[] known, int batchLimit, int quotaLeft,\n                            boolean attestationOk, int repeatScore, int stepUpThreshold) {\n    if (candidates == null || known == null) throw new IllegalArgumentException(\"null set\");\n    for (int v : candidates) {\n      if (v < 0) throw new IllegalArgumentException(\"negative candidate hash\");\n    }\n    for (int v : known) {\n      if (v < 0) throw new IllegalArgumentException(\"negative known hash\");\n    }\n    if (batchLimit <= 0) throw new IllegalArgumentException(\"batchLimit must be positive\");\n    if (quotaLeft < 0 || repeatScore < 0 || stepUpThreshold < 0) {\n      throw new IllegalArgumentException(\"negative counter\");\n    }\n\n    // 先算授权、再碰数据：拒绝路径上一个 known 元素都不读，\n    // 否则\"读多少东西\"本身又成了一条时延侧信道。\n    boolean authorized = attestationOk\n        && candidates.length <= batchLimit\n        && quotaLeft > 0\n        && repeatScore <= stepUpThreshold;\n\n    int[] out = new int[candidates.length];      // 长度只由调用方自己的输入决定 ⇒ 不泄漏服务端状态\n    if (!authorized) {\n      return out;                                 // 全 0 —— 与\"零命中\"逐字节相同\n    }\n    Set<Integer> seen = new HashSet<>();\n    for (int v : known) {\n      seen.add(v);\n    }\n    for (int i = 0; i < candidates.length; i++) {\n      out[i] = seen.contains(candidates[i]) ? 1 : 0;\n    }\n    return out;\n  }\n}",
+    "naiveSolution": "import java.util.ArrayList;\nimport java.util.List;\nimport java.util.Set;\nimport java.util.HashSet;\n\npublic class Solution {\n  // \"每种拒绝都给一个码\"版：功能齐全，但把预言机交回给了调用方\n  public static int[] probe(int[] candidates, int[] known, int batchLimit, int quotaLeft,\n                            boolean attestationOk, int repeatScore, int stepUpThreshold) {\n    if (candidates == null || known == null) throw new IllegalArgumentException(\"null set\");\n    for (int v : candidates) {\n      if (v < 0) throw new IllegalArgumentException(\"negative candidate hash\");\n    }\n    for (int v : known) {\n      if (v < 0) throw new IllegalArgumentException(\"negative known hash\");\n    }\n    if (batchLimit <= 0) throw new IllegalArgumentException(\"batchLimit must be positive\");\n    if (quotaLeft < 0 || repeatScore < 0 || stepUpThreshold < 0) {\n      throw new IllegalArgumentException(\"negative counter\");\n    }\n    if (!attestationOk) {\n      return new int[] {-1};                      // 泄漏点 1：不同的拒绝给不同的形状\n    }\n    if (candidates.length > batchLimit) {\n      return new int[] {-2};                      // 泄漏点 2：还能反推 batchLimit\n    }\n    if (quotaLeft <= 0) {\n      return new int[] {-3};\n    }\n    if (repeatScore > stepUpThreshold) {\n      return new int[] {-4};\n    }\n    Set<Integer> seen = new HashSet<>();\n    for (int v : known) {\n      seen.add(v);\n    }\n    List<Integer> hits = new ArrayList<>();\n    for (int v : candidates) {\n      if (seen.contains(v)) {\n        hits.add(v);                              // 泄漏点 3：长度就是命中数\n      }\n    }\n    int[] out = new int[hits.size()];\n    for (int i = 0; i < out.length; i++) {\n      out[i] = hits.get(i);\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "Apple",
+    "role": "隐私敏感服务 / iCloud 服务端 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/apple-privacy-and-edge-cloud.md §1.3 与 §4 题面草稿 A（素材给了\"求交本身即攻击面\"与六条断言，未砍成可判分的纯函数契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:33:23.067Z"
+  }
+}

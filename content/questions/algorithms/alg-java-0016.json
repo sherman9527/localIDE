@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0016",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "SLO 违规预算内的最长合规窗口",
+  "statement": "## 背景\n\nSLO 观察：\"服务在窗口内允许的降级分钟数不超过 `maxDips\"` 是错误预算（error budget）的常见形式。给定每分钟 QPS 序列 `qpsPerMinute`，低于 `minQps` 的那一分钟算一次降级（**包括脏数据造成的负值**），要求**最长的连续子段**，使其内部降级次数 `<= maxDips`，返回该子段长度。\n\n这就是\"变长窗口 + 违反条件才收缩\"的模板，但不变式一旦写歪（比如收缩时忘了判断被移出的元素是不是降级），结果就会偏短或偏长。\n\n## 入口\n\n```java\npublic static int longestCompliantSpan(int[] qpsPerMinute, int minQps, int maxDips)\n```\n\n- 返回满足\"降级次数 ≤ `maxDips`\"的最长连续子数组长度；\n- `qpsPerMinute` 为空 → `0`；\n- `maxDips < 0` → `-1`（非法配置，业务失败不抛异常）。\n\n## 不变式与硬约束\n\n1. 降级的判定是 `qps < minQps`（**严格小于**）：`qps == minQps` 算达标；`qps` 为负（脏数据）算降级，不得抛异常。\n2. `minQps` 取遍 `int`（含负值与 `Integer.MAX_VALUE`），比较不许做减法（`minQps - qps` 在 `MAX_VALUE` 附近溢出）。\n3. 双指针必须保证不变式：**窗口内 `dips` 恰好等于当前区间的降级数**，收缩时只对\"被移出且确实是降级\"的元素 `dips--`。请写出这个不变式并据此论证 O(n)。\n4. 只允许一遍扫描（`left` 单调不减），O(n) 时间、O(1) 额外空间。\n5. 不得修改入参数组。\n\n## 输出契约\n\n返回 `int` 长度。空数组返回 `0`（而不是 `-1`）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "sliding-window",
+    "two-pointer",
+    "invariants",
+    "slo-monitoring",
+    "modern:slo-monitoring"
+  ],
+  "cases": [
+    {
+      "name": "空序列返回 0 长度",
+      "input": [
+        [],
+        100,
+        0
+      ],
+      "expected": 0
+    },
+    {
+      "name": "零违规预算退化为最长全达标段",
+      "input": [
+        [
+          5,
+          6,
+          1,
+          7,
+          8,
+          1,
+          9
+        ],
+        6,
+        0
+      ],
+      "expected": 2
+    },
+    {
+      "name": "允许一次降级",
+      "input": [
+        [
+          5,
+          6,
+          1,
+          7,
+          8,
+          1,
+          9
+        ],
+        6,
+        1
+      ],
+      "expected": 4
+    },
+    {
+      "name": "预算充足时整段并列达标",
+      "input": [
+        [
+          5,
+          6,
+          1,
+          7,
+          8,
+          1,
+          9
+        ],
+        6,
+        5
+      ],
+      "expected": 7
+    },
+    {
+      "name": "全部降级的退化输入",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        5,
+        2
+      ],
+      "expected": 2
+    },
+    {
+      "name": "负值脏数据也按降级计",
+      "input": [
+        [
+          -7,
+          10,
+          10
+        ],
+        5,
+        1
+      ],
+      "expected": 3
+    },
+    {
+      "name": "预算为负属于非法配置",
+      "input": [
+        [
+          1
+        ],
+        5,
+        -1
+      ],
+      "expected": -1
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int longestCompliantSpan(int[] qpsPerMinute, int minQps, int maxDips)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 变长滑窗：right 扩张 -> 计降级；当 dips > maxDips 时收缩 left。\n   * 不变式：dips == 区间 [left, right] 内满足 qps < minQps 的元素个数。\n   * 因此收缩时必须判断\"被移出的那个元素是不是降级\"，否则 dips 会永久偏大（答案偏短）。\n   * left 与 right 各自只前进一次 -> O(n)，额外空间 O(1)。\n   */\n  public static int longestCompliantSpan(int[] qpsPerMinute, int minQps, int maxDips) {\n    if (maxDips < 0) return -1;\n    int best = 0;\n    int left = 0;\n    int dips = 0;\n    for (int right = 0; right < qpsPerMinute.length; right++) {\n      if (qpsPerMinute[right] < minQps) dips++;\n      while (dips > maxDips) {\n        if (qpsPerMinute[left] < minQps) dips--;\n        left++;\n      }\n      int len = right - left + 1;\n      if (len > best) best = len;\n    }\n    return best;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：把\"违规预算\"当成不存在，只找最长的连续达标段（等价 maxDips == 0）。\n  // 一旦预算 > 0 就会显著偏短，而且完全忽略调用方的错误预算语义。\n  public static int longestCompliantSpan(int[] qpsPerMinute, int minQps, int maxDips) {\n    if (maxDips < 0) return -1;\n    int best = 0;\n    int run = 0;\n    for (int v : qpsPerMinute) {\n      if (v >= minQps) {\n        run++;\n        if (run > best) best = run;\n      } else {\n        run = 0;\n      }\n    }\n    return best;\n  }\n}\n"
+  },
+  "answer": "**思路**：变长滑动窗口。`right` 每步进就更新 `dips`；只要 `dips > maxDips` 就从左边收缩（**收缩时要判断被移出的元素是否是降级**）。不变式成立时 `right - left + 1` 就是以 `right` 结尾的最长合法窗口，取全局最大。\n\n**为什么是 O(n)**：`left`、`right` 各自单调不减且最多走 n 步；`while` 的总执行次数被 `left` 的上界摊还掉 → 总比较次数 ≤ 2n。写成\"每个右端点重扫到左边\"就是 O(n²)，n=2e5 时判分必然超时——这是本题的复杂度对抗点。\n\n**与定长窗口的差别**（高频追问）：定长窗口（本批 0007 的滑动最大值）不需要 `while` 收缩，靠\"下标滑出\"维护；变长窗口的核心是\"违反才收缩\"，收缩条件与计数增量必须一一对应。常见错法：`dips--` 无条件执行（把达标元素也当降级扣掉，`dips` 变负 → 窗口过长）。\n\n**语义细节**：\n- 判定用 `qps < minQps` 严格小于；`>=` 与 `>` 混用会让\"恰好等于阈值\"的分钟被误判，而业务上阈值通常是\"及格线\"（等于即达标）。\n- 负值（脏数据）算降级而不抛异常：摄取层已经清洗过，监控层宁可保守（把异常读数当不达标）。\n- `maxDips < 0` → `-1`（配置错误），空数组 → `0`（事实陈述），两者语义不同，别统一抛异常。\n\n**复杂度**：时间 O(n)，额外空间 O(1)。\n\n**面试追问**：\n1. 如果要输出**所有**最长的窗口起点？（收缩时把 `len == best` 的 `left` 收集进 `int[]`/`List<Integer>`，注意先清掉更短的旧记录；输出要升序。）\n2. 如果预算是\"降级次数占比 ≤ p%\"？（不等式变成 `dips * 100 <= p * len`，`len` 随窗口变化 → 单调性被破坏，双指针不再直接适用；正解是二分答案 + 前缀和判可行（把 `dips` 转成 `+1/-1` 加权前缀），或维护一个\"降级位置\"的单调队列。）\n3. 数据流式到达（不能回看）？（窗口要显式保存，内存 O(最长窗口)；或做近似：分桶 + 允许误差 ε，即\"流式最长子数组\"的 sketch 化。）\n4. 为什么不用前缀和 + 二分？（可以：`dipsPrefix[i]` 上二分找最远左端点，O(n log n)；双指针在线性时间解决它，前提是\"违反单调\"——能识别这个单调性就是考点。）",
+  "estimatedMinutes": 16,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#1-核心机制",
+    "addedBy": "content-agent-alg"
+  }
+}

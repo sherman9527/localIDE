@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0051",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "平滑加权轮询的执行轨迹：比例对了不等于 inflight 均摊，序列才是考点",
+  "statement": "## 背景\n\nKitex 的负载均衡文档把\"默认为什么是 `WeightedRoundRobin`\"写得很具体【源 S5】：\n\n- 目的是\"**能让所有下游实例拥有最小的同时 inflight 请求数，以减少下游过载情况的发生**\"；\n- \"**当权重全部相等时退化为纯轮询**，以节省开销\"；\n- `InterleavedWeightedRoundRobin` 解决的是空间复杂度：\n  WRR 的空间是\"最小正周期（权重和 / 权重最大公约数）\"，interleaved 版是实例数，\n  \"在下游实例数权重总和非常大时更节省空间\"；\n- `Alias Method`（Vose's Alias）O(n) 建表、O(1) 选取，\"选取效率比 WeightedRandom 更高\"；\n- 一致性哈希是**警告式**表述：\"如果你不了解什么是一致性哈希，或者不知道带来的副作用，请勿使用\"。\n\n## 任务\n\n实现教科书式的**平滑加权轮询**（Nginx / Dubbo 同款），并输出可核对的执行轨迹：\n\n```java\npublic static String wrrTrace(int[] weights, int picks)\n```\n\n`weights[i]` 是实例 i 的权重（正整数），要选 `picks` 次。返回：\n\n```\n\"<每次选中的实例下标，逗号分隔>|<每个实例被选中的总次数，逗号分隔>\"\n```\n\n## 算法（**照这个实现，不要自己发明**）\n\n每个实例维护一个 `currentWeight`，初值 0。每一轮：\n\n1. 所有实例 `currentWeight += weight`；\n2. 选 `currentWeight` **最大**的那个实例；**并列时取下标最小者**；\n3. 被选中的实例 `currentWeight -= totalWeight`（`totalWeight` 是所有权重之和，固定值）。\n\n平局规则不是可有可无的细节：不定义它，\"权重全相等 ⇒ 严格 0,1,2,0,1,2 轮转\"这条\n就无法断言（并列取最大下标会得到完全不同的序列）。\n\n## 合法性（`IllegalArgumentException`，消息一字不差）\n\n`weights must not be empty` / `weight must be positive` / `picks must be positive` /\n`picks too large`（上限 1000）/ `weights sum too large`（权重和上限 100000）\n\n后两条上限是本题为了\"输出可读、判题可算\"加的约束，不是框架限制。\n真实框架里权重和可以很大 —— **那正是 `Interleaved` 版本存在的理由**：\n朴素 WRR 想做到\"每个周期内比例精确\"需要维护最小正周期长度的表，\n而周期长度是 `权重和 / gcd(权重)`，权重一大就爆。\n\n## 这题真正考的东西\n\n把序列和计数**分开输出**是本题的核心设计：只看计数，`{3,1}` 与 `{0,0,1,0}` 与\n`{0,0,0,1}` 全都在 4 次里选中 3 次实例 0 —— **比例完全一样，过载风险天差地别**。\n文档说 WRR 的目标是\"最小的同时 inflight\"，那是一句关于**序列**的断言，\n不是关于比例的断言；只用比例验证负载均衡的实现，永远发现不了连续命中同一实例的问题。\n\n用例「极端：权重差 100 倍」给出的是这条算法的**真实短板**：`[100,1]` 选 5 次得到\n连续的 0 —— 平滑性只在权重接近时成立。要理解为什么字节系还要有\ninterleaved 版和\"最快请求探测\"这类权重来源，就得先看到朴素版的失败模式。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "load-balancer",
+    "weighted-round-robin",
+    "inflight",
+    "tie-breaking",
+    "modern:service-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：权重全相等 ⇒ 严格退化成纯轮询（文档明写这条优化）",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        6
+      ],
+      "expected": "0,1,2,0,1,2|2,2,2",
+      "visible": true
+    },
+    {
+      "name": "计数正确但顺序不匀：权重 3:1 的前四次是 0,0,1,0",
+      "input": [
+        [
+          3,
+          1
+        ],
+        4
+      ],
+      "expected": "0,0,1,0|3,1",
+      "visible": true
+    },
+    {
+      "name": "边界：权重有公约数 2:4 ⇒ 周期是\"权重和 / 最大公约数\"而不是实例数",
+      "input": [
+        [
+          2,
+          4
+        ],
+        6
+      ],
+      "expected": "1,0,1,1,0,1|2,4",
+      "visible": true
+    },
+    {
+      "name": "极端：权重差 100 倍 ⇒ 连续 5 次全打同一个实例（inflight 均摊在这里失效）",
+      "input": [
+        [
+          100,
+          1
+        ],
+        5
+      ],
+      "expected": "0,0,0,0,0|5,0",
+      "visible": true
+    },
+    {
+      "name": "边界：只有一个实例 ⇒ 永远选它，权重值毫无意义",
+      "input": [
+        [
+          5
+        ],
+        3
+      ],
+      "expected": "0,0,0|3",
+      "visible": true
+    },
+    {
+      "name": "退化：只选一次 ⇒ 平局时取最小下标",
+      "input": [
+        [
+          7,
+          3
+        ],
+        1
+      ],
+      "expected": "0|1,0",
+      "visible": true
+    },
+    {
+      "name": "两实例等权重奇数次 ⇒ 先选的那个多一次",
+      "input": [
+        [
+          4,
+          4
+        ],
+        3
+      ],
+      "expected": "0,1,0|2,1",
+      "visible": true
+    },
+    {
+      "name": "非法：实例列表为空",
+      "input": [
+        [],
+        3
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "weights must not be empty"
+    },
+    {
+      "name": "非法：权重含 0（会永远选不中，形成静默下线）",
+      "input": [
+        [
+          2,
+          0
+        ],
+        3
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "weight must be positive"
+    },
+    {
+      "name": "非法：选取次数为 0",
+      "input": [
+        [
+          1
+        ],
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "picks must be positive"
+    },
+    {
+      "name": "非法：选取次数超过题面上限",
+      "input": [
+        [
+          1
+        ],
+        1001
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "picks too large"
+    },
+    {
+      "name": "非法：权重总和超过题面上限",
+      "input": [
+        [
+          60000,
+          60000
+        ],
+        2
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "weights sum too large"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步循环，关键是 `cw[best] -= total` 用的是**权重总和**而不是被选中者的权重 ——\n写成后者会退化成\"每次都选同一个\"（这正是 `naiveSolution` 的行为：它连 `cw` 都不维护）。\n\n**基线 `[1,1,1]` 选 6 次 ⇒ `\"0,1,2,0,1,2|2,2,2\"`**：\n每轮 `cw` 都出现三方并列，\"并列取下标最小\"把序列钉成严格轮转。\n这就是文档那句\"权重全部相等时退化为纯轮询\"的可断言形式。\n**去掉平局规则的实现会给出别的顺序，但计数仍是 `2,2,2`** ——\n所以返回值的左半边（序列）不是装饰，它是这条退化性质唯一的落点。\n\n**`[3,1]` 选 4 次 ⇒ `\"0,0,1,0|3,1\"`**：\n第 2 轮出现 `cw = [2, 2]` 的并列，取最小下标又选中 0 ⇒ 头两次连着打实例 0。\n比例正确、**inflight 不匀**。这就是\"序列与计数分开\"的价值。\n\n**边界 `[2,4]` 选 6 次 ⇒ `\"1,0,1,1,0,1|2,4\"`**：\n权重和 6、gcd 2 ⇒ 最小正周期长度只有 3（`6 / 2`），\n所以序列是 `1,0,1` 重复两遍 —— 第 3、4 次之间出现连续两次命中实例 1，\n平滑性同样只在周期内成立。\n把它和\"朴素 WRR 需要维护周期长度的表\"连起来看，就是 interleaved 版的动机。\n\n**极端 `[100,1]` 选 5 次 ⇒ `\"0,0,0,0,0|5,0\"`**：\n`cw` 永远追不上差距 ⇒ 实例 1 一次都没被选中。\n**一个权重差两个数量级的配置，可以让小实例彻底闲置、大实例独自承压** ——\n\"平滑\"这个词在权重悬殊时是不成立的，这是 WRR 类算法共同的失效模式，\n也是\"权重从哪来\"（注册中心元数据 / 主动健康检查 / 最快请求探测）比算法本身\n更值得追问的原因。\n\n**退化与非法用例的作用**：`[5]` 选 3 次 ⇒ `\"0,0,0|3\"`（单实例时权重是噪声）；\n`[7,3]` 选 1 次 ⇒ `\"0|1,0\"`（第一轮全是 0，靠平局规则取胜者）；\n`[2, 0]` 必须抛错而不是\"权重 0 就跳过\"——\n静默跳过会让一台机器**永远接不到流量却仍在注册中心里**，\n这是比崩溃更贵的故障形态。\n\n**工程延伸（面试追问点）**\n\n1. 别名法在这里能换成什么？（O(1) 选取，代价是**每次选取互相独立** ⇒\n   它是加权**随机**，短期分布会出现长连续段，比 WRR 更不利于 inflight 均摊。\n   文档给它的定位是\"选取效率比 WeightedRandom 更高\"，不是\"比 WRR 更平滑\"。）\n2. 实例上下线怎么办？（朴素 WRR 的状态只有 `cw` 数组，增删实例影响有限；\n   一致性哈希则会发生**迁移放大** —— 见本批 A/B 分桶题与 hot 短题。）\n3. 为什么还要 `IsActive` 类健康检查？（负载均衡只看权重，不知道实例是否已经卡死；\n   权重来自注册中心 ⇒ 更新滞后一个心跳周期。素材 §2 追问\"权重从哪来\"就是这个。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "String wrrTrace(int[] weights, int picks)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static String wrrTrace(int[] weights, int picks) {\n    if (weights == null || weights.length == 0)\n      throw new IllegalArgumentException(\"weights must not be empty\");\n    for (int w : weights) if (w <= 0) throw new IllegalArgumentException(\"weight must be positive\");\n    if (picks <= 0) throw new IllegalArgumentException(\"picks must be positive\");\n    if (picks > 1000) throw new IllegalArgumentException(\"picks too large\");\n    int total = 0;\n    for (int w : weights) total += w;\n    if (total > 100000) throw new IllegalArgumentException(\"weights sum too large\");\n\n    int n = weights.length;\n    long[] cw = new long[n];\n    int[] counts = new int[n];\n    StringBuilder seq = new StringBuilder();\n    for (int k = 0; k < picks; k++) {\n      for (int i = 0; i < n; i++) cw[i] += weights[i];\n      int best = 0;\n      for (int i = 1; i < n; i++) if (cw[i] > cw[best]) best = i;\n      cw[best] -= total;\n      if (k > 0) seq.append(',');\n      seq.append(best);\n      counts[best]++;\n    }\n    StringBuilder cnt = new StringBuilder();\n    for (int i = 0; i < counts.length; i++) {\n      if (i > 0) cnt.append(',');\n      cnt.append(counts[i]);\n    }\n    return seq + \"|\" + cnt;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"加权随机\"版：每次都选权重最大的那个 —— 比例长期是对的，\n  // 但短期内把同一个实例打死，正是文档要避免的 inflight 堆积。\n  public static String wrrTrace(int[] weights, int picks) {\n    if (weights == null || weights.length == 0)\n      throw new IllegalArgumentException(\"weights must not be empty\");\n    for (int w : weights) if (w <= 0) throw new IllegalArgumentException(\"weight must be positive\");\n    if (picks <= 0) throw new IllegalArgumentException(\"picks must be positive\");\n    if (picks > 1000) throw new IllegalArgumentException(\"picks too large\");\n    int total = 0;\n    for (int w : weights) total += w;\n    if (total > 100000) throw new IllegalArgumentException(\"weights sum too large\");\n    int best = 0;\n    for (int i = 1; i < weights.length; i++) if (weights[i] > weights[best]) best = i;\n    int[] counts = new int[weights.length];\n    StringBuilder seq = new StringBuilder();\n    for (int k = 0; k < picks; k++) {\n      if (k > 0) seq.append(',');\n      seq.append(best);\n      counts[best]++;\n    }\n    StringBuilder c = new StringBuilder();\n    for (int i = 0; i < counts.length; i++) c.append(i == 0 ? \"\" : \",\").append(counts[i]);\n    return seq + \"|\" + c;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "ByteDance",
+    "role": "服务端研发（Go 微服务治理方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-backend-and-infrastructure.md#4 考点 5（负载均衡算法的取舍与代价：默认 WRR 与 inflight 目的、等权重退化轮询、Interleaved 空间复杂度、别名法 O(n)/O(1)、一致性哈希警告）＋ §1.3；\"平局取下标最小\"与两条上限是【推】（题面已写成本题契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:20:38.826Z"
+  }
+}

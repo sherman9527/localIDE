@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0002",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实现带抖动退避、幂等矩阵与取消透传的重试层",
+  "statement": "## 场景\n\n移动端的弱网重试策略曾经由每个业务模块自己手写，结果三类事故反复出现：① 对 `POST /orders` 这种非幂等写操作做自动重试，用户点一次下单产生三笔订单；② 对 4xx 契约错误重试，把网关打死；③ 退避没有抖动，App 在早高峰同步重试形成惊群。现在由你实现统一的请求重试层，把它交给数据层团队复用。\n\n## 契约\n\n判题沙箱里已经有脚手架 **`http.ts`**（`runner.files` 会把它和测试一起落盘），里面有 `HttpError`（带 `status` 与 `retryAfterMs`）、`RetryOptions`、`Outcome`。你的提交写在 **`Solution.tsx`**：\n\n```tsx\nimport type { Outcome, RetryOptions } from './http';\n\nexport async function fetchWithRetry<T>(\n  request: (signal: AbortSignal, attempt: number) => Promise<T>,\n  opts?: RetryOptions,\n): Promise<Outcome<T>>;\n```\n\n`request` 由调用方提供（测试注入的是记录型替身）。默认值：`maxAttempts = 3`、`baseMs = 100`、`maxDelayMs = 2000`、`budgetMs = Infinity`、`random = Math.random`、`method = 'GET'`。\n\n### 退避公式（必须逐位一致，用例断言具体毫秒数组）\n\n```\nraw      = min(maxDelayMs, baseMs * 2 ** (attempt - 1))   // attempt = 刚失败的那一次，从 1 起\njitter   = Math.round(raw * (0.5 + random()))             // random() ∈ [0,1) → 0.5x ~ 1.5x 全抖动\ndelay    = (error 是 429 且 retryAfterMs != null) ? Math.max(jitter, retryAfterMs) : jitter\n```\n\n### 分类与决策矩阵\n\n| 情况 | 是否重试 | 失败时的 `kind` |\n| --- | --- | --- |\n| `HttpError` 429 或 5xx | 可重试 | `http` |\n| 其它 `HttpError`（4xx） | **不重试** | `contract` |\n| 非 `HttpError` 抛出 | 可重试 | `network` |\n| `method` 非 `GET`/`HEAD` 且没有 `idempotencyKey` | **不重试**（幂等矩阵） | 按错误本身分类 |\n| 下一次 `delay` 会让累计等待超过 `budgetMs` | 放弃 | `aborted` |\n| `opts.signal` 已 aborted | 放弃 | `aborted` |\n\n另外三条硬要求：\n\n1. **取消透传**：调用方给了 `opts.signal` 时，每次 `request` 收到的必须是**同一个 signal 实例**（用例用 `toBe` 比引用）；内部若需要自己的 controller，也不许把它替换掉调用方的那个。\n2. **等待要能被取消唤醒**：`sleep(ms, signal)` 必须收到同一个 signal；`opts.sleep` 缺省时用你自己的计时实现，测试会注入记录型替身，所以**不许**用真实计时器做断言相关的路径。\n3. `attempts` 是**实际发起的**请求次数（1 起）。预算按\"计划等待之和\"计，不用墙钟。\n\n## 不许做什么\n\n- 不许对 4xx 契约错误重试（它属于\"我们和后端对不上\"，重试只会放大）。\n- 不许无脑重试非幂等写请求；要重试必须有 `idempotencyKey`。\n- 不许把取消分类成 `network`/`http`：取消不该进错误率分子。\n- 不许依赖 `AbortSignal.any`（判题容器 jsdom 没有这个 API），也不许引入任何第三方库（沙箱不会 `npm install`）。\n\n## 判分\n\n7 个用例全部由 `retry.test.tsx` 的 vitest 断言判定；`expected`/`actual` 会精确到退避数组与 `attempts` 数值。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:retry-backoff",
+    "data-fetching",
+    "idempotency",
+    "race-condition",
+    "cancellation"
+  ],
+  "cases": [
+    {
+      "name": "单次成功不重试也不等待",
+      "input": {
+        "failures": []
+      },
+      "expected": "{\"ok\":true,\"data\":\"data-1\",\"attempts\":1} 且 sleeps=[]",
+      "note": "成功路径零额外开销"
+    },
+    {
+      "name": "503 两次后成功且退避随注入的 random 变化",
+      "input": {
+        "failures": [
+          "HttpError(503)",
+          "HttpError(503)"
+        ],
+        "random": [
+          "0.5",
+          "0"
+        ]
+      },
+      "expected": "attempts=3；random=0.5 时 sleeps=[100,200]；random=0 时 sleeps=[50,100]",
+      "note": "两组都断言，固定退避（无抖动）会挂"
+    },
+    {
+      "name": "429 的 Retry-After 优先于计算出的退避",
+      "input": {
+        "failures": [
+          "HttpError(429,5000)"
+        ]
+      },
+      "expected": "sleeps=[5000]，attempts=2，ok=true"
+    },
+    {
+      "name": "重复点击的非幂等 POST 首次失败即返回不重试",
+      "input": {
+        "method": "POST",
+        "failures": [
+          "503 x3"
+        ]
+      },
+      "expected": "kind='http'，attempts=1，sleeps=[]",
+      "note": "幂等矩阵判分点"
+    },
+    {
+      "name": "契约错误 400 不重试且分类为 contract",
+      "input": {
+        "failures": [
+          "HttpError(400)"
+        ]
+      },
+      "expected": "kind='contract'，attempts=1"
+    },
+    {
+      "name": "外部 signal 取消后停止重试并原样透传同一 signal",
+      "input": {
+        "abortIn": "第一次 sleep 里 controller.abort()"
+      },
+      "expected": "kind='aborted'，attempts=1，request 收到的 signal 与 opts.signal 同一实例"
+    },
+    {
+      "name": "预算耗尽按 aborted 分类且不再排下一次等待",
+      "input": {
+        "baseMs": 200,
+        "budgetMs": 250,
+        "random": 0.5,
+        "failures": [
+          "503 x3"
+        ]
+      },
+      "expected": "kind='aborted'，attempts=2，sleeps=[200]",
+      "note": "下一次 delay=400 会让累计 600 > 250，必须放弃"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "http.ts",
+        "content": "/** 判题脚手架：第三方响应层抛出的错误类型与重试层契约（考生与测试共用）。 */\nexport class HttpError extends Error {\n  readonly status: number;\n  readonly retryAfterMs: number | null;\n\n  constructor(status: number, retryAfterMs?: number, message = 'http error') {\n    super(message);\n    this.name = 'HttpError';\n    this.status = status;\n    this.retryAfterMs = retryAfterMs ?? null;\n  }\n}\n\nexport type FailureKind = 'http' | 'network' | 'contract' | 'aborted';\n\nexport interface RetryOptions {\n  /** 调用方的取消信号；必须原样透传给 request（用例断言 signal 身份） */\n  signal?: AbortSignal;\n  method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';\n  idempotencyKey?: string;\n  maxAttempts?: number;\n  baseMs?: number;\n  maxDelayMs?: number;\n  budgetMs?: number;\n  random?: () => number;\n  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;\n}\n\nexport type Outcome<T> =\n  | { ok: true; data: T; attempts: number }\n  | { ok: false; kind: FailureKind; error: unknown; attempts: number };\n"
+      },
+      {
+        "path": "retry.test.tsx",
+        "content": "import { expect, it } from 'vitest';\nimport { HttpError } from './http';\nimport { fetchWithRetry } from './Solution';\n\ninterface Attempt {\n  signal: AbortSignal;\n  attempt: number;\n}\n\n/** 记录型 sleep：把\"等了多久\"变成可断言的数据，避免用墙钟计时判分（jsdom 下必然 flaky）。 */\nfunction harness(opts: { failures: unknown[]; random?: () => number }) {\n  const sleeps: number[] = [];\n  const attempts: Attempt[] = [];\n  let cursor = 0;\n  const request = async (signal: AbortSignal, attempt: number) => {\n    attempts.push({ signal, attempt });\n    const next = opts.failures[cursor];\n    cursor += 1;\n    if (next === undefined) return 'data-' + attempt;\n    throw next;\n  };\n  const sleep = async (ms: number) => {\n    sleeps.push(ms);\n  };\n  return { sleeps, attempts, request, sleep, random: opts.random ?? (() => 0.5) };\n}\n\nconst DEFAULTS = { baseMs: 100, maxDelayMs: 2000, maxAttempts: 3 };\n\nit('单次成功不重试也不等待', async () => {\n  const h = harness({ failures: [] });\n  const out = await fetchWithRetry(h.request, { ...DEFAULTS, random: h.random, sleep: h.sleep });\n  expect(JSON.stringify(out)).toBe('{\"ok\":true,\"data\":\"data-1\",\"attempts\":1}');\n  expect(h.sleeps).toEqual([]);\n  expect(h.attempts.length).toBe(1);\n});\n\nit('503 两次后成功且退避随注入的 random 变化', async () => {\n  const a = harness({ failures: [new HttpError(503), new HttpError(503)], random: () => 0.5 });\n  const outA = await fetchWithRetry(a.request, { ...DEFAULTS, random: a.random, sleep: a.sleep });\n  expect(outA.ok).toBe(true);\n  expect(outA.attempts).toBe(3);\n  expect(a.sleeps).toEqual([100, 200]);\n\n  const b = harness({ failures: [new HttpError(503), new HttpError(503)], random: () => 0 });\n  const outB = await fetchWithRetry(b.request, { ...DEFAULTS, random: b.random, sleep: b.sleep });\n  expect(outB.attempts).toBe(3);\n  expect(b.sleeps).toEqual([50, 100]);\n});\n\nit('429 的 Retry-After 优先于计算出的退避', async () => {\n  const h = harness({ failures: [new HttpError(429, 5000)] });\n  const out = await fetchWithRetry(h.request, { ...DEFAULTS, random: h.random, sleep: h.sleep });\n  expect(out.ok).toBe(true);\n  expect(h.sleeps).toEqual([5000]);\n  expect(out.attempts).toBe(2);\n});\n\nit('重复点击的非幂等 POST 首次失败即返回不重试', async () => {\n  const h = harness({ failures: [new HttpError(503), new HttpError(503), new HttpError(503)] });\n  const out = await fetchWithRetry(h.request, { ...DEFAULTS, method: 'POST', random: h.random, sleep: h.sleep });\n  expect(out.ok).toBe(false);\n  expect(out.kind).toBe('http');\n  expect(out.attempts).toBe(1);\n  expect(h.sleeps).toEqual([]);\n});\n\nit('契约错误 400 不重试且分类为 contract', async () => {\n  const h = harness({ failures: [new HttpError(400)] });\n  const out = await fetchWithRetry(h.request, { ...DEFAULTS, method: 'GET', random: h.random, sleep: h.sleep });\n  expect(out.kind).toBe('contract');\n  expect(out.attempts).toBe(1);\n  expect(h.sleeps).toEqual([]);\n});\n\nit('外部 signal 取消后停止重试并原样透传同一 signal', async () => {\n  const controller = new AbortController();\n  const h = harness({ failures: [new HttpError(503), new HttpError(503)] });\n  const out = await fetchWithRetry(h.request, {\n    ...DEFAULTS,\n    signal: controller.signal,\n    random: h.random,\n    sleep: async (ms: number, signal: AbortSignal) => {\n      h.sleeps.push(ms);\n      controller.abort();\n    },\n  });\n  expect(out.kind).toBe('aborted');\n  expect(out.attempts).toBe(1);\n  expect(h.attempts[0].signal).toBe(controller.signal);\n});\n\nit('预算耗尽按 aborted 分类且不再排下一次等待', async () => {\n  const h = harness({ failures: [new HttpError(503), new HttpError(503), new HttpError(503)] });\n  const out = await fetchWithRetry(h.request, {\n    baseMs: 200,\n    maxDelayMs: 2000,\n    maxAttempts: 5,\n    budgetMs: 250,\n    random: h.random,\n    sleep: h.sleep,\n  });\n  expect(out.kind).toBe('aborted');\n  expect(out.attempts).toBe(2);\n  expect(h.sleeps).toEqual([200]);\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { HttpError } from './http';\nimport type { Outcome, RetryOptions } from './http';\n\nconst IDEMPOTENT = new Set(['GET', 'HEAD']);\n\nfunction asHttpError(error: unknown): HttpError | null {\n  return error instanceof HttpError ? error : null;\n}\n\n/** 4xx（除 429）是契约破坏：重试只会放大故障。 */\nfunction isRetryable(error: unknown): boolean {\n  const http = asHttpError(error);\n  if (!http) return true;\n  if (http.status === 429) return true;\n  return http.status >= 500;\n}\n\nfunction defaultSleep(ms: number, signal: AbortSignal): Promise<void> {\n  return new Promise((resolve) => {\n    const id = setTimeout(() => {\n      signal.removeEventListener('abort', onAbort);\n      resolve();\n    }, ms);\n    function onAbort() {\n      clearTimeout(id);\n      resolve();\n    }\n    signal.addEventListener('abort', onAbort, { once: true });\n  });\n}\n\nexport async function fetchWithRetry<T>(\n  request: (signal: AbortSignal, attempt: number) => Promise<T>,\n  opts: RetryOptions = {},\n): Promise<Outcome<T>> {\n  const {\n    signal,\n    method = 'GET',\n    idempotencyKey,\n    maxAttempts = 3,\n    baseMs = 100,\n    maxDelayMs = 2000,\n    budgetMs = Number.POSITIVE_INFINITY,\n    random = Math.random,\n    sleep = defaultSleep,\n  } = opts;\n\n  const controller = new AbortController();\n  if (signal) {\n    if (signal.aborted) controller.abort();\n    else signal.addEventListener('abort', () => controller.abort(), { once: true });\n  }\n  /** 调用方给了 signal 就用它的同一个实例（用例断言 identity），否则用内部 controller。 */\n  const used: AbortSignal = signal ?? controller.signal;\n  const canRetry = IDEMPOTENT.has(method) || typeof idempotencyKey === 'string' && idempotencyKey.length > 0;\n\n  let spent = 0;\n  let lastError: unknown = undefined;\n  let attempts = 0;\n\n  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {\n    if (used.aborted) {\n      return { ok: false, kind: 'aborted', error: lastError, attempts };\n    }\n    attempts = attempt;\n    try {\n      const data = await request(used, attempt);\n      return { ok: true, data, attempts };\n    } catch (error) {\n      lastError = error;\n      const http = asHttpError(error);\n      if (http && http.status >= 400 && http.status < 500 && http.status !== 429) {\n        return { ok: false, kind: 'contract', error, attempts };\n      }\n      if (!isRetryable(error) || !canRetry || attempt === maxAttempts) {\n        return { ok: false, kind: http ? 'http' : 'network', error, attempts };\n      }\n\n      const raw = Math.min(maxDelayMs, baseMs * 2 ** (attempt - 1));\n      const jittered = Math.round(raw * (0.5 + random()));\n      const retryAfter = http && http.status === 429 ? http.retryAfterMs : null;\n      const delay = retryAfter === null || retryAfter === undefined ? jittered : Math.max(jittered, retryAfter);\n\n      if (spent + delay > budgetMs) {\n        return { ok: false, kind: 'aborted', error, attempts };\n      }\n      spent += delay;\n      await sleep(delay, used);\n      if (used.aborted) {\n        return { ok: false, kind: 'aborted', error, attempts };\n      }\n    }\n  }\n  return { ok: false, kind: 'network', error: lastError, attempts };\n}\n",
+    "naiveSolution": "import { HttpError } from './http';\nimport type { Outcome, RetryOptions } from './http';\n\n/** 朴素实现：固定线性退避、无抖动、什么都敢重试、不看取消信号。 */\nexport async function fetchWithRetry<T>(\n  request: (signal: AbortSignal, attempt: number) => Promise<T>,\n  opts: RetryOptions = {},\n): Promise<Outcome<T>> {\n  const { signal, maxAttempts = 3, baseMs = 100, sleep } = opts;\n  let lastError: unknown = undefined;\n  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {\n    try {\n      const data = await request(signal ?? new AbortController().signal, attempt);\n      return { ok: true, data, attempts: attempt };\n    } catch (error) {\n      lastError = error;\n      if (attempt === maxAttempts) break;\n      const ms = baseMs * attempt;\n      if (sleep) await sleep(ms, signal ?? new AbortController().signal);\n    }\n  }\n  const http = lastError instanceof HttpError ? lastError : null;\n  return { ok: false, kind: http ? 'http' : 'network', error: lastError, attempts: maxAttempts };\n}\n"
+  },
+  "answer": "参考要点：\n- 退避要**有界 + 全抖动**：`min(cap, base * 2^n) * (0.5 + random)`，否则同一时刻掉线的客户端会同步重试（惊群）；把 `random` 做成注入参数是这道题的工程考点——否则测试只能靠墙钟断言，必然 flaky。\n- 幂等矩阵：只有\"重复执行不改变语义\"的操作能自动重试。GET/HEAD 天然幂等；写操作必须有 `idempotencyKey`（服务端去重），否则宁可把失败交给用户。\n- `429` 的 `Retry-After` 是服务端显式预算，取 `max(jitter, retryAfterMs)`；但 `retryAfterMs` 可能大于客户端预算，此时按 `aborted` 放弃而不是硬等（返回 stale 数据比转圈更好）。\n- 取消单独分类：错误率分子里塞进\"用户切页面\"会让告警完全失真；同理 4xx 属\"契约破坏\"，应当打告警而不是重试。\n- signal 透传用同一实例，是因为 `AbortSignal.any([...])` 在部分运行时（jsdom 25 的 `AbortSignal`）不存在；真要组合就手写 `addEventListener('abort', ...)` 转发。\n\n面试追问：\n1. 共享 promise（同 key 去重）与\"单个订阅者取消\"如何共存？（引用计数 / 只有缓存层能 abort 共享请求）\n2. `sleep` 期间信号到来，你如何立刻醒来？（`addEventListener('abort')` + `clearTimeout`，否则白等一个退避周期）\n3. `budgetMs` 为什么按\"计划等待\"而不是墙钟？（可测、且 CI/低端机上墙钟本身是噪声源）\n4. 如果 `request` 自身已经带超时，重试层的取消语义要不要区分？（timeout 属 network 类可重试，取消属 aborted）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/data-fetching-and-errors.md#12-重试退避与幂等senior-必答",
+    "addedBy": "content-agent-fe"
+  }
+}

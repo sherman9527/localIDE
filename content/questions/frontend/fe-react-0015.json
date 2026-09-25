@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0015",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "可订日期选择器：可订性是\"存在一段合法连续块\"，而退房日那一晚不占用",
+  "statement": "## 背景\n\n房源日历上那个\"哪些日期能选入住\"的组件，是 Airbnb 前端最容易写错的一块 ——\n因为**可订性不是一个 nightly 布尔值，而是\"存在一段满足规则的连续空闲块\"**。\n\n给定整段可售视界里被阻挡的夜晚、最短/最长住期，返回所有**可选作入住日**的夜晚下标。\n\n## 契约\n\n```ts\nexport function selectableCheckIns(\n  blockedNights: number[],   // 被占/封存的夜晚下标（不是\"日期\"，就是第几晚）\n  minNights: number,         // 最短住期\n  maxNights: number,         // 最长住期\n  horizon: number,           // 可售视界：夜晚下标 0 .. horizon-1\n): number[]                  // 升序的可选入住日\n```\n\n## 规则（区间语义是判分点本身）\n\n- 一次住宿是 **`[checkIn, checkOut)`**：入住那晚占用，**退房那晚不占用**。\n  住 `n` 晚 ⇒ 占用 `checkIn .. checkIn+n-1`，`checkOut = checkIn + n`。\n- 晚数 `n` 必须满足 `minNights <= n <= maxNights`。\n- 占用的每一晚都不能在 `blockedNights` 里。\n- `checkOut <= horizon`（不能超出可售视界 —— 视界外的日期还没放出来卖）。\n- 只要**存在**一个合法的 `n`，该 `checkIn` 就可订。\n- `blockedNights` 允许越界/乱序/重复的输入，不要因此崩掉。\n- `minNights <= 0` 或 `maxNights < minNights` ⇒ `throw new Error(...)`（配置写错要炸在组件里，\n  不要静默渲染出一个\"全都不可订\"的日历 —— 那会被当成房源下架）。\n- `horizon <= 0` ⇒ 返回空数组。\n\n## 这题真正考的东西\n\n1. **只看\"当晚空不空\"是错的**。`minNights=2` 时，第 3 晚本身是空的，\n   但如果第 4 晚被挡，从第 3 晚入住就凑不出两晚 —— 它不该可选。\n   反过来，某晚被挡**不代表它不能当退房日**：住到那天早上离开，占用的只有前面几晚。\n2. **退房日的 off-by-one**：把占用写成 `checkIn .. checkOut`（含退房日）会让\n   \"退房日恰好被下一个客人占着\"的合法房源被禁用 —— 而日历上这种紧邻排期是**大多数**。\n3. **尾部越界**：`checkIn` 靠近视界末尾时，短住期能住、长住期越界，\n   必须\"任一合法即可\"而不是\"最长住期合法才行\"。\n4. **阻挡日乱序/越界/重复**是真实输入（来自多个数据源合并），\n   用数组下标直接索引会越界读，用 `Set` 才是对的形状。\n\n不许引入第三方依赖。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "availability",
+    "interval-semantics",
+    "off-by-one",
+    "calendar",
+    "modern:marketplace-rules"
+  ],
+  "cases": [
+    {
+      "name": "全空日历：视界末尾两晚因住期越界而不可选",
+      "input": [
+        [],
+        2,
+        3,
+        5
+      ],
+      "expected": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "visible": true,
+      "note": "checkIn=4 时最短两晚也要到 checkOut=6 > horizon ⇒ 不可选"
+    },
+    {
+      "name": "中间一晚被挡：它自己与前一晚都不能作入住日",
+      "input": [
+        [
+          2
+        ],
+        2,
+        3,
+        5
+      ],
+      "expected": [
+        0,
+        3
+      ],
+      "visible": true
+    },
+    {
+      "name": "退房日那一晚不占用：阻挡日恰好是退房日时仍可订",
+      "input": [
+        [
+          3
+        ],
+        2,
+        2,
+        5
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "checkIn=1 住两晚 → 占用 1、2，退房日 3 被挡不影响；闭区间实现会禁用它"
+    },
+    {
+      "name": "连续三晚被挡：只剩挡块之后能凑住期的日子",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        2,
+        2,
+        6
+      ],
+      "expected": [
+        4
+      ],
+      "visible": true
+    },
+    {
+      "name": "最短住期为 1 时逐晚独立判断",
+      "input": [
+        [
+          2
+        ],
+        1,
+        1,
+        3
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：horizon 为 0 返回空数组",
+      "input": [
+        [],
+        2,
+        3,
+        0
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "退化：阻挡日乱序、重复且越界，不许崩",
+      "input": [
+        [
+          7,
+          2,
+          2,
+          -1
+        ],
+        2,
+        2,
+        5
+      ],
+      "expected": [
+        0,
+        3
+      ],
+      "visible": true,
+      "note": "越界与重复是多源合并的常态；布尔数组实现会静默错位"
+    },
+    {
+      "name": "非法：minNights 为 0 要抛错而不是渲染全灰日历",
+      "input": [
+        [],
+        0,
+        3,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error"
+    },
+    {
+      "name": "非法：maxNights 小于 minNights 要抛错",
+      "input": [
+        [],
+        3,
+        2,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n双层循环：外层枚举入住日，内层枚举住期 `minNights..maxNights`；\n占用区间是 **半开区间 `[checkIn, checkOut)`**，只要有一档住期全空闲且不出视界就可选。\n`O(horizon × maxNights × maxNights)` 最坏，阻挡集合用 `Set` 所以越界/重复/乱序都天然安全。\n\n**为什么退房日不能算占用**：真实日历上\"上一位客人 12:00 退房、下一位 15:00 入住\"是同一天，\n如果按闭区间判定，这两个排期会互相把对方判成不可订 —— 症状是\"明明有房但日历全灰\"，\n而数据侧完全正确。这类 off-by-one 在评审里几乎必漏，因为它在**空日历上看不出差别**，\n只有阻挡日恰好落在退房位置时才暴露（用例 3 就是专门造这一条）。\n\n**为什么\"存在一段\"而不是\"最长住期成立\"**：视界末尾必然出现\"能住 2 晚但住不了 3 晚\"的房源。\n按最长住期判会把这几天全部禁用，转化率直接掉一截而没人会归因到日历组件。\n\n**为什么 `Set` 而不是布尔数组**：阻挡日来自多个源（订单、房东封存、清洁排期），\n合并后可能越界与重复。布尔数组遇到越界下标不会崩，只会**静默错位** —— 那比崩更难查。\n\n**工程延伸（面试追问点）**\n\n1. 真实系统为什么不让前端算这个？（可订性取决于**日期区间锁**与价格日历的一致性，\n   前端算出来的一定与下单时校验的结果不一致 —— 正确做法是后端给\"可订区间\"，\n   前端只做渲染。本题的价值在于让前端同学也能把区间语义写对一次。）\n2. 时区与\"晚\"的定义？（一晚是 `[15:00, 12:00)` 这种跨日的业务窗口，不是 UTC 日历日。\n   跨 DST 的房源会出现同一晚在两个\"日\"里，所以索引必须是\"晚\"而不是\"日期\" —— 本题正是这么设计的。）\n3. 性能怎么优化？（预处理\"连续空闲段\"，对每段用区间判断可订入住日，`O(段数)`；\n   或者反向做：从阻挡日切段后对每段做区间加。关键是别在渲染路径上跑三层循环。）\n4. 长住（28 晚以上）规则不同怎么办？（那是**另一套 min/max**，按房源与日期区间配置，\n   不能塞进这两个参数；正确抽象是\"规则集合 + 求交\"，本题的函数签名是它退化到单规则的形状。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "availability.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { selectableCheckIns } from './Solution';\n\n/**\n * 可订性判分的核心是区间语义：占用 [checkIn, checkOut)，退房日不占用。\n * 这些期望值全部由 Python 按同一套规则算过一遍再写进来（见本目录 gen.py 的 selectable()）。\n */\ndescribe('selectableCheckIns：可订性是\"存在一段合法连续块\"', () => {\n  it('全空日历：视界末尾两晚因住期越界而不可选', () => {\n    expect(selectableCheckIns([], 2, 3, 5)).toEqual([0, 1, 2, 3]);\n  });\n\n  it('中间一晚被挡：它自己与前一晚都不能作入住日', () => {\n    expect(selectableCheckIns([2], 2, 3, 5)).toEqual([0, 3]);\n  });\n\n  it('退房日那一晚不占用：阻挡日恰好是退房日时仍可订', () => {\n    expect(selectableCheckIns([3], 2, 2, 5)).toEqual([0, 1]);\n  });\n\n  it('连续三晚被挡：只剩挡块之后能凑住期的日子', () => {\n    expect(selectableCheckIns([1, 2, 3], 2, 2, 6)).toEqual([4]);\n  });\n\n  it('最短住期为 1 时逐晚独立判断', () => {\n    expect(selectableCheckIns([2], 1, 1, 3)).toEqual([0, 1]);\n  });\n\n  it('退化：horizon 为 0 返回空数组', () => {\n    expect(selectableCheckIns([], 2, 3, 0)).toEqual([]);\n  });\n\n  it('退化：阻挡日乱序、重复且越界，不许崩', () => {\n    expect(selectableCheckIns([7, 2, 2, -1], 2, 2, 5)).toEqual([0, 3]);\n  });\n\n  it('非法：minNights 为 0 要抛错而不是渲染全灰日历', () => {\n    expect(() => selectableCheckIns([], 0, 3, 5)).toThrow();\n  });\n\n  it('非法：maxNights 小于 minNights 要抛错', () => {\n    expect(() => selectableCheckIns([], 3, 2, 5)).toThrow();\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "export function selectableCheckIns(\n  blockedNights: number[],\n  minNights: number,\n  maxNights: number,\n  horizon: number,\n): number[] {\n  if (minNights <= 0) throw new Error('minNights must be positive');\n  if (maxNights < minNights) throw new Error('maxNights must be >= minNights');\n  if (horizon <= 0) return [];\n\n  // Set 而不是布尔数组：阻挡日可能乱序、重复、甚至落在视界之外（多源合并的常态）\n  const blocked = new Set(blockedNights);\n  const out: number[] = [];\n\n  for (let checkIn = 0; checkIn < horizon; checkIn++) {\n    for (let nights = minNights; nights <= maxNights; nights++) {\n      const checkOut = checkIn + nights;\n      if (checkOut > horizon) break;          // 再长一定越界\n      let free = true;\n      for (let n = checkIn; n < checkOut; n++) {   // [checkIn, checkOut)：退房日不占用\n        if (blocked.has(n)) {\n          free = false;\n          break;\n        }\n      }\n      if (free) {\n        out.push(checkIn);\n        break;                                 // 存在一段合法即可，不必要求最长住期合法\n      }\n    }\n  }\n  return out;\n}",
+    "naiveSolution": "export function selectableCheckIns(\n  blockedNights: number[],\n  minNights: number,\n  maxNights: number,\n  horizon: number,\n): number[] {\n  if (minNights <= 0) throw new Error('minNights must be positive');\n  if (horizon <= 0) return [];\n  const blocked = new Set(blockedNights);\n  const out: number[] = [];\n  for (let checkIn = 0; checkIn < horizon; checkIn++) {\n    // 错法一：只看入住当晚空不空，不看能不能凑出满足住期的连续块\n    // 错法二：占用区间写成闭区间，把退房日也算进去\n    let free = true;\n    for (let n = checkIn; n <= checkIn + minNights; n++) {\n      if (n > horizon || blocked.has(n)) {\n        free = false;\n        break;\n      }\n    }\n    if (free && !blocked.has(checkIn)) out.push(checkIn);\n  }\n  return out;\n}"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "Airbnb",
+    "role": "搜索与发现 / 前端平台 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-marketplace-booking.md §1.1（日历 + 规则 + 区间锁）；素材只描述了业务，未做成可判分契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:11:47.826Z"
+  }
+}

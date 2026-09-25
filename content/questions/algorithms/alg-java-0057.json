@@ -1,0 +1,191 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0057",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "RocketMQ 定时消息默认 24 小时上限：3 天关单要续投几跳、第一跳投在哪",
+  "statement": "## 背景\n\nApache RocketMQ 5.0《定时/延时消息》有四条可核查的硬约束【源 S15】：\n\n1. 定时值是**毫秒级 Unix 时间戳**，不是\"多少秒之后\"；\n2. \"**超过范围则定时不生效，服务端会立即投递**\"；\"必须设置在未来，否则同样立即投递\"；\n3. \"**定时时长最大值默认为 24 小时，不支持自定义修改**\"；\n4. 官方给的场景就是\"订单下单后暂未支付……需要等待一段时间后才能关闭订单\"。\n\n素材 §2 追问 11 把这三条合成一道题：*\"订单 30 分钟关单怎么做、3 天呢？\"*\n30 分钟直接投；3 天超出 24 小时上限，而**服务端不会报错，它会立刻投递** ——\n也就是说\"3 天后关单\"会变成\"马上关单\"。这是本题的全部内容。\n\n## 任务\n\n实现 `public static int[] timerChain(int deliverAtMs, int nowMs, int horizonMs, int refireLeadMs)`，\n返回 `{需要投几跳, 第一跳的投递时刻, 是否立即投递, 最后一跳要覆盖的毫秒数}`。\n\n| 入参 | 含义 |\n| --- | --- |\n| `deliverAtMs` | 目标投递时刻（毫秒时间戳；本题时间轴从 0 起算） |\n| `nowMs` | 当前时刻 |\n| `horizonMs` | 单次定时的最大跨度（官方默认 86400000 = 24 小时，**不可自定义修改**） |\n| `refireLeadMs` | 续投提前量：每一跳被消费之后还要留出判断\"到没到点\"和再投一次的时间 |\n\n## 判据\n\n- `reach = horizonMs - refireLeadMs` 是**一跳能安全推进的距离**。\n  为什么要减：如果一跳投到 `now + horizonMs`，消息在 `now + horizonMs` 到点被消费，\n  而消费方需要 `refireLeadMs` 才能完成\"比较当前时间与目标时刻 + 再投一次\"，\n  这段时间里目标时刻**已经过了** —— 它会被当成\"过去时间\"立即投递，\n  于是提前关单。所以续投必须**提前**落地。\n- `deliverAtMs <= nowMs` ⇒ `{0, nowMs, 1, 0}`：**定时不生效，立即投递**\n  （官方语义：设成过去的时间戳会立即投递。本题把 `==` 也算进去，因为\"正好等于 now\"\n  没有任何延时可言，且这是唯一能让\"重放的旧请求\"与\"刚过期的请求\"走同一条路的做法）。\n- `0 < deliverAtMs - nowMs <= horizonMs` ⇒ **一跳到位**：`{1, deliverAtMs, 0, span}`。\n  注意这里用的是完整 `horizonMs`，不是 `reach`：这一跳是**终点**，投到点之后不需要再续投，\n  所以不必为它预留提前量。\n- 否则 `hops = ceil(span / reach)`，第 `k` 跳投在 `nowMs + k × reach`，\n  **第一跳在 `nowMs + reach`**；`最后一跳要覆盖的毫秒数 = span - (hops - 1) × reach`\n  （它就是终点那一跳的距离，必然 `<= horizonMs`）。\n\n## 参数校验（抛 `IllegalArgumentException`，消息一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `horizonMs <= 0` | `horizon must be positive` |\n| `refireLeadMs < 0` | `refire lead must be non-negative` |\n| `horizonMs - refireLeadMs <= 0` | `hop reach must be positive` |\n| `nowMs < 0` | `now must be non-negative` |\n\n**`reach <= 0` 必须抛错，不许钳成 1**：钳了之后\"3 天关单\"会算出几千万跳，\n每一跳都在续投自己 —— 系统不会崩，它只是**永远不到点**。\n这种故障在监控上表现为\"定时消息发送量很高\"，而不是\"有异常\"，\n所以只能靠拒绝非法配置来防。\n\n## 这题真正考的东西\n\n`deliverAtMs` 是时间戳而 `horizonMs` 是时长 —— **两者混用就是本题的朴素解**。\n服务端对超范围的定时不报错、立即投递，这条设计把\"参数算错\"变成了\"业务提前发生\"：\n关单提前 = 用户没付成款被取消；退款定时提前 = 钱提前出去。所以续投链路必须自己写，\n而且**提前量要按消费方最慢一次的 P99 来定，不是拍一个 60 秒**（素材把这条列为追问点）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "rocketmq",
+    "delay-message",
+    "timeout-close-order",
+    "unit-arithmetic",
+    "modern:messaging"
+  ],
+  "cases": [
+    {
+      "name": "基线：30 分钟关单一次投到位（默认上限 24 小时内不需要续投）",
+      "input": [
+        1800000,
+        0,
+        86400000,
+        60000
+      ],
+      "expected": [
+        1,
+        1800000,
+        0,
+        1800000
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：跨度正好等于 24 小时 ⇒ 仍然是一跳（判据用 <=，不是 <）",
+      "input": [
+        86400000,
+        0,
+        86400000,
+        60000
+      ],
+      "expected": [
+        1,
+        86400000,
+        0,
+        86400000
+      ],
+      "visible": true
+    },
+    {
+      "name": "3 天自动取消：按\"每跳有效推进 = 上限 - 续投提前量\"分段，末段是余量",
+      "input": [
+        259200000,
+        0,
+        86400000,
+        60000
+      ],
+      "expected": [
+        4,
+        86340000,
+        0,
+        180000
+      ],
+      "visible": true,
+      "note": "上限 24 小时、续投提前量 60 秒 ⇒ 每跳推进 86340000ms；3 天 = 259200000ms ⇒ 4 跳，末段余 180000ms"
+    },
+    {
+      "name": "退化：deliverAt 正好等于 now ⇒ 定时不生效、服务端立即投递",
+      "input": [
+        1000,
+        1000,
+        86400000,
+        60000
+      ],
+      "expected": [
+        0,
+        1000,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：deliverAt 在过去（调用方算错或被重放）⇒ 也判立即投递，不许倒着排队列",
+      "input": [
+        1000,
+        5000,
+        86400000,
+        60000
+      ],
+      "expected": [
+        0,
+        5000,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：续投提前量比上限只少 1 秒 ⇒ 每跳只推进 1000ms，段数爆炸但要算对",
+      "input": [
+        86405000,
+        0,
+        86400000,
+        86399000
+      ],
+      "expected": [
+        86405,
+        1000,
+        0,
+        1000
+      ],
+      "visible": true,
+      "note": "每跳推进 1000ms、跨度 86405000ms ⇒ 86405 跳，末段正好 1000ms。\"看起来不合理但合法\"：reach > 0 就不许抛错"
+    },
+    {
+      "name": "非法：续投提前量 >= 定时上限 ⇒ 每跳推进 <= 0，会无限续投，必须拒绝而不是钳成 1",
+      "input": [
+        86400000,
+        0,
+        86400000,
+        86400000
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "hop reach must be positive"
+    },
+    {
+      "name": "非法：定时上限为 0 或负",
+      "input": [
+        86400000,
+        0,
+        0,
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "horizon must be positive"
+    },
+    {
+      "name": "非法：续投提前量为负",
+      "input": [
+        86400000,
+        0,
+        86400000,
+        -1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "refire lead must be non-negative"
+    },
+    {
+      "name": "非法：now 为负（本题的时间轴从 0 起算）",
+      "input": [
+        86400000,
+        -10,
+        86400000,
+        60000
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "now must be non-negative"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n四条判据按顺序写，全整数运算，`ceil` 用 `(span + reach - 1) / reach`。\n**唯一要停下来想一想的是\"终点那一跳用 `horizon`，中间跳用 `reach`\"**。\n\n**用例「3 天自动取消」：`deliverAt = 259200000, now = 0, horizon = 86400000, lead = 60000`**\n⇒ `reach = 86340000`、`span = 259200000`、`hops = 4`、第一跳 `86340000`、\n末段 `259200000 - 3 × 86340000 = 180000`（3 分钟）。\n前三跳把时间推到 `t = 259020000`，第四跳从这里投到终点，跨度 180000ms ≤ 24 小时 ⇒ 合法。\n**末段远小于上限是正确解的特征，不是 bug**；\n真正要注意的是它必须 > 0（`hops` 是向上取整，所以永远 > 0）。\n\n为什么是 4 跳而不是 3 跳：`3 × 86340000 = 259020000 < 259200000`，\n三跳之后还差 180000ms 才到目标；如果第 3 跳直接投到 259200000，\n它那一跳的距离是 `259200000 - 172680000 = 86520000 > horizon` ⇒ 服务端立即投递，\n**订单会在第三个 24 小时附近被关掉**。\n\n**用例「边界：跨度正好等于 24 小时」⇒ `{1, 86400000, 0, 86400000}`**：\n判据是 `span <= horizon`，恰好等于是一次投到位。\n写成 `<` 的实现会走续投分支，给出 `{2, 86340000, 0, 60000}` —— 多一跳、\n而且第一跳在 86340000，**目标时刻却已经被推后了一整次消费**。\n这类\"边界上多一跳\"的错误不会报错，只会让所有超时都晚一点，几乎不可能被业务发现。\n\n**用例「退化：deliverAt 正好等于 now」⇒ `{0, now, 1, 0}`**：`immediate` 位是 1。\n官方写的是\"必须设置在未来，否则立即投递\"，所以 `<=` 才是那条语义；\n判 `<` 的实现会走\"span <= 0 ⇒ 一跳投到过去的时间戳\"，\n把立即投递伪装成一个\"定时成功\"的返回值。\n\n**用例「续投提前量比上限只少 1 秒」：`horizon = 86400000, lead = 86399000` ⇒ `reach = 1000`，\n`span = 86405000` ⇒ `hops = 86405`、第一跳 `1000`、末段 `1000`。**\n这是故意造出来的\"看起来不合理但合法\"的输入：`reach > 0`，所以**不许抛错**，\n而答案要如实给出八万多跳。真实系统里这就是\"提前量配得几乎等于上限\"的事故预演 ——\n本题选择在 `reach <= 0` 时拒绝、在 `reach` 极小时如实计算，\n是为了让**配置审查**成为唯一防线（而不是让算术悄悄掩盖它）。\n\n**朴素解挂在哪**：它把 `deliverAt - now` 当成一个时长直接投。\n3 天那条它给出 `{1, 259200000, 0, 259200000}` —— 一跳、\"看起来\"很简单，\n而这一跳超过 24 小时上限，服务端的行为是**立即投递**：下单立刻关单。\n\"定时不生效\"这五个字之所以值钱，是因为它是**静默的**。\n\n**工程延伸（面试追问点）**\n\n1. `refireLeadMs` 该多大？（它不是常数：等于\"续投消费方从收到消息到发出下一条\"的\n   **P99 加上时钟偏差与调度抖动**。素材 §7 明确没有官方阈值可引，所以这题把它做成入参，\n   而面试要答的是**测法**：压测该消费者在洪峰下的处理时长分布，取右尾。）\n2. 为什么不用外部调度（定时任务扫库）？（官方把\"对比传统数据库扫描\"列为定时消息的优势：\n   精度高、开发门槛低【S15】。但 24 小时上限意味着超窗口的一切都要续投或外置，\n   **续投链路的正确性成本要算进账**：每次续投都是一次\"投递 + 消费\"，\n   4 跳就是 4 次可能重复 —— 于是这条链路的每一步都要能幂等（素材考点 5）。）\n3. 30 分钟关单和 3 天取消能共用一条链路吗？（能，但**判据要分开**：\n   30 分钟那一跳永远一跳到位；3 天那条要续投 ⇒ 它的中间跳消息本身不能带业务语义\n   （\"这只是续投检查\"），否则下游会把它当成一次真实的关单事件。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] timerChain(int deliverAtMs, int nowMs, int horizonMs, int refireLeadMs)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int[] timerChain(int deliverAtMs, int nowMs, int horizonMs, int refireLeadMs) {\n    if (horizonMs <= 0) throw new IllegalArgumentException(\"horizon must be positive\");\n    if (refireLeadMs < 0) throw new IllegalArgumentException(\"refire lead must be non-negative\");\n    long reach = (long) horizonMs - refireLeadMs;\n    if (reach <= 0) throw new IllegalArgumentException(\"hop reach must be positive\");\n    if (nowMs < 0) throw new IllegalArgumentException(\"now must be non-negative\");\n\n    if (deliverAtMs <= nowMs) return new int[] {0, nowMs, 1, 0};   // 定时不生效 -> 立即投递\n    long span = (long) deliverAtMs - nowMs;\n    if (span <= horizonMs) return new int[] {1, deliverAtMs, 0, (int) span};\n\n    long hops = (span + reach - 1) / reach;                        // ceil(span / reach)\n    long first = nowMs + reach;\n    long tail = span - (hops - 1) * reach;\n    return new int[] {(int) hops, (int) first, 0, (int) tail};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"定时消息 = 传时长\"版：把 deliverAt - now 当成 delay 直接交给服务端，\n  // 超过上限的那部分被静默截断 —— 订单提前关，或者按官方口径\"定时不生效、立即投递\"。\n  public static int[] timerChain(int deliverAtMs, int nowMs, int horizonMs, int refireLeadMs) {\n    if (horizonMs <= 0) throw new IllegalArgumentException(\"horizon must be positive\");\n    if (refireLeadMs < 0) throw new IllegalArgumentException(\"refire lead must be non-negative\");\n    long reach = (long) horizonMs - refireLeadMs;\n    if (reach <= 0) throw new IllegalArgumentException(\"hop reach must be positive\");\n    if (nowMs < 0) throw new IllegalArgumentException(\"now must be non-negative\");\n    int hops = deliverAtMs <= nowMs ? 0 : 1;\n    return new int[] {hops, Math.max(deliverAtMs, nowMs), deliverAtMs <= nowMs ? 1 : 0,\n        Math.max(0, deliverAtMs - nowMs)};\n  }\n}"
+  },
+  "estimatedMinutes": 25,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（交易履约与超时关单方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 7/§2 追问 11（定时/延时消息【源 S15】：毫秒级时间戳、\"超过范围则定时不生效，服务端会立即投递\"、\"定时时长最大值默认为 24 小时且不支持自定义修改\"、官方场景就是订单超时关单；素材把\"3 天怎么办 → 分段续投或外部调度\"标为【推】，本题把续投算术写成显式契约并给出提前量的定义）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:49.407Z"
+  }
+}

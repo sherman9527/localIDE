@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0011",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "给不可信的外部契约写运行时校验层",
+  "statement": "## 场景\n\n对接第三方行程 API：SDK 的 `.d.ts` 写着 `id: number`，实际返回的是 `9007199254740993` 这种超过 `Number.MAX_SAFE_INTEGER` 的雪花 ID——一旦走 `Number()`，尾部精度会静默丢失，对账永远差一条；`stops` 里偶尔混进 `null`（上游序列化 bug）和稀疏数组；`arrival` 有时是中文日期。类型只是**假设**，边界才是**事实**：这一层要把不确定性收敛成可判定的结果，而不是 `as Trip` 一把梭。\n\n## 契约\n\n脚手架 **`contract.ts`** 已随题目落盘（`Trip` / `TripStop` / `Issue` / `Parsed` / `TIMEZONES`）。提交写在 **`Solution.tsx`**：\n\n```tsx\nexport function parseTrip(raw: unknown): Parsed<Trip>;\nexport function TripList(props: { raws: unknown[] }): JSX.Element;\n```\n\n`Parsed<T> = { ok: true; value: T } | { ok: false; issues: Issue[] }`，`Issue = { path: string; message: string }`。\n\n### 校验规则（逐条判分）\n\n| 字段 | 合法 | 不合法时的 issue path |\n| --- | --- | --- |\n| 顶层 | plain object | `''`（空串） |\n| `id` | 十进制数字**字符串**（`/^[0-9]+$/`） | `id` |\n| `stops` | 数组，可为空 | `stops` |\n| `stops[i]` | 对象且 `name` 为非空字符串（trim 后） | `stops[i]` / `stops[i].name` |\n| `stops[i].arrival` | **缺失**合法；存在时必须是 `/^\\d{4}-\\d{2}-\\d{2}T/` 的字符串；显式 `undefined` 非法 | `stops[i].arrival` |\n| 稀疏数组的洞 | 非法 | `stops[i]`（按索引逐个报） |\n| `budgetCents` | `Number.isInteger` 且 `>= 0` | `budgetCents` |\n| `timezone` | 必须在 `TIMEZONES` 白名单里 | `timezone` |\n\n- 未知字段**忽略**（不许出现在返回的 value 里）；\n- `issues` 必须**按字段声明顺序**（id → stops → budgetCents → timezone）、`stops` 内**按索引升序**，一个都不许漏（不是遇错即停）；\n- `parseTrip` 对**任何**输入都不得抛异常，只能返回 `Parsed`；\n- `message` 必须非空且能定位问题（说明为什么不合格），path 才是判分依据；\n\n### `TripList`\n\n- 有效行：`<li data-testid=\"trip-<id>\"><stops.length> 站 · <timezone></li>`；\n- 无效行：`<li data-testid=\"invalid-<数组下标>\"><issue.path 用逗号拼接></li>`；\n- 汇总：`data-testid=\"valid-count\"`，文案 `有效数/总数`；三行都必须是 `role=\"listitem\"`（用 `<ul><li>`）。\n\n## 不许做什么\n\n- 不许 `raw as Trip` / `any` 直接信任，也不许 `String(raw.id)`、`Number(raw.budgetCents)` 这种**静默 coercion**（精度与语义都会错）；\n- 不许引入 zod/valibot（沙箱不 `npm install`）——手写才是考点；\n- 不许在遇到第一个 issue 后 return（要做全量收集，UI 才有可展示的清单）；\n- 不许 `try/catch` 把异常咽成 `{ ok: true }`。\n\n## 判分\n\n7 个用例：合法还原与忽略未知字段、空 stops 合法、数字 id 判负、空洞与显式 undefined 定位、500 项升序全量收集、任意垃圾输入不抛异常、`TripList` 行级降级。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:ts-strict-modeling",
+    "runtime-validation",
+    "api-contract",
+    "bigint-safe-ids",
+    "partial-failure"
+  ],
+  "cases": [
+    {
+      "name": "合法 payload 还原全部字段并忽略未知字段",
+      "input": {
+        "id": "9007199254740993",
+        "extraKey": true
+      },
+      "expected": "ok=true，value 不含未知字段，stops[1].arrival 为 undefined（缺失）"
+    },
+    {
+      "name": "空 stops 数组是合法结果不是错误",
+      "input": {
+        "stops": []
+      },
+      "expected": "ok=true 且 stops.length=0",
+      "note": "空数组 ≠ 契约错误"
+    },
+    {
+      "name": "数字 id 判为契约错误而不是自动转字符串",
+      "input": {
+        "id": 42
+      },
+      "expected": "issues=['id']，message 含 string",
+      "note": "禁静默 coercion"
+    },
+    {
+      "name": "数组空洞与显式 undefined 逐项定位 path",
+      "input": {
+        "stops": "含 null / 空白 name / arrival:undefined / 中文日期 / 稀疏洞"
+      },
+      "expected": "issues path 依次为 stops[0]、stops[2].name、stops[3].arrival、stops[4].arrival"
+    },
+    {
+      "name": "超大 500 项 stops 全量校验且 issue 按索引升序",
+      "input": {
+        "stops": 500,
+        "badEvery": 100
+      },
+      "expected": "5 条 issue 按索引升序，不提前短路"
+    },
+    {
+      "name": "非法输入只返回 issue 绝不抛异常",
+      "input": {
+        "junk": [
+          "null",
+          "undefined",
+          "字符串",
+          "数组",
+          "0",
+          "缺字段对象",
+          "NaN 预算",
+          "负预算",
+          "未知时区"
+        ]
+      },
+      "expected": "全部 ok=false 且零抛异常；缺字段只报 id 一条"
+    },
+    {
+      "name": "TripList 坏行只降级该行并显示 issue 路径",
+      "input": {
+        "raws": "三条，其中两条坏"
+      },
+      "expected": "有效行 testid=trip-<id> 文案 '2 站 · Asia/Shanghai'；坏行 invalid-1='id,timezone'、invalid-2='id'；valid-count='1/3'；listitem 3 个"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "contract.ts",
+        "content": "/** 判题脚手架：类型声明与白名单（\"后端说它是 Trip\"，但边界才是事实）。 */\nexport interface TripStop {\n  readonly name: string;\n  readonly arrival?: string;\n}\n\nexport interface Trip {\n  readonly id: string;\n  readonly stops: TripStop[];\n  readonly budgetCents: number;\n  readonly timezone: string;\n}\n\nexport interface Issue {\n  readonly path: string;\n  readonly message: string;\n}\n\nexport type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly issues: Issue[] };\n\nexport const TIMEZONES: readonly string[] = ['Asia/Shanghai', 'America/Los_Angeles', 'Europe/Dublin', 'UTC'];\n"
+      },
+      {
+        "path": "trip-list.test.tsx",
+        "content": "import { fireEvent, render, screen } from '@testing-library/react';\nimport { expect, it } from 'vitest';\nimport { TripList, parseTrip } from './Solution';\n\nconst GOOD = {\n  id: '9007199254740993',\n  stops: [{ name: 'PVG', arrival: '2026-03-08T09:15:00' }, { name: 'SFO' }],\n  budgetCents: 129900,\n  timezone: 'Asia/Shanghai',\n  vendorInternalCode: 'ignore-me',\n};\n\nconst issuesOf = (res) => (!res.ok ? res.issues.map((issue) => issue.path) : []);\n\nit('合法 payload 还原全部字段并忽略未知字段', () => {\n  const res = parseTrip(GOOD);\n  expect(res.ok).toBe(true);\n  if (res.ok) {\n    expect(res.value.id).toBe('9007199254740993');\n    expect(res.value.stops.length).toBe(2);\n    expect(res.value.stops[1].arrival).toBeUndefined();\n    expect(res.value.budgetCents).toBe(129900);\n    expect(res.value.timezone).toBe('Asia/Shanghai');\n    expect(Object.prototype.hasOwnProperty.call(res.value, 'vendorInternalCode')).toBe(false);\n  }\n});\n\nit('空 stops 数组是合法结果不是错误', () => {\n  const res = parseTrip({ ...GOOD, stops: [] });\n  expect(res.ok).toBe(true);\n  if (res.ok) expect(res.value.stops.length).toBe(0);\n});\n\nit('数字 id 判为契约错误而不是自动转字符串', () => {\n  const res = parseTrip({ ...GOOD, id: 42 });\n  expect(res.ok).toBe(false);\n  expect(issuesOf(res)).toEqual(['id']);\n  expect(res.issues[0].message.length).toBeGreaterThan(0);\n});\n\nit('数组空洞与显式 undefined 逐项定位 path', () => {\n  const holes = [null, { name: 'PVG' }, { name: '   ' }, { name: 'SFO', arrival: undefined }, { name: 'LHR', arrival: '3月8日' }];\n  holes[5] = { name: 'NRT' };\n  const res = parseTrip({ ...GOOD, stops: holes });\n  expect(res.ok).toBe(false);\n  expect(issuesOf(res)).toEqual(['stops[0]', 'stops[2].name', 'stops[3].arrival', 'stops[4].arrival']);\n});\n\nit('超大 500 项 stops 全量校验且 issue 按索引升序', () => {\n  const stops = Array.from({ length: 500 }, (_unused, i) => (i % 100 === 5 ? { name: 123 } : { name: 'S' + i }));\n  const res = parseTrip({ ...GOOD, stops });\n  expect(res.ok).toBe(false);\n  expect(issuesOf(res)).toEqual(['stops[5].name', 'stops[105].name', 'stops[205].name', 'stops[305].name', 'stops[405].name']);\n});\n\nit('非法输入只返回 issue 绝不抛异常', () => {\n  const junk = [null, undefined, 'text', [], 0, { id: 'a' }, { ...GOOD, budgetCents: Number.NaN }, { ...GOOD, budgetCents: -1 }, { ...GOOD, timezone: 'Mars/Valles' }];\n  const crashes: string[] = [];\n  for (const item of junk) {\n    try {\n      const res = parseTrip(item);\n      if (res.ok) crashes.push('accepted:' + JSON.stringify(item));\n    } catch (error) {\n      crashes.push('threw:' + String(error));\n    }\n  }\n  expect(crashes).toEqual([]);\n  const missing = parseTrip({ ...GOOD, id: 'a' });\n  expect(issuesOf(missing)).toEqual(['id']);\n  const budget = parseTrip({ ...GOOD, budgetCents: 12.5 });\n  expect(issuesOf(budget)).toEqual(['budgetCents']);\n  const zone = parseTrip({ ...GOOD, timezone: 'Mars/Valles' });\n  expect(issuesOf(zone)).toEqual(['timezone']);\n});\n\nit('TripList 坏行只降级该行并显示 issue 路径', () => {\n  const raws = [GOOD, { ...GOOD, id: 7, timezone: 'Mars/Valles' }, { ...GOOD, id: 'x2' }];\n  render(<TripList raws={raws} />);\n  expect(screen.getByTestId('trip-9007199254740993').textContent).toBe('2 站 · Asia/Shanghai');\n  expect(screen.getByTestId('invalid-1').textContent).toBe('id,timezone');\n  expect(screen.getByTestId('invalid-2').textContent).toBe('id');\n  expect(screen.getByTestId('valid-count').textContent).toBe('1/3');\n  expect(screen.getAllByRole('listitem').length).toBe(3);\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import type { Issue, Parsed, Trip, TripStop } from './contract';\nimport { TIMEZONES } from './contract';\n\nconst DECIMAL_ID = /^[0-9]+$/;\nconst ISO_LIKE = /^\\d{4}-\\d{2}-\\d{2}T/;\n\nconst issue = (path: string, message: string): Issue => ({ path, message });\n\nconst isPlainObject = (value: unknown): value is Record<string, unknown> =>\n  typeof value === 'object' && value !== null && !Array.isArray(value);\n\nfunction parseStop(raw: unknown, path: string): { stop: TripStop | null; issues: Issue[] } {\n  if (!isPlainObject(raw)) return { stop: null, issues: [issue(path, '站点必须是对象')] };\n  const issues: Issue[] = [];\n  const name = raw.name;\n  if (typeof name !== 'string' || name.trim().length === 0) {\n    issues.push(issue(path + '.name', 'name 必须是非空字符串'));\n  }\n  let arrival: string | undefined;\n  if ('arrival' in raw) {\n    if (raw.arrival === undefined) {\n      // exactOptionalPropertyTypes 的运行时对应物：缺失与\"显式 undefined\"是两件事\n      issues.push(issue(path + '.arrival', 'arrival 不得显式为 undefined'));\n    } else if (typeof raw.arrival !== 'string' || !ISO_LIKE.test(raw.arrival)) {\n      issues.push(issue(path + '.arrival', 'arrival 必须是 ISO 风格字符串'));\n    } else {\n      arrival = raw.arrival;\n    }\n  }\n  if (issues.length) return { stop: null, issues };\n  const stop: TripStop = { name: (name as string).trim() };\n  if (arrival !== undefined) return { stop: { ...stop, arrival }, issues };\n  return { stop, issues };\n}\n\n/** 只收集 issue、绝不抛：把外部世界的不确定性收敛成判别联合。 */\nexport function parseTrip(raw: unknown): Parsed<Trip> {\n  const issues: Issue[] = [];\n  if (!isPlainObject(raw)) return { ok: false, issues: [issue('', 'payload 必须是对象')] };\n\n  const id = raw.id;\n  if (typeof id !== 'string') {\n    issues.push(issue('id', 'id 必须是字符串（长数字 ID 用 number 会掉精度）'));\n  } else if (!DECIMAL_ID.test(id)) {\n    issues.push(issue('id', 'id 必须是十进制数字串'));\n  }\n\n  const stops: TripStop[] = [];\n  const rawStops = raw.stops;\n  if (!Array.isArray(rawStops)) {\n    issues.push(issue('stops', 'stops 必须是数组'));\n  } else {\n    // 用 for-index 而不是 for...of：稀疏数组的洞要按索引报出来\n    for (let index = 0; index < rawStops.length; index += 1) {\n      if (!(index in rawStops)) {\n        issues.push(issue('stops[' + index + ']', '数组空洞'));\n        continue;\n      }\n      const parsed = parseStop(rawStops[index], 'stops[' + index + ']');\n      if (parsed.issues.length) issues.push(...parsed.issues);\n      else stops.push(parsed.stop as TripStop);\n    }\n  }\n\n  const budget = raw.budgetCents;\n  if (typeof budget !== 'number' || !Number.isInteger(budget) || budget < 0) {\n    issues.push(issue('budgetCents', 'budgetCents 必须是非负整数（货币不用浮点表示分）'));\n  }\n\n  const timezone = raw.timezone;\n  if (typeof timezone !== 'string' || !TIMEZONES.includes(timezone)) {\n    issues.push(issue('timezone', 'timezone 必须在白名单内'));\n  }\n\n  if (issues.length) return { ok: false, issues };\n  return {\n    ok: true,\n    value: { id: id as string, stops, budgetCents: budget as number, timezone: timezone as string },\n  };\n}\n\nexport function TripList({ raws }: { raws: unknown[] }) {\n  const parsed = raws.map((raw) => parseTrip(raw));\n  const valid = parsed.filter((item) => item.ok).length;\n  return (\n    <>\n      <ul>\n        {parsed.map((item, index) =>\n          item.ok ? (\n            <li key={index} data-testid={'trip-' + item.value.id}>\n              {item.value.stops.length + ' 站 · ' + item.value.timezone}\n            </li>\n          ) : (\n            <li key={index} data-testid={'invalid-' + index}>\n              {item.issues.map((each) => each.path).join(',')}\n            </li>\n          ),\n        )}\n      </ul>\n      <span data-testid=\"valid-count\">{valid + '/' + parsed.length}</span>\n    </>\n  );\n}\n",
+    "naiveSolution": "export function parseTrip(raw) {\n  return {\n    ok: true,\n    value: {\n      id: String(raw.id),\n      stops: raw.stops ?? [],\n      budgetCents: Number(raw.budgetCents),\n      timezone: raw.timezone,\n    },\n  };\n}\n\nexport function TripList({ raws }) {\n  return (\n    <ul>\n      {raws.map((raw, index) => (\n        <li key={index} data-testid={'trip-' + String(raw.id)}>\n          {(raw.stops ?? []).length} 站 · {raw.timezone}\n        </li>\n      ))}\n    </ul>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- 类型是编译期假设，网络响应是运行时事实：边界必须有一层\"收窄\"（手写 narrow 或 schema 库），否则 `as Trip` 之后所有下游代码都在说谎，`noUncheckedIndexedAccess` 也救不了你。\n- 长 ID 一律按字符串处理：`9007199254740993` 过 `Number` 会静默变成 ...92，这是最贵的一类数据 bug（对账差异）。校验层直接判 `typeof id !== \"string\"`，把 coercion 挡在门外。\n- 缺失 vs 显式 `undefined`：TS 的 `exactOptionalPropertyTypes` 说的就是这件事；JSON 里二者都可能出现（后端序列化差异），运行时必须分开报。\n- 稀疏数组要按索引检测（`index in arr`），`for...of` 会把洞读成 `undefined`，于是 issue 定位到错误的 path。\n- 全量收集 issue 而不是短路：UI 要能把\"哪几条数据坏了\"摊给运营；短路版只会一条一条地来回修。\n- 部分失败建模成数据（`Parsed`）而不是异常，因此能进 `Promise.all`、能进列表渲染、能被边界之外的逻辑统计（配合 0009 的行级降级）。\n\n面试追问：\n1. 为什么不直接把 `arrival` 的 `undefined` 当缺失？（前端把它 `JSON.stringify` 回后端时字段会消失/出现，写路径语义就变了）\n2. `Intl`/`Temporal` 能帮你校验日期吗？这里为何只用形状校验？（跨环境口径不稳，业务层只做格式契约，时区/夏令时在展示层）\n3. 校验失败要不要上报？（要，但要按 path 聚合打点，才能反向推动后端修契约；契约类错误不该重试，见 0002）\n4. 若字段有 300 个、每天 2000 万次调用，性能怎么优化？（编译式 validator：把规则编成一次性 shape 检查/隐藏类稳定的对象，避免每字段闭包与 spread）",
+  "estimatedMinutes": 28,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/typescript-strict-modeling.md#15-边界与类型安全",
+    "addedBy": "content-agent-fe"
+  }
+}

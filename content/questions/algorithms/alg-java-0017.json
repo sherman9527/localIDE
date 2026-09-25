@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0017",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "租户配额分配的最大-min 公平水位线",
+  "statement": "## 背景\n\n存储/带宽配额系统要做 **max-min fairness**：给每个租户分配整数单位，租户 i 实际拿到 `min(demands[i], share)`（超过需求的部分不外溢、也不补贴别人），且总和不能超过 `capacityUnits`。目标是**找到满足约束的最大水位线 `share`**。\n\n这是\"答案二分\"（对 `share` 单调）的标准生产形态。平均分（`capacity / n`）是错的：小需求租户被截断后腾出的额度必须能让别的水位线更高。\n\n## 入口\n\n```java\npublic static int fairShareUnits(int[] demands, long capacityUnits)\n```\n\n- 返回最大的整数 `share >= 0`，使得 `sum over i of min(demands[i], share) <= capacityUnits`；\n- `demands` 为空 → `0`；`capacityUnits <= 0` → `0`（没有任何可分配额度）；\n- 容量远超总需求时，答案就是 `max(demands)`（多余容量闲置，不抬高水位线）。\n\n## 不变式与硬约束\n\n1. `demands[i] >= 0`，出现负数抛 `IllegalArgumentException`（配额不能为负，静默处理会把总需求算少）。`demands[i]` 可达 `Integer.MAX_VALUE`。\n2. `capacityUnits` 是 `long`（可达 4e18）；`demands.length` 上界 2e5 → 需求总和可达 2e5 × 2e9 = **4e14**，判定函数里的累加**必须 `long`**，并且**必须在超过容量时提前 `break`/`return`**（否则大输入下既可能溢出又可能超时）。\n3. 二分必须在 `long` 域写区间（`(lo + hi + 1) >>> 1` 或 `lo + ((hi - lo + 1) >>> 1)`），并在**循环外**证明上界：`hi = max(demands)`。不许 `int mid = (lo + hi) / 2`（`MAX_VALUE + MAX_VALUE` 溢出为负 → 死循环或越界）。\n4. 谓词必须单调：`fits(share)` 随 `share` 不减。请说明\"为什么不能对 `demands` 排序后线性灌水\"是错的（它其实也对，但复杂度 O(n log n)；二分是 O(n log max)——要能比较两者的常数与适用条件）。\n5. 不允许修改入参数组。\n\n## 输出契约\n\n返回 `int`（水位线，`[0, max(demands)]`）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "binary-search-on-answer",
+    "monotone-predicate",
+    "resource-allocation",
+    "overflow-contract",
+    "modern:max-min-fairness"
+  ],
+  "cases": [
+    {
+      "name": "零容量时水位线为 0",
+      "input": [
+        [
+          5,
+          5
+        ],
+        0
+      ],
+      "expected": 0
+    },
+    {
+      "name": "空租户表返回 0",
+      "input": [
+        [],
+        100
+      ],
+      "expected": 0
+    },
+    {
+      "name": "小需求先被满足后再抬水位线",
+      "input": [
+        [
+          1,
+          2,
+          9
+        ],
+        6
+      ],
+      "expected": 3
+    },
+    {
+      "name": "容量远超总需求时水位线取最大需求",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        100
+      ],
+      "expected": 3
+    },
+    {
+      "name": "重复需求并列",
+      "input": [
+        [
+          4,
+          4,
+          4
+        ],
+        9
+      ],
+      "expected": 3
+    },
+    {
+      "name": "求和必须用 long 域判定",
+      "input": [
+        [
+          2000000000,
+          2000000000
+        ],
+        4000000000
+      ],
+      "expected": 2000000000
+    },
+    {
+      "name": "零需求租户不占额度（退化输入）",
+      "input": [
+        [
+          0,
+          0,
+          10
+        ],
+        5
+      ],
+      "expected": 5
+    },
+    {
+      "name": "单租户被容量截断",
+      "input": [
+        [
+          7
+        ],
+        3
+      ],
+      "expected": 3
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int fairShareUnits(int[] demands, long capacityUnits)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 答案二分：谓词 fits(share) = Σ min(demand, share) <= capacity 对 share 单调不减（一旦超就永远超）。\n   * 搜索区间 [0, maxShare]，用 long 做中点避免 (lo + hi + 1) 在 int 域溢出；\n   * 累加提前退出：一旦 need > capacity 就返回 false，避免无谓的 O(n) 走完全程与潜在溢出。\n   */\n  public static int fairShareUnits(int[] demands, long capacityUnits) {\n    if (demands.length == 0 || capacityUnits <= 0) return 0;\n    int maxShare = 0;\n    for (int d : demands) {\n      if (d < 0) throw new IllegalArgumentException(\"negative demand\");\n      if (d > maxShare) maxShare = d;\n    }\n    long lo = 0;\n    long hi = maxShare;                     // 水位线不可能超过最大需求：超出部分不会被任何人消耗\n    while (lo < hi) {\n      long mid = (lo + hi + 1) >>> 1;       // 上取整中点：配合 lo = mid 的收缩方向\n      if (fits(demands, capacityUnits, mid)) lo = mid;\n      else hi = mid - 1;\n    }\n    return (int) lo;\n  }\n\n  static boolean fits(int[] demands, long capacity, long share) {\n    long need = 0L;\n    for (int d : demands) {\n      need += Math.min((long) d, share);\n      if (need > capacity) return false;    // 提前退出：规模大时这是能否过时限的关键\n    }\n    return true;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：平均分配 —— 水位线 = capacity / 租户数。\n  // 忽略了\"小需求租户被截断后腾出的额度\"，因此在需求不均的集群上系统性低估水位线，\n  // 而在总需求远小于容量时又给出天文数字（超出任何租户的真实需求）。\n  public static int fairShareUnits(int[] demands, long capacityUnits) {\n    if (demands.length == 0 || capacityUnits <= 0) return 0;\n    return (int) (capacityUnits / demands.length);\n  }\n}\n"
+  },
+  "answer": "**思路**：对水位线二分。谓词 `fits(share) = Σ min(d_i, share) ≤ C` 关于 `share` 单调（`share` 越大需求越大），所以\"最大可行 share\"就是一次上取整中点的二分；上界取 `max(demands)`（超出部分不会被任何租户消耗，再抬只会浪费）。复杂度 O(n log maxD)，判定内提前退出。\n\n**三个必考细节**：\n1. **中点的溢出**：`(lo + hi + 1)` 在 `int` 域当 `hi = Integer.MAX_VALUE` 时溢出为负 → `mid` 变成负数或 0 → 死循环。放进 `long` 后 `(lo + hi + 1) >>> 1` 也保证了\"上取整\"，与 `lo = mid / hi = mid - 1` 的收缩方向配套（写成下取整中点配这个方向会死循环——这是二分最经典的分寸错误）。\n2. **累加的溢出与提前退出**：`Σ min(d_i, share)` 上界 2e5 × 2.1e9 = 4.2e14 → 必须 `long`；`need > capacity` 立刻 return，既避免继续累加（大输入下的时限就是靠这个），也避免\"累加到 4e18 级\"的潜在上界讨论。\n3. **`int` 与 `long` 的赋值陷阱**：`need += Math.min(d, share)` 若 `Math.min` 在 `int` 域求值再累加，`share > Integer.MAX_VALUE` 时会被截断（这里 share ≤ maxD 所以安全），但 `capacity` 与 `share` 混合比较时必须显式 `(long) d`。能指出\"我这一步为什么安全/为什么需要证明\"就是 senior 与中级的分水岭。\n\n**朴素解为什么错**：平均分把\"截断产生的富余\"当成不存在 → `[[1,2,9]] / C=6` 真实水位线是 3（1+2+3=6），平均给的是 2；而 `[[1,2,3]] / C=100` 平均给 33，超过最大需求，等于把不存在的额度分了出去。\n\n**复杂度**：时间 O(n log maxD)（约 31 次判定），空间 O(1)。替代方案：排序 + 一次线性灌水 O(n log n)（比较次数远少于 31n，实测常常更快，但要额外空间且需拷贝数组以免修改入参）——能给出这个取舍就是加分答案。\n\n**面试追问**：\n1. max-min fairness 与 weighted fairness 的差别？（带权重时水位线变成 `share * weight_i`，谓词仍是单调的，二分照用；要防的是权重为 0 的租户把额度吃光。）\n2.  indivisible（不可分）单位怎么办？（本题已经是整数单位；若单位不可分且要\"最大化和\"，就成了背包/多重集合分配问题，NP-hard，需近似。）\n3. 分布式实现（每个租户在分片上）？（分片内局部水位线 + 全局两轮聚合：先上报 `Σ min(d_i, x)` 的**分段线性函数**（拐点即各 demand），再在合并后的折线上求最大可行 x —— 比\"每轮二分都全量 RPC\"少几个数量级的通信，这正是本类题目在大数据场景下的真正解法。）\n4. 如何证明\"多余容量闲置\"是可接受的？（max-min 的定义就是\"不让任何租户拿到超过需求的量\"；若业务允许转让，则要换成 second-price/拍卖式再分配，语义完全不同。）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#13-二分的唯一正确姿势两个-bound-原语",
+    "addedBy": "content-agent-alg"
+  }
+}

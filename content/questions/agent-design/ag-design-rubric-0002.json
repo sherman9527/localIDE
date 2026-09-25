@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "ag-design-rubric-0002",
+  "category": "agent-design",
+  "difficulty": "principal",
+  "title": "Agent 工具平台契约与 MCP 网关治理（含无状态化改造）",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": ["modern:mcp", "tool-schema-design", "mcp-integration", "agent-guardrails", "platform-governance"],
+  "estimatedMinutes": 35,
+  "statement": "## 背景\n你在 Apple（上海/美国 office）面试 Principal Engineer, Agent Infrastructure。要为内部（研发、客服、运营）建「Agent 工具平台」：各团队自助发布 MCP server 与工具，agent 侧统一调用。\n\n## 现状与数字\n- 3 个团队各自发布工具，共 96 个，命名有重复；当单会话可见工具数 > 30 时，工具选择准确率从 93% 掉到 71%。\n- 近 30 天事故：2 起「agent 误调写接口」（给真实用户发了站内消息）、1 起「HTTP 超时后自动重试」导致重复发送 412 条。\n- 参数错误占失败调用 27%，目前靠「在提示里再强调一遍」处理。\n\n## 硬约束\n- 安全团队：agent 不得拥有生产写权限的直连路径；高危动作必须可追溯、可撤销、可熔断。\n- 法务：用户数据不得经第三方模型提供商处理（模型端点受数据驻留限制）。\n- SLO：单工具 p95 < 800ms、300 并发会话、每次调用有审计记录；单位任务成本 ≤ $0.04。\n- MCP 当期规范（2026-07-28 修订）转向无状态优先；若某协议细节你不确定，请写「需核实」并给出等价设计，**不要编造字段名或版本号**。\n\n## 请交付（按小标题作答）\n1. **工具契约规范**：给出粒度原则、参数可验证性要求（类型/枚举/日期与时区语义/limit 必填）、副作用分级如何写进 schema、失败返回结构。必须附一个具体工具的 JSON schema 片段（字段可自拟）体现这四点。\n2. **调用循环的确定性防线**：校验/归一化修复的边界（哪些能修、哪些必须拒）、幂等键的构成、重试预算（次数与退避的数值上限）、循环与无进展检测判据（给阈值）、以及「超时但后端可能已成功」的处置。\n3. **MCP 网关职责清单**：发现与白名单、同名工具冲突消解、参数与返回脱敏、配额与熔断、审计留存；并说明无状态化之后**长任务**与**向用户追问**分别用什么机制承载、状态由谁持有。\n4. **授权模型**：人 → agent → 工具三级的 scope 粒度、凭证时效与撤销；解释为什么「server 级授权」不够，以及当期鉴权要求（如校验签发方 `iss`、客户端标识来源）防的是哪类攻击。\n5. **96 个工具的治理**：裁剪/合并/分域暴露的具体做法与目标数字（每轮可见工具数、要恢复到的选择准确率），以及「自助发布 vs 安全审批」的机制化解法（哪些自动放行、哪些人工 + 双人）。\n6. **三条硬红线**：写进平台规范且能被网关或 CI 强制拦截（每条给检查方式，不接受「文档要求」）。\n\n## 追问预告（面试官会挑 2 个继续问）\n- 工具超时但后端可能已成功，用户问「到底发出去没有」，系统怎么回答？\n- 工具描述里被塞进指令（描述投毒/影子 server）你怎么发现和处置？\n- 为什么不是「给 agent 一个管理员 token + 全量审计日志」？\n",
+  "answer": "参考要点（仅用于评分）：\n1. 契约规范：一个业务动作一个工具（search/get/update_status 优于 do_everything(action)）；参数含 type/enum/min-max/required，日期用 ISO8601 且写明时区语义，limit 必填，ID 为不透明字符串；副作用分级字段如 side_effect: read_only|mutating|destructive|external_effect，并声明 idempotency_required、max_result_tokens；失败返回 {error_code, retryable, message, hints[], partial_result}，hint 面向模型（下一步做什么）而非堆栈。schema 片段示例：update_booking_status{booking_id(pattern), status(enum[confirmed,cancelled,host_declined]), reason_code(enum), dry_run(bool), confirm_token(string|null), limit 不需要} + 返回 {error_code: INVALID_ENUM, retryable:false, hints:[\"status 必须是 ...；若要查询当前状态用 get_booking\"]}。\n2. 循环防线：可修 = 类型转换（字符串数字）、日期格式（2026/9/3 → 2026-09-03）、枚举近似（大小写/空格）、未知字段剥离（记录剥离数量）；不可修 = 枚举无近似、数值越界、缺 required → 直接结构化错误回模型（限 1-2 次）。幂等键 = hash(sessionId, logicalCallId, tool, normalizedArgs)，mutating/destructive 必带；同 key 重试不重复副作用。重试预算：retryable 最多 3 次 + 指数退避 + 总 deadline（如 8s）超限即停；non-retryable 不重试。循环检测：同 (tool, argsHash) 连续 3 次或上下文新增信息 hash 连续 2 步未变 → LOOP_DETECTED/STALLED 并熔断。超时未知结果 → 返回 UNKNOWN_OUTCOME + 幂等键，进对账队列（状态查询 API 或人工），**绝不自动重试写**。\n3. 网关：工具目录（版本、owner、签名/来源、审批状态）；发现结果缓存 + 白名单；同名冲突按 namespace@version 消解并禁止路由到写操作；参数与返回脱敏（PII 字段策略 + 正则）；租户级配额（每分钟调用、每日成本）与熔断；审计留存（who/for-whom/which-tool/args-digest/result-code/cost/trace_id）。无状态化：会话状态与进度由编排层 + 外部存储持有；分钟级长任务转 tasks 类扩展（轮询 + 更新，具体方法名需核实）；向用户追问用「客户端携带上下文重发原请求」的 MRTR 式机制（命名需核实），因此服务端必须幂等可恢复；流式/进度走应用层通道（如 SSE）而非协议会话。\n4. 授权：IdP 角色决定人的权限；agent 用「代表用户的窄化 scope token」（不得提权，权限集合 ⊆ 用户集合，且按工具白名单再收窄）；短时凭证（≤15 分钟）+ 可撤销 + 每次调用审计；工具级 allowlist（同一 server 里读工具与删数据工具权限不同）。server 级授权的问题：一个 server 内含高危写工具时全部放行、无法按动作分级审批。鉴权新要求防的是混淆代理 / token 误投放到错误授权服务器（校验 iss、用 metadata document 固定 client 标识来源）。\n5. 工具治理：意图分域（每轮可见 ≤8 个工具，按路由结果动态挂载）；96 → 约 40 个合并近义工具 + 命名规范（动词_对象）+ 描述模板（何时用/何时不用/失败语义）；以「工具选择准确率 ≥90%」为发布门槛，用评测集每次回归；自助发布：read_only 工具自助 + 自动扫描（schema 完整性、PII、危险参数名）；mutating/destructive/external_effect 走人工 + 双人审批 + 沙箱租户灰度，且必须提供 dry_run 与状态查询。\n6. 硬红线示例：① 无 side_effect 声明与幂等键的写工具网关直接拒收（CI 校验 schema + 网关 400）；② 任何 URL/收件人/域名/脚本类参数必须是白名单枚举，模型自由文本一律拒绝（网关参数策略拦截）；③ 出口 DLP：返回体与出站请求扫描 PII/密钥，命中即阻断并告警（网关侧规则，留存阻断计数）。\n加分：成本归因到团队与用途；录制-回放能力；对描述投毒的常态化红队与目录漂移检测；对「模型端点不经第三方」的路由策略与可证明留痕。",
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "工具契约四要素",
+        "weight": 2,
+        "criteria": "命中要求：附带的 JSON schema 片段（或等价表格）同时体现 ①参数可验证（enum/范围/required/limit 至少两项）②副作用分级字段 ③结构化失败返回（error_code + retryable + 面向模型的 hint 至少两项）④返回体积控制（字段白名单/截断/分页游标/expand 任一）。缺任一项或只讲概念不给具体 schema → 不命中。"
+      },
+      {
+        "label": "可修与不可修边界",
+        "weight": 1,
+        "criteria": "命中要求：明确列出可安全修复的类别（类型转换、日期格式归一、枚举大小写近似、未知字段剥离）**且**明确不可猜必须拒绝的类别（枚举无近似、数值越界、缺 required），并说明修复后要走一次重校验。只写「加参数校验」→ 不命中。"
+      },
+      {
+        "label": "幂等与超时不重投",
+        "weight": 2,
+        "criteria": "命中要求：给出幂等键的具体构成（至少含 会话/逻辑调用 ID/工具名/归一化参数 中的三项）+ 明确「写操作超时后不得自动重试，返回 UNKNOWN_OUTCOME 并走状态查询或对账」+ 给出重试次数或总 deadline 的数值上限。三条缺一 → 不命中。"
+      },
+      {
+        "label": "循环与无进展熔断",
+        "weight": 1,
+        "criteria": "命中要求：给出可执行判据并带具体阈值（同一 工具+参数 连续 N 次、结果 hash 未变连续 N 步、或 步数/token/成本/时间 任一预算上限），且说明触发后给用户/编排层的表达（降级为「已知进展 + 需人接管」）。无阈值数字 → 不命中。"
+      },
+      {
+        "label": "无状态化长任务方案",
+        "weight": 2,
+        "criteria": "命中要求：说明状态由编排层/外部存储持有（不再依赖协议级会话）+ 长任务用轮询/更新型机制承载（可写「需核实」但必须给出等价设计）+ 向用户追问用可重发且幂等的请求方式。主张「靠 MCP 会话保持状态」→ 不命中。"
+      },
+      {
+        "label": "三级授权与可执行红线",
+        "weight": 2,
+        "criteria": "命中要求（三项齐全才给分）：(a) 人→agent→工具三级授权，且写明 agent 不得提权（scope = 用户权限 ∩ 工具白名单）与短时凭证可撤销；(b) 解释 server 级授权为什么不足（同一 server 内含高危写工具时无法按动作分级）；(c) 三条硬红线中至少两条给出可执行拦截方式（网关拒收 / CI 校验 / 出口 DLP 阻断）而非文档约定。缺任一项 → 不命中。"
+      }
+    ],
+    "notes": "判分口径：每条二值命中（hit 给满权重，否则 0 分），不给半分。答案若出现明显编造的协议方法名/版本号并声称是规范强制，第 5、6 条按未命中处理；写「需核实」并给出等价设计不扣分。若完全没有回答「自助发布 vs 安全审批」的边界，则第 6 条按未命中处理。"
+  },
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "company": "Apple",
+    "role": "Principal Engineer, Agent Infrastructure",
+    "location": "shanghai",
+    "knowledgeRef": "content/knowledge/agent-design/tool-calling-and-mcp.md#工具调用与MCP",
+    "addedBy": "content-agent-ag-hot"
+  }
+}

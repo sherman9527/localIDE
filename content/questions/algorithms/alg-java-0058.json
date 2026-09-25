@@ -1,0 +1,507 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0058",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "Sentinel 熔断降级状态机：最小请求数与比例都是严格大于、Block 不进样本、HALF-OPEN 一条请求定生死",
+  "statement": "## 背景\n\nSentinel《熔断降级》给的三种策略都自带**恢复判据**【源 S17】：\n\n> 慢调用比例：\"**熔断时长后进入 HALF-OPEN 探测恢复**，接下来一个请求 RT 小于慢调用 RT\n> 则结束熔断，否则再次熔断\"；异常比例的阈值域是 **[0.0, 1.0]**；另有\"异常数\"策略。\n\n同一条文档里还有两句更值钱的限制：\n\n> 触发条件是\"**在 statIntervalMs 内请求数大于最小请求数，并且慢调用比例大于阈值**\"；\n> \"**异常降级仅针对业务异常，对 Sentinel 限流降级本身的异常（BlockException）不生效**\"。\n\n素材 §2 追问 12 把后者写成一个现场问题：\"熔断了但大盘不红，为什么？\"\n—— 你自己抛的限流异常**不计入业务异常**，所以缺一条独立的\"降级触发率\"曲线【源 S17】。\n\n## 任务\n\n实现 `breakerWindow(...)`，把一段调用结果流水喂给熔断器，回放之后输出八个统计量。\n\n```java\nint[] breakerWindow(int strategy, int rtLimitMs, int threshold, int minRequests,\n                    int statIntervalMs, int tripDurationMs, int[] kind, int[] rt, int[] ts)\n```\n\n- `strategy`：0 = 慢调用比例，1 = 异常比例，2 = 异常数；\n- `kind[i]`：0 = 正常返回，1 = **业务异常**，2 = **BlockException**（限流/降级自身的异常）；\n- `rt[i]` / `ts[i]`：该次调用的 RT（ms）与到达时刻（逻辑毫秒，**严格递增**）。\n\n### 判分契约（前四条来自官方描述，其余是本题设定）\n\n| # | 判据 |\n| --- | --- |\n| 1 | 统计桶 = `ts / statIntervalMs`（整除）；**每个请求处理完就检查当前桶**，不是只在桶结束时检查 |\n| 2 | 越线条件：`total > minRequests` **严格大于**，且（策略 0/1）`bad × 100 > threshold × total`（比例**等于**阈值不算越线）；策略 2 用 `bad > threshold` |\n| 3 | 坏数定义：策略 0 = `kind==0 且 rt > rtLimitMs`（RT **等于**允许值不算慢）；策略 1/2 = `kind == 1` |\n| 4 | `kind == 2` 的请求只记 `blocked-seen`：**不进样本、不进分母、不进分子** |\n| 5 | 熔断 ⇒ `trips++`、进入 OPEN、`openUntil = 该请求的 ts + tripDurationMs`，并**清空当前桶** |\n| 6 | OPEN 期间（`ts < openUntil`）的请求一律被短路：只记 `rejected`，不进样本也不进桶 |\n| 7 | `ts >= openUntil` 的第一条请求就是**探测请求**：只记 `probes`，不进样本；策略 0 要求 `kind==0 且 rt < rtLimitMs`（**严格小于**，官方原话是\"小于\"）才算恢复成功，策略 1/2 要求 `kind != 1`。恢复失败 ⇒ 再熔断一次（`trips` 累加）并重新计时 |\n| 8 | 结尾状态 `state-at-end`：最后一个请求处理完仍在 OPEN 时长内 ⇒ 1，否则 0 |\n\n### 输出八个值（顺序固定）\n\n`[trips, state-at-end, rejected, sampled, blocked-seen, max-window-total, max-window-bad, probes]`\n\n- `sampled` = 计入统计的请求条数（不含 kind==2，不含被短路的，不含探测请求）；\n- `max-window-total` / `max-window-bad` = 任意时刻某个桶内曾达到的**最大**样本数 / 最大坏数。\n\n### 入口校验（必须抛 `IllegalArgumentException`，消息逐字一致）\n\n`unknown strategy`｜`stat interval must be positive`｜`trip duration must be positive`｜\n`min requests must be non-negative`｜`rt limit must be non-negative`｜`threshold out of range`\n（`threshold < 0`，或比例类策略 `threshold > 100`）｜`array length mismatch`｜\n`negative timestamp`｜`timestamps must increase`｜`unknown call kind`｜`negative rt`。\n\n## 说明\n\n素材 §7 第 3 条明写\"AHAS / MSE 治理中心的**线上阈值基线**没有可核查出处\"，\n所以本题**不出现任何推荐阈值**：阈值、时长、最小请求数全部是入参，\n考点是\"越线与恢复的**判据方向**\"，不是\"该配多少\"。\nHALF-OPEN 的探测请求\"只用于决定恢复、不进统计桶\"是本题设定 ——\n官方给的是\"接下来一个请求 RT 小于慢调用 RT 则结束熔断\"，没说它进不进样本。\n",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "circuit-breaker",
+    "slow-call-ratio",
+    "block-exception-sample",
+    "half-open-probe",
+    "threshold-direction",
+    "modern:resilience-semantics"
+  ],
+  "cases": [
+    {
+      "name": "基线：慢调用比例策略，第 5 条才越线、熔断一次",
+      "input": [
+        0,
+        100,
+        50,
+        4,
+        1000,
+        500,
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          50,
+          200,
+          300,
+          60,
+          400
+        ],
+        [
+          10,
+          20,
+          30,
+          40,
+          50
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        5,
+        0,
+        5,
+        3,
+        0
+      ],
+      "visible": true,
+      "note": "五条里三条慢（200 / 300 / 400 都 > 允许的最大 RT 100）⇒ 比例 60% > 50%，但前四条的 total 还没**超过**门槛 4，所以第 5 条结束时才同时满足两个严格大于；openUntil = 50 + 500 = 550，而流水到 ts=50 就结束 ⇒ 结尾状态仍是 OPEN"
+    },
+    {
+      "name": "边界：请求数恰好等于最小请求数、比例恰好等于阈值 ⇒ 一次都不熔断",
+      "input": [
+        0,
+        100,
+        50,
+        4,
+        1000,
+        500,
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          200,
+          60,
+          300,
+          40
+        ],
+        [
+          10,
+          20,
+          30,
+          40
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        4,
+        0,
+        4,
+        2,
+        0
+      ],
+      "visible": true,
+      "note": "total 最大到 4，而门槛是\"严格大于 4\"；就算看比例，2/4 = 50% 也只是**等于**阈值 50%。两处都是边界，任何一处写成 >= 就会多熔断一次"
+    },
+    {
+      "name": "边界：BlockException 只记 blockedSeen，不许把比例摊薄",
+      "input": [
+        1,
+        100,
+        50,
+        1,
+        1000,
+        500,
+        [
+          2,
+          2,
+          2,
+          1,
+          1
+        ],
+        [
+          10,
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          10,
+          20,
+          30,
+          40,
+          50
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        2,
+        3,
+        2,
+        2,
+        0
+      ],
+      "visible": true,
+      "note": "官方明写\"异常降级仅针对业务异常，对 BlockException 不生效\"。五条流水 = 3 条 block + 2 条业务异常：正确实现的样本只有那 2 条 ⇒ 比例 100% ⇒ 熔断；把 block 塞进分母就是 2/5 = 40% < 50% ⇒ **永远不熔断** —— 这正是素材 §2 追问 12\"熔断了但大盘不红\"的形状"
+    },
+    {
+      "name": "边界：熔断时长内的三条请求全被短路，一条探测都没放出去",
+      "input": [
+        1,
+        100,
+        50,
+        1,
+        1000,
+        400,
+        [
+          1,
+          1,
+          1,
+          0,
+          0
+        ],
+        [
+          10,
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          100,
+          200,
+          300,
+          450,
+          500
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        3,
+        2,
+        0,
+        2,
+        2,
+        0
+      ],
+      "visible": true,
+      "note": "第 2 条就越线（total 2 > 1 且异常比例 100% > 50%）⇒ openUntil = 200 + 400 = 600；ts 300 / 450 / 500 三条都在 600 之前 ⇒ 全部只记 rejected。probes=0 说明\"恢复时刻还没到\"，sampled=2 只统计熔断前那两条"
+    },
+    {
+      "name": "边界：过了熔断时长的第一条就是探测请求，探测成功不进样本",
+      "input": [
+        1,
+        100,
+        50,
+        1,
+        1000,
+        400,
+        [
+          1,
+          1,
+          0
+        ],
+        [
+          10,
+          10,
+          10
+        ],
+        [
+          100,
+          200,
+          700
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        2,
+        0,
+        2,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "openUntil=600 ⇒ ts=700 的第一条被当成探测请求；它不抛业务异常 ⇒ 恢复。probes=1、sampled 仍是 2（**探测请求不进样本**）、结尾 CLOSED"
+    },
+    {
+      "name": "边界：探测请求再次失败 ⇒ 再次熔断，trips 累加而不是重置",
+      "input": [
+        1,
+        100,
+        50,
+        1,
+        1000,
+        400,
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          100,
+          200,
+          300,
+          700
+        ]
+      ],
+      "expected": [
+        2,
+        1,
+        1,
+        2,
+        0,
+        2,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "第一次在 total=2 越线（openUntil=600），ts 300 被短路，ts 700 已过 openUntil ⇒ 它**是**探测请求；探测又抛业务异常 ⇒ 再次熔断，trips=2、结尾 OPEN"
+    },
+    {
+      "name": "边界：慢调用策略的探测要求 RT 严格小于允许值",
+      "input": [
+        0,
+        100,
+        50,
+        1,
+        1000,
+        400,
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          200,
+          300,
+          100,
+          90
+        ],
+        [
+          10,
+          20,
+          420,
+          700
+        ]
+      ],
+      "expected": [
+        2,
+        1,
+        1,
+        2,
+        0,
+        2,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "前两条都慢 ⇒ total=2 > 1 且 2/2 = 100% > 50% ⇒ openUntil = 20 + 400 = 420；第 3 条 ts=420 正好到点、**是**探测请求，但 RT 恰好等于 100 ⇒ 不算恢复（官方判据是\"小于\"）⇒ 再熔断一次，openUntil = 420 + 400 = 820；于是第 4 条（RT 90，本来能让它恢复）落在熔断期内被短路。探测判据若写成 <=，这条就会当场恢复：trips 从 2 变 1、rejected 从 1 变 0"
+    },
+    {
+      "name": "边界：异常数策略看条数不看比例",
+      "input": [
+        2,
+        100,
+        2,
+        1,
+        1000,
+        500,
+        [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          10,
+          10,
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          10,
+          20,
+          30,
+          5000,
+          5010,
+          5020
+        ]
+      ],
+      "expected": [
+        2,
+        1,
+        2,
+        3,
+        0,
+        3,
+        3,
+        1
+      ],
+      "visible": true,
+      "note": "第 2 条时 bad=2 **等于**阈值 2 不算越线（又是严格大于），第 3 条 bad=3 才熔断（openUntil = 30 + 500 = 530）；ts=5000 落进新桶（5000 / 1000 = 5）并且它就是探测请求，它又抛异常 ⇒ 再熔断，剩下两条被短路 ⇒ max-window-total 停在 3"
+    },
+    {
+      "name": "边界：探测恢复之后重新起算，旧桶的累计不许带过来",
+      "input": [
+        1,
+        100,
+        50,
+        2,
+        1000,
+        400,
+        [
+          0,
+          1,
+          1,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          10,
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          10,
+          20,
+          30,
+          450,
+          500,
+          600
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        5,
+        0,
+        3,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "第 3 条越线（total 3 > 2、比例 2/3 ≈ 66% > 50%）⇒ openUntil=430；ts=450 探测成功 ⇒ CLOSED 且桶作废。之后两条 OK 仍落在同一个统计区间（都在 1000 之内），如果旧桶的 total=3、bad=2 被带过来，max-window-total 会涨到 5 而不是 3 —— 这一列就是\"清了没清\"的证据"
+    },
+    {
+      "name": "退化：一条请求都没有 ⇒ 八个数全 0、状态 CLOSED",
+      "input": [
+        0,
+        100,
+        50,
+        4,
+        1000,
+        500,
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "空样本不许被当成\"熔断器坏了\"，也不许报\"100% 慢调用\""
+    },
+    {
+      "name": "非法：异常比例阈值写成 120（官方阈值域是 [0.0, 1.0]）",
+      "input": [
+        1,
+        100,
+        120,
+        1,
+        1000,
+        500,
+        [
+          1
+        ],
+        [
+          10
+        ],
+        [
+          10
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "threshold out of range",
+      "note": "比例类阈值越界必须在**入口**就拒；写成\"120% 永远不会触发\"就是把规则配没了"
+    },
+    {
+      "name": "非法：到达时刻不递增（乱序样本没法分桶）",
+      "input": [
+        0,
+        100,
+        50,
+        1,
+        1000,
+        500,
+        [
+          0,
+          0
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          100,
+          90
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "timestamps must increase"
+    }
+  ],
+  "answer": "## 参考答案\n\n单遍扫流水，维护 `(bucket, total, bad)` 三个累加器 + `(open, openUntil)` 两个状态位。\n**没有一处需要浮点数**：比例判据写成 `bad × 100 > threshold × total` 的整数式，\n否则\"恰好等于阈值\"这一格会因为四舍五入而飘。\n\n**两处\"严格大于\"是本判题的全部区分度**（用例「请求数恰好等于最小请求数、比例恰好等于阈值」）：\n官方原话是\"请求数**大于**最小请求数，并且慢调用比例**大于**阈值\"。\n该用例里 `total` 最大 4、门槛 4，比例 2/4 = 50% 又正好等于阈值 50% ⇒\n**八个数是 `[0, 0, 0, 4, 0, 4, 2, 0]`：一次都不熔断**。\n把门槛或比例任一写成 `>=`，`trips` 立刻变成非 0。\n\n**基线那条给出 `[1, 1, 0, 5, 0, 5, 3, 0]`**：五条里三条慢（`rt` 200 / 300 / 400 都 > 100），\n比例 60% 早就越过 50%，但**前四条的 total 没超过门槛 4**，\n所以直到第 5 条才成立 `3 × 100 > 50 × 5` ⇒ 熔断一次；\n`openUntil = 50 + 500 = 550` 而流水到 ts=50 就结束 ⇒ 第八格 `probes=0`、第二格 `state-at-end=1`。\n**\"最后一条才越线\"是刻意设计的**：前四条恰好卡在门槛上。\n\n**`kind == 2` 只进 `blocked-seen`**（用例「BlockException 只记 blockedSeen」）：\n`[1, 1, 0, 2, 3, 2, 2, 0]` —— 五条流水 = 3 条 block + 2 条业务异常，\n`sampled = 2`、`blocked-seen = 3`，两条异常凑成 100% ⇒ **熔断一次**。\n把 block 算进分母就变成 2/5 = 40% < 50% ⇒ **一次都不熔断**，\n这就是素材 §3 那条\"熔断了错误率肯定下降\"的反面：\n限流异常混进业务异常样本，会把真实故障**摊薄成噪音**。\n\n**OPEN 与 HALF-OPEN 是两个不同的数，别写成\"熔断中=1\"**：\n用例「熔断时长内的三条请求全被短路」给出 `[1, 1, 3, 2, 0, 2, 2, 0]` ——\n`probes = 0` 说明\"恢复时刻还没到\"，`rejected = 3` 说明\"到了也没放\"。\n用例「过了熔断时长的第一条就是探测请求」给出 `[1, 0, 0, 2, 0, 2, 2, 1]`：\n`ts=700 >= openUntil=600` ⇒ 那一条是探测，它不抛异常 ⇒ 恢复（`state-at-end=0`），\n而 `sampled` 仍是 2 —— **探测请求不进样本**，否则它自己会污染刚重建的窗口。\n用例「探测请求再次失败」给出 `[2, 1, 1, 2, 0, 2, 2, 1]`：**trips 累加到 2 而不是重置**，\n这条曲线才是\"这次故障到底抖了几次\"的答案。\n\n**慢调用策略的探测判据是严格小于**（用例「探测要求 RT 严格小于允许值」）：\n`RT = 100` 等于允许值 ⇒ **不算恢复**（`[2, 1, 1, 2, 0, 2, 2, 1]`），\n于是 `openUntil` 被推成 `420 + 400 = 820`，本来 RT 90 能让它恢复的第 4 条\n反而落进熔断期被短路（`rejected = 1`）。判据写成 `<=` 就会多恢复一次、少一次熔断。\n\n**异常数策略与\"重新起算\"**：用例「异常数策略看条数不看比例」给出\n`[2, 1, 2, 3, 0, 3, 3, 1]` —— 第 2 条时 `bad=2` **等于**阈值 2 不算越线，\n第 3 条 `bad=3` 才熔断；`ts=5000` 落进新桶（`5000 / 1000 = 5`）且它是探测请求，\n探测又抛异常 ⇒ 再熔断，`max-window-total` 因此停在 3。\n用例「探测恢复之后重新起算」给出 `[1, 0, 0, 5, 0, 3, 2, 1]`：\n熔断时把当前桶作废，恢复后的两条 OK 从 0 重新计，\n所以 `max-window-total = 3` 而不是 5 —— **这一列就是\"清了没清\"的证据**。\n不清空的症状不是\"少熔断\"，而是\"恢复后立刻又被旧累计再次熔断\"，\n即素材 §2 追问 14 那句\"按果调因\"的熔断版。\n\n**空流水与非法入参**：空数组 ⇒ 八个 0（不许报\"100% 慢调用\"，分母为 0 时**没有比例**）；\n阈值 120 ⇒ 入口就抛 `threshold out of range`（比例类的域来自官方 [0.0, 1.0] 的百分数写法），\n写成\"120% 永远不会触发\"等于把规则静默配没；`ts` 不递增 ⇒ `timestamps must increase`\n（乱序样本没法分桶，比\"算错\"更糟的是\"算得出来但没意义\"）。\n\n**朴素解挂六处**：门槛写成 `>=`（基线的 `trips` 变 2）、比例写成 `>=`\n（\"恰好等于阈值\"那条用例凭空多一次熔断）、`rt >= rtLimit` 判慢、\n把 `kind == 2` 塞进分母（于是 block 那条用例真的不熔断了）、\nOPEN 期间照样放行（`rejected` 恒 0）、恢复用\"下一桶平均\"而不是单条探测\n（`probes` 恒 0，且 `state-at-end` 永远是 0）—— 十二个用例里每一个都至少错一个数。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"降级触发率\"必须是独立一条曲线？（BlockException 不进业务异常样本 ⇒\n   业务成功率可以一路 100% 而被拒的请求堆成山。素材 §2 追问 12 的答案就是这条。）\n2. 探测请求为什么要\"独占\"？（放多条就变成\"半开流量比例\"，那是另一种设计；\n   官方给的是\"接下来一个请求\"，本题按一个实现 —— 多放一条就会把 `sampled` 撑高。）\n3. `tripDurationMs` 怎么定？（素材 §7 第 3 条：没有可核查的推荐阈值。\n   可测的做法是拿\"下游 RT 回落到基线的时间 + 一次完整压测周期\"作为下界，\n   并且要能回答\"探测失败后 openUntil 重新计时会不会造成抖动放大\"。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] breakerWindow(int strategy, int rtLimitMs, int threshold, int minRequests, int statIntervalMs, int tripDurationMs, int[] kind, int[] rt, int[] ts)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  // kind: 0 = 正常返回, 1 = 业务异常, 2 = BlockException（限流/降级自身的异常）\n  // 返回：[trips, stateAtEnd, rejected, sampled, blockedSeen, maxWindowTotal, maxWindowBad, probes]\n  public static int[] breakerWindow(int strategy, int rtLimitMs, int threshold, int minRequests,\n                                    int statIntervalMs, int tripDurationMs,\n                                    int[] kind, int[] rt, int[] ts) {\n    if (strategy < 0 || strategy > 2) throw new IllegalArgumentException(\"unknown strategy\");\n    if (statIntervalMs <= 0) throw new IllegalArgumentException(\"stat interval must be positive\");\n    if (tripDurationMs <= 0) throw new IllegalArgumentException(\"trip duration must be positive\");\n    if (minRequests < 0) throw new IllegalArgumentException(\"min requests must be non-negative\");\n    if (rtLimitMs < 0) throw new IllegalArgumentException(\"rt limit must be non-negative\");\n    if (threshold < 0 || ((strategy == 0 || strategy == 1) && threshold > 100))\n      throw new IllegalArgumentException(\"threshold out of range\");\n    if (kind.length != rt.length || rt.length != ts.length)\n      throw new IllegalArgumentException(\"array length mismatch\");\n    for (int i = 0; i < kind.length; i++) {\n      if (ts[i] < 0) throw new IllegalArgumentException(\"negative timestamp\");\n      if (i > 0 && ts[i] <= ts[i - 1]) throw new IllegalArgumentException(\"timestamps must increase\");\n      if (kind[i] < 0 || kind[i] > 2) throw new IllegalArgumentException(\"unknown call kind\");\n      if (rt[i] < 0) throw new IllegalArgumentException(\"negative rt\");\n    }\n    int trips = 0, rejected = 0, sampled = 0, blockedSeen = 0, probes = 0;\n    int maxTotal = 0, maxBad = 0;\n    boolean open = false;\n    int openUntil = 0, bucket = -1, total = 0, bad = 0;\n    for (int i = 0; i < kind.length; i++) {\n      if (open) {\n        if (ts[i] >= openUntil) {              // HALF-OPEN：这条就是探测请求\n          probes++;\n          open = false;\n          boolean ok = (strategy == 0) ? (kind[i] == 0 && rt[i] < rtLimitMs) : (kind[i] != 1);\n          if (ok) {\n            bucket = -1; total = 0; bad = 0;\n          } else {\n            trips++; open = true; openUntil = ts[i] + tripDurationMs;\n          }\n        } else {\n          rejected++;                          // 短路：不进样本、不进桶\n        }\n        continue;\n      }\n      int b = ts[i] / statIntervalMs;\n      if (b != bucket) { bucket = b; total = 0; bad = 0; }\n      if (kind[i] == 2) { blockedSeen++; continue; }\n      sampled++;\n      total++;\n      boolean isBad = (strategy == 0) ? (kind[i] == 0 && rt[i] > rtLimitMs) : (kind[i] == 1);\n      if (isBad) bad++;\n      if (total > maxTotal) maxTotal = total;\n      if (bad > maxBad) maxBad = bad;\n      if (total > minRequests) {               // 严格大于\n        boolean trip = (strategy == 0 || strategy == 1)\n            ? (long) bad * 100 > (long) threshold * total\n            : bad > threshold;\n        if (trip) {\n          trips++;\n          open = true; openUntil = ts[i] + tripDurationMs;\n          bucket = -1; total = 0; bad = 0;     // 熔断即清空当前桶\n        }\n      }\n    }\n    return new int[] {trips, open ? 1 : 0, rejected, sampled, blockedSeen,\n        maxTotal, maxBad, probes};\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 四个\"看起来一样\"的写法：门槛写成 >=、BlockException 也算样本、\n  // OPEN 期间照样放行、恢复用\"下一个窗口的平均\"而不是单条探测请求。\n  public static int[] breakerWindow(int strategy, int rtLimitMs, int threshold, int minRequests,\n                                    int statIntervalMs, int tripDurationMs,\n                                    int[] kind, int[] rt, int[] ts) {\n    if (strategy < 0 || strategy > 2) throw new IllegalArgumentException(\"unknown strategy\");\n    if (statIntervalMs <= 0) throw new IllegalArgumentException(\"stat interval must be positive\");\n    if (tripDurationMs <= 0) throw new IllegalArgumentException(\"trip duration must be positive\");\n    if (minRequests < 0) throw new IllegalArgumentException(\"min requests must be non-negative\");\n    if (rtLimitMs < 0) throw new IllegalArgumentException(\"rt limit must be non-negative\");\n    if (threshold < 0 || ((strategy == 0 || strategy == 1) && threshold > 100))\n      throw new IllegalArgumentException(\"threshold out of range\");\n    if (kind.length != rt.length || rt.length != ts.length)\n      throw new IllegalArgumentException(\"array length mismatch\");\n    for (int i = 0; i < kind.length; i++) {\n      if (ts[i] < 0) throw new IllegalArgumentException(\"negative timestamp\");\n      if (i > 0 && ts[i] <= ts[i - 1]) throw new IllegalArgumentException(\"timestamps must increase\");\n      if (kind[i] < 0 || kind[i] > 2) throw new IllegalArgumentException(\"unknown call kind\");\n      if (rt[i] < 0) throw new IllegalArgumentException(\"negative rt\");\n    }\n    int trips = 0, sampled = 0, blockedSeen = 0;\n    int maxTotal = 0, maxBad = 0;\n    int bucket = -1, total = 0, bad = 0;\n    for (int i = 0; i < kind.length; i++) {\n      int b = ts[i] / statIntervalMs;\n      if (b != bucket) { bucket = b; total = 0; bad = 0; }\n      sampled++;\n      total++;                                  // BlockException 也进分母\n      if (kind[i] == 2) blockedSeen++;\n      boolean isBad = (strategy == 0) ? rt[i] >= rtLimitMs : kind[i] == 1;   // >= 而不是 >\n      if (isBad) bad++;\n      if (total > maxTotal) maxTotal = total;\n      if (bad > maxBad) maxBad = bad;\n      if (total >= minRequests) {               // >= 而不是 >\n        boolean trip = (strategy == 0 || strategy == 1)\n            ? (long) bad * 100 >= (long) threshold * total   // 等于阈值也算越线\n            : bad >= threshold;\n        if (trip) trips++;                      // 不清空桶、也不落 OPEN 状态\n      }\n    }\n    return new int[] {trips, 0, 0, sampled, blockedSeen, maxTotal, maxBad, 0};\n  }\n}\n"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（稳定性与中间件方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 10（熔断降级与\"大盘不红\"的监控口径：慢调用比例/异常比例/异常数三种策略各自带恢复判据，\"熔断时长后进入 HALF-OPEN 探测恢复，接下来一个请求 RT 小于慢调用 RT 则结束熔断，否则再次熔断\"、异常比例阈值域 [0.0,1.0]、触发条件\"statIntervalMs 内请求数大于最小请求数并且慢调用比例大于阈值\"、**\"异常降级仅针对业务异常，对 BlockException 不生效\"**【源 S17】；§2 追问 12 与 §3 的\"熔断了但大盘不红\"。三类策略共用最小请求数门槛、探测请求不进样本、熔断即清空当前桶是【推】，题面已写成契约；素材 §7 第 3 条禁止的\"线上推荐阈值\"题面一个都没用）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T16:09:36.491Z"
+  }
+}

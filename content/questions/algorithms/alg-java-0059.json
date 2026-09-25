@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0059",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "epoll 触发模式：ET 一次通知读不完就悬挂，LT 没读完会继续叫醒你",
+  "statement": "## 背景\n\n网关的一个连接上到了一个大请求体。`epoll` 报可读，handler 读了一部分就返回 ——\n之后**没有任何新数据到达**（客户端以为发完了，或者它正在等我们的响应）。\n这时\"请求像被吞了，但连接没断\"的线上现象就有了唯一解释：**没人再通知你缓冲区里还有货**。\n\nLT 与 ET 的差别不在性能，在**谁负责把缓冲区读干净**：\nLT 下内核替你负责（没读干净就继续通知），ET 下这件事转嫁给你（一次通知只给一次机会）。\n\n## 你要实现的入口\n\n```java\npublic static int[] serve(int bytes, int chunk, boolean edgeTriggered, boolean drains, int maxWakeups)\n```\n\n返回长度为 3 的数组：`{processed, wakeups, stuck}` —— 被读走并处理的字节数、\n被唤醒的次数、**结束时还留在缓冲区里的字节数**。三个数必须自洽：`processed + stuck == bytes`。\n\n## 就绪与读取模型（题目的全部约定，不要引入真实 epoll 的其他行为）\n\n- 接收缓冲区里一开始有 `bytes` 个字节可读；**之后不再有新的数据到达**。\n- 每次 `read` 至多取走 `chunk` 个字节（实际取走 `min(剩余, chunk)`）。\n- `drains == true` ⇒ handler 在一次唤醒里循环读到\"读空\"为止；`false` ⇒ 每次唤醒只 `read` 一次。\n- `maxWakeups` 是唤醒次数上限（模拟事件循环还要服务别的 fd）：用完就不再叫醒。\n\n## 触发语义（判分点）\n\n- **LT（水平触发）**：只要还有可读字节，下一次 `epoll_wait` 还会报 ⇒\n  读干净需要 `ceil(bytes / chunk)` 次唤醒；上限不够就剩着。\n- **ET（边缘触发）**：只在状态变化那一刻报**一次** ⇒ 一次唤醒、取走 `chunk` 个字节就结束，\n  剩下的全部 `stuck`。\n- `drains == true` 时两种模式没有区别：一次唤醒就读干净。\n- `bytes == 0` ⇒ 从来没有就绪事件：`{0, 0, 0}`，**不报错**（keep-alive 上的空 body 就是这个形状）。\n- `maxWakeups == 0` ⇒ 一次都没叫醒：`{0, 0, bytes}`，`drains` 用不上（压根没进 handler）。\n\n## 非法输入\n\n抛 `IllegalArgumentException`：`bytes < 0`、`chunk <= 0`、`maxWakeups < 0`。\n`chunk == 0` 是\"每次 read 取 0 个字节\"，LT 下就是无限循环 —— 它是编程错误，不是边界情况。\n\n## 规模\n\n`bytes`、`chunk` 都在 `int` 范围内，`bytes` 可达 21 亿。\n**中间量可能超出 `int`**：结果本身一定在 `int` 里（`processed <= bytes`），\n但\"唤醒次数 × 每次字节数\"这一步不是 —— 怎么算到那里是你的事。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "epoll",
+    "edge-trigger",
+    "level-trigger",
+    "nonblocking-read",
+    "int-overflow",
+    "modern:inference-gateway"
+  ],
+  "cases": [
+    {
+      "name": "零字节：从来没有就绪事件，一次都不该被叫醒",
+      "input": [
+        0,
+        4096,
+        false,
+        false,
+        8
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "keep-alive 上的空 body 就是这个形状，不是错误"
+    },
+    {
+      "name": "ET 不读完就悬挂：一次通知只给一次机会",
+      "input": [
+        10000,
+        4096,
+        true,
+        false,
+        8
+      ],
+      "expected": [
+        4096,
+        1,
+        5904
+      ],
+      "visible": true
+    },
+    {
+      "name": "LT 分三次读完：没读完就会继续通知",
+      "input": [
+        10000,
+        4096,
+        false,
+        false,
+        8
+      ],
+      "expected": [
+        10000,
+        3,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：LT 的唤醒上限不够，一样会剩",
+      "input": [
+        10000,
+        4096,
+        false,
+        false,
+        2
+      ],
+      "expected": [
+        8192,
+        2,
+        1808
+      ],
+      "visible": true
+    },
+    {
+      "name": "ET 读干净：drain 到 EAGAIN 时两种模式没区别",
+      "input": [
+        10000,
+        4096,
+        true,
+        true,
+        8
+      ],
+      "expected": [
+        10000,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：chunk 正好等于 bytes",
+      "input": [
+        4096,
+        4096,
+        true,
+        false,
+        8
+      ],
+      "expected": [
+        4096,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：chunk 大于 bytes，一次就空",
+      "input": [
+        100,
+        4096,
+        false,
+        false,
+        3
+      ],
+      "expected": [
+        100,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "极大：中间量 wakeups × chunk 会溢出 int",
+      "input": [
+        2100000000,
+        2000000000,
+        false,
+        false,
+        5
+      ],
+      "expected": [
+        2100000000,
+        2,
+        0
+      ],
+      "visible": true,
+      "note": "结果本身在 int 里（processed <= bytes），但乘积不在"
+    },
+    {
+      "name": "重复叫醒也没用：maxWakeups 为 0 一律不处理",
+      "input": [
+        500,
+        100,
+        false,
+        true,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        500
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：chunk 为 0 就是无限循环",
+      "input": [
+        100,
+        0,
+        false,
+        false,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：负字节数",
+      "input": [
+        -1,
+        100,
+        false,
+        false,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：负的唤醒上限",
+      "input": [
+        100,
+        100,
+        false,
+        false,
+        -1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "**这道题考的是\"通知归谁负责\"，不是 API 记忆。**\n\n三个数各自的角色：`wakeups` 是**内核给了几次机会**，`processed` 是你**用掉了几次**，\n`stuck` 是**下一次不会再来通知的欠账**。ET 下 `stuck > 0` 就是事故本身 ——\n数据在缓冲区里，连接健康，没有人会被叫醒去读它。\n\n**判分点逐条**：\n\n- ET 且 `drains=false`：一次唤醒只取 `chunk`，其余悬挂（10000 字节 / 4096 一次 ⇒ 剩 5904）。\n- LT：`ceil(bytes/chunk)` 次机会，`maxWakeups` 不够时同样剩（10000 / 4096 / 上限 2 ⇒ 处理 8192，剩 1808）。\n- `drains=true`：一次读干净，两种模式无差别 —— 这正是 ET 的正确写法（循环读到 `EAGAIN` 才返回）。\n- `bytes==0` 与 `maxWakeups==0` 是两个不同的零：前者\"没有事件\"，后者\"有事件但没被处理\"。\n- 溢出：`chunk` 与 `bytes` 都接近 21 亿时，`wakeups * chunk` 在 `int` 里会翻成负数，\n  于是 `processed` 变负、`stuck` 变超界。**先把乘积放进 `long`，再落回 `int`**。\n\n**为什么\"ET 性能更好\"这句话在这题里一文不值**：ET 省的是**系统调用次数**，\n代价是把\"读干净\"的责任从内核转给使用者。省下来的那次 `epoll_wait` 回来之后，\n如果 handler 没有循环到 `EAGAIN`，你省的那点开销会以\"悬挂请求 + 超时重试\"的形式全部还回去，\n还附上一个查起来极其难受的现象：连接没断、日志没报错、就是没结果。\n\n**工程上怎么落**：用 ET 就必须把\"读干净\"写死在框架层（循环 `read` 直到 `EAGAIN`，\n并用 `bytes` 上限或 `SO_RCVLOWAT` 之类控制单次预算）；做不到就用 LT，多几次唤醒换正确性。\n真实系统里更常见的是第三种：**ET + 长度前缀协议**，读不满一帧就留着下次通知继续读 ——\n那已经不是\"LT/ET 哪个快\"的问题，而是协议层愿不愿意为语义付一次额外状态。",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] serve(int bytes, int chunk, boolean edgeTriggered, boolean drains, int maxWakeups)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int[] serve(int bytes, int chunk, boolean edgeTriggered, boolean drains, int maxWakeups) {\n    if (bytes < 0) throw new IllegalArgumentException(\"negative bytes\");\n    if (chunk <= 0) throw new IllegalArgumentException(\"chunk must be positive\");\n    if (maxWakeups < 0) throw new IllegalArgumentException(\"negative maxWakeups\");\n    if (bytes == 0) return new int[] {0, 0, 0};\n    if (maxWakeups == 0) return new int[] {0, 0, bytes};\n    if (drains) return new int[] {bytes, 1, 0};\n\n    // 中间量走 long：wakeups * chunk 可以超过 int，而它只在 min() 之后才落回 int 域\n    long total = bytes;\n    long step = chunk;\n    long processed;\n    long wakes;\n    if (edgeTriggered) {\n      wakes = 1;\n      processed = Math.min(total, step);\n    } else {\n      long need = (total + step - 1) / step;\n      wakes = Math.min(need, (long) maxWakeups);\n      processed = Math.min(total, wakes * step);\n    }\n    return new int[] {(int) processed, (int) wakes, (int) (total - processed)};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 朴素解：把两种触发模式当成同一件事 —— \"能读就读，读完为止\"。\n  // 它假设内核总会再通知一次，于是 ET 的悬挂在这份实现里永远是 0。\n  public static int[] serve(int bytes, int chunk, boolean edgeTriggered, boolean drains, int maxWakeups) {\n    if (bytes < 0) throw new IllegalArgumentException(\"negative bytes\");\n    if (chunk <= 0) throw new IllegalArgumentException(\"chunk must be positive\");\n    if (maxWakeups < 0) throw new IllegalArgumentException(\"negative maxWakeups\");\n    if (bytes == 0) return new int[] {0, 0, 0};\n    int processed = 0;\n    int wakes = 0;\n    while (processed < bytes && wakes < maxWakeups) {\n      processed += Math.min(chunk, bytes - processed);   // int 相加；也从不区分 ET/LT\n      wakes += 1;\n      if (drains) {\n        while (processed < bytes) processed += Math.min(chunk, bytes - processed);\n      }\n    }\n    return new int[] {processed, wakes, bytes - processed};\n  }\n}"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理服务 / 网关 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#11（原文给出 LT/ET 的通知语义与\"ET 必须一次性读完\"的结论，未做成可判分的唤醒计数模型）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-25T05:59:20.305Z"
+  }
+}

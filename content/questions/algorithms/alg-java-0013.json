@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0013",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "报表段落排版的最小坏度（最优换行 DP）",
+  "statement": "## 背景\n\nPDF/报表渲染器要做**最优换行**（Knuth–Plass 思路的简化版）：把一行行文字排进宽度 `lineWidth` 的版心，同一行相邻词之间恰好留 1 个单位的空格。每行（**最后一行除外**）的\"坏度\"是剩余空间的平方 `(lineWidth - usedWidth)^2`，目标是**总坏度最小**。\n\n直觉的 greedy（能塞就塞）在这里**不是最优**：为了让当前行填满，可能把后面几行挤成大量碎空间。这正是 DP 存在的理由，也是渲染结果在不同实现之间不一致（客户看到\"同一份报告两版排版不同\"）的根因。\n\n## 入口\n\n```java\npublic static int minLayoutSlack(int[] wordWidths, int lineWidth)\n```\n\n- `wordWidths[i]` = 第 i 个词的宽度（**保持词序，不可重排**）；返回最小总坏度；\n- 空词表返回 `0`；\n- 存在 `wordWidths[i] > lineWidth`（单个词就超版心）时返回 `-1`（不可排版）。\n\n## 不变式与硬约束\n\n1. 一行放词 $j..i-1$ 的占用宽度 = `sum(wordWidths[j..i-1]) + (i-1-j)`（词间空格各 1 单位）；**行尾不留空格**。\n2. 最后一行不计坏度（排版惯例：末行允许左对齐留白）。这是 DP 转移里最容易写错的一处。\n3. 约束 $n \\\\le 500$、$lineWidth \\\\le 1000$、$1 \\\\le wordWidths[i] \\\\le lineWidth$（0 宽度词抛 `IllegalArgumentException`）。**请给出\"总坏度不会溢出 `int`\"的值域证明**：上界是 $n \\\\cdot lineWidth^2$，代入这两个上限是多少？换成 $n=5000$ 会怎样？\n4. 转移枚举起点时利用\"一行最多放 `lineWidth` 个词（每词宽度至少 1 且词间还有空格）\"提前 `break`，从而把复杂度从 $O(n^2)$ 降到 $O(n \\\\cdot W)$；用前缀和 O(1) 求行宽。\n5. 结果必须与判分完全一致（**不允许**用\"随机扰动 + 多次跑\"之类的非确定做法）。\n\n## 输出契约\n\n返回 `int`（最小总坏度），不可排版时返回 `-1`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "dynamic-programming",
+    "prefix-sum",
+    "knuth-line-breaking",
+    "monotone-optimum",
+    "modern:render-determinism"
+  ],
+  "cases": [
+    {
+      "name": "空词表坏度为 0",
+      "input": [
+        [],
+        10
+      ],
+      "expected": 0
+    },
+    {
+      "name": "两行恰好填满零坏度",
+      "input": [
+        [
+          3,
+          2,
+          2,
+          5
+        ],
+        5
+      ],
+      "expected": 4
+    },
+    {
+      "name": "单行恰好放下一词（零坏度）",
+      "input": [
+        [
+          4
+        ],
+        4
+      ],
+      "expected": 0
+    },
+    {
+      "name": "存在超长词时返回 -1",
+      "input": [
+        [
+          2,
+          9,
+          2
+        ],
+        5
+      ],
+      "expected": -1
+    },
+    {
+      "name": "退化输入：一行只放得下一个词",
+      "input": [
+        [
+          3,
+          3,
+          3,
+          3
+        ],
+        6
+      ],
+      "expected": 27
+    },
+    {
+      "name": "贪心非最优（DP 必须赢过 first-fit）",
+      "input": [
+        [
+          4,
+          1,
+          1,
+          1,
+          4
+        ],
+        6
+      ],
+      "expected": 5
+    },
+    {
+      "name": "全部同宽且恰好成行",
+      "input": [
+        [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        5
+      ],
+      "expected": 0
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int minLayoutSlack(int[] wordWidths, int lineWidth)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * dp[i] = 排版前 i 个词的最小总坏度（第 i 个词之后是行边界）。\n   * 枚举最后一行的起点 j：line = pre[i] - pre[j] - 1 是行占用宽度（pre 里每个词多算 1 个空格）。\n   * 最后一行（i == n）不计坏度。j 递减到行宽超过 lineWidth 就 break：\n   * 因为每个词至少占 1 + 1 = 2，一行最多 lineWidth 个词 → 转移数被 lineWidth 界住，O(n * W)。\n   */\n  public static int minLayoutSlack(int[] wordWidths, int lineWidth) {\n    int n = wordWidths.length;\n    if (n == 0) return 0;\n    int[] pre = new int[n + 1];\n    for (int k = 0; k < n; k++) {\n      if (wordWidths[k] <= 0) throw new IllegalArgumentException(\"word width must be positive\");\n      if (wordWidths[k] > lineWidth) return -1;      // 单词超版心：不可排版\n      pre[k + 1] = pre[k] + wordWidths[k] + 1;\n    }\n    final int INF = Integer.MAX_VALUE / 4;\n    int[] dp = new int[n + 1];\n    java.util.Arrays.fill(dp, INF);\n    dp[0] = 0;\n    for (int i = 1; i <= n; i++) {\n      for (int j = i - 1; j >= 0; j--) {\n        int line = pre[i] - pre[j] - 1;\n        if (line > lineWidth) break;                 // 再往前只会更宽，剪枝\n        int slack = (i == n) ? 0 : (lineWidth - line) * (lineWidth - line);\n        if (dp[j] + slack < dp[i]) dp[i] = dp[j] + slack;\n      }\n    }\n    return dp[n];\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：greedy first-fit —— 当前行能塞就塞，塞不下才换行。\n  // 在 [[4,1,1,1,4]] / 6 这类输入上会比最优解差：第一行塞成 [4,1,1] 后，\n  // 剩下的 1 和 4 无法成行，产生 (6-3)^2 = 9 的碎空间，而最优解是 5。\n  public static int minLayoutSlack(int[] wordWidths, int lineWidth) {\n    int n = wordWidths.length;\n    if (n == 0) return 0;\n    for (int width : wordWidths) {\n      if (width <= 0) throw new IllegalArgumentException(\"word width must be positive\");\n      if (width > lineWidth) return -1;\n    }\n    int total = 0;\n    int pos = 0;\n    while (pos < n) {\n      int used = wordWidths[pos];\n      int next = pos + 1;\n      while (next < n && used + 1 + wordWidths[next] <= lineWidth) {\n        used += 1 + wordWidths[next];\n        next++;\n      }\n      if (next < n) total += (lineWidth - used) * (lineWidth - used);\n      pos = next;\n    }\n    return total;\n  }\n}\n"
+  },
+  "answer": "**思路**：`dp[i]` = 前 i 个词的最小坏度，枚举**最后一行**的起点 j：`dp[i] = min over j (dp[j] + cost(j..i-1))`，其中非末行 `cost = (lineWidth - usedWidth)^2`，末行 cost = 0。行宽用前缀和 O(1)：把每个词都记成 `width+1`，则 `line = pre[i] - pre[j] - 1`（减掉行尾多余的那个空格）。\n\n**贪心为什么错**（这是本题的听点）：`[4,1,1,1,4] / lineWidth=6`。贪心第一行塞成 `4 1 1`（宽 6，坏度 0），第二行 `1 1`（宽 3，坏度 9），末行 `4`（不计）→ 合计 **9**。而最优解是 `4`（坏度 4）+ `1 1 1`（宽 5，坏度 1）+ 末行 `4`（0）→ **5**。**\"每行尽量填满\"只是局部最优；坏度是剩余空间的平方（凸惩罚），宁可让前一行少塞一点也要把碎空间摊薄**——这正是 DP 适用的信号。**\"每行尽量填满\"是局部最优，坏度是平方函数 → 惩罚凸，宁可让前一行少塞一点也要让后面的行更均匀**，这正是 DP 适用的信号。\n\n**值域证明（必须会说）**：单行坏度上界 $lineWidth^2 = 10^6$；行数上界 $n = 500$ → 总坏度 $\\\\le 5\\\\times10^8 < 2.147\\\\times10^9$，`int` 安全。把 $n$ 提到 5000（或 $lineWidth$ 到 4000）就不再安全，必须换 `long`——判分用的 `INF = Integer.MAX_VALUE / 4` 也会随之失效（`INF + slack` 溢出）。写 DP 时把\"哨兵值 + 单次转移增量\"的上界一起算出来，才算交付。\n\n**复杂度**：$O(n \\\\cdot W)$ 时间、$O(n)$ 空间（$W = lineWidth$ 是\"一行最多几个词\"的上界，因为每词至少占 `1 + 1`）。进一步可用**单调队列 / Knuth-Plass 的决策单调性**（cost 满足四边形不等式 → divide-and-conquer DP 或 SMAWK）降到 $O(n \\\\log n)$；能说清\"为什么 cost 是凸的所以决策点单调\"是 principal 加分。\n\n**面试追问**：\n1. 为什么\"最后一行不计坏度\"？（排版惯例：末行允许左对齐留白。写错这一条会在\"退化成一行只放一个词\"的用例上判负。）\n2. 如果禁止\"寡行\"（最后一行至少 2 个词）怎么改？（在 `i == n` 的转移上加 j 的下界约束，或对末行加罚项；DP 结构不变。）\n3. 词宽可能来自 `String.measureText`，含代理对/组合字符怎么办？（宽度要按**码点**与字体度量算，不能用 `length()`；本批判分题的姊妹考点见 0015 的 CSV 解析——字符编码假设必须写进不变式。）\n4. 渲染服务怎样保证跨版本一致？（把 DP 表与决策点序列化出来做 golden test；任何\"tie-break 靠 HashMap 顺序\"的实现都会造成同版本不同机器的排版差异。）\n5. 如果一页放不下要分页（同时最小化\"行坏度 + 分页罚\"）？（两阶段 DP：先算段内最优排版，再在\"页容量\"约束下对段做二分/DP；这就是 TeX 的 page-break 算法，代价是 DP 状态要多一维。）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-graph-dp-adversarial.md#13-dpscrolling-array-sentinel-and-modulus",
+    "addedBy": "content-agent-alg"
+  }
+}

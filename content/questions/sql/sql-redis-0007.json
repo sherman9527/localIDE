@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0007",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "多租户在途配额：用 ZSET 记\"谁在跑\"，让崩溃泄漏能自愈",
+  "statement": "## 背景\n\n推理网关要做**多租户在途请求配额**：每个租户最多 `N` 个请求同时在 GPU 上跑，\n超出的排队或拒绝。网关是多进程、多实例的，所以配额状态必须放在 Redis 里共享。\n\n上线两周后出了一次事故：某租户的网关进程被 OOM killer 杀掉，**它持有的配额位没有释放**，\n于是该租户永久占满配额、所有新请求全被拒 —— 重启也不自愈，只能人工清 key。\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL`/`SCRIPT`/`KEYS`/`FLUSHDB`/`CONFIG`/`DEBUG`/`SORT`/`OBJECT` 等命令\n（判题器会直接拒），所以\"用 Lua 做原子判断\"不在本题解空间内。\n\n## 你要交付的东西\n\n提交一段**命令序列**（每行一条，`#` 开头是注释），按顺序完成下面全部动作。\n判题会在你的脚本跑完之后，逐条执行校验命令并比对结果 —— 也就是说它看的是**最终状态**，\n不是你的解释。\n\n固定的 key 规范与参数（必须照用，否则校验命令找不到你的数据）：\n\n- 每个租户一个有序集合 `inflight:{tenant}`；\n- **score = 该请求登记时刻的毫秒时间戳**，**member = 请求 id**（不是计数器，必须能追溯到是哪个请求）；\n- 租户：`a`、`b`；配额上限本题不考（放行判断在应用层，脚本只负责记账）。\n\n按顺序完成：\n\n1. 清空 `inflight:a` 与 `inflight:b`（脚本要能重复执行而结果不变）；\n2. 租户 a 登记 3 个在途请求：`r1`@1000、`r2`@2000、`r3`@3000；\n3. 租户 b 登记 2 个：`q1`@1500、`q2`@2500；\n4. **回收僵尸**：以\"当前时刻 `now = 3500`、租约 `ttl = 1000`\"为准，\n   把两个租户里 `score <= 2500` 的条目当作已泄漏，全部清掉（边界含 2500 本身）；\n5. 租户 a 再登记 `r4`@4000；\n6. 给两个 key 各设 60 秒的兜底过期（防止租户彻底消失后 key 永久驻留）。\n\n## 这题真正考的东西\n\n- **`INCR`/`DECR` 计数器做不了这件事**。它只记\"占了几个\"，不记\"是谁占的\"，\n  于是进程崩溃漏减之后**没有任何办法回收**（你不知道该减哪个、也不知道该减几个）。\n  把\"时刻\"写进 score，僵尸就变成一段 `ZREMRANGEBYSCORE` 就能扫掉的范围 —— 自愈能力来自数据形状，不来自运维。\n- **回收必须发生在登记之前**（真实网关里每次登记前都要先扫一遍），\n  否则刚登记完就被自己的清理逻辑误删；本题按\"先登记、再统一回收、再登记 r4\"的顺序考，\n  所以 `r4`（score 4000）必须活下来，而 `r3`（3000 > 2500）也要活下来。\n- **边界含 2500**：`q2` 的 score 正好是 2500，按口径它算僵尸。\n  用 `-inf (2500`  exclusive 写法会把 `q2` 留下，校验就会看到 `b` 还剩 1 个。\n- **租户隔离靠 key 形状**，不靠\"记得加前缀\"：`a` 的 member 绝不能出现在 `b` 的集合里。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "rate-limiting",
+    "multi-tenancy",
+    "zset",
+    "lease-reclaim",
+    "modern:inference-gateway"
+  ],
+  "cases": [
+    {
+      "name": "租户 a 最终在途 2 个（r3 与 r4 活下来）",
+      "input": [
+        "ZCARD inflight:a"
+      ],
+      "expected": 2,
+      "visible": true,
+      "note": "r1@1000、r2@2000 是僵尸；r3@3000 > 2500 保留，r4@4000 在回收之后登记"
+    },
+    {
+      "name": "租户 b 被清空：score 恰等于阈值的 q2 也算僵尸",
+      "input": [
+        "ZCARD inflight:b"
+      ],
+      "expected": 0,
+      "visible": true,
+      "note": "用 exclusive 上界 (2500 的写法会留下 1 个"
+    },
+    {
+      "name": "回收必须真的发生：a 里不许残留 score <= 2500 的条目",
+      "input": [
+        "ZCOUNT inflight:a -inf 2500"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "member 可追溯到请求 id（不是计数器）",
+      "input": [
+        "ZRANGE inflight:a 0 -1"
+      ],
+      "expected": [
+        "r3",
+        "r4"
+      ],
+      "visible": true
+    },
+    {
+      "name": "租户隔离：b 的集合里不许出现任何东西（含 a 的请求）",
+      "input": [
+        "ZCOUNT inflight:b 0 +inf"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "score 必须是登记时刻而不是占位值",
+      "input": [
+        "ZSCORE inflight:a r3"
+      ],
+      "expected": 3000,
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nDEL inflight:a\nDEL inflight:b\nZADD inflight:a 1000 r1\nZADD inflight:a 2000 r2\nZADD inflight:a 3000 r3\nZADD inflight:b 1500 q1\nZADD inflight:b 2500 q2\nZREMRANGEBYSCORE inflight:a -inf 2500\nZREMRANGEBYSCORE inflight:b -inf 2500\nZADD inflight:a 4000 r4\nEXPIRE inflight:a 60\nEXPIRE inflight:b 60\n```\n\n最终状态：`inflight:a = {r3@3000, r4@4000}`（2 个）、`inflight:b = {}`（0 个）。\n\n**为什么这个数据形状能自愈**：`score` 是登记时刻，\"泄漏\"就等价于\"score 落在过期区间里\"，\n于是回收是一条 O(log N + M) 的范围删除，不需要任何外部知识。\n换成 `INCR quota:a` / `DECR quota:a` 的计数器方案，状态里**没有\"谁占的、什么时候占的\"**，\n崩溃后既无法判断该减几，也无法区分\"真在跑\"与\"早就死了\" —— 只能人工介入。\n本题的判分点其实就是这一条：**可回收性来自数据建模，不来自运维流程**。\n\n**顺序为什么是\"回收 → 再登记\"**：真实网关每次放行前都要先扫一遍僵尸，\n否则新登记的请求会被同一轮的清理逻辑删掉（尤其当 `ttl` 小于等于时钟抖动时）。\n本题的 `r4`（score 4000）就是用来验证这一点的：先登记后回收的实现它会活着，\n但如果实现把回收放在最后且阈值写错，它就可能被误删。\n\n**边界**：`2500` 含在内 ⇒ `q2` 必须被清掉。\n写成 `ZREMRANGEBYSCORE inflight:b -inf (2500` 会留下 1 个，校验立刻暴露。\n\n**工程延伸（面试追问点）**\n\n1. 没有 Lua 怎么做\"检查 + 占位\"的原子操作？（Redis 侧能做的是把两步压成一步：\n   `ZADD ... GT`/`ZADD ... NX` 加条件、或用 `ZCARD` 后由应用层决定；\n   真正的原子性要靠**幂等 + 冲突可检测**（member 用请求 id，重复登记不改变状态），\n   而不是靠\"读-改-写\"看起来很快。）\n2. 网关多实例并发登记会不会互相覆盖？（不会 —— `ZADD` 是按 member  upsert，\n   这正是用 ZSET 而不是用单个 string 存\"当前并发数\"的原因。）\n3. `ttl` 定多少？（它必须 **大于** 最长请求时间，否则会把还在跑的请求当僵尸删掉，\n   配额被低估 → 过载；小于最长时间则回收不了。正确做法是\"请求侧续租\"（心跳 `ZADD` 更新 score），\n   这样 `ttl` 只需大于心跳间隔，两者解耦。）\n4. 配额要不要按模型/优先级分池？（要。`inflight:{tenant}:{model}:{priority}` 是常见形状；\n   但一旦分池，\"跨池借用\"就需要第二层记账 —— 借用记录本身也要能自愈，别只给主池做回收。）\n5. 怎么观测这套配额是不是在漏？（直接指标：`ZCARD` 与网关侧真实在途数的差值；\n   以及\"被回收的僵尸数\" —— 它持续增长说明有进程在异常退出，那才是根因。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL inflight:a",
+      "DEL inflight:b"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# 幂等起手：脚本可重复执行\nDEL inflight:a\nDEL inflight:b\n# 租户 a 登记 3 个在途请求（score = 登记时刻，member = 请求 id）\nZADD inflight:a 1000 r1\nZADD inflight:a 2000 r2\nZADD inflight:a 3000 r3\n# 租户 b 登记 2 个\nZADD inflight:b 1500 q1\nZADD inflight:b 2500 q2\n# 回收僵尸：now=3500、ttl=1000 ⇒ 阈值 2500，score <= 2500 视为已泄漏\nZREMRANGEBYSCORE inflight:a -inf 2500\nZREMRANGEBYSCORE inflight:b -inf 2500\n# 新请求登记（必须在回收之后，否则会被自己的回收误删）\nZADD inflight:a 4000 r4\n# 兜底过期：租户彻底消失后 key 不会永久驻留\nEXPIRE inflight:a 60\nEXPIRE inflight:b 60",
+    "naiveSolution": "# 生产事故版：只记账，不回收 —— 进程一崩配额就永久泄漏\nDEL inflight:a\nDEL inflight:b\nZADD inflight:a 1000 r1\nZADD inflight:a 2000 r2\nZADD inflight:a 3000 r3\nZADD inflight:b 1500 q1\nZADD inflight:b 2500 q2\nZADD inflight:a 4000 r4\nEXPIRE inflight:a 60\nEXPIRE inflight:b 60"
+  },
+  "estimatedMinutes": 18,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理网关 / 平台工程 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#57,#30（原文只答\"队列隔离、算力配额\"，未给可判分的记账结构与回收语义）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T13:44:55.025Z"
+  }
+}

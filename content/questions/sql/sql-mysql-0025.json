@@ -1,0 +1,369 @@
+{
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "实验进组的三种口径：累计去重、天级去重之和、多天平均，一次算清并暴露 ARPU 漂移",
+  "statement": "## 背景\n\n火山引擎 A/B《如何看懂实验报告》对统计口径的原文是【源 S10】：\n\n> \"以进组用户数为例，多天累计的用户数，即是实验期间**累计进组并去重**后的用户数\"\n> \"相比单天累计，多天累计更能保证各组的样本是「**同质可比**」的；\n> 相比多天平均，多天累计更易检验出受影响指标的**显著性**\"\n\n也就是说官方把**三种**口径摆在了一起：单天累计、多天累计（去重）、多天平均。\n这题就是把三者同时算出来，并让\"分母换一个、结论就翻\"这件事变得可机器判。\n\n（`users_daily_sum / days` 这个\"多天平均\"、以及 ARPU 的具体算法是本题设定。）\n\n## 表\n\n```\nassignment(id INT PK, exp_id VARCHAR(16), group_name VARCHAR(16),\n           user_id VARCHAR(16), assigned_date CHAR(10))     -- 'yyyy-MM-dd'\nconversion(id INT PK, user_id VARCHAR(16), gmv_fen BIGINT)  -- 金额单位是**分**\n```\n\n`assignment` 是**进组流水**：同一用户会被反复记到（每天一条，偶发重复上报），\n所以它不是\"用户名单\"。`conversion` 是全量成交，**包含从未进过任何实验的用户**。\n\n## 任务\n\n只交**一条 SELECT**。按 `(exp_id, group_name)` 输出，列固定为\n\n```\nexp_id, group_name, users_cum, users_daily_sum, days, avg_daily_users, gmv_fen, arpu_cum_fen\n```\n\n- `users_cum` = **累计去重**进组用户数\n- `days` = 该组有进组记录的自然日数\n- `users_daily_sum` = **每天各自去重**之后的人次之和\n  （= \"该组内不同的 `(user_id, assigned_date)` 组合数\"。它**不等于**流水行数）\n- `avg_daily_users` = `ROUND(users_daily_sum / days, 2)`\n- `gmv_fen` = 该组**去重用户**的成交金额之和（单位分）\n- `arpu_cum_fen` = `FLOOR(gmv_fen / users_cum)`\n按 `exp_id`、`group_name` 升序。**没有进组记录的组不许出现在结果里。**\n\n## 三条口径纪律\n\n- **`gmv_fen` 的分子必须按去重用户聚合，分母也必须是去重用户数。**\n  直接 `JOIN conversion` 再 `SUM` 会把 GMV 乘上\"该用户的进组流水条数\" ——\n  u1 在 E1/treat 里有 3 条流水、两笔成交共 32000 分，\n  那样算出来是 **96000 分**。**这是本仓库反复强调的那类\"静默降级\"：\n  每一列都\"有值\"，只有量级是错的。**\n- **一个用户同时属于两个实验时，他的 GMV 在两个实验里各算一次。**\n  这不是重复计算错误：实验比的是\"组内 vs 组内\"。\n  也正因此 —— **能把各实验 GMV 加回大盘的那个口径，不是实验口径。**\n- **从未进组的用户一分都不许进分子。**\n  `conversion` 里有一个只成交、从不进组的用户；\n  任何\"从成交表出发再关联实验\"的写法都会把他的钱算进去。\n\n## 陷阱提示\n\n判题数据里包含：跨天重复进组、**同一用户同一天两条流水**、\n有进组但无成交的用户、有成交但没进过任何组的用户、清空成交表、清空进组表。\n**`SUM` 一个可能为 NULL 的列之前先想清楚 `COALESCE` 放在哪一侧** ——\n把它写成 `WHERE c.user_id IS NOT NULL` 会把\"整组无成交\"这一组**整行删掉**，\n于是报表显示\"这个组不存在\"，而不是\"这个组 GMV 为 0\"。\n\n只允许一条 `SELECT`。",
+  "judgeKind": "mysql",
+  "tags": [
+    "ab-reading-caliber",
+    "cumulative-dedup",
+    "fan-out-join",
+    "denominator-domain",
+    "modern:experimentation"
+  ],
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（实验平台与指标方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 12（实验读数口径：官方\"多天累计 + 进组用户累计去重\"、\"同质可比\"、\"多天平均\"三种口径的对照）＋ 考点 7（同一指标多口径两两差异）；ARPU 与 avg_daily_users 的具体公式是【推】，已写成题面契约",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:46:11.721Z"
+  },
+  "language": "sql",
+  "cases": [
+    {
+      "name": "基线：跨天重复 + 同日重复流水都要吃掉，两种口径的人数与 ARPU 同时输出",
+      "input": [],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "group_name",
+          "users_cum",
+          "users_daily_sum",
+          "days",
+          "avg_daily_users",
+          "gmv_fen",
+          "arpu_cum_fen"
+        ],
+        "rows": [
+          [
+            "E1",
+            "ctrl",
+            3,
+            3,
+            2,
+            1.5,
+            5000,
+            1666
+          ],
+          [
+            "E1",
+            "treat",
+            3,
+            5,
+            3,
+            1.67,
+            52000,
+            17333
+          ],
+          [
+            "E2",
+            "ctrl",
+            1,
+            1,
+            1,
+            1.0,
+            100,
+            100
+          ],
+          [
+            "E2",
+            "treat",
+            2,
+            2,
+            2,
+            1.0,
+            131000,
+            65500
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "E1/treat 有 6 条流水、3 个去重用户、5 个\"用户-天\" ⇒ daily_sum=5、days=3、avg 1.67。COUNT(*) 会给出 6，不去重的 users_cum 会给出 6",
+      "visible": true
+    },
+    {
+      "name": "边界：同一用户被两个实验各吃进去一次，他的 GMV 在两个实验里各算一遍",
+      "input": [
+        "INSERT INTO assignment VALUES (13, 'E2', 'treat', 'u2', '2026-09-05')"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "group_name",
+          "users_cum",
+          "users_daily_sum",
+          "days",
+          "avg_daily_users",
+          "gmv_fen",
+          "arpu_cum_fen"
+        ],
+        "rows": [
+          [
+            "E1",
+            "ctrl",
+            3,
+            3,
+            2,
+            1.5,
+            5000,
+            1666
+          ],
+          [
+            "E1",
+            "treat",
+            3,
+            5,
+            3,
+            1.67,
+            52000,
+            17333
+          ],
+          [
+            "E2",
+            "ctrl",
+            1,
+            1,
+            1,
+            1.0,
+            100,
+            100
+          ],
+          [
+            "E2",
+            "treat",
+            3,
+            3,
+            2,
+            1.5,
+            143000,
+            47666
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "u2 的 12000 分同时进 E1/treat 与 E2/treat 的分子 ⇒ 把各实验的 GMV 加起来会大于真实总成交",
+      "visible": true
+    },
+    {
+      "name": "把某用户那天的重复流水与原始流水一起删掉 ⇒ 去重人数不变、日均变小",
+      "input": [
+        "DELETE FROM assignment WHERE id = 3",
+        "DELETE FROM assignment WHERE id = 12"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "group_name",
+          "users_cum",
+          "users_daily_sum",
+          "days",
+          "avg_daily_users",
+          "gmv_fen",
+          "arpu_cum_fen"
+        ],
+        "rows": [
+          [
+            "E1",
+            "ctrl",
+            3,
+            3,
+            2,
+            1.5,
+            5000,
+            1666
+          ],
+          [
+            "E1",
+            "treat",
+            3,
+            4,
+            3,
+            1.33,
+            52000,
+            17333
+          ],
+          [
+            "E2",
+            "ctrl",
+            1,
+            1,
+            1,
+            1.0,
+            100,
+            100
+          ],
+          [
+            "E2",
+            "treat",
+            2,
+            2,
+            2,
+            1.0,
+            131000,
+            65500
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "只删 id 3 不删 id 12 时\"用户-天\"仍是 5 —— 这正是同日重复的作用；两条一起删才让 daily_sum 掉到 4 ⇒ avg 1.33",
+      "visible": true
+    },
+    {
+      "name": "新增一个从未成交的用户 ⇒ 分母变大、ARPU 变小（这就是分母敏感）",
+      "input": [
+        "INSERT INTO assignment VALUES (14, 'E1', 'treat', 'u99', '2026-09-03')"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "group_name",
+          "users_cum",
+          "users_daily_sum",
+          "days",
+          "avg_daily_users",
+          "gmv_fen",
+          "arpu_cum_fen"
+        ],
+        "rows": [
+          [
+            "E1",
+            "ctrl",
+            3,
+            3,
+            2,
+            1.5,
+            5000,
+            1666
+          ],
+          [
+            "E1",
+            "treat",
+            4,
+            6,
+            3,
+            2.0,
+            52000,
+            13000
+          ],
+          [
+            "E2",
+            "ctrl",
+            1,
+            1,
+            1,
+            1.0,
+            100,
+            100
+          ],
+          [
+            "E2",
+            "treat",
+            2,
+            2,
+            2,
+            1.0,
+            131000,
+            65500
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "u99 没有任何成交 ⇒ gmv 不变而 users_cum 从 3 变 4，E1/treat 的 arpu 从 17333 掉到 13000",
+      "visible": true
+    },
+    {
+      "name": "边界：有成交但从未进过任何组的用户，一分都不许进实验分子",
+      "input": [
+        "DELETE FROM assignment"
+      ],
+      "expected": [],
+      "note": "进组流水清空 ⇒ 结果必须是空集（连 u9 的 7700 分都不能出现）",
+      "visible": true
+    },
+    {
+      "name": "清空成交表 ⇒ ARPU 与 GMV 归零，但进组人数与四个分组行都不许消失",
+      "input": [
+        "DELETE FROM conversion"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "group_name",
+          "users_cum",
+          "users_daily_sum",
+          "days",
+          "avg_daily_users",
+          "gmv_fen",
+          "arpu_cum_fen"
+        ],
+        "rows": [
+          [
+            "E1",
+            "ctrl",
+            3,
+            3,
+            2,
+            1.5,
+            0,
+            0
+          ],
+          [
+            "E1",
+            "treat",
+            3,
+            5,
+            3,
+            1.67,
+            0,
+            0
+          ],
+          [
+            "E2",
+            "ctrl",
+            1,
+            1,
+            1,
+            1.0,
+            0,
+            0
+          ],
+          [
+            "E2",
+            "treat",
+            2,
+            2,
+            2,
+            1.0,
+            0,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    }
+  ],
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS `assignment`",
+      "DROP TABLE IF EXISTS `conversion`",
+      "CREATE TABLE assignment (id INT NOT NULL PRIMARY KEY, exp_id VARCHAR(16) NOT NULL, group_name VARCHAR(16) NOT NULL, user_id VARCHAR(16) NOT NULL, assigned_date CHAR(10) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE conversion (id INT NOT NULL PRIMARY KEY, user_id VARCHAR(16) NOT NULL, gmv_fen BIGINT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO assignment VALUES (1, 'E1', 'treat', 'u1', '2026-09-01'), (2, 'E1', 'treat', 'u2', '2026-09-01'), (3, 'E1', 'treat', 'u1', '2026-09-02'), (4, 'E1', 'treat', 'u3', '2026-09-02'), (5, 'E1', 'treat', 'u2', '2026-09-03'), (6, 'E1', 'ctrl', 'u4', '2026-09-01'), (7, 'E1', 'ctrl', 'u5', '2026-09-02'), (8, 'E1', 'ctrl', 'u6', '2026-09-02'), (9, 'E2', 'treat', 'u1', '2026-09-01'), (10, 'E2', 'treat', 'u7', '2026-09-05'), (11, 'E2', 'ctrl', 'u8', '2026-09-05'), (12, 'E1', 'treat', 'u1', '2026-09-02')",
+      "INSERT INTO conversion VALUES (1, 'u1', 30000), (2, 'u2', 12000), (3, 'u3', 8000), (4, 'u4', 5000), (5, 'u1', 2000), (6, 'u7', 99000), (7, 'u8', 100), (8, 'u9', 7700)"
+    ],
+    "entry": "function",
+    "timeoutMs": 20000,
+    "referenceSolution": "SELECT g.exp_id                                       AS exp_id,\n       g.group_name                                     AS group_name,\n       g.users_cum                                      AS users_cum,\n       g.users_daily_sum                                AS users_daily_sum,\n       dd.days                                          AS days,\n       ROUND(g.users_daily_sum / dd.days, 2)            AS avg_daily_users,\n       COALESCE(m.gmv_fen, 0)                           AS gmv_fen,\n       FLOOR(COALESCE(m.gmv_fen, 0) / g.users_cum)      AS arpu_cum_fen\nFROM (SELECT exp_id, group_name,\n             COUNT(DISTINCT user_id) AS users_cum,\n             COUNT(DISTINCT user_id, assigned_date) AS users_daily_sum\n      FROM assignment\n      GROUP BY exp_id, group_name) g\nJOIN (SELECT exp_id, group_name, COUNT(DISTINCT assigned_date) AS days\n      FROM assignment\n      GROUP BY exp_id, group_name) dd\n  ON dd.exp_id = g.exp_id AND dd.group_name = g.group_name\nLEFT JOIN (SELECT a.exp_id                            AS exp_id,\n                  a.group_name                        AS group_name,\n                  SUM(c.gmv_fen)                      AS gmv_fen\n           FROM (SELECT DISTINCT exp_id, group_name, user_id FROM assignment) a\n           JOIN (SELECT user_id, SUM(gmv_fen) AS gmv_fen\n                 FROM conversion GROUP BY user_id) c\n             ON c.user_id = a.user_id\n           GROUP BY a.exp_id, a.group_name) m\n  ON m.exp_id = g.exp_id AND m.group_name = g.group_name\nORDER BY g.exp_id, g.group_name",
+    "naiveSolution": "SELECT a.exp_id                                   AS exp_id,\n       a.group_name                                 AS group_name,\n       COUNT(*)                                     AS users_cum,\n       COUNT(*)                                     AS users_daily_sum,\n       COUNT(DISTINCT a.assigned_date)              AS days,\n       ROUND(COUNT(*) / COUNT(DISTINCT a.assigned_date), 2) AS avg_daily_users,\n       SUM(c.gmv_fen)                               AS gmv_fen,\n       FLOOR(SUM(c.gmv_fen) / COUNT(*))             AS arpu_cum_fen\nFROM assignment a\nJOIN conversion c ON c.user_id = a.user_id\nGROUP BY a.exp_id, a.group_name\nORDER BY a.exp_id, a.group_name",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 30,
+  "answer": "## 参考答案\n\n关键是**先压平、再聚合**，而且**三路各自算完才拼**：\n`g` 算\"去重人数 + 去重用户-天数\"（`COUNT(DISTINCT user_id)` 与\n`COUNT(DISTINCT user_id, assigned_date)`），`dd` 算自然日数，\n`m` 单独把 GMV 聚合到**去重用户**粒度上（内层 `SELECT DISTINCT exp_id, group_name, user_id`\n是唯一的防扇出屏障）。任何把这三路合并成一次 `JOIN` 的写法都会在某一列上被流水放大。\n\n**基线四行：**\n\n| exp | group | users_cum | users_daily_sum | days | avg | gmv_fen | arpu |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| E1 | ctrl | 3 | 3 | 2 | 1.50 | 5000 | 1666 |\n| E1 | treat | 3 | 5 | 3 | 1.67 | 52000 | 17333 |\n| E2 | ctrl | 1 | 1 | 1 | 1.00 | 100 | 100 |\n| E2 | treat | 2 | 2 | 2 | 1.00 | 131000 | 65500 |\n\nE1/treat 的 **6 条流水** ⇒ 3 个去重用户、**5 个用户-天**（u1 在 09-02 有两条流水）。\nGMV = u1(30000+2000) + u2(12000) + u3(8000) = 52000 分 ⇒ `FLOOR(52000/3) = 17333`。\n\n- 不去重 `users_cum` ⇒ 会得到 6、`arpu` 变成 8666；\n- 不去重 `(user, day)` ⇒ `users_daily_sum` 变成 6、`avg` 变成 2.00；\n- 让 GMV 被流水放大 ⇒ `gmv_fen` 变成 96000。\n**三个错各自只动一列，而每一列都\"看起来是个正常的数\"** —— 这就是为什么这题要把六个数同时输出。\n\n**用例「把某用户那天的重复流水与原始流水一起删掉」专门钉 `users_daily_sum` 的语义**：\n只删 id 3 时 5 不变（id 12 还在），两条一起删才掉到 4 ⇒ `avg = ROUND(4/3,2) = 1.33`。\n写成 `COUNT(*)` 的实现会跟着流水走，两个数都对不上。\n\n**边界用例是\"清空进组流水 ⇒ 空集\"**，\n而 `conversion` 里那个从未进组的用户（7700 分）**在基线里也一分都不出现**。\n用例「新增一个从未成交的用户」是另一半：\nu99 有进组无成交 ⇒ `users_cum` 从 3 变 4、GMV 仍是 52000 ⇒\n`arpu` 从 17333 掉到 13000。**一个子都没多，只是分母大了。**\n这就是官方为什么要写\"同质可比\"，也是为什么看板上必须\n**同时**给 `users_cum` 与 `gmv_fen` —— 只给 ARPU 的报表一定会骗人。\n\n**基线的双实验重叠**：四个分组的 `gmv_fen` 相加是\n`5000 + 52000 + 100 + 131000 = 188100` 分，\n而全部成交流水只有 163800 分。差额要拆成两半看：\n其中 **7700 分属于从没进过任何实验的 u9**（他没被算进去，所以是\"少加\"），\n**32000 分属于 u1 —— 他的两笔成交在 E1 与 E2 里各被记了一遍**（多加）。\n用例「同一用户被两个实验各吃进去一次」再把 u2 塞进 E2/treat，\n此时四组之和变成 `188100 + 12000 = 200100` 分（他的 12000 分同时进了 E1 与 E2 的分子）。\n这条算式说明的不是\"SQL 写错了\"，而是\n**实验口径天然不能横向求和成大盘**；想要大盘口径就必须有一个互斥的、\n覆盖全量的分流层 —— 也就是官方文档里的\"互斥域组保留对照组 / 全局保留对照组\"【源 S9】。\n\n**为什么 `naiveSolution` 一定挂**：它 `JOIN conversion` 因而把 GMV 按流水条数放大\n（E1/treat 的 u1 有 3 条流水 ⇒ 32000 分被算成 96000 分）、\n把 `COUNT(*)` 当去重人数（3 变 6）、并且用内连接**丢掉所有无成交的组**：\n在「清空成交表」那条用例下它返回空集，而期望是**四行带 0**。\n\"整组消失\"与\"该组数值为 0\"在报表上是两件完全不同的事 ——\n前者会被读成\"实验没跑\"，后者会被读成\"实验跑了但没带来成交\"。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"多天累计\"更能保证显著？（累计使样本量随天数单调增长，检验灵敏度提高【源 S10】。\n   但这**不等于可以天天看着显著就停**：多次窥视会抬高假阳性率（素材 §2 追问 13，标【推】）。\n   正解是预注册时长 + 停线只对护栏指标。）\n2. `assigned_date` 为什么用 CHAR(10) 而不是 DATE？（题面刻意如此：避免时区与\"日归属\"歧义。\n   真实系统里\"进组时间属于哪一天\"必须由**平台统一口径**决定并写进指标定义，\n   否则跨时区业务的 `days` 就不可比 —— 素材考点 7 那句\"时间锚点\"就是这一条。）\n3. `COUNT(DISTINCT a, b)` 能移植吗？（MySQL 特有。换到 Spark/PG 要写\n   `COUNT(DISTINCT CONCAT(...))` 或两级 `GROUP BY`。\n   题面要求\"先按 (用户,天) 去过重再计数\"说的就是这个**形状**，\n   而不是某个函数名 —— 判题只认结果，但人读你的 SQL 时要能看出你懂这一步在防什么。）",
+  "schemaVersion": 1,
+  "id": "sql-mysql-0025"
+}

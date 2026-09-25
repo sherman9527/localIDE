@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0002",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "长连接网关的峰值并发槽位（扫描线端点语义）",
+  "statement": "## 背景\n\n长连接网关做准入控制：每个 WebSocket 会话在 [start, end] 期间占用一个连接槽位。容量评审要的是**同一时刻并发会话数的峰值**（峰值直接决定 maxConnections 配置）。\n\n直觉做法是\"开始时间与结束时间各自排序后双指针扫\"，但那样**端点相接的语义就丢了**：会话 A 在 t 结束、会话 B 在 t 开始，到底算不算同时占用？这必须由调用方给开关，不能交给实现的巧合。\n\n## 入口\n\n```java\npublic static int peakConcurrentSessions(int[] startSecs, int[] endSecs, boolean touchingSharesSlot)\n```\n\n- 第 i 个会话占用闭区间 [startSecs[i], endSecs[i]]；\n- `touchingSharesSlot == true`：端点相接算并发（同一时刻既要释放又要占用，两个会话同时存在）；\n- `touchingSharesSlot == false`：端点相接**不算**并发（等价于 [start, end) 半开）；\n- 返回峰值并发数；没有任何会话时返回 `0`。\n\n## 不变式与硬约束\n\n1. `startSecs.length == endSecs.length`，否则抛 `IllegalArgumentException`。\n2. 每个区间满足 `endSecs[i] >= startSecs[i]`，否则抛 `IllegalArgumentException`。\n3. 坐标取遍 `int` 全域：必须能处理 `Integer.MIN_VALUE` 与 `Integer.MAX_VALUE`。**严禁 `end + 1` 这类差分位移写法**（差分数组的 +1 在 MAX_VALUE 上会溢出）。\n4. 期望结构：`TreeMap` 扫描线，或\"把 (坐标, 事件类型) 打包进一个 `long` 后 `Arrays.sort(long[])`\"。打包时必须保证**同一坐标下先处理哪一类事件由 `touchingSharesSlot` 决定**，且坐标平移要落在 `long` 域（提示：`(long) t - Integer.MIN_VALUE` 把 int 保序映射到 [0, 2^32-1]）。\n5. 复杂度 O(n log n) 时间、O(n) 额外空间；n 上界 2e5；不许开 int[2^32] 的差分数组。\n\n## 输出契约\n\n返回基本类型 `int`；峰值落在 [0, n]，不要用装箱 `Integer`，也不要返回集合。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "sweep-line",
+    "sorting",
+    "endpoint-semantics",
+    "overflow-contract",
+    "modern:sla-admission"
+  ],
+  "cases": [
+    {
+      "name": "空输入返回 0",
+      "input": [
+        [],
+        [],
+        true
+      ],
+      "expected": 0
+    },
+    {
+      "name": "单会话返回 1",
+      "input": [
+        [
+          100
+        ],
+        [
+          200
+        ],
+        false
+      ],
+      "expected": 1
+    },
+    {
+      "name": "端点相接并列时算并发",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          3
+        ],
+        true
+      ],
+      "expected": 2
+    },
+    {
+      "name": "端点相接不算并发",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          2,
+          3
+        ],
+        false
+      ],
+      "expected": 1
+    },
+    {
+      "name": "极值端点退化：MIN_VALUE 与 MAX_VALUE 不得相加",
+      "input": [
+        [
+          -2147483648,
+          0
+        ],
+        [
+          2147483647,
+          2147483646
+        ],
+        false
+      ],
+      "expected": 2
+    },
+    {
+      "name": "嵌套包含区间",
+      "input": [
+        [
+          0,
+          5,
+          15
+        ],
+        [
+          30,
+          10,
+          20
+        ],
+        false
+      ],
+      "expected": 2
+    },
+    {
+      "name": "全部端点并列在同一时刻",
+      "input": [
+        [
+          7,
+          7,
+          7
+        ],
+        [
+          7,
+          7,
+          7
+        ],
+        true
+      ],
+      "expected": 3
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int peakConcurrentSessions(int[] startSecs, int[] endSecs, boolean touchingSharesSlot)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 事件打包进 long：高位 = 坐标保序平移到 [0, 2^32-1]，低位 = 同一坐标内的处理顺序。\n   * touchingSharesSlot 决定\"进入\"排在\"退出\"之前（相接算并发）还是之后（相接不算并发）。\n   * O(n log n) 时间、O(n) 空间；全程没有 end + 1，因此 MAX_VALUE 端点安全。\n   */\n  public static int peakConcurrentSessions(int[] startSecs, int[] endSecs, boolean touchingSharesSlot) {\n    if (startSecs.length != endSecs.length) {\n      throw new IllegalArgumentException(\"length mismatch\");\n    }\n    int n = startSecs.length;\n    if (n == 0) return 0;\n    long inBit = touchingSharesSlot ? 0L : 1L;\n    long outBit = touchingSharesSlot ? 1L : 0L;\n    long[] events = new long[n * 2];\n    for (int k = 0; k < n; k++) {\n      int a = startSecs[k];\n      int b = endSecs[k];\n      if (b < a) throw new IllegalArgumentException(\"end before start\");\n      long ta = (long) a - Integer.MIN_VALUE;\n      long tb = (long) b - Integer.MIN_VALUE;\n      events[2 * k] = (ta << 1) | inBit;\n      events[2 * k + 1] = (tb << 1) | outBit;\n    }\n    java.util.Arrays.sort(events);\n    int peak = 0;\n    int cur = 0;\n    for (long ev : events) {\n      cur += (ev & 1L) == inBit ? 1 : -1;\n      if (cur > peak) peak = cur;\n    }\n    return peak;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：开始/结束各自排序后双指针。省掉了\"同一坐标内的事件类型\"这一位，\n  // 于是先处理进入还是先处理退出变成比较符的巧合，touchingSharesSlot 被静默忽略。\n  public static int peakConcurrentSessions(int[] startSecs, int[] endSecs, boolean touchingSharesSlot) {\n    if (startSecs.length != endSecs.length) {\n      throw new IllegalArgumentException(\"length mismatch\");\n    }\n    int[] a = startSecs.clone();\n    int[] b = endSecs.clone();\n    java.util.Arrays.sort(a);\n    java.util.Arrays.sort(b);\n    int cur = 0;\n    int peak = 0;\n    int j = 0;\n    for (int value : a) {\n      while (j < b.length && b[j] < value) {\n        cur--;\n        j++;\n      }\n      cur++;\n      if (cur > peak) peak = cur;\n    }\n    return peak;\n  }\n}\n"
+  },
+  "answer": "**思路**：扫描线。每个会话产生两个事件 (坐标, 类型)，按坐标排序后累加 delta，峰值即答案。唯一的区分点是**同一坐标内类型怎么排**：`touchingSharesSlot == true` 先处理\"进入\"（相接算并发），`false` 先处理\"退出\"（等价半开区间）。双指针写法把这件事交给比较的巧合，所以参数被静默忽略——这就是本题的杀点。\n\n**为什么不能 `end + 1`**：坐标覆盖 int 全域，`Integer.MAX_VALUE + 1` 溢出会把\"最后一个时刻\"变成 MIN_VALUE，凭空造出一条横跨全轴的假区间。用事件对（而非差分）天然不需要位移；非要差分就得在 long 域平移坐标。\n\n**打包细节**：`(long) t - Integer.MIN_VALUE` 把 int 保序映射到 [0, 2^32-1]，左移 1 位后仍落在 long 内（2*(2^32-1) < 2^63），低位留给事件类型，于是 `Arrays.sort(long[])` 一次搞定双键排序且零装箱。写成 `Comparator.comparingInt` + `Integer[]` 也能过，但 4e5 个元素会产生同等数量的装箱对象与指针跳跃。\n\n**复杂度**：时间 O(n log n)（排序主导），额外空间 O(n)（事件数组 8*2n 字节，n=2e5 时约 3.2MB，无对象分配，对 GC 友好）。\n\n**面试追问**：\n1. `TreeMap<Integer,Integer>` 聚合 delta 为什么还要小心？（同一坐标内\"先进后出\"必须编码进键或存 (in,out) 二元计数，纯 `merge(t,+1)` 会把两种语义抹平；端点相接的判负就在这里。）\n2. 端点相接算不算冲突由谁决定？（业务：TCP fd 关闭有延迟，同一秒确实可能同时占两个槽；HTTP keep-alive 通常按半开算。必须写进题面成为参数，否则判分不可复现。）\n3. 要输出\"峰值出现的所有时刻\"怎么做？（同一趟扫描记录 `cur == peak` 的坐标；同一坐标有多个事件时要先聚合再判定，并保证输出升序。）\n4. 数据流式到达（无法整体排序）？（`TreeMap` 扫描线可增量维护 cur/peak；或分片聚合 delta 后外部排序归并，这正是 Lambda 架构里\"窗口峰值\"的两阶段做法。）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-collections-heaps.md#13-treemap--treeset区间与扫描线",
+    "addedBy": "content-agent-alg"
+  }
+}

@@ -1,0 +1,315 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0014",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "采样权重还原：设备数按 max 权重归并，分位数必须加权",
+  "statement": "## 背景\n\n端上遥测**不可能全量上传**（带宽与隐私都不同意），所以每个 cohort 有自己的采样率。\n看板要的是\"总体估计值\"，不是\"样本值\" —— 这一步叫**采样权重还原**（Horvitz-Thompson 估计）。\n\n输入视图 `events`：\n\n```\nday           string   -- 'yyyy-MM-dd'\ncohort        string   -- 采样层\nsample_rate   double   -- 该层的采样概率，0 < r <= 1\ndevice_id     string\nlatency_ms    double   -- 可为 null（该事件没带延迟）\n```\n\n每行的**权重**定义为 `weight = 1 / sample_rate`。\n\n## 要输出什么\n\n按 `day` 分组，每行四列：`day, est_events, est_devices, p95_latency_ms`，按 `day` 升序。\n\n- `est_events` = 该天所有行的 `weight` 之和（**每行都算**，包括 `latency_ms` 为 null 的行）。\n- `est_devices` = 先按 `device_id` 归并、**每台设备取其所有行里最大的那个 weight**，再求和。\n  （一台设备可能被采到多次，直接 `Σ weight` 会把同一台设备放大好几遍。）\n- `p95_latency_ms` = **加权** 95 分位数：把该天 `latency_ms` 非 null 的行按延迟升序排，\n  累加 weight，取累计 weight **首次 ≥ 0.95 × 这些行的 weight 总和** 的那个 `latency_ms`。\n  `latency_ms` 为 null 的行完全不参与分位数（既不进分母也不进分子）。\n- 空输入返回 0 行。\n\n## 这题真正考的东西\n\n1. **不能拿一个\"整体采样率\"去线性外推**。各层采样率差两个数量级时（本例 A 层 0.5、B 层 0.01），\n   用平均采样率会把小众层（恰恰是最贵的那批设备）估错，症状是总体量看着对、\n   但**分位数完全不对** —— 因为分位数取决于权重排序，不是总量。\n2. **设备数不是事件数**。`est_devices` 要按设备归并取 max weight；\n   用 `COUNT(DISTINCT device_id) × 平均权重` 在跨层设备上会错（用例 2 专门造了一台\n   同时出现在 0.5 层与 0.01 层的设备：事件数涨、设备数**一点不变**）。\n3. **分位数必须加权**。Spark 的 `percentile_approx` 没有权重参数，\n   所以它给的是\"样本分位数\"，与总体分位数不是一回事 —— 要自己走累计权重。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "sampling-weight",
+    "weighted-percentile",
+    "metric-consistency",
+    "observability",
+    "modern:telemetry-estimation"
+  ],
+  "cases": [
+    {
+      "name": "基线：两天各自的三个指标",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": [
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 100
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 300
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d2",
+            "latency_ms": 900
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "B",
+            "sample_rate": 0.01,
+            "device_id": "d3",
+            "latency_ms": 50
+          },
+          {
+            "day": "2026-05-02",
+            "cohort": "C",
+            "sample_rate": 1,
+            "device_id": "d9",
+            "latency_ms": 20
+          }
+        ]
+      },
+      "expected": [
+        {
+          "day": "2026-05-01",
+          "est_events": 106,
+          "est_devices": 104,
+          "p95_latency_ms": 100
+        },
+        {
+          "day": "2026-05-02",
+          "est_events": 1,
+          "est_devices": 1,
+          "p95_latency_ms": 20
+        }
+      ],
+      "visible": true,
+      "note": "05-01：事件 106、设备 104、加权 p95 = 100（样本分位数会给 900）"
+    },
+    {
+      "name": "同一设备跨两个采样层：事件数涨，设备数一点不变",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": [
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 100
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 300
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d2",
+            "latency_ms": 900
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "B",
+            "sample_rate": 0.01,
+            "device_id": "d3",
+            "latency_ms": 50
+          },
+          {
+            "day": "2026-05-02",
+            "cohort": "C",
+            "sample_rate": 1,
+            "device_id": "d9",
+            "latency_ms": 20
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d3",
+            "latency_ms": 400
+          }
+        ]
+      },
+      "expected": [
+        {
+          "day": "2026-05-01",
+          "est_events": 108,
+          "est_devices": 104,
+          "p95_latency_ms": 300
+        },
+        {
+          "day": "2026-05-02",
+          "est_events": 1,
+          "est_devices": 1,
+          "p95_latency_ms": 20
+        }
+      ],
+      "visible": true,
+      "note": "d3 同时出现在 0.01 与 0.5 层 → 取 max weight，仍是 104；但多出的 2 点权重把加权 p95 从 100 推到 300"
+    },
+    {
+      "name": "latency 为 null 的行仍计入事件与设备，但不进分位数",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": [
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 100
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d1",
+            "latency_ms": 300
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "A",
+            "sample_rate": 0.5,
+            "device_id": "d2",
+            "latency_ms": 900
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "B",
+            "sample_rate": 0.01,
+            "device_id": "d3",
+            "latency_ms": 50
+          },
+          {
+            "day": "2026-05-02",
+            "cohort": "C",
+            "sample_rate": 1,
+            "device_id": "d9",
+            "latency_ms": 20
+          },
+          {
+            "day": "2026-05-01",
+            "cohort": "B",
+            "sample_rate": 0.01,
+            "device_id": "d4",
+            "latency_ms": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "day": "2026-05-01",
+          "est_events": 206,
+          "est_devices": 204,
+          "p95_latency_ms": 100
+        },
+        {
+          "day": "2026-05-02",
+          "est_events": 1,
+          "est_devices": 1,
+          "p95_latency_ms": 20
+        }
+      ],
+      "visible": true,
+      "note": "est_events 106→206、est_devices 104→204，而 p95 仍是 100"
+    },
+    {
+      "name": "采样率全为 1 时退化成普通计数与普通最近秩分位数",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": [
+          {
+            "day": "2026-05-03",
+            "cohort": "D",
+            "sample_rate": 1,
+            "device_id": "v1",
+            "latency_ms": 10
+          },
+          {
+            "day": "2026-05-03",
+            "cohort": "D",
+            "sample_rate": 1,
+            "device_id": "v2",
+            "latency_ms": 20
+          },
+          {
+            "day": "2026-05-03",
+            "cohort": "D",
+            "sample_rate": 1,
+            "device_id": "v3",
+            "latency_ms": 30
+          },
+          {
+            "day": "2026-05-03",
+            "cohort": "D",
+            "sample_rate": 1,
+            "device_id": "v4",
+            "latency_ms": 40
+          }
+        ]
+      },
+      "expected": [
+        {
+          "day": "2026-05-03",
+          "est_events": 4,
+          "est_devices": 4,
+          "p95_latency_ms": 40
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "只有一行的天：分位数就是它本身，事件数按该层采样率还原",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": [
+          {
+            "day": "2026-05-04",
+            "cohort": "E",
+            "sample_rate": 0.25,
+            "device_id": "z1",
+            "latency_ms": 777
+          }
+        ]
+      },
+      "expected": [
+        {
+          "day": "2026-05-04",
+          "est_events": 4,
+          "est_devices": 4,
+          "p95_latency_ms": 777
+        }
+      ],
+      "visible": true,
+      "note": "r=0.25 的一行 ⇒ est_events=4 而不是 1"
+    },
+    {
+      "name": "退化：空输入返回 0 行",
+      "input": {
+        "view": "events",
+        "schema": "day string, cohort string, sample_rate double, device_id string, latency_ms double",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三段独立聚合再 join：`Σ weight`（事件）、`Σ max(weight) per device`（设备）、\n按延迟排序走累计权重取加权分位数。\n\n```python\ne = events.withColumn('weight', 1.0 / col('sample_rate'))\nest_events  = e.groupBy('day').agg(sum('weight'))\nest_devices = e.groupBy('day','device_id').agg(max('weight')).groupBy('day').agg(sum('dev_weight'))\n# 加权分位数：percentile_approx 没有权重参数，只能自己走\nwalking = lat.join(totals,'day').withColumn('cum', sum('weight').over(w_rows))  # w_rows: 按 latency 排序的无界前缀\np95 = walking.filter(col('cum') >= 0.95 * col('w_total')).groupBy('day').agg(min('latency_ms'))\n```\n\n**基线算一遍（2026-05-01）**：权重分别是 2、2、2、100 ⇒ `est_events = 106`；\n设备 `d1→2, d2→2, d3→100` ⇒ `est_devices = 104`；\n分位数：总权重 106，阈值 `0.95×106 = 100.7`，按延迟升序 50(累计 100) → 100(累计 102 ≥ 100.7) ⇒ **100**。\n注意\"样本分位数\"会给出 900（4 个样本里第 4 个）—— **差 9 倍，而且总量是对的**，\n所以这类错误不会被\"总量对不对\"的发现机制抓到。\n\n**为什么设备数要取 max 而不是求和**：一台设备被采到 N 次时，它代表总体的\"份数\"仍只有一个\n（采样是设备级的），重复累加会把活跃设备的占比放大 —— 而活跃设备恰恰延迟更高，\n于是分位数被进一步推向高端。取 max 是\"按最保守的那一层还原\"。\n\n**`cum >= 0.95 * w_total` 用 `min(latency)` 收口**：满足条件的行可能有多条（并列延迟），\n取 `min` 保证结果确定，与\"首次 ≥ 阈值\"的定义一致。\n\n**工程延伸（面试追问点）**\n\n1. 为什么不用 `expr` 里的 `percentile_approx(..., weight)`？（Spark 的签名没有权重位。\n   硬要用得先把每行按权重复制成多行 —— 那是把内存炸掉当算法用，高采样精度要求下不可接受。）\n2. 权重是估计值，误差多大？（Horvitz-Thompson 有闭式方差：`Σ (1-r)/r² · x²`。\n   小众层 r=0.01 时方差极大 —— 所以生产看板要**同时**给点估计与置信区间，\n   否则\"渗透率涨了 3%\"这种结论永远无法被否证。这是\"给我三个数字然后问到你说不出为止\"的标准答案。）\n3. 采样率本身在一天内变了怎么办？（那 `sample_rate` 就不是层属性而是行属性，\n   本题已按行处理；真实难点是\"变化那一刻\"的指标会跳变，必须把采样率变更也当成一次发布来标注。）\n4. 为什么 `latency_ms` 为 null 的行还要计入事件数？（口径题：事件确实发生了，只是没带延迟。\n   把它整行丢掉会让 `est_events` 与\"上报量\"对不上，而这类不一致正是排查时最耗时间的地方。\n   关键是**写进契约**，让分子分母口径永远一致。）\n5. 跨天聚合（周视图）能直接相加吗？（事件数、设备数可以近似相加（设备数跨天要去重），\n   但**分位数绝对不行** —— 分位数不可合并，要合并必须留直方图或 sketch。\n   这与\"排队 P99 + 推理 P99 ≠ 端到端 P99\"是同一条约束。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\ndef solve(spark):\n    e = spark.table('events').withColumn('weight', F.lit(1.0) / F.col('sample_rate'))\n\n    est_events = e.groupBy('day').agg(F.sum('weight').alias('est_events'))\n\n    per_device = (e.groupBy('day', 'device_id')\n                   .agg(F.max('weight').alias('dev_weight'))\n                   .groupBy('day')\n                   .agg(F.sum('dev_weight').alias('est_devices')))\n\n    lat = e.filter(F.col('latency_ms').isNotNull())\n    totals = lat.groupBy('day').agg(F.sum('weight').alias('w_total'))\n    walking = (lat.join(totals, 'day')\n                  .withColumn('cum', F.sum('weight').over(\n                      Window.partitionBy('day').orderBy('latency_ms')\n                      .rowsBetween(Window.unboundedPreceding, Window.currentRow)))\n                  .withColumn('hit', F.col('cum') >= F.lit(0.95) * F.col('w_total')))\n    p95 = (walking.filter(F.col('hit'))\n                   .groupBy('day')\n                   .agg(F.min('latency_ms').alias('p95_latency_ms')))\n\n    return (est_events.join(per_device, 'day', 'inner')\n                      .join(p95, 'day', 'inner')\n                      .select('day',\n                              F.round('est_events', 6).alias('est_events'),\n                              F.round('est_devices', 6).alias('est_devices'),\n                              F.round('p95_latency_ms', 6).alias('p95_latency_ms'))\n                      .orderBy('day'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\ndef solve(spark):\n    e = spark.table('events')\n    # 错法：一个\"整体采样率\"线性外推 + 设备数直接 distinct × 平均权重 + 分位数不加权\n    return (e.groupBy('day')\n             .agg(F.count(F.lit(1)).alias('n_rows'),\n                  F.countDistinct('device_id').alias('n_dev'),\n                  F.avg('sample_rate').alias('avg_rate'),\n                  F.percentile_approx('latency_ms', 0.95).alias('p95'))\n             .withColumn('est_events', F.col('n_rows') / F.col('avg_rate'))\n             .withColumn('est_devices', F.col('n_dev') / F.col('avg_rate'))\n             .select('day',\n                     F.round('est_events', 6).alias('est_events'),\n                     F.round('est_devices', 6).alias('est_devices'),\n                     F.round('p95', 6).alias('p95_latency_ms'))\n             .orderBy('day'))"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 指标与实验 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/apple-telemetry-pipelines.md §采样权重（\"任何按事件数聚合必须 ×1/sample_rate\"）；手册只给了一句话，未做成可判分口径",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T13:44:55.022Z"
+  }
+}

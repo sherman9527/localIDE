@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-scala-0001",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "Scala Dataset API：每个用户的最长连续活跃天数（gaps & islands）",
+  "statement": "给定事件明细 `events(user: String, day: String)`（`day` 形如 `2026-09-03`，同一用户同一天可能有多条），用 **Scala** 写出 `object Solution` 里的 `def solve(df: org.apache.spark.sql.DataFrame): org.apache.spark.sql.DataFrame`，输出两列：`user` 与 `streak`（该用户**最长连续**活跃天数，没有任何事件的用户不会出现）。\n\n硬性要求：\n\n1. 必须走 **typed Dataset API**（`groupByKey` + `mapGroups`），并显式给出 `Encoders.product[...]`；不许 `collect` 到 driver 再在 Scala 侧聚合，也不许注册 UDF。\n2. 同一天重复事件只算一天；跨月、跨年边界必须正确（不要自己按 30 天估算）。\n3. 结果按 `user` 升序输出（判题默认行序不敏感，但请自己排序，面试会问为什么）。\n4. 说明你为什么这样写：`mapGroups` 相对 `window` 函数的代价与收益分别是什么，shuffle 发生在哪一步。\n\n业务背景：Airbnb 2026 年后端的用户增长团队要区分「累计活跃天数」与「连续活跃天数」，后者用于判断留存是否真实。用 `count(distinct day)` 交差是这道题要抓的错误做法。",
+  "judgeKind": "spark-scala",
+  "language": "scala",
+  "tags": [
+    "dataset-api",
+    "gaps-and-islands",
+    "groupbykey-mapgroups",
+    "spark-shuffle",
+    "modern:typed-dataset-encoders"
+  ],
+  "cases": [
+    {
+      "name": "两个用户各自连续三天",
+      "input": {
+        "rows": [
+          {
+            "user": "u1",
+            "day": "2026-09-01"
+          },
+          {
+            "user": "u1",
+            "day": "2026-09-02"
+          },
+          {
+            "user": "u1",
+            "day": "2026-09-03"
+          },
+          {
+            "user": "u2",
+            "day": "2026-09-05"
+          },
+          {
+            "user": "u2",
+            "day": "2026-09-06"
+          },
+          {
+            "user": "u2",
+            "day": "2026-09-07"
+          }
+        ],
+        "schema": "user string, day string"
+      },
+      "expected": [
+        {
+          "user": "u1",
+          "streak": 3
+        },
+        {
+          "user": "u2",
+          "streak": 3
+        }
+      ]
+    },
+    {
+      "name": "中间断档只算最长一段",
+      "input": {
+        "rows": [
+          {
+            "user": "u3",
+            "day": "2026-09-01"
+          },
+          {
+            "user": "u3",
+            "day": "2026-09-02"
+          },
+          {
+            "user": "u3",
+            "day": "2026-09-05"
+          },
+          {
+            "user": "u3",
+            "day": "2026-09-06"
+          },
+          {
+            "user": "u3",
+            "day": "2026-09-07"
+          },
+          {
+            "user": "u3",
+            "day": "2026-09-09"
+          }
+        ],
+        "schema": "user string, day string"
+      },
+      "expected": [
+        {
+          "user": "u3",
+          "streak": 3
+        }
+      ]
+    },
+    {
+      "name": "同日重复事件只算一天",
+      "input": {
+        "rows": [
+          {
+            "user": "u4",
+            "day": "2026-09-01"
+          },
+          {
+            "user": "u4",
+            "day": "2026-09-01"
+          },
+          {
+            "user": "u4",
+            "day": "2026-09-02"
+          },
+          {
+            "user": "u4",
+            "day": "2026-09-02"
+          }
+        ],
+        "schema": "user string, day string"
+      },
+      "expected": [
+        {
+          "user": "u4",
+          "streak": 2
+        }
+      ]
+    },
+    {
+      "name": "跨年边界退化",
+      "input": {
+        "rows": [
+          {
+            "user": "u5",
+            "day": "2025-12-30"
+          },
+          {
+            "user": "u5",
+            "day": "2025-12-31"
+          },
+          {
+            "user": "u5",
+            "day": "2026-01-01"
+          },
+          {
+            "user": "u5",
+            "day": "2026-01-03"
+          }
+        ],
+        "schema": "user string, day string"
+      },
+      "expected": [
+        {
+          "user": "u5",
+          "streak": 3
+        }
+      ]
+    },
+    {
+      "name": "空表边界返回零行",
+      "input": {
+        "rows": [],
+        "schema": "user string, day string"
+      },
+      "expected": []
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "className": "Solution",
+    "method": "solve",
+    "signature": "solve(df: DataFrame): DataFrame",
+    "timeoutMs": 120000,
+    "referenceSolution": "import org.apache.spark.sql.{DataFrame, Encoders}\nimport java.time.LocalDate\n\nobject Solution {\n  final case class Ev(user: String, day: String)\n  final case class Streak(user: String, streak: Long)\n\n  def solve(df: DataFrame): DataFrame = {\n    df.select(\"user\", \"day\")\n      .as[Ev](Encoders.product[Ev])\n      .groupByKey(_.user)(Encoders.STRING)\n      .mapGroups { (user, events) =>\n        // 用 epochDay 排序：LocalDate 没有隐式 Ordering，且按天差判断跨年边界才安全\n        val days = events.map(e => LocalDate.parse(e.day).toEpochDay).toSeq.distinct.sorted\n        var best = 0L\n        var run = 0L\n        var prev = Long.MinValue\n        days.foreach { d =>\n          run = if (d == prev + 1L) run + 1L else 1L\n          if (run > best) best = run\n          prev = d\n        }\n        Streak(user, if (days.isEmpty) 0L else best)\n      }(Encoders.product[Streak])\n      .orderBy(\"user\")\n      .toDF(\"user\", \"streak\")\n  }\n}",
+    "naiveSolution": "import org.apache.spark.sql.DataFrame\nimport org.apache.spark.sql.functions.countDistinct\n\nobject Solution {\n  def solve(df: DataFrame): DataFrame =\n    df.groupBy(\"user\").agg(countDistinct(\"day\").as(\"streak\")).orderBy(\"user\")\n}"
+  },
+  "answer": "import org.apache.spark.sql.{DataFrame, Encoders}\nimport java.time.LocalDate\n\nobject Solution {\n  final case class Ev(user: String, day: String)\n  final case class Streak(user: String, streak: Long)\n\n  def solve(df: DataFrame): DataFrame = {\n    df.select(\"user\", \"day\")\n      .as[Ev](Encoders.product[Ev])\n      .groupByKey(_.user)(Encoders.STRING)\n      .mapGroups { (user, events) =>\n        // 用 epochDay 排序：LocalDate 没有隐式 Ordering，且按天差判断跨年边界才安全\n        val days = events.map(e => LocalDate.parse(e.day).toEpochDay).toSeq.distinct.sorted\n        var best = 0L\n        var run = 0L\n        var prev = Long.MinValue\n        days.foreach { d =>\n          run = if (d == prev + 1L) run + 1L else 1L\n          if (run > best) best = run\n          prev = d\n        }\n        Streak(user, if (days.isEmpty) 0L else best)\n      }(Encoders.product[Streak])\n      .orderBy(\"user\")\n      .toDF(\"user\", \"streak\")\n  }\n}",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T21:20:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/spark-dataset-api.md",
+    "addedBy": "wi-27-spark-scala-runner"
+  }
+}

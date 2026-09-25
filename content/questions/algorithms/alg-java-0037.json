@@ -1,0 +1,405 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0037",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "多模型路由：三个升档触发条件 + 会话内只升不降的棘轮",
+  "statement": "## 背景\n\n网关上挂着两档模型：**小模型**（便宜、快、能力有限）与**大模型**（贵 10 倍）。\n路由的目标是\"该升档的时候升，不该升的时候一次都别升\"。\n\n一个容易被忽略的事实：**档位必须粘住**。同一轮对话里第 1 轮走大模型、\n第 2 轮因为置信度回升就切回小模型，用户看到的是语气、能力、拒答行为同时跳变 ——\n产品上比\"一直用小的\"更糟，排查时也没人会把现象归到路由器上。\n\n## 你要实现的入口\n\n```java\npublic static int[] route(int[] sessionId, int[] confidencePct, int[] promptTokens,\n                          int[] turnNo, int confFloor, int longCtxTokens, int deepTurns)\n```\n\n按下标对齐给出逐请求的判定：返回 `1` = 走大模型，`0` = 走小模型。\n\n## 升档触发条件（任一成立即升档）\n\n```\nconfidencePct[i] < confFloor          // 小模型自己都没把握\n|| promptTokens[i] > longCtxTokens    // 超出小模型的上下文预算\n|| turnNo[i] > deepTurns              // 深会话，指代消解扛不住\n```\n\n边界是**严格不等号**：`confidencePct == confFloor` 不升档、\n`promptTokens == longCtxTokens` 不升档、`turnNo == deepTurns` 不升档。\n\n## 粘性规则\n\n一旦某个 `sessionId` 触发过升档，该会话**后续所有请求**都走大模型，\n即使后面的请求单独看完全不需要升档。不同会话互不影响。\n（降档只有\"会话结束\"这一种途径，本题不表达会话结束。）\n\n## 非法输入（抛 `IllegalArgumentException`）\n\n四根数组长度不一致；`sessionId <= 0`；`confidencePct` 不在 `[0,100]`；\n`promptTokens < 0`；`turnNo <= 0`；`confFloor` 不在 `[0,100]`；\n`longCtxTokens <= 0`；`deepTurns <= 0`。\n\n数据规模小，一次遍历即可。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "model-routing",
+    "cost-control",
+    "sticky-state",
+    "boundary-conditions",
+    "modern:llm-gateway"
+  ],
+  "cases": [
+    {
+      "name": "基线：低置信升档，其余走小模型",
+      "input": [
+        [
+          1,
+          1
+        ],
+        [
+          90,
+          30
+        ],
+        [
+          100,
+          100
+        ],
+        [
+          1,
+          2
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "三条边界都不升档",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          40,
+          99,
+          99
+        ],
+        [
+          10,
+          8000,
+          10
+        ],
+        [
+          1,
+          1,
+          20
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "会话 1 卡在 confidence==confFloor、会话 2 卡在 promptTokens==longCtxTokens、会话 3 卡在 turnNo==deepTurns ⇒ 三条都必须走小模型"
+    },
+    {
+      "name": "升过档的会话后面全跟上去（粘性）",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          90,
+          10,
+          95
+        ],
+        [
+          10,
+          9999,
+          10
+        ],
+        [
+          1,
+          2,
+          3
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        0,
+        1,
+        1
+      ],
+      "visible": true,
+      "note": "第 2 条因长 prompt 升档 ⇒ 第 3 条单独看完全不该升，仍走大模型"
+    },
+    {
+      "name": "交错会话：A 升档不影响 B",
+      "input": [
+        [
+          1,
+          2,
+          1,
+          2
+        ],
+        [
+          50,
+          50,
+          5,
+          99
+        ],
+        [
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          1,
+          1,
+          2,
+          2
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "只有会话 1 的第 2 次请求触发 ⇒ 之后会话 1 粘住，会话 2 一直是小模型"
+    },
+    {
+      "name": "深会话触发：第 21 轮起整段跟上",
+      "input": [
+        [
+          7,
+          7,
+          7,
+          7
+        ],
+        [
+          99,
+          99,
+          99,
+          99
+        ],
+        [
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          20,
+          21,
+          22,
+          1
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        0,
+        1,
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "长 prompt 触发",
+      "input": [
+        [
+          3,
+          3
+        ],
+        [
+          99,
+          99
+        ],
+        [
+          8001,
+          10
+        ],
+        [
+          1,
+          1
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": [
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何请求",
+      "input": [
+        [],
+        [],
+        [],
+        [],
+        40,
+        8000,
+        20
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "confFloor=0：永远不会因置信度升档",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          1
+        ],
+        0,
+        8000,
+        20
+      ],
+      "expected": [
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：四根数组长度不一致",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          50
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          1,
+          1
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：置信度越界",
+      "input": [
+        [
+          1
+        ],
+        [
+          101
+        ],
+        [
+          10
+        ],
+        [
+          1
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：turnNo 为 0",
+      "input": [
+        [
+          1
+        ],
+        [
+          50
+        ],
+        [
+          10
+        ],
+        [
+          0
+        ],
+        40,
+        8000,
+        20
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：confFloor 大于 100",
+      "input": [
+        [
+          1
+        ],
+        [
+          50
+        ],
+        [
+          10
+        ],
+        [
+          1
+        ],
+        101,
+        8000,
+        20
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "confFloor=101 会让每条请求都升档 —— 等于把路由器关掉但没人知道"
+    },
+    {
+      "name": "非法：longCtxTokens 为 0",
+      "input": [
+        [
+          1
+        ],
+        [
+          50
+        ],
+        [
+          10
+        ],
+        [
+          1
+        ],
+        40,
+        0,
+        20
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个 `Set<Integer>` 记录\"已经升过档的会话\"，逐请求算触发条件，\n触发就把会话 id 放进集合，然后 `trigger || contains(session)` 决定这一条走哪档。\n`O(n)` 时间、`O(会话数)` 空间。\n\n**粘性是单向棘轮，不是\"平均一下\"**（用例「升过档的会话后面全跟上去」）：\n朴素版想用\"该会话到目前为止的平均置信度\"来平滑 —— 这个形状看起来更聪明，\n实际是把一次性的升档决定变成了一个**会自己漂回小模型**的连续量。\n产品后果是可感知的：用户会看到\"同一个会话里助手突然变笨了\",\n而且它跟任何单条请求的判定都对得上，所以没人会怀疑路由器。\n判据是：**升档是一个会被记住的事件，不是一个持续评估的指标。**\n\n**三个触发条件的边界都是严格不等号**（用例「三条边界都不升档」）：\n`confidence == confFloor` 不升、`promptTokens == longCtxTokens` 不升、\n`turnNo == deepTurns` 不升。三个条件里两个是 `<`、两个是 `>`，\n混着写最容易把某一个变成 `<=` —— 而 `turnNo` 是整数计数，\n`>= deepTurns` 会让\"刚好到第 N 轮\"的会话全体提前升档，成本直接跳。\n\n**不同会话互不影响**（用例「交错会话：A 升档不影响 B」）：\n粘性必须按 `sessionId` 隔离。用一个全局\"最近是否升档\"标志的写法，\n会让一个长上下文请求把之后所有租户的小模型流量都拖到大模型上 ——\n这种 bug 在指标上表现为\"某次发版后大模型调用量涨了一倍但没有对应的大 prompt 流量\"。\n\n**工程延伸（面试追问点）**\n\n1. `confidencePct` 哪来的？（小模型自己的输出概率/校准分。未校准的置信度是噪声，\n   所以真实系统要先做温度缩放/等距回归校准，再谈阈值 ——\n   这题把它当给定输入，面试时要主动说明这个假设有多强。）\n2. 为什么不做\"大模型 → 小模型\"的降级？（同一会话内不做，跨会话可以做（新会话重新判档）。\n   另外成本侧真正省钱的开关是\"升档后能否用一个便宜的探针判断能否回落\",\n   但那会引入第二次风格跳变，产品上通常否决。）\n3. 会话粘住的成本上限怎么控？（给\"已升档会话\"再设一个预算：\n   累计 token 超过阈值后强制走排队/降精度，否则一个长会话可以无限吃大模型额度。\n   诚实的答案是\"粘性 + 预算\"两条规则并存，本题只考前者。）\n4. 升档判定该在网关还是推理侧？（网关：它看得到会话历史与配额，且能一次决定；\n   推理侧：它才知道真实 KV 占用。工程上通常是网关做粗判 + 推理侧做\"实在装不下\"的兜底拒绝，\n   两层各有各的指标。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] route(int[] sessionId, int[] confidencePct, int[] promptTokens, int[] turnNo, int confFloor, int longCtxTokens, int deepTurns)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  public static int[] route(int[] sessionId, int[] confidencePct, int[] promptTokens,\n                            int[] turnNo, int confFloor, int longCtxTokens, int deepTurns) {\n    int n = sessionId.length;\n    if (confidencePct.length != n || promptTokens.length != n || turnNo.length != n) {\n      throw new IllegalArgumentException(\"arrays disagree\");\n    }\n    if (confFloor < 0 || confFloor > 100 || longCtxTokens <= 0 || deepTurns <= 0) {\n      throw new IllegalArgumentException(\"bad thresholds\");\n    }\n    for (int i = 0; i < n; i++) {\n      if (sessionId[i] <= 0) throw new IllegalArgumentException(\"sessionId must be positive\");\n      if (confidencePct[i] < 0 || confidencePct[i] > 100) {\n        throw new IllegalArgumentException(\"confidence out of range\");\n      }\n      if (promptTokens[i] < 0) throw new IllegalArgumentException(\"negative promptTokens\");\n      if (turnNo[i] <= 0) throw new IllegalArgumentException(\"turnNo must be positive\");\n    }\n\n    Set<Integer> escalated = new HashSet<>();\n    int[] out = new int[n];\n    for (int i = 0; i < n; i++) {\n      boolean trigger = confidencePct[i] < confFloor\n          || promptTokens[i] > longCtxTokens\n          || turnNo[i] > deepTurns;\n      if (trigger) {\n        escalated.add(sessionId[i]);           // 粘性是**单向棘轮**：只记升过档的会话\n      }\n      out[i] = (trigger || escalated.contains(sessionId[i])) ? 1 : 0;\n    }\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 逐请求独立判档：没有粘性\n  public static int[] route(int[] sessionId, int[] confidencePct, int[] promptTokens,\n                            int[] turnNo, int confFloor, int longCtxTokens, int deepTurns) {\n    int n = sessionId.length;\n    if (confidencePct.length != n || promptTokens.length != n || turnNo.length != n) {\n      throw new IllegalArgumentException(\"arrays disagree\");\n    }\n    if (confFloor < 0 || confFloor > 100 || longCtxTokens <= 0 || deepTurns <= 0) {\n      throw new IllegalArgumentException(\"bad thresholds\");\n    }\n    for (int i = 0; i < n; i++) {\n      if (sessionId[i] <= 0) throw new IllegalArgumentException(\"sessionId must be positive\");\n      if (confidencePct[i] < 0 || confidencePct[i] > 100) {\n        throw new IllegalArgumentException(\"confidence out of range\");\n      }\n      if (promptTokens[i] < 0) throw new IllegalArgumentException(\"negative promptTokens\");\n      if (turnNo[i] <= 0) throw new IllegalArgumentException(\"turnNo must be positive\");\n    }\n    int[] out = new int[n];\n    for (int i = 0; i < n; i++) {\n      boolean trigger = confidencePct[i] < confFloor\n          || promptTokens[i] > longCtxTokens\n          || turnNo[i] > deepTurns;\n      if (trigger) {\n        out[i] = 1;\n      } else {\n        long total = 0;\n        int seen = 0;\n        for (int j = 0; j <= i; j++) {        // 错法：按\"该会话至今的平均置信度\"再判一次\n          if (sessionId[j] == sessionId[i]) {\n            total += confidencePct[j];\n            seen++;\n          }\n        }\n        out[i] = total / seen < confFloor ? 1 : 0;\n      }\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理网关 / 多模型路由 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#54（原文只答\"简单走小模型、复杂走大模型\"，未给可判分的触发口径与会话粘性）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:38:41.155Z"
+  }
+}

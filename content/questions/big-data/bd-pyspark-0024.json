@@ -1,0 +1,490 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0024",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "MaxCompute 账单口径：压缩后计费、失败不计费、PyODPS 同一条公式，重跑的账要分两头",
+  "statement": "## 背景\n\nMaxCompute《计算费用（按量付费）》给的三条是能直接算成数字的硬规则【源 D20】：\n\n> \"SQL 作业当日总费用 = **计算输入数据量 × SQL 复杂度 × 单价**\"\n> （按量标准版 **0.3 元/GB**、金融云 **0.57 元/GB\"），\n> \"**SQL 作业的输入量是以压缩后的量计费**\"，\n> \"**执行失败的 SQL 作业不计费**\"，\n> 并且\"PyODPS 底层执行的是 SQL，因此按 SQL 计费\"。\n\n素材 §2 追问 18 把这三条写成一道现场题：\"这个月的计算费用为什么涨了 3 倍？\"\n标准答案要能点名四个来源：**无分区裁剪的 ad-hoc、失败重跑、小文件、无列裁剪**，\n并且要能区分\"失败重跑不重复计费，但会重复计费成功执行的那几次\"【源 D20】＋【推】。\n\n## 输入\n\n视图 `billable_jobs`（一个采集周期内的作业台账），列与类型：\n\n```\njob_id INT, team STRING, cloud STRING, engine STRING,\nscan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT\n```\n\n- `cloud` ∈ `'public'`（30 分/GB）/ `'finance'`（57 分/GB）；\n- `engine` ∈ `'SQL'` / `'PYODPS'` —— 两者**用同一条公式**（官方：PyODPS 按 SQL 计量）；\n- `scan_raw_gb` / `scan_comp_gb`：未压缩 / 压缩后的扫描量（GB，本题直接用整数 GB 避免单位歧义）；\n  `scan_comp_gb` 可能为 `null`（采集任务没回填）；\n- `complexity`：SQL 复杂度系数（整数，**由入参给定**，素材没给官方阶梯所以本题不自定义它）；\n- `runs` / `failed_runs`：该作业本周期内的执行次数与其中失败的次数。\n\n## 输出与判分契约\n\n一行一个 `team`，列固定为\n`team, jobs, unknown_rows, calc_gb, cost_fen, raw_calc_gb, pyodps_calc_gb, dup_cost_fen`，\n按 `team` 升序。禁止 `collect()`。\n\n| 列 | 定义 |\n| --- | --- |\n| `jobs` | 该团队的作业**行数**（不计金额，也不管是否计费） |\n| `unknown_rows` | **算不出钱**的行数：`scan_comp_gb IS NULL`，或 `failed_runs > runs`（台账不成立），或 `cloud` 不在两种单价之内 |\n| `calc_gb` | 可计费行的 `Σ scan_comp_gb × complexity × ok_runs` —— **压缩后**的量 |\n| `cost_fen` | 可计费行的 `Σ scan_comp_gb × complexity × ok_runs × 单价`，**逐行按该行自己的云的单价** |\n| `raw_calc_gb` | 所有行的 `Σ scan_raw_gb × complexity × ok_runs`（\"若按未压缩量计费会报成多少\"，含不可计费行） |\n| `pyodps_calc_gb` | `calc_gb` 中来自 `engine = 'PYODPS'` 的那部分 |\n| `dup_cost_fen` | 可计费且 `ok_runs > 1` 的行：`Σ scan_comp_gb × complexity × (ok_runs − 1) × 单价` |\n\n`ok_runs` 的定义：`failed_runs > runs` 时为 `0`，否则 `runs − failed_runs`\n（**执行失败的作业不计费** ⇒ 失败的次数一次都不进乘数；\n台账不成立的整行按 `unknown_rows` 处理，不许把负的 `ok_runs` 乘进去）。\n\n**\"重跑\"的账要分两头看**：失败的那几次不产生费用，\n而**成功的每一次都单独计费** —— 所以 `dup_cost_fen` 只统计 `ok_runs − 1` 那部分。\n\n## 说明\n\n机制取自阿里云 MaxCompute 计费文档【源 D20】，\n**用一次 Spark 批处理等价重写是【推】**（素材 §7 第 6 条：阿里官方没有给出 Spark 侧的规范实现），\n所以列名、`unknown_rows` 的三种成因、\"逐行取单价\"都是**本题契约**，不是产品接口。\n本题刻意不出现任何真实金额、真实用量或真实涨价倍数。\n",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "billing-formula",
+    "compressed-input",
+    "failure-not-billed",
+    "pyodps-as-sql",
+    "duplicate-run-attribution",
+    "modern:cost-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：两个团队八列，ads 一分钱里同时有公共云与金融云两种单价",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": [
+          {
+            "job_id": 1,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 900,
+            "scan_comp_gb": 300,
+            "complexity": 2,
+            "runs": 3,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 2,
+            "team": "ads",
+            "cloud": "finance",
+            "engine": "PYODPS",
+            "scan_raw_gb": 200,
+            "scan_comp_gb": 100,
+            "complexity": 1,
+            "runs": 1,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 3,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 400,
+            "scan_comp_gb": null,
+            "complexity": 1,
+            "runs": 2,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 4,
+            "team": "dw",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 1000,
+            "scan_comp_gb": 250,
+            "complexity": 4,
+            "runs": 1,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 5,
+            "team": "dw",
+            "cloud": "finance",
+            "engine": "SQL",
+            "scan_raw_gb": 600,
+            "scan_comp_gb": 200,
+            "complexity": 3,
+            "runs": 4,
+            "failed_runs": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "team": "ads",
+          "jobs": 3,
+          "unknown_rows": 1,
+          "calc_gb": 1300,
+          "cost_fen": 41700,
+          "raw_calc_gb": 4600,
+          "pyodps_calc_gb": 100,
+          "dup_cost_fen": 18000
+        },
+        {
+          "team": "dw",
+          "jobs": 2,
+          "unknown_rows": 0,
+          "calc_gb": 1800,
+          "cost_fen": 102600,
+          "raw_calc_gb": 5400,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 68400
+        }
+      ],
+      "visible": true,
+      "note": "ads 的 `cost_fen` = 1200 × 30 + 100 × 57 = 41700（**逐行按各自云的单价**）；job 3 的压缩量没回填 ⇒ 只进 `unknown_rows`，一行钱都不许算，但它的 `raw_calc_gb` 800 仍然要出（\"按未压缩量会报成多少\"是它的对照）；job 4 唯一一次执行失败 ⇒ 整行不计费"
+    },
+    {
+      "name": "边界：把没回填的压缩量补成 80 ⇒ unknown 归零、calc 多 160、raw_calc 一动不动",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": [
+          {
+            "job_id": 1,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 900,
+            "scan_comp_gb": 300,
+            "complexity": 2,
+            "runs": 3,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 2,
+            "team": "ads",
+            "cloud": "finance",
+            "engine": "PYODPS",
+            "scan_raw_gb": 200,
+            "scan_comp_gb": 100,
+            "complexity": 1,
+            "runs": 1,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 3,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 400,
+            "scan_comp_gb": 80,
+            "complexity": 1,
+            "runs": 2,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 4,
+            "team": "dw",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 1000,
+            "scan_comp_gb": 250,
+            "complexity": 4,
+            "runs": 1,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 5,
+            "team": "dw",
+            "cloud": "finance",
+            "engine": "SQL",
+            "scan_raw_gb": 600,
+            "scan_comp_gb": 200,
+            "complexity": 3,
+            "runs": 4,
+            "failed_runs": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "team": "ads",
+          "jobs": 3,
+          "unknown_rows": 0,
+          "calc_gb": 1460,
+          "cost_fen": 46500,
+          "raw_calc_gb": 4600,
+          "pyodps_calc_gb": 100,
+          "dup_cost_fen": 20400
+        },
+        {
+          "team": "dw",
+          "jobs": 2,
+          "unknown_rows": 0,
+          "calc_gb": 1800,
+          "cost_fen": 102600,
+          "raw_calc_gb": 5400,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 68400
+        }
+      ],
+      "visible": true,
+      "note": "补数改变的是\"这一行算不算得出钱\"：ads 的 unknown_rows 1 → 0、calc_gb 1300 → 1460（多 80 × 1 × 2 = 160）、cost_fen 41700 → 46500（多 160 × 30 = 4800）、dup_cost_fen 18000 → 20400（这一行成功跑过 2 次 ⇒ 第二次也算进重复计费），而 raw_calc_gb 仍是 4600 —— 它压根没用压缩量"
+    },
+    {
+      "name": "边界：把失败那次重跑改成成功 ⇒ dw 的 calc 从 1800 跳到 2800，dup 一列没涨",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": [
+          {
+            "job_id": 1,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 900,
+            "scan_comp_gb": 300,
+            "complexity": 2,
+            "runs": 3,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 2,
+            "team": "ads",
+            "cloud": "finance",
+            "engine": "PYODPS",
+            "scan_raw_gb": 200,
+            "scan_comp_gb": 100,
+            "complexity": 1,
+            "runs": 1,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 3,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 400,
+            "scan_comp_gb": null,
+            "complexity": 1,
+            "runs": 2,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 4,
+            "team": "dw",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 1000,
+            "scan_comp_gb": 250,
+            "complexity": 4,
+            "runs": 1,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 5,
+            "team": "dw",
+            "cloud": "finance",
+            "engine": "SQL",
+            "scan_raw_gb": 600,
+            "scan_comp_gb": 200,
+            "complexity": 3,
+            "runs": 4,
+            "failed_runs": 1
+          }
+        ]
+      },
+      "expected": [
+        {
+          "team": "ads",
+          "jobs": 3,
+          "unknown_rows": 1,
+          "calc_gb": 1300,
+          "cost_fen": 41700,
+          "raw_calc_gb": 4600,
+          "pyodps_calc_gb": 100,
+          "dup_cost_fen": 18000
+        },
+        {
+          "team": "dw",
+          "jobs": 2,
+          "unknown_rows": 0,
+          "calc_gb": 2800,
+          "cost_fen": 132600,
+          "raw_calc_gb": 9400,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 68400
+        }
+      ],
+      "visible": true,
+      "note": "job 4 变成 ok=1 ⇒ 新计 250 × 4 = 1000 GB ⇒ dw 的 calc_gb 1000 + 1800 = 2800、cost_fen 30000 + 102600 = 132600。`dup_cost_fen` 仍是 68400：它只统计**同一作业成功执行超过一次**的部分，job 4 只成功一次"
+    },
+    {
+      "name": "非法形态：把台账写成 failed_runs 大于 runs ⇒ 该行计不进钱，但必须留在 unknown_rows",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": [
+          {
+            "job_id": 1,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 900,
+            "scan_comp_gb": 300,
+            "complexity": 2,
+            "runs": 3,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 2,
+            "team": "ads",
+            "cloud": "finance",
+            "engine": "PYODPS",
+            "scan_raw_gb": 200,
+            "scan_comp_gb": 100,
+            "complexity": 1,
+            "runs": 1,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 3,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 400,
+            "scan_comp_gb": null,
+            "complexity": 1,
+            "runs": 2,
+            "failed_runs": 0
+          },
+          {
+            "job_id": 4,
+            "team": "dw",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 1000,
+            "scan_comp_gb": 250,
+            "complexity": 4,
+            "runs": 1,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 5,
+            "team": "dw",
+            "cloud": "finance",
+            "engine": "SQL",
+            "scan_raw_gb": 600,
+            "scan_comp_gb": 200,
+            "complexity": 3,
+            "runs": 4,
+            "failed_runs": 9
+          }
+        ]
+      },
+      "expected": [
+        {
+          "team": "ads",
+          "jobs": 3,
+          "unknown_rows": 1,
+          "calc_gb": 1300,
+          "cost_fen": 41700,
+          "raw_calc_gb": 4600,
+          "pyodps_calc_gb": 100,
+          "dup_cost_fen": 18000
+        },
+        {
+          "team": "dw",
+          "jobs": 2,
+          "unknown_rows": 1,
+          "calc_gb": 0,
+          "cost_fen": 0,
+          "raw_calc_gb": 0,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 0
+        }
+      ],
+      "visible": true,
+      "note": "ok 次数的定义是 `runs − failed_runs`，负数**不许**当\"跑了负数次\"：该行整条不进 calc/cost，只进 `unknown_rows=1`。此时 dw 两列全 0 —— 看起来像\"这个团队没花钱\"，而 `unknown_rows` 是唯一能把它和\"真的没花钱\"分开的列"
+    },
+    {
+      "name": "退化：所有作业的全部执行都失败 ⇒ 三列金额为 0，但 jobs 与两行团队还在",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": [
+          {
+            "job_id": 1,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 900,
+            "scan_comp_gb": 300,
+            "complexity": 2,
+            "runs": 3,
+            "failed_runs": 3
+          },
+          {
+            "job_id": 2,
+            "team": "ads",
+            "cloud": "finance",
+            "engine": "PYODPS",
+            "scan_raw_gb": 200,
+            "scan_comp_gb": 100,
+            "complexity": 1,
+            "runs": 1,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 3,
+            "team": "ads",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 400,
+            "scan_comp_gb": null,
+            "complexity": 1,
+            "runs": 2,
+            "failed_runs": 2
+          },
+          {
+            "job_id": 4,
+            "team": "dw",
+            "cloud": "public",
+            "engine": "SQL",
+            "scan_raw_gb": 1000,
+            "scan_comp_gb": 250,
+            "complexity": 4,
+            "runs": 1,
+            "failed_runs": 1
+          },
+          {
+            "job_id": 5,
+            "team": "dw",
+            "cloud": "finance",
+            "engine": "SQL",
+            "scan_raw_gb": 600,
+            "scan_comp_gb": 200,
+            "complexity": 3,
+            "runs": 4,
+            "failed_runs": 4
+          }
+        ]
+      },
+      "expected": [
+        {
+          "team": "ads",
+          "jobs": 3,
+          "unknown_rows": 1,
+          "calc_gb": 0,
+          "cost_fen": 0,
+          "raw_calc_gb": 0,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 0
+        },
+        {
+          "team": "dw",
+          "jobs": 2,
+          "unknown_rows": 0,
+          "calc_gb": 0,
+          "cost_fen": 0,
+          "raw_calc_gb": 0,
+          "pyodps_calc_gb": 0,
+          "dup_cost_fen": 0
+        }
+      ],
+      "visible": true,
+      "note": "\"失败不计费\"是官方的三条硬规则里唯一一条会让账单变小的，但它**不影响**\"跑了多少作业\"：`jobs` 仍是 3 与 2。把作业数也一并清零的实现，等于把一次集体故障读成\"没人用过这个 project\""
+    },
+    {
+      "name": "退化：一个作业都没有 ⇒ 空结果，不许造一行全 0 的团队",
+      "input": {
+        "view": "billable_jobs",
+        "schema": "job_id INT, team STRING, cloud STRING, engine STRING, scan_raw_gb BIGINT, scan_comp_gb BIGINT, complexity INT, runs INT, failed_runs INT",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一遍 `groupBy('team')` + 七个 `agg`，关键是**先把\"这行能不能算钱\"判出来，再乘任何东西**。\n\n**基线八个值**（`ads`）：`jobs=3`、`unknown_rows=1`、`calc_gb=1300`、`cost_fen=41700`、\n`raw_calc_gb=4600`、`pyodps_calc_gb=100`、`dup_cost_fen=18000`；\n（`dw`）：`jobs=2`、`unknown_rows=0`、`calc_gb=1800`、`cost_fen=102600`、\n`raw_calc_gb=5400`、`pyodps_calc_gb=0`、`dup_cost_fen=68400`。\n\n`ads` 那行是本题最密的一格，五条规则同时生效：\n- job 1：压缩后 300 GB × 复杂度 2 × 成功 2 次 = **1200** GB ⇒ 1200 × 30 = 36000 分；\n  它跑过 3 次、失败 1 次 —— **失败那次不计费**，所以乘数是 2 而不是 3；\n- job 2：`PYODPS` 必须与 SQL 同一条公式 ⇒ 100 × 1 × 1 = 100 GB，\n  但它挂在金融云 ⇒ 单价 57 ⇒ 5700 分。**不能先求和再乘单价**：\n  (1200 + 100) × 30 = 39000 是错的，正确答案 36000 + 5700 = **41700**；\n- job 3：压缩量没回填 ⇒ 只进 `unknown_rows`，钱按 0，但它的\n  `raw_calc_gb` 贡献 400 × 1 × 2 = 800 仍然要出。\n\n**`raw_calc_gb − calc_gb` 就是\"按未压缩量会多报多少\"**：\n基线上 `ads` 是 4600 − 1300 = 3300 GB、`dw` 是 5400 − 1800 = 3600 GB。\n这正是素材 §3 那条\"扫描量口径写错，账单就永远解释不清\"的可判形态。\n\n**用例「把没回填的压缩量补成 80」**动的是四列，而且**不动 `raw_calc_gb`**：\n`ads` 的 `unknown_rows` 1 → 0、`calc_gb` 1300 → 1460（多出 80 × 1 × 2 = 160）、\n`cost_fen` 41700 → 46500（多出 160 × 30 = 4800）、\n`dup_cost_fen` 18000 → 20400（这一行成功跑过 2 次 ⇒ 第二次也落进重复计费），\n而 `raw_calc_gb` 仍是 4600 —— 它从来没用过压缩量。\n**\"补数据\"改变的是算不算得出钱，不是扫描了多少**。\n\n**用例「把失败那次重跑改成成功」**是另一头：\n`dw` 的 `calc_gb` 1000 + 1800 = 2800、`cost_fen` 30000 + 102600 = 132600，\n但 `dup_cost_fen` 仍是 68400 —— 因为 job 4 只**成功一次**，\n而重复计费的定义是\"同一作业成功执行的第二次及以后\"。\n这一列的用途是把\"降本三刀\"里的**重跑**单独称出来：`dup_cost_fen` 占账单的比例\n就是\"我们有多少钱花在同一件事干了两遍上\"。\n\n**用例「把台账写成 failed_runs 大于 runs」**考的是负数：\n`ok_runs` 若直接写成 `runs − failed_runs`，job 5 会给出 4 − 9 = **−5** 并乘进金额，\n`dw` 的 `calc_gb` 变成 1800 − 3000 = −1200 这种荒谬值。\n契约要求：台账不成立的行**整行不进金额**，只进 `unknown_rows` ⇒\n`dw` 变成 `calc_gb=0`、`cost_fen=0`、`dup_cost_fen=0`、`unknown_rows=1`。\n**\"金额为 0\"与\"没算出来\"必须能分开**，否则一次采集故障会被读成一次成功的降本。\n\n**退化两条**：全部执行都失败 ⇒ 三列金额为 0 而 `jobs` 仍是 3 与 2\n（\"失败不计费\"不该顺手抹掉\"这批作业存在过\"）；\n空输入 ⇒ **空结果**，不许造一行全 0 的\"团队\"。\n\n**朴素解挂六处**：用未压缩量、把失败的次数也乘进乘数、单价统一 0.3、\n压缩量缺失时退回未压缩量、只认 `engine='SQL'`（于是 `pyodps_calc_gb` 恒 0）、\n`dup_cost_fen` 与 `unknown_rows` 两列直接写 0。\n\n**工程延伸（面试追问点）**\n\n1. 为什么把账单写成\"分\"而不是\"元\"？（0.3 元/GB 与 0.57 元/GB 都是两位小数，\n   账单一旦涉及汇总与阈值比较，浮点误差会在\"这个月涨了 3 倍\"这种结论上放大。\n   真实系统里应当用定点数或整数分。）\n2. `unknown_rows` 该不该进 DQC？（应当进 —— 素材考点 13 的监控分类里\"数据量与逻辑规则\"，\n   计费元数据缺失正是\"逻辑规则\"：一行算不出钱比一行算错钱更危险，因为它静默。）\n3. 这三条计费规则能不能合并成一条 SQL 视图给 BI 用？（能，但必须把 `dup_cost_fen`\n   与 `unknown_rows` 作为**独立度量**保留 —— 合并成一个\"总费用\"列，\n   治理动作就没有落点了：降价的三刀分别对应\"减少扫描、减少成功重跑、补齐采集\"。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('billable_jobs')\n    # 官方三条：压缩后计费、失败不计费、单价按云种；PyODPS 按 SQL 计量 => 同一条公式\n    bad_ledger = F.col('failed_runs') > F.col('runs')\n    ok_runs = F.when(bad_ledger, F.lit(0)).otherwise(F.col('runs') - F.col('failed_runs'))\n    price = (F.when(F.col('cloud') == 'public', F.lit(30))\n             .when(F.col('cloud') == 'finance', F.lit(57))\n             .otherwise(F.lit(0)))\n    known = (~F.col('cloud').isin('public', 'finance')) | bad_ledger | F.col('scan_comp_gb').isNull()\n    unknown = known.cast('int')\n    comp_calc = (F.coalesce(F.col('scan_comp_gb'), F.lit(0))\n                 * F.col('complexity') * ok_runs)\n    billed = F.when(unknown == 1, F.lit(0)).otherwise(comp_calc)\n    raw_calc = F.col('scan_raw_gb') * F.col('complexity') * ok_runs\n    dup = F.when((unknown == 0) & (ok_runs > 1),\n                 F.col('scan_comp_gb') * F.col('complexity') * (ok_runs - 1) * price) \\\n             .otherwise(F.lit(0))\n    return (r.groupBy('team')\n            .agg(F.count(F.lit(1)).alias('jobs'),\n                 F.sum(unknown).alias('unknown_rows'),\n                 F.sum(billed).alias('calc_gb'),\n                 F.sum(billed * price).alias('cost_fen'),\n                 F.sum(raw_calc).alias('raw_calc_gb'),\n                 F.sum(F.when(F.col('engine') == 'PYODPS', billed).otherwise(F.lit(0)))\n                 .alias('pyodps_calc_gb'),\n                 F.sum(dup).alias('dup_cost_fen'))\n            .orderBy('team'))\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('billable_jobs')\n    # 1) 扫描了多少就算多少（用未压缩量）  2) 跑了多少次就算多少次（不管成功失败）\n    # 3) 单价一律按公共云 0.3 元/GB       4) 压缩量没回填就退回未压缩量\n    # 5) 只认 engine = 'SQL'，把\"重跑成功的那几次\"当成 0 重复计费\n    gb = (F.coalesce(F.col('scan_comp_gb'), F.col('scan_raw_gb'))\n          * F.col('complexity') * F.col('runs'))\n    billed = F.when(F.col('engine') == 'SQL', gb).otherwise(F.lit(0))\n    return (r.groupBy('team')\n            .agg(F.count(F.lit(1)).alias('jobs'),\n                 F.lit(0).alias('unknown_rows'),\n                 F.sum(billed).alias('calc_gb'),\n                 F.sum(billed * 30).alias('cost_fen'),\n                 F.sum(billed).alias('raw_calc_gb'),\n                 F.lit(0).alias('pyodps_calc_gb'),\n                 F.lit(0).alias('dup_cost_fen'))\n            .orderBy('team'))\n"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发（成本与容量治理方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-data-and-storage.md#4 考点 14（成本与容量口径：SQL 作业当日总费用 = 计算输入数据量 × SQL 复杂度 × 单价、公共云 0.3 元/GB 与金融云 0.57 元/GB、\"SQL 作业的输入量是以压缩后的量计费\"、\"执行失败的 SQL 作业不计费\"、\"PyODPS 底层执行 SQL 因此按 SQL 计费\"【源 D20】；§2 追问 18 的四个涨价来源（无分区裁剪、失败重跑、小文件、无列裁剪）。素材该考点的出题建议正是\"给作业元数据表算日账单并按团队归因，要求区分压缩前后与失败不计费两条规则\"。\"成功执行的每一次单独计费\"与 unknown_rows 的三种成因是【推】，题面已写成契约；用 Spark 等价重写属 §7 第 6 条标注的【推】）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T16:22:31.963Z"
+  }
+}

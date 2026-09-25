@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0019",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "收件人信息不能只渲染\"数据缺失\"：四种空各有文案、指标桶与无障碍标签",
+  "statement": "## 背景\n\n订单详情里有一块\"收件人信息\"。接口层的事实是：\n`receiver_address` 只有在**订单待发货且未被风控打标**时才返回密文，**其余情况返回空字符串**。\n所以前端拿到的\"空\"至少有四个原因：审核中、已发货、整列没返回、库里根本没加密。\n\n**把它们渲染成同一句\"数据缺失\"，是这条链上最贵的前端 bug**：\n它会驱动一条假的\"地址缺失率\"指标，让数据团队去查一条没坏的管道，\n而真实原因是风控收紧。前端是唯一有\"原因\"这个信息的地方 —— 接口已经把状态与风控都给了它。\n\n## 你要实现的入口\n\n```ts\nexport interface ReceiverInput {\n  status: 1 | 2 | 3;        // 1 待发货 / 2 已发货待签收 / 3 已签收\n  risk: 0 | 1;              // 0 正常 / 1 审核中\n  stored: 'cipher' | 'plain' | 'absent';   // 库里存的是密文 / 明文 / 这一列没返回\n}\n\nexport interface ReceiverView {\n  reason: 'ok' | 'risk-hold' | 'not-awaiting-shipment' | 'not-ciphered' | 'no-column';\n  text: string;             // 见下表，必须一字不差\n  tone: 'ok' | 'muted' | 'warn';\n  canDecrypt: boolean;      // 是否显示\"点击查看\"按钮\n  metricBucket: 'visible' | 'policy-hidden' | 'pipeline-missing' | 'integrity-broken';\n  ariaLabel: string;        // '收件人信息：' + text\n  countsAsMissingForQuality: boolean;   // 只允许一种 reason 记为真缺失\n}\n\nexport function receiverView(row: ReceiverInput): ReceiverView\n```\n\n## reason 判定（优先级从上到下，与接口层那道题**必须一致**）\n\n1. `stored === 'absent'` ⇒ `no-column`\n2. `status !== 1` ⇒ `not-awaiting-shipment`\n3. `risk === 1` ⇒ `risk-hold`\n4. `stored === 'plain'` ⇒ `not-ciphered`\n5. 其余 ⇒ `ok`\n\n## 每个 reason 的输出（这张表就是判分点）\n\n| `reason` | `text` | `tone` | `canDecrypt` | `metricBucket` | `countsAsMissingForQuality` |\n| --- | --- | --- | --- | --- | --- |\n| `ok` | `可查看` | `ok` | `true` | `visible` | `false` |\n| `risk-hold` | `审核中 · 暂不可查看` | `warn` | `false` | `policy-hidden` | `false` |\n| `not-awaiting-shipment` | `已发货 · 不再提供` | `muted` | `false` | `policy-hidden` | `false` |\n| `not-ciphered` | `未加密 · 禁止展示` | `warn` | `false` | `integrity-broken` | `false` |\n| `no-column` | `数据缺失` | `warn` | `false` | `pipeline-missing` | `true` |\n\n`ariaLabel` 恒为 `'收件人信息：' + text`（屏幕阅读器必须能读出\"为什么看不见\"，\n而不是只读出一句\"数据缺失\"）。\n\n## 抛错（`throw new Error(...)`，消息文本必须一致）\n\n- `row` 是 `null` / `undefined` ⇒ `row must be an object`\n- `status` 不是 1/2/3/5 ⇒ `unknown order status`\n- `status === 5` ⇒ `filter value 5 is not a real status`（那是查询用的**筛选值**，不该出现在数据里）\n- `risk` 不是 0/1 ⇒ `unknown risk control status`\n- `stored` 不在三种形态里 ⇒ `unknown stored form`\n\n校验顺序就按上面列出的先后。\n\n不许引入第三方依赖（无 styled-components、无 intl）。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "field-visibility",
+    "view-model",
+    "accessibility",
+    "metric-bucket",
+    "modern:privacy-engineering"
+  ],
+  "cases": [
+    {
+      "name": "基线：待发货 + 未打标 + 密文 ⇒ 唯一可解密的形态",
+      "input": [
+        {
+          "status": 1,
+          "risk": 0,
+          "stored": "cipher"
+        }
+      ],
+      "expected": {
+        "reason": "ok",
+        "text": "可查看",
+        "tone": "ok",
+        "canDecrypt": true,
+        "metricBucket": "visible",
+        "ariaLabel": "收件人信息：可查看",
+        "countsAsMissingForQuality": false
+      },
+      "visible": true
+    },
+    {
+      "name": "风控审核中必须渲染成\"暂不可查看\"，不能渲染成\"数据缺失\"",
+      "input": [
+        {
+          "status": 1,
+          "risk": 1,
+          "stored": "cipher"
+        }
+      ],
+      "expected": {
+        "reason": "risk-hold",
+        "text": "审核中 · 暂不可查看",
+        "tone": "warn",
+        "canDecrypt": false,
+        "metricBucket": "policy-hidden",
+        "ariaLabel": "收件人信息：审核中 · 暂不可查看",
+        "countsAsMissingForQuality": false
+      },
+      "visible": true
+    },
+    {
+      "name": "已发货：状态本身就不该再展示收件人信息",
+      "input": [
+        {
+          "status": 2,
+          "risk": 0,
+          "stored": "cipher"
+        }
+      ],
+      "expected": {
+        "reason": "not-awaiting-shipment",
+        "text": "已发货 · 不再提供",
+        "tone": "muted",
+        "canDecrypt": false,
+        "metricBucket": "policy-hidden",
+        "ariaLabel": "收件人信息：已发货 · 不再提供",
+        "countsAsMissingForQuality": false
+      },
+      "visible": true
+    },
+    {
+      "name": "整列没返回：这一种才允许进\"数据缺失\"的分子",
+      "input": [
+        {
+          "status": 1,
+          "risk": 0,
+          "stored": "absent"
+        }
+      ],
+      "expected": {
+        "reason": "no-column",
+        "text": "数据缺失",
+        "tone": "warn",
+        "canDecrypt": false,
+        "metricBucket": "pipeline-missing",
+        "ariaLabel": "收件人信息：数据缺失",
+        "countsAsMissingForQuality": true
+      },
+      "visible": true
+    },
+    {
+      "name": "库里是明文：禁止展示，且归到完整性问题而不是缺失",
+      "input": [
+        {
+          "status": 1,
+          "risk": 0,
+          "stored": "plain"
+        }
+      ],
+      "expected": {
+        "reason": "not-ciphered",
+        "text": "未加密 · 禁止展示",
+        "tone": "warn",
+        "canDecrypt": false,
+        "metricBucket": "integrity-broken",
+        "ariaLabel": "收件人信息：未加密 · 禁止展示",
+        "countsAsMissingForQuality": false
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：已签收 + 审核中 + 缺列三件事同时成立时，缺列优先（管道故障最该被看见）",
+      "input": [
+        {
+          "status": 3,
+          "risk": 1,
+          "stored": "absent"
+        }
+      ],
+      "expected": {
+        "reason": "no-column",
+        "text": "数据缺失",
+        "tone": "warn",
+        "canDecrypt": false,
+        "metricBucket": "pipeline-missing",
+        "ariaLabel": "收件人信息：数据缺失",
+        "countsAsMissingForQuality": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：已发货优先于审核中（状态是更强的拒绝理由）",
+      "input": [
+        {
+          "status": 3,
+          "risk": 1,
+          "stored": "cipher"
+        }
+      ],
+      "expected": {
+        "reason": "not-awaiting-shipment",
+        "text": "已发货 · 不再提供",
+        "tone": "muted",
+        "canDecrypt": false,
+        "metricBucket": "policy-hidden",
+        "ariaLabel": "收件人信息：已发货 · 不再提供",
+        "countsAsMissingForQuality": false
+      },
+      "visible": true
+    },
+    {
+      "name": "非法：整行是 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "row must be an object"
+    },
+    {
+      "name": "非法：未知订单状态",
+      "input": [
+        {
+          "status": 9,
+          "risk": 0,
+          "stored": "cipher"
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown order status"
+    },
+    {
+      "name": "非法：筛选值 5 落进了数据",
+      "input": [
+        {
+          "status": 5,
+          "risk": 0,
+          "stored": "cipher"
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "filter value 5 is not a real status"
+    },
+    {
+      "name": "非法：未知风控标记",
+      "input": [
+        {
+          "status": 1,
+          "risk": 2,
+          "stored": "cipher"
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown risk control status"
+    },
+    {
+      "name": "非法：未知存储形态",
+      "input": [
+        {
+          "status": 1,
+          "risk": 0,
+          "stored": "hashed"
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown stored form"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个优先级链定 `reason`，两张表把 `reason` 映射成文案与指标桶。\n**关键结构是\"先判原因，再由原因查文案\"**，而不是在每个分支里各写一遍字符串 ——\n后者会让文案、tone、metricBucket 三处各自漂移，而它们是同一条业务规则的三个投影。\n\n**基线五种输入各打一条分支**，其中最值钱的两条：\n`status=3, risk=1, stored='absent'` ⇒ `no-column`（优先级 1 压过 2 和 3：\n管道故障比业务原因更该被先看见，否则\"缺列\"会被风控解释掉而没人去修）；\n`status=3, risk=1, stored='cipher'` ⇒ `not-awaiting-shipment`\n（**状态优先于风控**：已经发货的单，风控解不解除都不该再给地址。\n把 2、3 两条顺序换一下，这条就会翻成 `risk-hold`，\n于是\"审核中\"的计数虚高、发货后的合规隐藏被记成风控问题）。\n\n**`countsAsMissingForQuality` 只允许 `no-column` 为 true**：\n这一列是\"前端把哪些情况算进数据质量分子\"的显式契约。\n朴素解把它写成 `missing`（覆盖所有拿不到值的情况），\n于是风控与状态两种\"合规正常态\"一起进了缺失率 —— 这正是素材里\n\"缺失率从 2% 涨到 40%\"那条事故的源头。\n**指标层那道题（pyspark）与这道题共用同一个判据**，两边必须能对上。\n\n**`metricBucket` 为什么比 `reason` 多一层抽象**：\n`risk-hold` 与 `not-awaiting-shipment` 是两个不同的 reason，\n但它们是同一个指标桶（`policy-hidden`）。看板按桶聚合、按 reason 下钻。\n如果只有 reason，聚合规则会被写进 BI 层的 CASE 表达式里 ——\n那正是\"同一个口径在两处实现、迟早漂移\"的起点。\n\n**为什么 `not-ciphered` 既不算可见也不算缺失**：\n库里躺着明文本身是合规事故（PIPL 下的个人敏感信息），\n但它**不是**\"数据不可用\"。把它塞进 `pipeline-missing` 会掩盖真正的问题：\n需要被修的是加密链路，不是补数据。所以它单独一个桶 `integrity-broken`。\n\n**`ariaLabel` 要带原因**（`'收件人信息：' + text`）：\n只读\"数据缺失\"对屏幕阅读器用户等于什么都没读出来。\n可访问性与可观测性在这里是同一件事 —— **界面必须说得出\"为什么没有\"**。\n\n**工程延伸（面试追问点）**\n\n1. 为什么前端不做解密？（解密是**字段级权限 + 审计动作**：谁、何时、为哪个订单解了密\n   必须留痕，所以解密要打一请求，而不是把密钥发到浏览器。\n   `canDecrypt` 控制的是按钮，不是能力。）\n2. 这套 reason 值不值得写进共享包？（必须。接口层、数仓层、前端三处用的是**同一套枚举**，\n   任何一处私自加值都会被另外两处静默吞掉。真实工程是\n   `@arena/receiver-visibility` 之类的共享模块 + 一份契约测试。）\n3. 新增一种 reason 会怎样？（老前端会命中\"未知\"分支。所以映射表要有\n   `default`：**未知 reason 一律按最保守的展示**（不给解密、不计缺失、tone warn），\n   并且单独上报一个 `unmapped` 计数 —— 这就是枚举治理的前端版本。）\n4. 测试为什么要断整个对象而不是 `text`？（这条链上的缺陷全是\"文案对了但 metricBucket 错了\"\n   这类**语义错位**。`toEqual` 打全对象是这类缺陷唯一的捕获方式。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "receiver.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { receiverView } from './Solution';\n\n/**\n * 断言由 gen.py 里同一个 receiver_view() 模型生成，不手抄 ——\n * react-vitest 题的判分事实来源就是这份测试文件，抄错一次就永久错一次。\n * 契约型用例断言到**消息**：只写 .toThrow() 会让几条\"都该抛错\"的用例收敛成同一条。\n */\ndescribe('receiverView：收件人字段三态语义的视图模型', () => {\n  it(\"基线：待发货 + 未打标 + 密文 ⇒ 唯一可解密的形态\", () => {\n    expect(receiverView({\"status\": 1, \"risk\": 0, \"stored\": \"cipher\"})).toEqual({\"reason\": \"ok\", \"text\": \"可查看\", \"tone\": \"ok\", \"canDecrypt\": true, \"metricBucket\": \"visible\", \"ariaLabel\": \"收件人信息：可查看\", \"countsAsMissingForQuality\": false});\n  });\n  it(\"风控审核中必须渲染成\\\"暂不可查看\\\"，不能渲染成\\\"数据缺失\\\"\", () => {\n    expect(receiverView({\"status\": 1, \"risk\": 1, \"stored\": \"cipher\"})).toEqual({\"reason\": \"risk-hold\", \"text\": \"审核中 · 暂不可查看\", \"tone\": \"warn\", \"canDecrypt\": false, \"metricBucket\": \"policy-hidden\", \"ariaLabel\": \"收件人信息：审核中 · 暂不可查看\", \"countsAsMissingForQuality\": false});\n  });\n  it(\"已发货：状态本身就不该再展示收件人信息\", () => {\n    expect(receiverView({\"status\": 2, \"risk\": 0, \"stored\": \"cipher\"})).toEqual({\"reason\": \"not-awaiting-shipment\", \"text\": \"已发货 · 不再提供\", \"tone\": \"muted\", \"canDecrypt\": false, \"metricBucket\": \"policy-hidden\", \"ariaLabel\": \"收件人信息：已发货 · 不再提供\", \"countsAsMissingForQuality\": false});\n  });\n  it(\"整列没返回：这一种才允许进\\\"数据缺失\\\"的分子\", () => {\n    expect(receiverView({\"status\": 1, \"risk\": 0, \"stored\": \"absent\"})).toEqual({\"reason\": \"no-column\", \"text\": \"数据缺失\", \"tone\": \"warn\", \"canDecrypt\": false, \"metricBucket\": \"pipeline-missing\", \"ariaLabel\": \"收件人信息：数据缺失\", \"countsAsMissingForQuality\": true});\n  });\n  it(\"库里是明文：禁止展示，且归到完整性问题而不是缺失\", () => {\n    expect(receiverView({\"status\": 1, \"risk\": 0, \"stored\": \"plain\"})).toEqual({\"reason\": \"not-ciphered\", \"text\": \"未加密 · 禁止展示\", \"tone\": \"warn\", \"canDecrypt\": false, \"metricBucket\": \"integrity-broken\", \"ariaLabel\": \"收件人信息：未加密 · 禁止展示\", \"countsAsMissingForQuality\": false});\n  });\n  it(\"退化：已签收 + 审核中 + 缺列三件事同时成立时，缺列优先（管道故障最该被看见）\", () => {\n    expect(receiverView({\"status\": 3, \"risk\": 1, \"stored\": \"absent\"})).toEqual({\"reason\": \"no-column\", \"text\": \"数据缺失\", \"tone\": \"warn\", \"canDecrypt\": false, \"metricBucket\": \"pipeline-missing\", \"ariaLabel\": \"收件人信息：数据缺失\", \"countsAsMissingForQuality\": true});\n  });\n  it(\"边界：已发货优先于审核中（状态是更强的拒绝理由）\", () => {\n    expect(receiverView({\"status\": 3, \"risk\": 1, \"stored\": \"cipher\"})).toEqual({\"reason\": \"not-awaiting-shipment\", \"text\": \"已发货 · 不再提供\", \"tone\": \"muted\", \"canDecrypt\": false, \"metricBucket\": \"policy-hidden\", \"ariaLabel\": \"收件人信息：已发货 · 不再提供\", \"countsAsMissingForQuality\": false});\n  });\n  it(\"非法：整行是 null\", () => {\n    expect(() => receiverView(null as never)).toThrow(\"row must be an object\");\n  });\n  it(\"非法：未知订单状态\", () => {\n    expect(() => receiverView({\"status\": 9, \"risk\": 0, \"stored\": \"cipher\"} as never)).toThrow(\"unknown order status\");\n  });\n  it(\"非法：筛选值 5 落进了数据\", () => {\n    expect(() => receiverView({\"status\": 5, \"risk\": 0, \"stored\": \"cipher\"} as never)).toThrow(\"filter value 5 is not a real status\");\n  });\n  it(\"非法：未知风控标记\", () => {\n    expect(() => receiverView({\"status\": 1, \"risk\": 2, \"stored\": \"cipher\"} as never)).toThrow(\"unknown risk control status\");\n  });\n  it(\"非法：未知存储形态\", () => {\n    expect(() => receiverView({\"status\": 1, \"risk\": 0, \"stored\": \"hashed\"} as never)).toThrow(\"unknown stored form\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "export interface ReceiverInput {\n  status: number;\n  risk: number;\n  stored: string;\n}\n\nexport interface ReceiverView {\n  reason: string;\n  text: string;\n  tone: string;\n  canDecrypt: boolean;\n  metricBucket: string;\n  ariaLabel: string;\n  countsAsMissingForQuality: boolean;\n}\n\nconst REASON_TEXT: Record<string, [string, string]> = {\n  ok: ['可查看', 'ok'],\n  'risk-hold': ['审核中 · 暂不可查看', 'warn'],\n  'not-awaiting-shipment': ['已发货 · 不再提供', 'muted'],\n  'not-ciphered': ['未加密 · 禁止展示', 'warn'],\n  'no-column': ['数据缺失', 'warn'],\n};\n\nconst REASON_BUCKET: Record<string, string> = {\n  ok: 'visible',\n  'risk-hold': 'policy-hidden',\n  'not-awaiting-shipment': 'policy-hidden',\n  'not-ciphered': 'integrity-broken',\n  'no-column': 'pipeline-missing',\n};\n\nexport function receiverView(row: ReceiverInput): ReceiverView {\n  if (row === null || row === undefined) throw new Error('row must be an object');\n  const { status, risk, stored } = row;\n  if (status !== 1 && status !== 2 && status !== 3 && status !== 5) {\n    throw new Error('unknown order status');\n  }\n  if (status === 5) throw new Error('filter value 5 is not a real status');\n  if (risk !== 0 && risk !== 1) throw new Error('unknown risk control status');\n  if (stored !== 'cipher' && stored !== 'plain' && stored !== 'absent') {\n    throw new Error('unknown stored form');\n  }\n\n  // 优先级：管道没给 > 状态不该给 > 风控压着 > 值没加密 > 正常\n  let reason: string;\n  if (stored === 'absent') reason = 'no-column';\n  else if (status !== 1) reason = 'not-awaiting-shipment';\n  else if (risk === 1) reason = 'risk-hold';\n  else if (stored === 'plain') reason = 'not-ciphered';\n  else reason = 'ok';\n\n  const [text, tone] = REASON_TEXT[reason];\n  return {\n    reason,\n    text,\n    tone,\n    canDecrypt: reason === 'ok',\n    metricBucket: REASON_BUCKET[reason],\n    ariaLabel: '收件人信息：' + text,\n    countsAsMissingForQuality: reason === 'no-column',\n  };\n}",
+    "naiveSolution": "export function receiverView(row: any): any {\n  // \"空就是没有\"版：四个原因压成一句文案，全部计入缺失率。\n  // 症状：风控收紧那天，前端\"地址缺失\"提示翻倍，数据团队据此立项去查一条没坏的管道。\n  const missing = !row || !row.stored || row.stored === 'absent';\n  const text = missing ? '数据缺失' : '可查看';\n  return {\n    reason: missing ? 'no-column' : 'ok',\n    text,\n    tone: missing ? 'warn' : 'ok',\n    canDecrypt: !missing,\n    metricBucket: missing ? 'pipeline-missing' : 'visible',\n    ariaLabel: text,\n    countsAsMissingForQuality: missing,\n  };\n}"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "PDD",
+    "role": "前端工程（交易中台 / 订单详情方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 4（`receiver_*` 官方三态注释 + `risk_control_status` 打标）＋ DATA 考点 5「把值与可见性原因拆成两列，下游必须引用可见性列而不是猜」。note：素材本身未提出前端题，这里落在**已有官方字段语义**上，不引入任何拼多多前端栈断言",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.114Z"
+  }
+}

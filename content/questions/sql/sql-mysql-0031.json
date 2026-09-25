@@ -1,0 +1,764 @@
+{
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "Hologres 表属性 × 查询模式：点查形态、分段键与聚簇键、分片裁剪与配置风险各是各的",
+  "statement": "## 背景\n\nHologres 官方把自己定位成\"支持 PB 级多维分析（OLAP）与即席分析，\n**支持高并发低延迟的在线数据服务（Serving）**\"【源 D14】，\n并把\"同一份数据既要被聚合分析、又要被高 QPS 点查\"拆成**几个互相独立的表属性**\n【源 D11/D12/D13】：\n\n| 属性 | 官方原话（摘要） | 解决什么 |\n| --- | --- | --- |\n| `orientation` | 列存\"海量聚合分析首选\"；行存\"**专门为基于主键的点查 Point Lookup 优化，响应速度可达毫秒级**\" | 数据**怎么存** |\n| 主键索引 | \"系统自动在底层保存一个主键索引文件，**采用行存结构**，Key = 表主键，Value = RID + 聚簇索引\" | 主键冲突判定、按主键定位 |\n| `distribution_key` | 分片存储；默认取主键、建议只选一列且是主键子集 | **要不要跨 shard** |\n| `clustering_key` | **文件内排序**，默认为空、建议最多一列且只支持升序 | 文件内少读 |\n| `event_time_column`（Segment Key） | 适用\"**含范围过滤条件（包括等值条件）**的查询\"与\"**基于主键的 UPDATE**\"；机制是\"数据文件基于该列范围排序后合并、**减少文件之间的重叠**\" | **文件级裁剪** |\n| `bitmap_columns` | 低基数列等值过滤 | 等值过滤 |\n\n另有两条官方\"反面建议\"，本题做成配置风险列：\n**不建议把 Serial 设为主键**（写入时是表锁、长度易溢出）【源 D13】；\n**TTL 非精确删除**（\"到期后数据会在某一段时间删除……**因此可能出现 PK 重复或者查询结果不一致**\"，\n官方建议改用分区表）【源 D11】。\n\n## 表\n\n```\nholo_table(tbl VARCHAR(32) PK, orientation VARCHAR(8),      -- 'row' | 'column' | 'both'\n           pk_cols VARCHAR(32),      -- 主键列名，'' = 无主键（本题主键都是单列）\n           dist_key VARCHAR(32), cluster_key VARCHAR(32), seg_key VARCHAR(32),\n           bitmap_cols VARCHAR(128),                        -- 逗号分隔，'' = 没配\n           ttl_days INT, pk_is_serial INT)\nquery_log(qid INT PK, tbl VARCHAR(32), pattern VARCHAR(8),  -- 'point'|'agg'|'range'|'eq'\n          filters VARCHAR(32),      -- 等值过滤列（point 传主键列），'' = 没有\n          range_col VARCHAR(32))    -- 范围谓词列，'' = 没有\n```\n\n## 任务\n\n只交**一条 SELECT**（`query_log JOIN holo_table`），按 `qid` 升序输出：\n\n```\nqid, tbl, pattern, access_path, shard_pruned, config_risk\n```\n\n`access_path` 判据（**从上到下命中即止**；下文\"行存形态\"指 `orientation <> 'column'`）：\n\n| # | 条件 | `access_path` |\n| --- | --- | --- |\n| 1 | `pattern='point'` 且 `pk_cols=''` | `no-pk-scan` |\n| 2 | `point` 且 `filters = pk_cols` 且 行存形态 | `pk-point-lookup` |\n| 3 | `point` 且 `filters = pk_cols`（列存表） | `pk-index-on-column` |\n| 4 | `point` 且 行存形态（过滤列不是主键） | `pk-partial-scan` |\n| 5 | `point` 其余 | `pk-partial-on-column` |\n| 6 | `agg` 且 `orientation='row'` | `row-scan-for-agg` |\n| 7 | `agg` 且 `range_col = seg_key`（`seg_key` 非空） | `agg-segment-pruned` |\n| 8 | `agg` 其余 | `agg-column-scan` |\n| 9 | `range` 且 `range_col = seg_key` | `segment-pruned` |\n| 10 | `range` 且 `range_col = cluster_key` | `cluster-sorted-scan` |\n| 11 | `range` 其余 | `full-scan` |\n| 12 | `eq` 且 `filters` 出现在 `bitmap_cols` 里 | `bitmap-index-scan` |\n| 13 | `eq` 且 `filters = dist_key`（`dist_key` 非空） | `shard-local-scan` |\n| 14 | 其余 | `seq-scan` |\n\n`shard_pruned` = （`dist_key` 非空且 `filters = dist_key`）? `1` : `0`。\n\n`config_risk` 判据（**同样从上到下，只报第一条**）：\n\n| # | 条件 | `config_risk` |\n| --- | --- | --- |\n| 1 | `pk_is_serial = 1` | `serial-pk` |\n| 2 | `ttl_days > 0` 且 `pk_cols <> ''` | `ttl-on-pk-table` |\n| 3 | `dist_key <> ''` 且 `pk_cols <> ''` 且 `dist_key <> pk_cols` | `dist-key-not-in-pk` |\n| 4 | `orientation = 'column'` 且**该表存在任意一条 `point` 查询** | `column-for-point` |\n| 5 | `cluster_key <> ''` 且 `cluster_key = seg_key` | `cluster-equals-segment` |\n| 6 | 其余 | `none` |\n\n## 三条口径纪律\n\n- **第 4 条要 `EXISTS` 而不是判当前行**：\"列存表上有点查\"是**表级**配置问题，\n  它要在该表的每一条查询记录上都显示出来。写成\"当前行 pattern='point' 才算\"\n  会让同一张表报出两种风险（点查那行有、聚合那行没有），\n  而看板按表去重统计\"有风险的表数\"时就会漏。\n- **第 3 条要求 `pk_cols <> ''`**：无主键的表谈不上\"分布键不是主键子集\"\n  （官方那条建议的前提是\"默认取主键、建议是主键子集\"）。\n  漏掉这个前提会把故意无主键的表报成配置错误。\n- **`shard_pruned` 与 `access_path` 必须分列**：分片裁剪解决\"要扫多少个 shard\"，\n  点查形态解决\"单个 shard 里怎么走索引\"。一张表可以两个都好、也可以一好一坏\n  （用例「无主键的列存表做点查」就是后者）。\n\n只允许一条 `SELECT`。",
+  "judgeKind": "mysql",
+  "tags": [
+    "hologres",
+    "access-path",
+    "segment-key",
+    "distribution-key",
+    "ttl-pk-duplication",
+    "modern:olap-serving"
+  ],
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发（实时数仓 / OLAP 服务层方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-data-and-storage.md#4 考点 9（OLAP 选型【源 D11/D12/D13/D14】：列存/行存适用面、主键索引是行存文件（Value=RID+聚簇键）、四类表属性各自解决什么、不建议 Serial 做主键、TTL 非精确删除会出现 PK 重复、聚簇索引=文件内排序 vs 分段键=文件级裁剪；素材该考点的出题建议正是\"给一张订单明细与 5 条真实查询，写哪些走预聚合、哪些走主键点查、哪些必须扫分区的分层方案与索引映射\"。优先级表与 config_risk 的五条排序是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T14:59:13.087Z"
+  },
+  "language": "sql",
+  "cases": [
+    {
+      "name": "基线：十二类查询各落一种访问路径，配置风险按优先级只报一条",
+      "input": [],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "ttl-on-pk-table"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "ttl-on-pk-table"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "none"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "cluster-sorted-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "none"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "none"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "qid1 列存按主键点查 ⇒ pk-index-on-column；qid2 行存按主键 ⇒ pk-point-lookup；qid6 命中分段键 ⇒ segment-pruned；qid7 只命中聚簇键 ⇒ cluster-sorted-scan；qid11 是 both 表且范围谓词正好落在分段键上 ⇒ agg-segment-pruned",
+      "visible": true
+    },
+    {
+      "name": "边界：把 ord 的分段键改成与聚簇键同列 ⇒ 三条路径重算，风险列按优先级仍停在\"列存做点查\"",
+      "input": [
+        "UPDATE holo_table SET seg_key = 'pay_time' WHERE tbl = 'ord'"
+      ],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "ttl-on-pk-table"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "ttl-on-pk-table"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-column-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "none"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "full-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "none"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "none"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "ord 是列存表且 pk/dist 合规 ⇒ 第 4 条（column-for-point）排在第 5 条前面，风险列不动；但 qid4/qid6/qid7 三条路径全跟着 seg_key 变",
+      "visible": true
+    },
+    {
+      "name": "边界：清掉 TTL ⇒ risk_point 的配置风险换成\"聚簇键与分段键同列\"",
+      "input": [
+        "UPDATE holo_table SET ttl_days = 0 WHERE tbl = 'risk_point'"
+      ],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "cluster-equals-segment"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "cluster-equals-segment"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "none"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "cluster-sorted-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "none"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "none"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：把 evt 的分布键改成与主键同列 ⇒ dist-key-not-in-pk 消失，两键互顶浮出",
+      "input": [
+        "UPDATE holo_table SET dist_key = 'evt_id' WHERE tbl = 'evt'"
+      ],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "ttl-on-pk-table"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "ttl-on-pk-table"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "none"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "cluster-sorted-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "none"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "none"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "cluster-equals-segment"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "cluster-equals-segment"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "qid9 的 shard_pruned 同时从 1 变 0：分布键改对了（等于主键），却把\"按 shop 维度的查询\"弄成跨片 —— 一列动、两列变",
+      "visible": true
+    },
+    {
+      "name": "退化：查询日志为空 ⇒ 结果必须是空集（表配置再差也不许凭空出行）",
+      "input": [
+        "DELETE FROM query_log"
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "非法形态：查询打着一张不存在的表 ⇒ 整行不出现，不许猜路径",
+      "input": [
+        "INSERT INTO query_log VALUES (13, 'typo_tbl', 'point', 'id', '')"
+      ],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "ttl-on-pk-table"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "ttl-on-pk-table"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "none"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "cluster-sorted-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "none"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "none"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "LEFT JOIN 到不存在的表上 pk_cols 是 NULL，三值逻辑下与空串比较都不成立 ⇒ 报表里会多出一条\"某张不存在的表在做顺序扫描\"，污染按表去重的风险计数",
+      "visible": true
+    },
+    {
+      "name": "边界：无主键的列存表做点查 ⇒ no-pk-scan 而 shard_pruned 仍可为 1",
+      "input": [
+        "UPDATE holo_table SET orientation = 'column' WHERE tbl = 'dim_shop'",
+        "INSERT INTO query_log VALUES (14, 'dim_shop', 'point', 'shop_id', '')"
+      ],
+      "expected": {
+        "columns": [
+          "qid",
+          "tbl",
+          "pattern",
+          "access_path",
+          "shard_pruned",
+          "config_risk"
+        ],
+        "rows": [
+          [
+            1,
+            "ord",
+            "point",
+            "pk-index-on-column",
+            1,
+            "column-for-point"
+          ],
+          [
+            2,
+            "risk_point",
+            "point",
+            "pk-point-lookup",
+            1,
+            "ttl-on-pk-table"
+          ],
+          [
+            3,
+            "risk_point",
+            "point",
+            "pk-partial-scan",
+            0,
+            "ttl-on-pk-table"
+          ],
+          [
+            4,
+            "ord",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            5,
+            "dim_shop",
+            "agg",
+            "agg-column-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            6,
+            "ord",
+            "range",
+            "segment-pruned",
+            0,
+            "column-for-point"
+          ],
+          [
+            7,
+            "ord",
+            "range",
+            "cluster-sorted-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            8,
+            "dim_shop",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "column-for-point"
+          ],
+          [
+            9,
+            "dim_shop",
+            "eq",
+            "shard-local-scan",
+            1,
+            "column-for-point"
+          ],
+          [
+            10,
+            "evt",
+            "eq",
+            "bitmap-index-scan",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            11,
+            "evt",
+            "agg",
+            "agg-segment-pruned",
+            0,
+            "dist-key-not-in-pk"
+          ],
+          [
+            12,
+            "serial_t",
+            "point",
+            "pk-index-on-column",
+            1,
+            "serial-pk"
+          ],
+          [
+            14,
+            "dim_shop",
+            "point",
+            "no-pk-scan",
+            1,
+            "column-for-point"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "qid14：dim_shop 无主键 ⇒ 第 1 条就命中 no-pk-scan（轮不到第 3 条的主键索引），但分布键命中 ⇒ shard_pruned=1。两列各自成立，说明\"分片裁剪\"与\"点查形态\"是两件不同的事",
+      "visible": true
+    }
+  ],
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS `holo_table`",
+      "DROP TABLE IF EXISTS `query_log`",
+      "CREATE TABLE holo_table (tbl VARCHAR(32) NOT NULL PRIMARY KEY, orientation VARCHAR(8) NOT NULL, pk_cols VARCHAR(32) NOT NULL, dist_key VARCHAR(32) NOT NULL, cluster_key VARCHAR(32) NOT NULL, seg_key VARCHAR(32) NOT NULL, bitmap_cols VARCHAR(128) NOT NULL, ttl_days INT NOT NULL, pk_is_serial INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE query_log (qid INT NOT NULL PRIMARY KEY, tbl VARCHAR(32) NOT NULL, pattern VARCHAR(8) NOT NULL, filters VARCHAR(32) NOT NULL, range_col VARCHAR(32) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO holo_table VALUES ('ord', 'column', 'order_id', 'order_id', 'pay_time', 'gmt_create', 'shop_id,pay_type', 0, 0), ('risk_point', 'row', 'user_id', 'user_id', 'event_time', 'event_time', '', 7, 0), ('dim_shop', 'both', '', 'shop_id', '', '', 'city,brand', 0, 0), ('evt', 'both', 'evt_id', 'user_id', 'evt_time', 'evt_time', 'biz_type', 0, 0), ('serial_t', 'column', 'id', 'id', 'created_at', 'created_at', '', 0, 1)",
+      "INSERT INTO query_log VALUES (1, 'ord', 'point', 'order_id', ''), (2, 'risk_point', 'point', 'user_id', ''), (3, 'risk_point', 'point', 'event_time', ''), (4, 'ord', 'agg', '', 'gmt_create'), (5, 'dim_shop', 'agg', '', ''), (6, 'ord', 'range', '', 'gmt_create'), (7, 'ord', 'range', '', 'pay_time'), (8, 'dim_shop', 'eq', 'city', ''), (9, 'dim_shop', 'eq', 'shop_id', ''), (10, 'evt', 'eq', 'biz_type', ''), (11, 'evt', 'agg', '', 'evt_time'), (12, 'serial_t', 'point', 'id', '')"
+    ],
+    "entry": "function",
+    "timeoutMs": 20000,
+    "referenceSolution": "SELECT q.qid                                            AS qid,\n       q.tbl                                              AS tbl,\n       q.pattern                                          AS pattern,\n       CASE\n         WHEN q.pattern = 'point' AND t.pk_cols = '' THEN 'no-pk-scan'\n         WHEN q.pattern = 'point' AND q.filters = t.pk_cols AND t.orientation <> 'column'\n           THEN 'pk-point-lookup'\n         WHEN q.pattern = 'point' AND q.filters = t.pk_cols THEN 'pk-index-on-column'\n         WHEN q.pattern = 'point' AND t.orientation <> 'column' THEN 'pk-partial-scan'\n         WHEN q.pattern = 'point' THEN 'pk-partial-on-column'\n         WHEN q.pattern = 'agg' AND t.orientation = 'row' THEN 'row-scan-for-agg'\n         WHEN q.pattern = 'agg' AND t.seg_key <> '' AND q.range_col = t.seg_key\n           THEN 'agg-segment-pruned'\n         WHEN q.pattern = 'agg' THEN 'agg-column-scan'\n         WHEN q.pattern = 'range' AND t.seg_key <> '' AND q.range_col = t.seg_key\n           THEN 'segment-pruned'\n         WHEN q.pattern = 'range' AND t.cluster_key <> '' AND q.range_col = t.cluster_key\n           THEN 'cluster-sorted-scan'\n         WHEN q.pattern = 'range' THEN 'full-scan'\n         WHEN q.filters <> '' AND FIND_IN_SET(q.filters, t.bitmap_cols) > 0\n           THEN 'bitmap-index-scan'\n         WHEN t.dist_key <> '' AND q.filters = t.dist_key THEN 'shard-local-scan'\n         ELSE 'seq-scan'\n       END                                                AS access_path,\n       CASE WHEN t.dist_key <> '' AND q.filters = t.dist_key THEN 1 ELSE 0 END AS shard_pruned,\n       CASE\n         WHEN t.pk_is_serial = 1 THEN 'serial-pk'\n         WHEN t.ttl_days > 0 AND t.pk_cols <> '' THEN 'ttl-on-pk-table'\n         WHEN t.dist_key <> '' AND t.pk_cols <> '' AND t.dist_key <> t.pk_cols\n           THEN 'dist-key-not-in-pk'\n         WHEN t.orientation = 'column'\n              AND EXISTS (SELECT 1 FROM query_log p2\n                          WHERE p2.tbl = t.tbl AND p2.pattern = 'point')\n           THEN 'column-for-point'\n         WHEN t.cluster_key <> '' AND t.cluster_key = t.seg_key THEN 'cluster-equals-segment'\n         ELSE 'none'\n       END                                                AS config_risk\nFROM query_log q\nJOIN holo_table t ON t.tbl = q.tbl\nORDER BY q.qid",
+    "naiveSolution": "SELECT q.qid    AS qid,\n       q.tbl      AS tbl,\n       q.pattern  AS pattern,\n       CASE WHEN q.pattern = 'point' THEN 'pk-point-lookup'\n            WHEN q.range_col <> '' THEN 'segment-pruned'\n            WHEN q.pattern = 'agg' THEN 'olap-scan'\n            ELSE 'seq-scan' END AS access_path,\n       1 AS shard_pruned,\n       'none' AS config_risk\nFROM query_log q\nJOIN holo_table t ON t.tbl = q.tbl\nORDER BY q.qid",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 30,
+  "answer": "## 参考答案\n\n一条 `JOIN` + 两个多档 `CASE`。判分点全在**顺序**与\"哪些条件要判空串\"。\n\n**基线 12 行的 `access_path`**：qid1 `pk-index-on-column`（列存表按主键点查 ——\n主键索引文件是行存结构，但表体不是点查形态）、qid2 `pk-point-lookup`、\nqid3 `pk-partial-scan`（行存表按非主键列查）、qid4 `agg-segment-pruned`、\nqid5 `agg-column-scan`、qid6 `segment-pruned`、qid7 `cluster-sorted-scan`、\nqid8 `bitmap-index-scan`、qid9 `shard-local-scan`、qid10 `bitmap-index-scan`\n（`biz_type` 在 evt 的 bitmap 列里）、qid11 `agg-segment-pruned`（both 表的范围谓词\n正好落在分段键上）、qid12 `pk-index-on-column`（serial_t 是列存，命中第 3 条）。\n\n**`config_risk` 基线按表只有五种取值**：`ord` → `column-for-point`（该表有 qid1 这条 point）、\n`risk_point` → `ttl-on-pk-table`、`dim_shop` → `none`、\n`evt` → `dist-key-not-in-pk`（分布键 `user_id` 不等于主键 `evt_id`）、\n`serial_t` → `serial-pk`。\n**优先级在这里不是纸面要求**：`risk_point` 的 `cluster_key` 与 `seg_key` 同为 `event_time`\n（第 5 条也成立），但它只报 `ttl-on-pk-table`；`evt` 与 `serial_t` 同样满足第 5 条，\n却分别被第 3 条、第 1 条挡在前面。一张表报五条风险 = 一条都不会被修。\n\n**用例「清掉 TTL」把 `risk_point` 的 `ttl_days` 置 0** ⇒ 它的风险列换成\n`cluster-equals-segment`。这条专门用来证明优先级链**真的按顺序走**：\n只实现第 2 条（TTL）的实现会给出 `none`；而把第 5 条放在最前的实现会顺手把 `evt`、\n`serial_t` 也报成互顶（它们两键确实同列），盖掉真正该先报的第 3 条与第 1 条。\n素材把\"聚簇索引是文件内排序、分段键是文件级裁剪，**两者都当范围谓词用会互相顶掉收益**\"\n标为【推】，本题把它做成一条可判的枚举。\n\n**用例「把 ord 的分段键改成与聚簇键同列」一次改了三条路径，但**不改**风险列**：\nqid4 从 `agg-segment-pruned` 掉到 `agg-column-scan`、qid6 从 `segment-pruned` 掉到\n`full-scan`（它的 `range_col=gmt_create` 不再是分段键）、qid7 从 `cluster-sorted-scan`\n升到 `segment-pruned`（`pay_time` 现在是分段键）。**\"改一个属性会不会影响路径\"正是这题要证的**：\n只把配置风险当文案提示的实现，路径列不会跟着变。\n而 `ord` 的风险列**仍然是** `column-for-point` —— 第 4 条排在第 5 条前面，\n\"两键互顶\"在这张表上永远轮不到，这就是\"一张表只报第一条\"的代价。\n\n**`no-pk-scan` 只有最后一个用例能测到**：基线五张表要么有主键、要么不是纯列存。\n该用例把 `dim_shop` 改成列存（它本来就没有主键）并补一条 `point` 查询 ⇒\nqid14 落 `no-pk-scan`（第 1 条），而 `shard_pruned` 仍是 1（分布键 `shop_id` 命中）——\n两列各自成立，正说明\"分片裁剪\"与\"点查形态\"是两件不同的事。\n\n**用例「退化：查询日志为空」期望裸 `[]`**：`mysql --batch` 在 0 行时连表头都不输出，\n带 `columns` 的期望值构造上判不了（docs/JUDGING.md 的 mysql 一节）。\n\n**用例「查询打着一张不存在的表」不许多出行**：`JOIN holo_table` 直接挡掉。\n若有人改成 `LEFT JOIN holo_table`，三值逻辑下 `t.pk_cols = ''` 对 NULL 是 UNKNOWN、\n`t.orientation <> 'column'` 也是 UNKNOWN，于是 point 分支一路掉到 `seq-scan`/`none`，\n**报表里多出一条\"某张不存在的表在做顺序扫描\"的行**，\n而按表去重统计风险数时它是纯噪声。\n\n**朴素解挂在哪**：point 一律 `pk-point-lookup`（不看 orientation、不看过滤列是否真是主键）、\n`range_col` 非空就 `segment-pruned`（不比对分段键）、`shard_pruned` 恒 1、\n`config_risk` 恒 `none`。它对应的正是素材 §3 那条错误答案\n**\"列存就是最快\"**【源 D11/D13】。\n\n**工程延伸（面试追问点）**\n\n1. 点查为什么要行存？（机制在主键索引文件：它本身就是行存结构，\n   Value = RID + 聚簇键，RID 每次 UPSERT 生成且单调递增【源 D13】。\n   行存表的主键默认同时是 Clustering 与 Distribution Key ⇒ \"按主键定位数据文件\"是一跳。）\n2. 既要 OLAP 又要 Serving 怎么办？（`orientation='row,column'` 行列共存【源 D11】，\n   代价是写两份、存储翻倍。本题的 `both` 就是这个形态：\n   它的 point 走第 2 条、agg 走第 8 条，两侧都拿得到好路径。）\n3. TTL 到底能不能用？（官方原话是\"生产业务中不建议使用 TTL 来管理数据生命周期，\n   建议采用分区表\"，因为删除时点不精确 ⇒ **可能出现 PK 重复或查询结果不一致**【源 D11】。\n   这条同时是成本题与质量题的共同根因，也是本题把它排进第 2 位的原因。）",
+  "schemaVersion": 1,
+  "id": "sql-mysql-0031"
+}

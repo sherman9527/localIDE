@@ -1,0 +1,373 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0019",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "DQC 规则命中：四种分子同一个分母，分母为 0 判不了而不是通过",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n```\norders_fact(order_id INT PRIMARY KEY, customer_id INT, device_id INT NULL,\n            amount DECIMAL(10,2) NULL, status VARCHAR(8))     -- 'ok' | 'test'\ndim_device (device_id INT PRIMARY KEY)\ndqc_rule   (rule_id INT PRIMARY KEY, rule_type VARCHAR(16),\n            target_col VARCHAR(16), threshold DECIMAL(6,4))   -- rule_type 见下表\n```\n\n`target_col` 是给人看的元数据；本批规则用到的列是**固定**的\n（`null_rate`/`negative_value` 看 `amount`，`orphan` 看 `device_id`，`duplicate` 看 `customer_id`）。\n\n## 任务\n\n对**每一条规则**输出一行判词，按 `rule_id` 升序，列名与顺序必须是：\n\n```\nrule_id, rule_type, checked_rows, violations, violation_rate_pct, fail_flag\n```\n\n## 口径（这张表就是判分点）\n\n1. **所有规则共用同一个\"有效行\"集合**：`status <> 'test'`。\n   测试单不许参与任何一条规则（既不进分子也不进分母）。\n   `checked_rows` 恒等于有效行数（四种规则都一样）。\n2. 各规则的 `violations`：\n   - `null_rate` ⇒ `amount IS NULL` 的有效行数；\n   - `negative_value` ⇒ `amount < 0` 的有效行数（`amount IS NULL` **不算**负值，它归 `null_rate`）；\n   - `orphan` ⇒ `device_id IS NOT NULL` 且该 id **不在** `dim_device` 的有效行数。\n     **`device_id IS NULL` 不算孤儿** —— 它是空值问题，两列都要能各自说话；\n   - `duplicate` ⇒ **多出来的行数**：`Σ (组内行数 − 1)`。\n     不是\"有几个 key 重复了\"，也不是\"涉及重复的总行数\"。\n3. `violation_rate_pct` = `ROUND(violations * 100 / checked_rows, 2)`；\n   `checked_rows = 0` ⇒ 输出 `NULL`（**没有样本不等于 0% 违规**）。\n4. `fail_flag` = 1 当且仅当 `violation_rate_pct / 100 > threshold`（**严格大于**）。\n   `checked_rows = 0` ⇒ `fail_flag = 0`（判不了就不判失败，交给人看那个 `NULL`）。\n\n只提交**一条** `SELECT` / `WITH` 查询，不许动态拼 SQL、不许存储过程。\n\n## 这题真正考的东西\n\n- **四种规则的分子完全不同，分母必须相同**。\n  一旦某条规则偷偷换了分母（比如 `duplicate` 用\"不同 key 数\"当分母），\n  它的 `fail_flag` 就和其它三条不可比，而仪表盘上它们并排显示。\n- **`duplicate` 三种口径的分岔**：多出来的行数 / 重复的组数 / 涉及重复的总行数 ——\n  基线数据下三者分别是 1 / 1 / 2。阈值是按其中**一种**定的，用错一种就是算错。\n- **NULL 不能同时被两条规则认领**：`device_id IS NULL` 既进 `orphan` 又进 `null_rate`\n  会让同一行数据被计两次违规，全表违规率虚高，而且两条规则的告警会互相\"确认\"。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "data-quality",
+    "dqc",
+    "metric-denominator",
+    "null-handling",
+    "modern:data-contract"
+  ],
+  "cases": [
+    {
+      "name": "基线：三条失败一条通过，分母统一是 6",
+      "input": [],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            6,
+            1,
+            16.67,
+            0
+          ],
+          [
+            2,
+            "negative_value",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            3,
+            "orphan",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            4,
+            "duplicate",
+            6,
+            1,
+            16.67,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "null 16.67% 未过 20% 阈值；negative/orphan 阈值 0 各命中 1；duplicate 多出 1 行 > 10%"
+    },
+    {
+      "name": "测试单本来就不参与：删掉它，四条判词一字不变",
+      "input": [
+        "DELETE FROM orders_fact WHERE order_id = 6"
+      ],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            6,
+            1,
+            16.67,
+            0
+          ],
+          [
+            2,
+            "negative_value",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            3,
+            "orphan",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            4,
+            "duplicate",
+            6,
+            1,
+            16.67,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "有效行仍是 6 ⇒ 与基线完全相同 —— 测试单本来就不该参与"
+    },
+    {
+      "name": "维表少一行 + 阈值下调：orphan 命中变 2，null_rate 转为失败",
+      "input": [
+        "UPDATE dqc_rule SET threshold = 0.1 WHERE rule_id = 1",
+        "DELETE FROM dim_device WHERE device_id = 12"
+      ],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            2,
+            "negative_value",
+            6,
+            1,
+            16.67,
+            1
+          ],
+          [
+            3,
+            "orphan",
+            6,
+            2,
+            33.33,
+            1
+          ],
+          [
+            4,
+            "duplicate",
+            6,
+            1,
+            16.67,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "device 12 被删 ⇒ order 7 也成孤儿（1→2）；null_rate 命中数没变（仍是 1 行、16.67%），但因阈值从 0.20 降到 0.10 而转为失败 —— 判词变的是阈值而不是数据，这种情况必须能在报表上被区分出来"
+    },
+    {
+      "name": "删掉一条负值订单：null_rate 正好卡在 20% 阈值上（严格大于才失败）",
+      "input": [
+        "DELETE FROM orders_fact WHERE order_id = 3"
+      ],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            5,
+            1,
+            20,
+            0
+          ],
+          [
+            2,
+            "negative_value",
+            5,
+            0,
+            0,
+            0
+          ],
+          [
+            3,
+            "orphan",
+            5,
+            1,
+            20,
+            1
+          ],
+          [
+            4,
+            "duplicate",
+            5,
+            1,
+            20,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "剩 5 行、null 1 行 ⇒ 20.00%，阈值 0.20 ⇒ 0.20 > 0.20 为假 ⇒ 仍不失败。把 > 写成 >= 的实现在这里会翻成失败"
+    },
+    {
+      "name": "customer 100 变四行：violations 是 3，不是 1 也不是 4",
+      "input": [
+        "INSERT INTO orders_fact VALUES (8, 100, 10, 5.0, 'ok')",
+        "INSERT INTO orders_fact VALUES (9, 100, 10, 6.0, 'ok')"
+      ],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            8,
+            1,
+            12.5,
+            0
+          ],
+          [
+            2,
+            "negative_value",
+            8,
+            1,
+            12.5,
+            1
+          ],
+          [
+            3,
+            "orphan",
+            8,
+            1,
+            12.5,
+            1
+          ],
+          [
+            4,
+            "duplicate",
+            8,
+            3,
+            37.5,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "customer 100 共 4 行 ⇒ Σ(组内−1) = 3；\"重复的组数\"会给 1、\"涉及重复的总行数\"会给 4 —— 三种口径都 != 3"
+    },
+    {
+      "name": "把有效行删光：分母为 0 ⇒ 比率 NULL、fail 为 0，而不是全绿",
+      "input": [
+        "DELETE FROM orders_fact WHERE order_id = 1",
+        "DELETE FROM orders_fact WHERE order_id = 2",
+        "DELETE FROM orders_fact WHERE order_id = 3",
+        "DELETE FROM orders_fact WHERE order_id = 4",
+        "DELETE FROM orders_fact WHERE order_id = 5",
+        "DELETE FROM orders_fact WHERE order_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "rule_id",
+          "rule_type",
+          "checked_rows",
+          "violations",
+          "violation_rate_pct",
+          "fail_flag"
+        ],
+        "rows": [
+          [
+            1,
+            "null_rate",
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            2,
+            "negative_value",
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            3,
+            "orphan",
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            4,
+            "duplicate",
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "order 6 是 test，本来就不进集合 ⇒ checked_rows 0"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个 `stats` CTE 把四种违规**在同一次扫描里**算完（分母只有一个 `COUNT(*)`），\n再用 `CASE r.rule_type` 给每条规则挑自己的分子。\n这样四条判词的分母天然一致 —— 这正是这题要的结构性正确。\n\n**基线手算一遍（用来核对 expected 是不是真的对）**：\n有效行 6 条（order 6 是 `test`，剔除）。\n- `null_rate`：`amount IS NULL` ⇒ order 2 ⇒ 1 条 ⇒ 16.67% > 20%? 否 ⇒ **不失败**。\n- `negative_value`：order 3 ⇒ 1 条 ⇒ 16.67% > 0 ⇒ **失败**。\n- `orphan`：order 4（device 99 不在维表）⇒ 1 条；order 5 的 `device_id` 是 NULL **不算** ⇒ 16.67% > 0 ⇒ **失败**。\n- `duplicate`：只有 customer 100 出现两次 ⇒ 多出来 1 行 ⇒ 16.67% > 10% ⇒ **失败**。\n`checked_rows` 四行都是 6 —— 如果哪条规则算出别的分母，一眼就能看出来。\n\n**`duplicate` 的三种口径在基线上是 1 / 1 / 2**：\n\"多出来的行数\" = `Σ(组内行数−1)` = 1；\"重复的组数\" = 1；\"涉及重复的总行数\" = 2。\n本题只有第一种与阈值(0.10)自洽。\n用第三种的实现会把违规率翻倍，于是\"10% 阈值\"实际变成\"5%\" —— 规则上线后开始滥报，\n大家的第一反应是调高阈值，之后这条规则就再也没抓住过东西。\n\n**NULL 只能被一条规则认领**（基线用例里的 order 5：`device_id` 是 NULL。把它也算成孤儿，`orphan` 的 violations 就从 1 变 2、比率从 16.67% 变 33.33%，而这条判词只该说\"维表缺行\"）：\n`device_id IS NULL` 是**空值问题**（该字段没上报），\n`device_id` 有值但查不到维表是**引用完整性问题**（维表缺行或写入顺序错）。\n两者的修法、责任人、紧急程度都不一样。把 NULL 也判成孤儿，两条规则会同时告警并互相\"确认\"，\n而真正的维表缺行被混在噪声里。\n\n**分母为 0 输出 `NULL` 而不是 0**（用例「把有效行删光」）：\n`0.00%` 在仪表板上是一个绿色通过标记；`NULL` 是\"没判\"。\n删完数据还全绿，是这类系统最危险的形态 —— 它不是\"没报错\"，是\"报了一次假的安全\"。\n\n**工程延伸（面试追问点）**\n\n1. 为什么这里用 `CASE` 而不是给每种规则写一段 SQL 再 UNION？\n   （UNION 版本每加一种规则就加一段，且各段分母容易漂移；\n   单扫描 + `CASE` 保证\"所有规则看的是同一批行\"。\n   代价是分子逻辑挤在一个表达式里 —— 真实系统会把这个表达式生成出来而不是手写，\n   也就是 dbt/Great Expectations 那类工具做的事。）\n2. 真实 DQC 引擎怎么处理 `target_col` 是动态的？（不能靠一条 SQL 泛化 ——\n   要么发布时按规则**生成**测试 SQL 再执行，要么每种规则类型注册一段模板。\n   本题把列固定是**有意的可判分简化**，面试时要主动说明真实系统必须生成。）\n3. 阈值该怎么定？（不能拍。`null_rate` 从历史分布取（上一周期的 p99 空值率 + 余量），\n   `duplicate`/`orphan` 这类\"结构上不该发生\"的取 0；\n   取 0 的规则一旦某天出现零星命中，通常是上游发布引起的，要阻断而不是调阈值。）\n4. 及时性（freshness）规则为什么没放进来？（它的分母不是行数而是\"最新分区是否到位\"，\n   与其它四条不同型；放进同一张表会让人误以为 `violation_rate_pct` 是通用量纲 ——\n   这正是\"统一 schema\"最该被拒绝的地方。真实系统会给它单独一类判词：\n   `max_day`、`lag_hours`、是否超过 SLA。）\n5. 坏数据怎么办？（**隔离区，不改写源表**。规则命中后把该行复制进隔离表并带\n   `rule_id + 判定时刻`，下游读\"干净视图\"，修复后重放。\n   直接 `DELETE` 源表等于销毁证据，之后无法回答\"到底影响了哪些订单\"。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS orders_fact",
+      "DROP TABLE IF EXISTS dim_device",
+      "DROP TABLE IF EXISTS dqc_rule",
+      "CREATE TABLE orders_fact (order_id INT PRIMARY KEY, customer_id INT NOT NULL, device_id INT NULL, amount DECIMAL(10,2) NULL, status VARCHAR(8) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE dim_device (device_id INT PRIMARY KEY) ENGINE=InnoDB",
+      "CREATE TABLE dqc_rule (rule_id INT PRIMARY KEY, rule_type VARCHAR(16) NOT NULL, target_col VARCHAR(16) NOT NULL, threshold DECIMAL(6,4) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO orders_fact VALUES (1, 100, 10, 20.0, 'ok'), (2, 100, 10, NULL, 'ok'), (3, 101, 11, -5.0, 'ok'), (4, 102, 99, 30.0, 'ok'), (5, 103, NULL, 40.0, 'ok'), (6, 104, 12, 50.0, 'test'), (7, 105, 12, 60.0, 'ok')",
+      "INSERT INTO dim_device VALUES (10), (11), (12)",
+      "INSERT INTO dqc_rule VALUES (1, 'null_rate', 'amount', 0.2), (2, 'negative_value', 'amount', 0.0), (3, 'orphan', 'device_id', 0.0), (4, 'duplicate', 'customer_id', 0.1)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH active AS (\n  SELECT o.* FROM orders_fact o WHERE o.status <> 'test'\n), stats AS (\n  SELECT COUNT(*) AS checked_rows,\n         -- 空集时 SUM 返回 NULL 而不是 0；分子兜住才与 checked_rows = 0 的判词一致\n         COALESCE(SUM(a.amount IS NULL), 0) AS nulls,\n         COALESCE(SUM(a.amount < 0), 0) AS negatives,\n         COALESCE(SUM(a.device_id IS NOT NULL\n                     AND NOT EXISTS (SELECT 1 FROM dim_device d WHERE d.device_id = a.device_id)), 0)\n           AS orphans,\n         COUNT(*) - COUNT(DISTINCT a.customer_id) AS dup_extra\n  FROM active a\n), hits AS (\n  SELECT r.rule_id, r.rule_type, r.threshold, s.checked_rows,\n         CASE r.rule_type\n           WHEN 'null_rate'     THEN s.nulls\n           WHEN 'negative_value' THEN s.negatives\n           WHEN 'orphan'        THEN s.orphans\n           WHEN 'duplicate'     THEN s.dup_extra\n         END AS violations\n  FROM dqc_rule r CROSS JOIN stats s\n)\nSELECT rule_id,\n       rule_type,\n       checked_rows,\n       violations,\n       CASE WHEN checked_rows = 0 THEN NULL\n            ELSE ROUND(violations * 100 / checked_rows, 2) END AS violation_rate_pct,\n       CASE WHEN checked_rows > 0\n                 AND ROUND(violations * 100 / checked_rows, 2) / 100 > threshold\n            THEN 1 ELSE 0 END AS fail_flag\nFROM hits\nORDER BY rule_id",
+    "naiveSolution": "-- \"每条规则自己算自己的分母\"版：判词之间不可比\nSELECT r.rule_id,\n       r.rule_type,\n       COUNT(o.order_id) AS checked_rows,\n       CASE r.rule_type\n         WHEN 'null_rate'     THEN SUM(o.amount IS NULL)\n         WHEN 'negative_value' THEN SUM(o.amount <= 0)          -- 错：把 NULL 当成\"不是正数\"\n         WHEN 'orphan'        THEN SUM(o.device_id IS NULL)     -- 错：空值算成孤儿\n         WHEN 'duplicate'     THEN COUNT(*) - COUNT(DISTINCT o.customer_id)\n       END AS violations,\n       ROUND(SUM(o.amount IS NULL) * 100 / COUNT(*), 2) AS violation_rate_pct,   -- 错：只有 null_rate 的分母\n       CASE WHEN COUNT(*) > 0\n            THEN (ROUND(SUM(o.amount IS NULL) * 100 / COUNT(*), 2) / 100 > r.threshold) + 0\n            ELSE 0 END AS fail_flag                                              -- 错：永远按 null 率判\nFROM dqc_rule r\nLEFT JOIN orders_fact o ON o.status <> 'test'\nGROUP BY r.rule_id, r.rule_type, r.threshold\nORDER BY r.rule_id"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 数据质量与治理 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §3.5「设计数据质量 / 监控 / 血缘」（手册列出规则类型清单与\"坏数据进隔离区\"，未给可判分的分母一致性与 NULL 归属口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T01:01:16.717Z"
+  }
+}

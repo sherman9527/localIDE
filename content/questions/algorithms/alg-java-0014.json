@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0014",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "日志采集 Agent 的最少区间覆盖数",
+  "statement": "## 背景\n\n日志采集：每台 agent 能覆盖一段连续的 shard 编号（区间 [from, to) 半开），要用**最少的 agent 数量**无缝覆盖目标区间 `[0, span)`。中间不能有洞，也不能留尾。\n\n这题的坑不在\"会不会贪心\"，而在**贪心的正确性条件**与**并列输入的处理**：起点相同的多个候选必须选延伸最远的那个；朴素实现\"按起点排序后依次取第一条能接上的区间\"会在起点并列时直接死锁。\n\n## 入口\n\n```java\npublic static int minAgentsToCover(int[] from, int[] to, int span)\n```\n\n- 第 k 台 agent 覆盖 $[from[k], to[k])$；返回覆盖 $[0, span)$ 所需的**最少台数**；\n- 无法覆盖（有空洞、或 `from > 0` 的第一段就接不上）→ 返回 `-1`；\n- `span <= 0` → 返回 `0`（没有需要覆盖的 shard）。\n\n## 不变式与硬约束\n\n1. `from.length == to.length`，否则抛 `IllegalArgumentException`；每条区间满足 `to[k] >= from[k]`，否则抛 `IllegalArgumentException`。\n2. 坐标是**非负 `int`**，`span` 可达 `Integer.MAX_VALUE`：**禁止任何 `+1 / -1` 位移**（`MAX_VALUE + 1` 溢出会把\"覆盖到最后\"变成\"覆盖到 0\"）。只用比较。\n3. 区间完全在目标之外（`to[k] <= 0` 或 `from[k] >= span`）不算错误，只是无效候选，不得因此报错。\n4. 贪心步骤必须是：在当前覆盖边界 `cur` 上，取所有 `from <= cur` 的候选中 `to` **最大**的一条（并列时任取，因为结果只关心台数）。请给出\"为什么这样不会漏最优解\"的交换论证。\n5. 复杂度 O(m log m) 时间（排序主导）、O(m) 额外空间；m ≤ 2e5。\n\n## 输出契约\n\n返回 `int`（台数或 `-1`）。不要返回被选中 agent 的下标集合（那是另一问，见答案追问 3）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "greedy-interval-cover",
+    "sorting",
+    "interval-semantics",
+    "adversarial-input",
+    "modern:log-shipping"
+  ],
+  "cases": [
+    {
+      "name": "零跨度无需任何 agent",
+      "input": [
+        [],
+        [],
+        0
+      ],
+      "expected": 0
+    },
+    {
+      "name": "有空洞时返回 -1",
+      "input": [
+        [
+          0,
+          3
+        ],
+        [
+          2,
+          5
+        ],
+        5
+      ],
+      "expected": -1
+    },
+    {
+      "name": "基本链式覆盖",
+      "input": [
+        [
+          0,
+          2,
+          4
+        ],
+        [
+          3,
+          5,
+          7
+        ],
+        7
+      ],
+      "expected": 3
+    },
+    {
+      "name": "一个长区间吞掉所有短区间",
+      "input": [
+        [
+          0,
+          0,
+          3,
+          6
+        ],
+        [
+          10,
+          3,
+          6,
+          10
+        ],
+        10
+      ],
+      "expected": 1
+    },
+    {
+      "name": "乱序输入必须靠排序解决",
+      "input": [
+        [
+          5,
+          0,
+          2
+        ],
+        [
+          7,
+          3,
+          6
+        ],
+        7
+      ],
+      "expected": 3
+    },
+    {
+      "name": "完全被包含的冗余区间",
+      "input": [
+        [
+          0,
+          2
+        ],
+        [
+          10,
+          3
+        ],
+        10
+      ],
+      "expected": 1
+    },
+    {
+      "name": "起点并列必须选延伸最远的那条",
+      "input": [
+        [
+          0,
+          0,
+          3
+        ],
+        [
+          4,
+          2,
+          10
+        ],
+        10
+      ],
+      "expected": 2
+    },
+    {
+      "name": "极值端点不得做加法位移",
+      "input": [
+        [
+          0,
+          0
+        ],
+        [
+          2147483647,
+          2
+        ],
+        2147483647
+      ],
+      "expected": 1
+    },
+    {
+      "name": "起点未覆盖 0 返回 -1",
+      "input": [
+        [
+          1
+        ],
+        [
+          5
+        ],
+        5
+      ],
+      "expected": -1
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int minAgentsToCover(int[] from, int[] to, int span)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 贪心：按 from 升序（from 并列时按原下标，不影响结果）扫描，\n   * 每轮把所有 from <= cur 的候选看一遍、取最大延伸 farthest，然后 cur = farthest。\n   * 排序键打包进 long：高位是 from（非负，直接左移不破坏有符号序），低位是原始下标。\n   * 全程只做比较，没有任何 end + 1，因此 span = Integer.MAX_VALUE 也安全。\n   */\n  public static int minAgentsToCover(int[] from, int[] to, int span) {\n    if (from.length != to.length) throw new IllegalArgumentException(\"interval arrays must be parallel\");\n    if (span <= 0) return 0;\n    int m = from.length;\n    long[] keys = new long[m];\n    for (int k = 0; k < m; k++) {\n      if (to[k] < from[k]) throw new IllegalArgumentException(\"inverted interval\");\n      keys[k] = ((long) from[k] << 32) | (k & 0xffffffffL);\n    }\n    java.util.Arrays.sort(keys);\n    int count = 0;\n    int cur = 0;\n    int p = 0;\n    while (cur < span) {\n      int farthest = cur;\n      while (p < m && (int) (keys[p] >> 32) <= cur) {   // 所有能接上的候选\n        int e = (int) keys[p];\n        if (to[e] > farthest) farthest = to[e];         // 取延伸最远\n        p++;\n      }\n      if (farthest == cur) return -1;                   // 没有进展 = 有空洞\n      cur = farthest;\n      count++;\n    }\n    return count;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：按 from 排序后\"取第一条能接上的区间\"就前进，不看谁延伸得更远。\n  // 起点并列时它会挑到短的那条，下一步发现更长的那条已经\"过期\"，直接误判为无法覆盖。\n  public static int minAgentsToCover(int[] from, int[] to, int span) {\n    if (from.length != to.length) throw new IllegalArgumentException(\"interval arrays must be parallel\");\n    if (span <= 0) return 0;\n    int m = from.length;\n    long[] keys = new long[m];\n    for (int k = 0; k < m; k++) {\n      if (to[k] < from[k]) throw new IllegalArgumentException(\"inverted interval\");\n      keys[k] = ((long) from[k] << 32) | (k & 0xffffffffL);\n    }\n    java.util.Arrays.sort(keys);\n    int count = 0;\n    int cur = 0;\n    int p = 0;\n    while (cur < span) {\n      while (p < m && (int) (keys[p] >> 32) > cur) p++;\n      if (p >= m) return -1;\n      int e = (int) keys[p];\n      if (to[e] <= cur) return -1;\n      cur = to[e];\n      p++;\n      count++;\n    }\n    return count;\n  }\n}\n"
+  },
+  "answer": "**思路**：区间覆盖贪心。维持已覆盖边界 `cur`，每轮把 `from <= cur` 的候选全部纳入视野并取最大 `to`（一次\"批扫描\"），前进一次、计数一次；没有进展就说明有空洞。排序 + 单遍扫描 → O(m log m)。\n\n**交换论证（这题要听的就是这段）**：设最优解在第一步选了区间 A（延伸最远为 $a$），贪心第一步选的是延伸最远的区间 B（$b \\\\ge a$）。用 B 替换 A 后，剩余部分要覆盖 $[b, span)$ 是 $[a, span)$ 的**更弱**要求，因此所需台数不会变多；归纳到每一步即得贪心最优。朴素解错在第一步就可能选 $b' < a$，之后即便想换也没有回溯。\n\n**为什么朴素解在\"起点并列\"上死**：`[0,4) [0,2) [3,10)`，`span=10`。排序后它先取 `[0,4)`（cur=4），再取下一条\"from ≤ 4\"的 `[0,2)`，`to=2 <= cur` → 误判无解返回 -1；正解是 2 台（`[0,4)` + `[3,10)`）。判分用例直接对着这个形状造。\n\n**数值/边界**：`span` 可达 `Integer.MAX_VALUE`，所以任何 `cur + 1`、`end + 1` 都会翻成负数；本题用半开区间 + 纯比较，天然规避（这也是为什么题面把区间语义钉成 [from, to)：闭区间就得做位移，从而引入溢出）。\n\n**复杂度**：时间 O(m log m)，空间 O(m)（打包键数组）。若已按 from 排好序则 O(m)；能说出\"内层 while 的指针 p 全局只前进一次，所以总比较次数是 O(m) 而不是 O(m × 轮数)\"是这题的摊还考法。\n\n**面试追问**：\n1. 要输出被选中的 agent 下标（且要求并列时取字典序最小）怎么改？（在 `farthest` 更新时记录候选下标，并在 `to` 相等时取下标较小者；输出前按选择顺序收集——注意\"字典序最小\"是对**下标序列**的字典序，需要贪心时优先考虑小下标，这会让\"批扫描\"的 tie-break 变成关键。）\n2. 如果每台 agent 有成本（不等价）？（区间覆盖 + 带权 → 最小权覆盖，DP：`dp[x] = min over (区间 [a,x)) dp[a] + cost`，用 `TreeMap`/线段树维护前缀最小值，O(m log m)。）\n3. 循环覆盖（shard 编号是环形 0..N-1）？（枚举起点切开环，线性化跑 n 次 → 用单调队列优化到 O(m log m)。）\n4. 生产里为什么还要关心\"最少台数\"以外的东西？（最少 agent 数会集中到少数机器，故障域大；真实目标是\"最少台数 + 最大冗余\"，通常做两层：先求最小覆盖集，再要求每个 shard 至少被 2 台覆盖 = 双覆盖问题。）",
+  "estimatedMinutes": 20,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#4-可判分出题角度",
+    "addedBy": "content-agent-alg"
+  }
+}

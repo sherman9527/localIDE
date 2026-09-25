@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0014",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "MSE 无损上下线：停流量与摘除是两个动作、强制摘除要留下没归零的证据、预热按 120 秒爬坡",
+  "statement": "## 背景\n\n阿里云《基于 MSE 实现微服务应用无损上下线》给的是**两半**，不是一句\"优雅停机\"【源 S24】：\n\n- **下线**：引入\"**自适应等待**和**主动通知**机制，确保所有待处理请求完成后再执行下线\"；\n- **上线**：通过\"**就绪检查**\"并把微服务生命周期管理与发布各阶段对齐；\n- **服务预热**：无损上线开关里的\"**预热时长** 默认值 **120 秒**\"，\n  \"开启预热功能的应用重启后的**流量会随时间缓慢增加**\"，\n  用于\"需要预建连接池和缓存等资源的慢启动场景\"。\n\n配套的注册中心语义（Nacos）：\"提供对服务的实时的健康检查，\n**阻止向不健康的主机或服务实例发送请求**\"，并支持权重路由【源 S26】。\n\n（\"权重 0 = 停止新流量但仍在表里\"、\"线性爬坡的算法\"、\"强制摘除要留下剩余在途数\"\n这三条是按【推】补全的**本题设定**，官方文档给的是能力与默认值。）\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL` / `EVALSHA` / `SCRIPT` / `FCALL` / `KEYS` / `FLUSHDB` /\n`CONFIG` / `DEBUG` / `SORT` / `OBJECT` / `SELECT`。\n判题**不模拟并发、也不让时间流逝**：摆初始状态 → 顺序执行你的脚本 → 逐条校验最终状态。\n本场景**观测时刻 `now = 19000`**（逻辑毫秒）。\n\n## 初始状态\n\n```\nZADD mse:route 100 i-1 / 100 i-2 / 100 i-3 / 20 i-8     -- score = 权重（0~100）\nSET  mse:inflight:i-3 3        -- i-3 有 3 个在途请求（会陆续完成）\nSET  mse:inflight:i-8 2        -- i-8 有 2 个在途请求（卡住，不会完成）\nHSET mse:warmup total_ms 120000 elapsed_i9_ms 60000 full_weight 100\nHSET mse:stat removed 0 forced 0\ni-9 还没进注册表；mse:draining 不存在\n```\n\n## 六个事件（必须全部处理）\n\n| 事件 | 情况 | 必须 | 绝对不许 |\n| --- | --- | --- | --- |\n| E1 | `i-3` 发起下线 | **先把权重置 0**（停止新流量）并落 `mse:draining` 标记 | 先从路由表删掉 |\n| E2 | `i-3` 的 3 个在途请求陆续完成 | 计数递减到 0 | 直接 `DEL` 计数器 |\n| E3 | `i-3` 在途归零 | 从 `mse:route` 摘除，`HINCRBY mse:stat removed 1` | 留一个权重 0 的成员在表里 |\n| E4 | `i-8` 到 `now=19000` 仍有 2 个在途（超时兜底） | 强制摘除 + `HINCRBY mse:stat forced 1` + 落 draining 标记 | **把 `mse:inflight:i-8` 删掉或清零** |\n| E5 | `i-9` 上线（已运行 60000ms，预热总时长 120000ms） | 按线性爬坡写入权重 = `100 × 60000 / 120000` | 给满权重 100，或给 0 |\n| E6 | `i-1` / `i-2` 健康；`i-4` 被禁用（从未在表里） | 什么都不发 | 给 `i-4` 建权重 |\n\n要求最终状态：`mse:route` = `i-1`(100) / `i-2`(100) / `i-9`(**50**)，共 3 个成员；\n`mse:inflight:i-3` = `0`；`mse:inflight:i-8` = **`2`**（证据必须留在原地）；\n`mse:draining` 有 `i-3`(10000) 与 `i-8`(19000) 两个成员；\n`mse:stat` 的 `removed = 1`、`forced = 1`；`mse:warmup` 三个字段不许被改动。\n\n## 这题真正考的东西\n\n1. **`ZADD mse:route 0 i-3` 与 `ZREM mse:route i-3` 是两件事，顺序不能反**：\n   置 0 = \"不再进新流量，但会话与计数还要看得见\"；摘除 = \"这个实例从路由里消失\"。\n   先 `ZREM` 的话，你既无法回答\"它当时还剩几个在途\"，\n   也无法在异常时**把权重恢复回去**（回滚一个已经被摘掉的实例要重建成员）。\n   这与官方把\"禁播 / 复播 / 断开\"分成三个动作是同一个道理。\n2. **超时兜底必须留下\"没归零\"的证据**：`i-8` 的计数**必须还是 2**。\n   `DEL mse:inflight:i-8` 是最容易写的一行，也是把 2 个请求的丢失**从审计里抹掉**的一行。\n   素材 §2 的追问\"你怎么证明它真的无损\"，答案就是这一列数字。\n3. **预热值要算出来**：`100 × 60000 / 120000 = 50`。\n   给 100 等于**默认预热没生效**（新实例的 JIT 与连接池还没起来就被均摊流量），\n   素材把\"预热窗口短于到达稳态的时间等于没做\"列为【推】追问点。\n\n只交一段命令脚本，不需要写代码。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "graceful-shutdown",
+    "inflight-counter",
+    "service-warmup",
+    "registry-weight",
+    "forced-removal-evidence",
+    "modern:service-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：路由表最终恰好 3 个成员（i-1 / i-2 / i-9）",
+      "input": [
+        "ZCARD mse:route"
+      ],
+      "expected": 3,
+      "visible": true
+    },
+    {
+      "name": "预热爬坡要算出来：i-9 的权重是 50，不是 100",
+      "input": [
+        "ZSCORE mse:route i-9"
+      ],
+      "expected": "50",
+      "visible": true,
+      "note": "100 × 60000 / 120000 = 50；给 100 等于默认预热没生效"
+    },
+    {
+      "name": "边界：归零的 i-3 必须已被真正摘除",
+      "input": [
+        "ZSCORE mse:route i-3"
+      ],
+      "expected": null,
+      "visible": true,
+      "note": "\"停在权重 0\"只是第一步；到最终状态还留着就是没走完下线流程"
+    },
+    {
+      "name": "边界：i-3 的在途计数归零但不许被删（0 也是证据）",
+      "input": [
+        "GET mse:inflight:i-3"
+      ],
+      "expected": "0",
+      "visible": true
+    },
+    {
+      "name": "超时兜底不许抹证据：i-8 的在途仍是 2",
+      "input": [
+        "GET mse:inflight:i-8"
+      ],
+      "expected": "2",
+      "visible": true,
+      "note": "DEL 掉它就等于宣布\"这次丢的 2 个请求不算丢\"，而下一次预案会照此制定"
+    },
+    {
+      "name": "强制摘除要单独计数，不与正常摘除混成一格",
+      "input": [
+        "HGET mse:stat forced"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "正常摘除计数=1（用 HINCRBY，不许 HSET 覆盖）",
+      "input": [
+        "HGET mse:stat removed"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "下线标记表要留下两个成员",
+      "input": [
+        "ZCARD mse:draining"
+      ],
+      "expected": 2,
+      "visible": true
+    },
+    {
+      "name": "i-3 的下线发起时刻要留档（10000）",
+      "input": [
+        "ZSCORE mse:draining i-3"
+      ],
+      "expected": "10000",
+      "visible": true
+    },
+    {
+      "name": "空结果边界：被禁用的 i-4 绝不允许出现在路由表里",
+      "input": [
+        "ZSCORE mse:route i-4"
+      ],
+      "expected": null,
+      "visible": true
+    },
+    {
+      "name": "健康实例的权重不许被动",
+      "input": [
+        "ZSCORE mse:route i-1"
+      ],
+      "expected": "100",
+      "visible": true
+    },
+    {
+      "name": "预热参数不许被脚本改动",
+      "input": [
+        "HGET mse:warmup total_ms"
+      ],
+      "expected": "120000",
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nZADD mse:route 0 i-3\nZADD mse:draining 10000 i-3\nDECR mse:inflight:i-3\nDECR mse:inflight:i-3\nDECR mse:inflight:i-3\nZREM mse:route i-3\nHINCRBY mse:stat removed 1\nHINCRBY mse:stat forced 1\nZADD mse:draining 19000 i-8\nZREM mse:route i-8\nZADD mse:route 50 i-9\n```\n\n**`i-3` 与 `i-8` 的收尾动作一样（`ZREM`），但记录的东西完全不同，\n而这个差别就是\"无损\"与\"有损\"的界线**：\n`i-3` 走满\"置 0 → 落标记 → 计数归零 → 摘除 → `removed++`\"，\n`i-8` 走\" `forced++` → 落标记 → 摘除\"，**并且它的 `mse:inflight:i-8` 必须仍是 2**。\n\n朴素解 `DEL mse:inflight:i-8` 之后，\n2 个请求被强杀这件事**在数据上不留任何痕迹**，\n于是下一次容量规划会照着\"超时兜底从来没被用过\"来定 ——\n这正是素材反复强调的那类静默降级。\n素材 §2 追问\"你怎么证明它真的无损\"，答案就是这一列数字与 `forced` 计数。\n\n**`ZSCORE mse:route i-9` = `50`** 是唯一带算术的一格：\n`100 × 60000 / 120000`。朴素解给 100（等于把 120 秒预热开关白配），\n而给 0 的另一种错法更常见 ——\n\"先注册、等健康检查过了再改权重\"在**没有任何东西会来改它**的系统里\n就是一台永远不接流量的机器，症状是\"发布完容量少一台\"。\n\n**`removed` 用 `HINCRBY` 而不是 `HSET removed 2`**：\n朴素解一次 `HSET` 写 2，把\"正常摘除\"与\"强制摘除\"**合并成一个数**，\n于是这条曲线失去了唯一的意义 ——\n`forced > 0` 才是\"这次发布有损\"的证据。素材在字节那批题里留过同一条纪律\n（\"降级要留两套曲线\"），这里是它的发布版。\n\n**`ZCARD mse:draining = 2` 与 `ZSCORE mse:draining i-3 = 10000`** 两格\n测的是\"下线历史不许被顺手清掉\"。`DEL mse:draining`（朴素解没写，\n但很常见）会让回滚无从下手：\n你不知道该把哪些实例的权重恢复成多少 —— 因为路由表里已经没有它们了。\n\n**为什么 `EXISTS`/`ZSCORE` 类校验要成对写**：\n`ZSCORE mse:route i-3 = nil`（已摘除）与 `GET mse:inflight:i-3 = 0`\n（计数在原地归零）必须同时成立 ——\n只有前者是\"摘了但不知道当时有没有在途\"，\n只有后者是\"等到归零了但没摘\"。**两个都成立才是完整的一次无损下线。**\n\n**工程延伸（面试追问点）**\n\n1. 120 秒够不够？（素材把这条列为【推】追问：预热窗口必须 **≥** 实测的\n   \"JIT 到稳态 + 连接池建立 + 本地缓存回填\"时间，测法是压测看 RT 曲线回落。\n   更完整的做法是把权重爬坡与就绪检查**分开**：就绪检查决定\"能不能接\"，\n   预热决定\"接多少\"。）\n2. 在途计数谁来减？（应用侧 filter/interceptor 计数，注册中心只读。\n   用\"连接数\"或 QPS 反推会把长连接与慢请求算错 —— 而慢请求正是发布期最该保护的。）\n3. `mse:inflight:*` 用普通 key 而不是 HASH 的代价？（要枚举实例就得 `KEYS`/`SCAN`，\n   而判题器禁 `KEYS`；真实系统里 `SCAN` 可用但要付遍历成本。\n   用 `HGETALL mse:inflight` 一次拿全会更实用 —— 这题把它做成入参，\n   考的就是\"你知不知道两种形状各自的读路径代价\"。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL mse:route",
+      "DEL mse:draining",
+      "DEL mse:inflight:i-1",
+      "DEL mse:inflight:i-2",
+      "DEL mse:inflight:i-3",
+      "DEL mse:forced",
+      "ZADD mse:route 100 i-1",
+      "ZADD mse:route 100 i-2",
+      "ZADD mse:route 100 i-3",
+      "ZADD mse:route 20 i-8",
+      "SET mse:inflight:i-3 3",
+      "SET mse:inflight:i-8 2",
+      "HSET mse:warmup total_ms 120000 elapsed_i9_ms 60000 full_weight 100",
+      "HSET mse:stat removed 0 forced 0"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# 观测时刻 now = 19000；i-9 启动于 10000（已过 60000ms，预热总时长 120000ms）\n# E1 i-3 要下线：先停新流量（权重置 0，**留在路由表里**），并落下下线标记\nZADD mse:route 0 i-3\nZADD mse:draining 10000 i-3\n# E2 i-3 的在途请求陆续完成：三次递减（不是 DEL）\nDECR mse:inflight:i-3\nDECR mse:inflight:i-3\nDECR mse:inflight:i-3\n# E3 归零后才真正摘除，并计数一次\"正常摘除\"\nZREM mse:route i-3\nHINCRBY mse:stat removed 1\n# E4 i-8 到超时仍未归零（还剩 2 个在途）⇒ 强制摘除，但**不许把计数清零**，\n#    并且要落两笔证据：一次 forced + 一个带\"剩余在途数\"的下线标记\nHINCRBY mse:stat forced 1\nZADD mse:draining 19000 i-8\nZREM mse:route i-8\n# E5 i-9 上线：预热按线性爬坡 = full_weight × elapsed / total = 100 * 60000 / 120000\nZADD mse:route 50 i-9\n# E6 健康实例 i-1 / i-2 什么都不动；被禁用的 i-4 绝不允许进表（一条命令都不发）",
+    "naiveSolution": "# \"发布就是改注册表\"版：下线先摘除再看在途、预热直接给满权重、超时的计数顺手清零\nZREM mse:route i-3\nDEL mse:inflight:i-3\nZREM mse:route i-8\nDEL mse:inflight:i-8\nHSET mse:stat removed 2\nZADD mse:route 100 i-9"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（微服务治理与发布方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 13（发布期的流量无损与全链路灰度：下线=自适应等待 + 主动通知\"确保所有待处理请求完成后再执行下线\"、上线=就绪检查、\"预热时长默认 120 秒\"\"流量会随时间缓慢增加\"【源 S24】、Nacos 健康检查\"阻止向不健康的实例发送请求\"与权重路由【源 S26】；该考点的 redis 出题建议正是\"实例下线时在途请求计数归零后再摘除的计数器与超时兜底\"。权重 0 与 ZREM 的分工、线性爬坡与强制摘除留证是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T14:59:13.092Z"
+  }
+}

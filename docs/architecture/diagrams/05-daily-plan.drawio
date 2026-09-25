@@ -1,0 +1,89 @@
+<mxfile host="Electron" modified="2026-09-20T00:00:00.000Z" agent="arena-doc" version="24.0.0" type="device">
+  <diagram id="daily-plan" name="05-今日套餐与复习排期">
+    <mxGraphModel dx="1180" dy="760" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1180" pageHeight="760" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="今日套餐与复习排期：每天 2 道主栈代码题 + 1 道副栈主观题，到期的错题来顶槽位" style="text;html=1;align=left;fontSize=18;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="1100" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="entry" value="&lt;b&gt;GET /api/challenge/today&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="56" width="480" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="cache" value="settings['plan:YYYY-MM-DD']　命中且仍有效 → 直接返回（同日两次调用 deep-equal）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#1F9E7E;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="110" width="480" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="miss" value="未命中 → 重新选题（下面 4 步）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#999999;fontSize=11;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="172" width="480" height="32" as="geometry" />
+        </mxCell>
+        <mxCell id="cur" value="&lt;b&gt;1. content/curriculum/&amp;lt;YYYY-MM&amp;gt;.json&lt;/b&gt;　按日期排主/副类别；没排到就按 categoryOrder(date) 轮转" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5FBEC;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="222" width="480" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="count" value="&lt;b&gt;2. 主栈题量微调（adaptive.ts）&lt;/b&gt;　近 7 天正确率 → 2 / 3 题，reason 记 default | adaptive-low | adaptive-high；上限是该类别现有可判题数" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="288" width="480" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="pick" value="&lt;b&gt;3. pickForDay(judgeable, date, mainCategory, n)&lt;/b&gt;　以日期为种子的确定性算法（shared/game.ts）；副栈从主观题里取 1 道" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="358" width="480" height="48" as="geometry" />
+        </mxCell>
+        <mxCell id="review" value="&lt;b&gt;4. 复习顶槽&lt;/b&gt;　loadBook() → dueIds(book, today) → pickReview()：优先&quot;今天主栈类别的代码题&quot; → &quot;副栈的主观题&quot; → 任意代码题 → 任意主观题" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;strokeWidth=2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="424" width="480" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="slot" value="顶掉&lt;b&gt;同形态那一组&lt;/b&gt;的最后一个槽位 → 槽位总数不变 → 完成判定与 XP 上限都不必改；该题 id 记进 plan.reviewIds，界面上标&quot;复习&quot;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B8547D;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="494" width="480" height="52" as="geometry" />
+        </mxCell>
+        <mxCell id="write" value="写回 settings 缓存 → 返回 { plan, questions, reviewIds, progress }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#1F9E7E;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="564" width="480" height="38" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bookTitle" value="错题本存在哪（settings['review:book']，不是第二张表）" style="text;html=1;align=left;fontSize=12;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="580" y="56" width="560" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="book" value="{ version, entries: { &quot;&amp;lt;questionId&amp;gt;&quot;: { reps, due, last, lastDay } } }" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#B8547D;fontSize=11;fontFamily=Consolas;" vertex="1" parent="1">
+          <mxGeometry x="580" y="84" width="560" height="38" as="geometry" />
+        </mxCell>
+        <mxCell id="ladderTitle" value="REVIEW_LADDER = [1, 3, 7, 14, 30, 60] 天（SM-2 的二值退化）" style="text;html=1;align=left;fontSize=12;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="580" y="146" width="560" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="l1" value="1d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="580" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="l2" value="3d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="676" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="l3" value="7d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="772" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="l4" value="14d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="868" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="l5" value="30d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="964" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="l6" value="60d" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDEEF4;strokeColor=#B8547D;fontSize=12;" vertex="1" parent="1"><mxGeometry x="1060" y="176" width="80" height="40" as="geometry" /></mxCell>
+        <mxCell id="el1" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="l1" target="l2"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="el2" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="l2" target="l3"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="el3" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="l3" target="l4"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="el4" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="l4" target="l5"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="el5" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="l5" target="l6"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="rules" value="&lt;b&gt;升降档规则&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;· &lt;b&gt;pass 且上次也 pass&lt;/b&gt; 才升一档（reps+1）—— 少一次&quot;侥幸做对&quot;的运气。&lt;br&gt;· &lt;b&gt;fail&lt;/b&gt; → reps 归 0，明天再来（due = today + 1）。&lt;br&gt;· &lt;b&gt;不在册且这次做对&lt;/b&gt; → 不入本。复习只服务&quot;错过的题&quot;。&lt;br&gt;· 到顶 60d 之后仍按最后一档继续排，不做&quot;毕业&quot;—— 少一个状态就少一处漂移。&lt;br&gt;· 完整 SM-2 要 0~5 的回忆质量评分，本系统只有 pass/fail 与用时，所以取二值退化。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#B8547D;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="580" y="240" width="560" height="146" as="geometry" />
+        </mxCell>
+
+        <mxCell id="xpTitle" value="XP 与连击（全部从 attempts 推导，不建第二张&quot;日表&quot;）" style="text;html=1;align=left;fontSize=12;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="580" y="404" width="560" height="22" as="geometry" />
+        </mxCell>
+        <mxCell id="xp" value="&lt;font style=&quot;font-size:11px&quot;&gt;· pass 15 / fail 2 / error 0；主观题 XP = round(score / maxScore × 20)，&amp;ge; 60% 记 pass。&lt;br&gt;· 做完当日套餐幂等 +10（只在 POST 之后结算，GET 不写库）。&lt;br&gt;· &lt;b&gt;每题只算历史上最好那次&lt;/b&gt;（同分取更早）—— 所以&quot;本周 XP&quot;不可能大于&quot;累计 XP&quot;。&lt;br&gt;· 续签门槛 20 XP：只答 1 题不足以打卡，避免&quot;打开一下就算练了&quot;。&lt;br&gt;· 青铜 0 / 白银 150 / 黄金 450 / 铂金 1000 / 钻石 2000。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;fontSize=12;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="580" y="432" width="560" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="practice" value="&lt;b&gt;练习池&lt;/b&gt;：/api/challenge/today?category=X 额外给该类别 4 道（PRACTICE_POOL_SIZE），不占套餐槽位、不参与完成判定。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#6C8EBF;fontSize=11;dashed=1;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="580" y="586" width="560" height="52" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="html=1;strokeColor=#666666;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="entry" target="cache"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" value="未命中" style="html=1;strokeColor=#999999;strokeWidth=2;fontSize=10;fontColor=#595959;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="cache" target="miss"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="html=1;strokeColor=#82B366;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="miss" target="cur"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="html=1;strokeColor=#1F9E7E;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="cur" target="count"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="html=1;strokeColor=#1F9E7E;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="count" target="pick"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" value="到期题" style="html=1;strokeColor=#B8547D;strokeWidth=2;fontSize=10;fontColor=#B8547D;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="pick" target="review"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e7" style="html=1;strokeColor=#B8547D;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="review" target="slot"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e8" style="html=1;strokeColor=#1F9E7E;strokeWidth=2;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1" source="slot" target="write"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="eBook" value="loadBook" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#B8547D;strokeWidth=2;dashed=1;fontSize=10;fontColor=#B8547D;exitX=0;exitY=0.5;entryX=1;entryY=0.5;" edge="1" parent="1" source="book" target="review"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="560" y="450" /></Array></mxGeometry></mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0007",
+  "category": "frontend",
+  "difficulty": "principal",
+  "title": "用 useSyncExternalStore 接高频 store 并按窗口降采样",
+  "statement": "## 场景\n\n监控页要显示一条实时曲线：外部 store（WebSocket 推数）每 16ms 来一个点，一次会话最多 10 万点。老实现把 store 直接接在组件上，结果一次推送让 30 个订阅组件各重渲染一轮，主线程被排满，页面滚动掉帧；更糟的是有人把 `getSnapshot` 写成 `() => ({ ...state })`，React 判定\"快照变了\"又触发一轮渲染，直接进进了无限循环。现在由你定这套外部状态接入层的规范并给出参考实现。\n\n## 契约\n\n脚手架 **`storeKit.ts`** 已随题目落盘（测试也 import 它）：\n\n```ts\nexport interface MetricState { readonly version: number; readonly latest: number; readonly total: number }\nexport interface MetricStore {\n  subscribe(listener: () => void): () => void;\n  push(value: number): void;\n  getSnapshot(): MetricState;\n}\nexport type Scheduler = (task: () => void) => () => void;\n```\n\n提交写在 **`Solution.tsx`**，导出三样：\n\n```tsx\nexport function createMetricStore(): MetricStore;\nexport function useMetricWindow(store: MetricStore, schedule: Scheduler): MetricState;\nexport function MetricPanel(props: { store: MetricStore; schedule: Scheduler }): JSX.Element;\n```\n\n`MetricPanel` 渲染 `data-testid=\"latest\"`（= latest）、`\"version\"`、`\"total\"`。测试提供**注入式调度器**（jsdom 无布局无绘制，判分禁止墙钟；窗口推进由测试握在手里，`schedule(task)` 返回取消函数）。\n\n## 硬性要求\n\n1. `createMetricStore().getSnapshot()` 在**版本未变时必须返回同一个对象引用**；`push` 生成新快照（不可变），旧快照的字段不许被就地改写。\n2. `subscribe` 返回的退订函数要真正摘掉监听；多个订阅者互不影响。\n3. `useMetricWindow` 只能通过 `useSyncExternalStore` 读取（不许 `useState` + effect 里 setState，那样会撕裂：同一帧内两个组件读到不同版本）。\n4. **降采样**：一个窗口内无论 `push` 多少次，只调度**一个**任务（`schedule` 调用次数为 1），任务执行时读当时最新快照，因此**末值一定被提交**（不许\"最后 N 个点永远不显示\"）。窗口未 flush 之前不得提交新值。\n5. 组件卸载时把待执行任务**取消**（用例数取消次数与 commit 次数），晚到的任务不得再触发渲染或告警。\n\n## 不许做什么\n\n- 不许 `getSnapshot()` 里新建对象/数组（`{ ...state }`、`state.slice()`）——那正是无限重渲染的来源；\n- 不许用 `setTimeout` 自己实现窗口（判题环境没有真实帧；必须走注入的 `schedule`）；\n- 不许引入 zustand/jotai 等第三方库（沙箱不 `npm install`）；\n- 不许在渲染期读 `store` 之外的可变全局（同一帧两个组件读到不同值就判撕裂）。\n\n## 判分\n\n6 个用例：快照引用稳定与不可变、无推送零调度、窗口内合并提交并保留末值、超大 1000 次 push、卸载取消、订阅者退订。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:use-sync-external-store",
+    "render-performance",
+    "external-store",
+    "backpressure",
+    "profiler"
+  ],
+  "cases": [
+    {
+      "name": "同一版本连续读取快照引用稳定且旧快照不被就地改写",
+      "input": {
+        "push": [
+          5
+        ]
+      },
+      "expected": "getSnapshot() 两次 toBe 同一引用；push 后新引用 version=1/latest=5，旧快照 latest 仍为 0",
+      "note": "就地改写 = 引用不变 = React 看不见更新（或被判定为需要缓存快照）"
+    },
+    {
+      "name": "无数据推送时不调度也不额外提交",
+      "input": {
+        "pushes": 0
+      },
+      "expected": "schedule 调用 0 次；commit 数 1；latest/total 显示 0/0"
+    },
+    {
+      "name": "窗口内重复 push 合并为一次提交并保留末值",
+      "input": {
+        "pushes": 5,
+        "thenFlush": true
+      },
+      "expected": "flush 前 pending 任务 1 个、commit 仍 1 次且画面是旧值 0/0；flush 后 commit 2 次、显示 5/5"
+    },
+    {
+      "name": "超大 1000 次 push 只排一个任务且一帧收敛",
+      "input": {
+        "pushes": 1000
+      },
+      "expected": "pending 任务 1 个；flush 后 commit 2 次、显示 1000/1000"
+    },
+    {
+      "name": "卸载后取消调度任务且晚到任务不再提交",
+      "input": {
+        "push": 3,
+        "unmount": true
+      },
+      "expected": "取消函数被调用、晚到 flush 不产生 commit、console.error 期望 [] 实际 []"
+    },
+    {
+      "name": "订阅者退订后不再被通知",
+      "input": {
+        "subscribers": 2
+      },
+      "expected": "off1 后 hits1 停在 1、hits2 继续增长，total=2"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "storeKit.ts",
+        "content": "/** 判题脚手架：外部状态源与调度器的类型契约（测试与考生共用）。 */\nexport interface MetricState {\n  readonly version: number;\n  readonly latest: number;\n  readonly total: number;\n}\n\nexport interface MetricStore {\n  subscribe(listener: () => void): () => void;\n  push(value: number): void;\n  getSnapshot(): MetricState;\n}\n\n/** 注入的\"下一帧\"调度：返回取消函数。判题环境禁墙钟，所以窗口推进由测试握住。 */\nexport type Scheduler = (task: () => void) => () => void;\n"
+      },
+      {
+        "path": "metric.test.tsx",
+        "content": "import { act, render, screen } from '@testing-library/react';\nimport { Profiler } from 'react';\nimport { afterEach, expect, it, vi } from 'vitest';\nimport type { Scheduler } from './storeKit';\nimport { MetricPanel, createMetricStore, useMetricWindow } from './Solution';\n\nfunction makeScheduler() {\n  const live = new Set<{ run: () => void }>();\n  let cancels = 0;\n  const schedule: Scheduler = (task) => {\n    const box = { run: task };\n    live.add(box);\n    return () => {\n      cancels += 1;\n      live.delete(box);\n    };\n  };\n  const flush = () => {\n    const items = [...live];\n    live.clear();\n    items.forEach((box) => box.run());\n  };\n  return { schedule, flush, pending: () => live.size, cancels: () => cancels };\n}\n\n/** 帧探针：Profiler 在 commit 之后回调，此时读 DOM 就是这一帧真正提交的内容。 */\nfunction mountPanel() {\n  const commits: string[] = [];\n  const store = createMetricStore();\n  const s = makeScheduler();\n  function frame() {\n    return screen.getByTestId('latest').textContent + '/' + screen.getByTestId('total').textContent;\n  }\n  const view = render(\n    <Profiler id=\"panel\" onRender={() => commits.push(frame())}>\n      <MetricPanel store={store} schedule={s.schedule} />\n    </Profiler>,\n  );\n  const pushMany = (count: number, from = 1) => {\n    act(() => {\n      for (let i = 0; i < count; i += 1) store.push(from + i);\n    });\n  };\n  const flush = () => {\n    act(() => s.flush());\n  };\n  return { store, s, commits, frame, pushMany, flush, unmount: view.unmount };\n}\n\nafterEach(() => {\n  vi.restoreAllMocks();\n});\n\nit('同一版本连续读取快照引用稳定且旧快照不被就地改写', () => {\n  const store = createMetricStore();\n  const before = store.getSnapshot();\n  expect(store.getSnapshot()).toBe(before);\n  expect(before.version).toBe(0);\n  expect(before.latest).toBe(0);\n  store.push(5);\n  const after = store.getSnapshot();\n  expect(after).not.toBe(before);\n  expect(after.version).toBe(1);\n  expect(after.latest).toBe(5);\n  expect(before.latest).toBe(0);\n  expect(store.getSnapshot()).toBe(after);\n});\n\nit('无数据推送时不调度也不额外提交', () => {\n  const m = mountPanel();\n  expect(m.s.pending()).toBe(0);\n  expect(m.commits.length).toBe(1);\n  expect(m.frame()).toBe('0/0');\n});\n\nit('窗口内重复 push 合并为一次提交并保留末值', () => {\n  const m = mountPanel();\n  m.pushMany(5);\n  expect(m.s.pending()).toBe(1);\n  expect(m.commits.length).toBe(1);\n  expect(m.frame()).toBe('0/0');\n  m.flush();\n  expect(m.commits.length).toBe(2);\n  expect(m.frame()).toBe('5/5');\n});\n\nit('超大 1000 次 push 只排一个任务且一帧收敛', () => {\n  const m = mountPanel();\n  m.pushMany(1000);\n  expect(m.s.pending()).toBe(1);\n  m.flush();\n  expect(m.commits.length).toBe(2);\n  expect(m.frame()).toBe('1000/1000');\n});\n\nit('卸载后取消调度任务且晚到任务不再提交', () => {\n  const noise: string[] = [];\n  vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => noise.push(args.map(String).join(' ')));\n  const m = mountPanel();\n  m.pushMany(3);\n  expect(m.s.pending()).toBe(1);\n  const before = m.commits.length;\n  m.unmount();\n  expect(m.s.cancels()).toBe(1);\n  m.flush();\n  expect(m.commits.length).toBe(before);\n  expect(noise).toEqual([]);\n});\n\nit('订阅者退订后不再被通知', () => {\n  const store = createMetricStore();\n  let hits1 = 0;\n  let hits2 = 0;\n  const off1 = store.subscribe(() => { hits1 += 1; });\n  store.subscribe(() => { hits2 += 1; });\n  store.push(1);\n  expect(hits1).toBe(1);\n  expect(hits2).toBe(1);\n  off1();\n  store.push(2);\n  expect(hits1).toBe(1);\n  expect(hits2).toBe(2);\n  expect(store.getSnapshot().total).toBe(2);\n});\n"
+      }
+    ],
+    "timeoutMs": 50000,
+    "referenceSolution": "import { useCallback, useSyncExternalStore } from 'react';\nimport type { MetricState, MetricStore, Scheduler } from './storeKit';\n\n/**\n * 不可变快照：同一 version 永远返回同一个对象引用。\n * getSnapshot 每次新建对象 = useSyncExternalStore 判定\"变了\" → 无限重渲染。\n */\nexport function createMetricStore(): MetricStore {\n  let snapshot: MetricState = { version: 0, latest: 0, total: 0 };\n  const listeners = new Set<() => void>();\n  return {\n    subscribe(listener: () => void) {\n      listeners.add(listener);\n      return () => {\n        listeners.delete(listener);\n      };\n    },\n    push(value: number) {\n      snapshot = { version: snapshot.version + 1, latest: value, total: snapshot.total + 1 };\n      listeners.forEach((listener) => listener());\n    },\n    getSnapshot() {\n      return snapshot;\n    },\n  };\n}\n\n/**\n * 高频 store（16ms 一个点）直连组件会把主线程排满：\n * 这里把\"通知 React\"这件事按窗口合并——同一次 flush 内无论 push 多少次都只调度一个任务，\n * 且任务执行时读的是当时的最新快照（尾帧保留，不会把末尾的点丢掉）。\n */\nexport function useMetricWindow(store: MetricStore, schedule: Scheduler): MetricState {\n  const subscribe = useCallback(\n    (onStoreChange: () => void) => {\n      let scheduled = false;\n      let cancel: (() => void) | null = null;\n      const unsubscribe = store.subscribe(() => {\n        if (scheduled) return;\n        scheduled = true;\n        cancel = schedule(() => {\n          scheduled = false;\n          cancel = null;\n          onStoreChange();\n        });\n      });\n      return () => {\n        unsubscribe();\n        if (cancel) cancel();\n      };\n    },\n    [store, schedule],\n  );\n  const getSnapshot = useCallback(() => store.getSnapshot(), [store]);\n  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);\n}\n\nexport function MetricPanel({ store, schedule }: { store: MetricStore; schedule: Scheduler }) {\n  const state = useMetricWindow(store, schedule);\n  return (\n    <div>\n      <span data-testid=\"latest\">{state.latest}</span>\n      <span data-testid=\"version\">{state.version}</span>\n      <span data-testid=\"total\">{state.total}</span>\n    </div>\n  );\n}\n",
+    "naiveSolution": "import { useSyncExternalStore } from 'react';\n\nconst state = { version: 0, latest: 0, total: 0 };\nconst listeners = new Set<() => void>();\n\nexport function createMetricStore() {\n  return {\n    subscribe(listener: () => void) {\n      listeners.add(listener);\n      return () => {\n        listeners.delete(listener);\n      };\n    },\n    push(value: number) {\n      // 就地改写同一个对象：引用永远不变，React 看不出变化\n      state.latest = value;\n      state.total += 1;\n      state.version += 1;\n      listeners.forEach((listener) => listener());\n    },\n    getSnapshot: () => state,\n  };\n}\n\nexport function useMetricWindow(store, schedule) {\n  void schedule;\n  return useSyncExternalStore(store.subscribe, store.getSnapshot);\n}\n\nexport function MetricPanel({ store, schedule }) {\n  const s = useMetricWindow(store, schedule);\n  return (\n    <div>\n      <span data-testid=\"latest\">{s.latest}</span>\n      <span data-testid=\"version\">{s.version}</span>\n      <span data-testid=\"total\">{s.total}</span>\n    </div>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- `useSyncExternalStore` 的两个致命点：`getSnapshot` 必须返回**缓存的不可变引用**（同版本同引用），以及订阅通知与读取之间不能撕裂——它在 commit 前用 `checkIfSnapshotChanged` 兜底重读，所以高频源只能靠\"合并通知\"降频，不能靠组件自己 diff。\n- 降采样放在 subscribe 层而不是组件里：一个 `scheduled` 标志让 N 次 push 只排一个任务，任务执行时读**当时**的快照，因此末值必然提交（这是\"节流必须保尾帧\"的前端版本）。\n- 卸载时取消已排任务：`schedule` 返回的 cancel 必须在 cleanup 里调用，否则晚到的任务会去 `onStoreChange` 一个已卸载的订阅（React 19 不再告警，但工作队列被白白唤醒）。\n- 判分口径：墙钟在 jsdom 里没意义，所以用注入调度器 + `Profiler` commit 序列 + 调度/取消次数这些**确定性信号**（对应 CI 里的 render-count 护栏）。\n- 选型边界：Context 是依赖图不是 store，高频小字段必须走外部 store + selector 或拆 Provider；原子化库（jotai/zustand）底层也是这个 hook。\n\n面试追问：\n1. 为什么 `getSnapshot: () => ({ ...state })` 会死循环而不是\"只是多渲染一次\"？（每次比较都不同 → 强制同步重渲染 → 又读一次）\n2. 若窗口内 store 被整体替换（切租户），你怎么避免读到旧 store 的快照？（subscribe/getSnapshot 都按 store 身份 memo，替换即重建窗口）\n3. 10 万点曲线怎么不卡：降采样之外还有什么？（把聚合放 Worker、只渲染窗口内像素桶、`content-visibility`、必要时 OffscreenCanvas）\n4. React Compiler 会不会让这类 memo 变得多余？（编译器做 memo，但不改变订阅宽度与优先级；store 选型仍是人决策）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/render-performance.md#14-内存与泄漏senior-高频失分点",
+    "addedBy": "content-agent-fe"
+  }
+}

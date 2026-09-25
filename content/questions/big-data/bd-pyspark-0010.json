@@ -1,0 +1,269 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0010",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "Last-touch 归因：非等值时间窗 join + 窗口取最新（24 小时含边界的口径钉死）",
+  "statement": "## 背景与数据规模\n增长团队要做 **24 小时 last-touch 归因**：每笔预订（`bookings`，日均 260 万笔）归因到该用户预订前 24 小时内**最后一次**营销触点（`touchpoints`，日均 19 亿行）。\n旧实现把 join 写成「取该用户的所有触点后 `max(channel)`」——按**字符串字典序**而不是按时间取，导致 `zeta` 渠道永远抢走归因量，预算分配被系统性扭曲（这是「看起来跑通了、数字全错」的典型）。\n\n## 输入\n1. 临时视图 `bookings`（建表阶段灌入，全题固定，代表线上预订事实）：\n   `booking_id STRING, user_id STRING(可能为 NULL), ts STRING(yyyy-MM-dd HH:mm:ss UTC), gmv DECIMAL(18,2)`\n2. 临时视图 `touchpoints`（每个用例单独灌入）：\n   `user_id STRING, channel STRING(可能为 NULL), ts STRING(可能为 NULL 或非法文本)`\n\n判题固定预订集：\n- `b1` 用户 `u1`，`2026-09-10 12:00:00`，`100.00`\n- `b2` 用户 `u1`，`2026-09-10 12:00:00`，`50.00`（与 b1 同用户同时刻，用来验证「归因是逐笔预订独立裁决」）\n- `b3` 用户 `u2`，`2026-09-11 09:00:00`，`25.50`\n- `b4` 用户 `NULL`，`2026-09-11 10:00:00`，`7.25`\n\n## 归因口径（必须严格实现）\n1. 触点有效性：`ts` 为 NULL 或无法解析的触点行丢弃；`channel` 为 NULL 的**有效**触点记作 `'unspecified'`。\n2. 候选触点必须满足：`touch.user_id = booking.user_id`（**等值语义**：`booking.user_id IS NULL` 永远不匹配任何触点）、`touch.ts <= booking.ts`、且 `booking.ts - touch.ts <= 24 小时`（**恰好 86400 秒算在窗口内**，86401 秒算窗口外）。\n3. 在候选集中取 `ts` 最大的一条为归因触点；`ts` 并列时取 `channel` 字典序**最小**（保证结果确定）。没有任何候选触点 → `'direct'`。\n4. 归因是**左外**语义：每笔预订必须且只能出现一行（4 笔预订 → 4 行输出，多一行少一行都判负）。\n5. 金额列不参与计算，原样带出。\n\n## 输出\n列**必须严格是** `booking_id, attributed_channel, gmv`。\n**判题行序敏感**：必须 `ORDER BY booking_id ASC`（booking_id 非空且唯一，构成全序）。\n\n## 约束\n- 只提交**一条** SELECT / WITH 查询。\n- 时间窗比较请用 `UNIX_TIMESTAMP` 或 `ts + INTERVAL 1 DAY` 这类显式表达式；`touchpoints` 只有 4 行量级时它会走 BroadcastNestedLoopJoin（非等值条件），线上 19 亿行必须改写成「按 `user_id` 等值 join + 窗口过滤 + `ROW_NUMBER`」并保证 `user_id` 分桶/分区对齐——追问会让你给出改写与代价对比。\n- Spark 4.2 新引入的 `QUALIFY`（窗口结果过滤）与 `NEAREST BY`（top-K 最近邻 join 原语）是这类查询的新表达方式：请在答案里说明它们各自能替代哪一段代码、以及**替代不了**哪一段（本題的多级 tie-break 与含端点窗口条件仍需显式写）。",
+  "judgeKind": "pyspark",
+  "language": "sql",
+  "tags": [
+    "attribution",
+    "non-equi-join",
+    "last-touch",
+    "window-functions",
+    "join-strategy",
+    "modern:spark-4-2-nearest-by"
+  ],
+  "cases": [
+    {
+      "name": "基础：窗口内多次触点取最后一次，无触点的预订归 direct",
+      "input": {
+        "view": "touchpoints",
+        "schema": "user_id string, channel string, ts string",
+        "rows": [
+          {
+            "user_id": "u1",
+            "channel": "organic",
+            "ts": "2026-09-09 12:00:00"
+          },
+          {
+            "user_id": "u1",
+            "channel": "paid",
+            "ts": "2026-09-10 11:00:00"
+          },
+          {
+            "user_id": "u2",
+            "channel": "cpc",
+            "ts": "2026-09-11 08:00:00"
+          },
+          {
+            "user_id": "u1",
+            "channel": "later",
+            "ts": "2026-09-10 13:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "booking_id": "b1",
+          "attributed_channel": "paid",
+          "gmv": "100"
+        },
+        {
+          "booking_id": "b2",
+          "attributed_channel": "paid",
+          "gmv": "50"
+        },
+        {
+          "booking_id": "b3",
+          "attributed_channel": "cpc",
+          "gmv": "25.5"
+        },
+        {
+          "booking_id": "b4",
+          "attributed_channel": "direct",
+          "gmv": "7.25"
+        }
+      ],
+      "note": "`organic` 恰好是 24 小时前的边界（在窗口内）但被更晚的 paid 击败；`later` 晚于预订时刻，不得参与。b4 的 user_id 是 NULL，等值语义下不匹配。"
+    },
+    {
+      "name": "边界：恰好 24 小时含端点，24 小时零 1 秒出窗",
+      "input": {
+        "view": "touchpoints",
+        "schema": "user_id string, channel string, ts string",
+        "rows": [
+          {
+            "user_id": "u1",
+            "channel": "edge_out",
+            "ts": "2026-09-09 11:59:59"
+          },
+          {
+            "user_id": "u2",
+            "channel": "edge_in",
+            "ts": "2026-09-10 09:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "booking_id": "b1",
+          "attributed_channel": "direct",
+          "gmv": "100"
+        },
+        {
+          "booking_id": "b2",
+          "attributed_channel": "direct",
+          "gmv": "50"
+        },
+        {
+          "booking_id": "b3",
+          "attributed_channel": "edge_in",
+          "gmv": "25.5"
+        },
+        {
+          "booking_id": "b4",
+          "attributed_channel": "direct",
+          "gmv": "7.25"
+        }
+      ],
+      "note": "u1 距预订 86401 秒 → 出窗；u2 距预订恰好 86400 秒 → 入窗。用 `< 86400` 会把 b3 错判成 direct。"
+    },
+    {
+      "name": "并列边界：同刻多渠道取字典序最小，NULL 渠道记 unspecified",
+      "input": {
+        "view": "touchpoints",
+        "schema": "user_id string, channel string, ts string",
+        "rows": [
+          {
+            "user_id": "u1",
+            "channel": "zeta",
+            "ts": "2026-09-10 11:00:00"
+          },
+          {
+            "user_id": "u1",
+            "channel": null,
+            "ts": "2026-09-10 11:30:00"
+          },
+          {
+            "user_id": "u1",
+            "channel": "alpha",
+            "ts": "2026-09-10 11:30:00"
+          },
+          {
+            "user_id": "u2",
+            "channel": null,
+            "ts": "2026-09-11 07:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "booking_id": "b1",
+          "attributed_channel": "alpha",
+          "gmv": "100"
+        },
+        {
+          "booking_id": "b2",
+          "attributed_channel": "alpha",
+          "gmv": "50"
+        },
+        {
+          "booking_id": "b3",
+          "attributed_channel": "unspecified",
+          "gmv": "25.5"
+        },
+        {
+          "booking_id": "b4",
+          "attributed_channel": "direct",
+          "gmv": "7.25"
+        }
+      ],
+      "note": "11:30 的两条最新，并列时按 channel 升序 → alpha（NULL 归一为 unspecified 后 'alpha' < 'unspecified'）。"
+    },
+    {
+      "name": "脏数据边界：非法 ts 触点丢弃，触点全部晚于预订则归 direct",
+      "input": {
+        "view": "touchpoints",
+        "schema": "user_id string, channel string, ts string",
+        "rows": [
+          {
+            "user_id": "u1",
+            "channel": "broken",
+            "ts": null
+          },
+          {
+            "user_id": "u1",
+            "channel": "broken2",
+            "ts": "oops"
+          },
+          {
+            "user_id": "u1",
+            "channel": "too_late",
+            "ts": "2026-09-10 23:00:00"
+          },
+          {
+            "user_id": "u2",
+            "channel": "broken3",
+            "ts": "2026-99-99 00:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "booking_id": "b1",
+          "attributed_channel": "direct",
+          "gmv": "100"
+        },
+        {
+          "booking_id": "b2",
+          "attributed_channel": "direct",
+          "gmv": "50"
+        },
+        {
+          "booking_id": "b3",
+          "attributed_channel": "direct",
+          "gmv": "25.5"
+        },
+        {
+          "booking_id": "b4",
+          "attributed_channel": "direct",
+          "gmv": "7.25"
+        }
+      ],
+      "note": "把非法 ts 直接 CAST 成 timestamp 在某些方言里会抛异常（判为 error）；用 `TRY_CAST`/先解析再过滤才是可上线写法。"
+    },
+    {
+      "name": "空触点分区：所有预订都必须以 direct 出现（行数守恒）",
+      "input": {
+        "view": "touchpoints",
+        "schema": "user_id string, channel string, ts string",
+        "rows": []
+      },
+      "expected": [
+        {
+          "booking_id": "b1",
+          "attributed_channel": "direct",
+          "gmv": "100"
+        },
+        {
+          "booking_id": "b2",
+          "attributed_channel": "direct",
+          "gmv": "50"
+        },
+        {
+          "booking_id": "b3",
+          "attributed_channel": "direct",
+          "gmv": "25.5"
+        },
+        {
+          "booking_id": "b4",
+          "attributed_channel": "direct",
+          "gmv": "7.25"
+        }
+      ],
+      "note": "内连接写法在这个用例上会直接返回 0 行——归因报表「某天数字消失」就是这么来的。"
+    }
+  ],
+  "runner": {
+    "entry": "sql",
+    "timeoutMs": 75000,
+    "orderSensitive": true,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW bookings AS SELECT * FROM VALUES ('b1','u1','2026-09-10 12:00:00',CAST(100.00 AS DECIMAL(18,2))), ('b2','u1','2026-09-10 12:00:00',CAST(50.00 AS DECIMAL(18,2))), ('b3','u2','2026-09-11 09:00:00',CAST(25.50 AS DECIMAL(18,2))), ('b4',CAST(NULL AS STRING),'2026-09-11 10:00:00',CAST(7.25 AS DECIMAL(18,2))) AS t(booking_id, user_id, ts, gmv)"
+    ],
+    "referenceSolution": "WITH valid_touch AS (\n  SELECT user_id,\n         COALESCE(channel, 'unspecified') AS channel,\n         TO_TIMESTAMP(ts) AS ts\n  FROM touchpoints\n  WHERE TO_TIMESTAMP(ts) IS NOT NULL\n),\nscored AS (\n  SELECT b.booking_id AS booking_id,\n         b.gmv AS gmv,\n         t.channel AS channel,\n         t.ts AS touch_ts,\n         ROW_NUMBER() OVER (\n           PARTITION BY b.booking_id\n           ORDER BY t.ts DESC, COALESCE(t.channel, 'unspecified') ASC\n         ) AS rn\n  FROM bookings b\n  LEFT JOIN valid_touch t\n    ON b.user_id = t.user_id\n   AND t.ts <= TO_TIMESTAMP(b.ts)\n   AND UNIX_TIMESTAMP(b.ts) - UNIX_TIMESTAMP(t.ts) <= 86400\n)\nSELECT booking_id,\n       CASE WHEN touch_ts IS NULL THEN 'direct' ELSE channel END AS attributed_channel,\n       gmv\nFROM scored\nWHERE rn = 1\nORDER BY booking_id ASC",
+    "naiveSolution": "SELECT b.booking_id AS booking_id,\n       COALESCE(MAX(t.channel), 'direct') AS attributed_channel,\n       MAX(b.gmv) AS gmv\nFROM bookings b\nLEFT JOIN touchpoints t\n  ON b.user_id = t.user_id\n AND t.ts <= b.ts\nGROUP BY b.booking_id\nORDER BY booking_id ASC"
+  },
+  "answer": "## 参考要点\n1. 归因的正确形态是「**候选集过滤 + 按预订粒度取 top-1**」（`ROW_NUMBER`/`QUALIFY`），而不是 `MAX(channel)`：字符串聚合取的是字典序极值，与「最后一次」毫无关系。同理 `MAX(ts)` 也不对——它给出时间但给不出对应的 channel，必须把整行带出来（或用 `max_by/ARG_MAX`，但也要显式给第二级 tie-break）。\n2. 边界口径必须钉死并在用例里断言：`<= 86400`（含 24 小时整点）与 `t.ts <= b.ts`（不得归因到未来触点）。这类「含不含端点」的争议在增长口径评审里天天发生，写进题面与用例才叫可验证。\n3. `LEFT JOIN` 的方向不能反：以预订为主表才能保证「每笔预订恰好一行」；内连接会让无触点预订整天消失。而 `CASE WHEN touch_ts IS NULL THEN 'direct'` 必须在**取到 top-1 之后**做，否则「有匹配触点但 channel 为 NULL」与「无匹配」会混成同一个值（本实现里 NULL 渠道归一为 `unspecified`，与 `direct` 严格区分）。\n4. NULL 关联键：`b.user_id = t.user_id` 在 `user_id IS NULL` 时永远不成立 → b4 归 direct。要意识到「NULL 不匹配」既是正确语义，也是「设备未登录订单被大量归为 direct」的真实来源；需要另一种口径时必须显式命名（如 ` unidentified`），不能悄悄用 `<=>` 把所有 NULL 连成一堆（那会变成笛卡尔积）。\n5. 非等值 join 的代价：19 亿触点 × 260 万预订按「同用户 + 时间窗」关联，真实做法是先按 `user_id` 做等值 shuffle（或两侧同分桶）、窗口条件作为 residual filter；也可以把触点预聚合成「每用户每小时的最后一条触点」再关联（把行数压 3 个数量级，代价是边界小时的口径误差要评估）。`spark.sql.adaptive.*` 只能优化分区与倾斜，改变不了「同一超级用户有 10 万触点」造成的行爆炸——那是膨胀型倾斜，只能改写。\n6. 口径治理：归因窗口、渠道映射表（`channel` 字典版本）、以及「新增枚举值」（如 `CANCELLED_LATE` 这类）必须走语义层与契约，否则新增渠道会静默改变历史归因分布。归因结果与订单金额必须能双路径对账（明细重算 vs 归因表汇总）。\n\n## 追问\n- 「同毫秒两条不同渠道怎么办？」→ 本题按字典序；生产上这是**数据契约问题**，应该由上游提供严格有序的 `event_seq`/版本字段，而不是下游用字典序兜底（并加 DQC 断言「同一用户同毫秒多渠道」的行数占比）。\n- 「last-touch 与 first-touch 的差别在哪一层？」→ 只差 `ORDER BY t.ts DESC` 与 `ASC`；因此口径必须是参数化的（同一份代码两种归因），而不是复制两份 SQL——两份代码必然漂移。\n- 「Spark 4.2 的 `NEAREST BY` 能做什么？」→ 把「取距离最近/时间最接近的 top-K」变成一等公民原语（top-K nearest-neighbor join），能表达得更清晰并让优化器选专用算子；但对「窗口 + 业务优先级排序」这类复合裁决仍需显式规则。",
+  "estimatedMinutes": 26,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/pyspark-correctness-and-perf.md#analytics-sql-patterns",
+    "addedBy": "content-agent-bd"
+  }
+}

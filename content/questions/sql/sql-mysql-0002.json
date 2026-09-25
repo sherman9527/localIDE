@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0002",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "同一秒的多笔支付：累计 GMV 的默认帧语义 + 金额分桶",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表 payments：id INT 主键、uid INT、channel VARCHAR(12)、amount DECIMAL(10,2)、paid_at DATETIME（UTC 字面量）。同一 uid 在**同一秒**可能有多笔支付（回调合并写入的产物）。\n\n要求输出一张明细表，列顺序与别名必须是 uid, id, amount, running_amount, amount_bucket：\n1) running_amount：同一 uid 内，按 paid_at 升序的**批次累计**金额。业务口径明确写着「同一秒内到达的多笔支付属于同一个批次，报表上这几行必须显示**相同**的累计值（= 该秒全部支付的和已经计入）」。**不要**把它写成逐行累加。\n2) amount_bucket：同一 uid 内按 amount 降序做 NTILE(4) 四等分桶（1 = 金额最大的一档）；金额并列时按 id 升序进桶。桶数不足 4 行时后面的桶号不出现。\n3) 必须自带全序 ORDER BY uid, id —— 判题按行序敏感比对。\n\n只提交一条 SELECT / WITH 查询。提示：本题区分「知道窗口默认帧是什么」和「以为 ROWS 与 RANGE 一样」两种人。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "window-functions",
+    "frame-clause",
+    "ntile",
+    "running-total",
+    "modern:mysql8-window-functions"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：两处同秒并列（RANGE 帧含 peer）",
+      "input": [],
+      "expected": {
+        "columns": ["uid", "id", "amount", "running_amount", "amount_bucket"],
+        "orderSensitive": true,
+        "rows": [
+          [1, 1, 100, 300, 1],
+          [1, 2, 200, 300, 1],
+          [1, 3, 50, 350, 3],
+          [1, 4, 75, 450, 2],
+          [1, 5, 25, 450, 4],
+          [2, 6, 500, 600, 1],
+          [2, 7, 100, 600, 3],
+          [2, 8, 300, 900, 2]
+        ]
+      },
+      "note": "id1 与 id2 同属 09:00:00 批次，都显示 300；ROWS 版会给出 100/300。"
+    },
+    {
+      "name": "同秒三笔的批次边界",
+      "input": [
+        "INSERT INTO payments VALUES (9,3,'web',10.00,'2026-06-01 00:00:00'),(10,3,'app',20.00,'2026-06-01 00:00:00'),(11,3,'pos',30.00,'2026-06-01 00:00:00'),(12,3,'app',40.00,'2026-06-02 00:00:00')"
+      ],
+      "expected": {
+        "columns": ["uid", "id", "amount", "running_amount", "amount_bucket"],
+        "orderSensitive": true,
+        "rows": [
+          [1, 1, 100, 300, 1],
+          [1, 2, 200, 300, 1],
+          [1, 3, 50, 350, 3],
+          [1, 4, 75, 450, 2],
+          [1, 5, 25, 450, 4],
+          [2, 6, 500, 600, 1],
+          [2, 7, 100, 600, 3],
+          [2, 8, 300, 900, 2],
+          [3, 9, 10, 60, 4],
+          [3, 10, 20, 60, 3],
+          [3, 11, 30, 60, 2],
+          [3, 12, 40, 100, 1]
+        ]
+      }
+    },
+    {
+      "name": "重复金额的进桶顺序与同秒重复的累计边界",
+      "input": [
+        "DELETE FROM payments",
+        "INSERT INTO payments VALUES (14,5,'web',10.00,'2026-07-01 08:00:00'),(13,5,'app',10.00,'2026-07-01 08:00:00'),(12,5,'pos',10.00,'2026-07-01 08:00:00'),(11,5,'web',99.00,'2026-07-02 08:00:00')"
+      ],
+      "expected": {
+        "columns": ["uid", "id", "amount", "running_amount", "amount_bucket"],
+        "orderSensitive": true,
+        "rows": [
+          [5, 11, 99, 129, 1],
+          [5, 12, 10, 30, 2],
+          [5, 13, 10, 30, 3],
+          [5, 14, 10, 30, 4]
+        ]
+      },
+      "note": "三笔 10.00 并列，进桶顺序由 id 升序唯一决定（id 是主键，倒序插入不影响）。"
+    },
+    {
+      "name": "只有一笔的退化边界",
+      "input": [
+        "DELETE FROM payments",
+        "INSERT INTO payments VALUES (1,1,'app',10.00,'2026-05-01 09:00:00')"
+      ],
+      "expected": {
+        "columns": ["uid", "id", "amount", "running_amount", "amount_bucket"],
+        "orderSensitive": true,
+        "rows": [[1, 1, 10, 10, 1]]
+      }
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM payments"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nSELECT uid, id, amount,\n       SUM(amount) OVER (PARTITION BY uid ORDER BY paid_at) AS running_amount,\n       NTILE(4) OVER (PARTITION BY uid ORDER BY amount DESC, id) AS amount_bucket\nFROM payments\nORDER BY uid, id;\n```\n1) 带 ORDER BY 而不写帧时，默认是 `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`，RANGE 的 CURRENT ROW = **当前 peer 组的所有行**，所以同秒的几笔会把彼此都算进去 —— 这正是题目要的批次口径。`ROWS UNBOUNDED PRECEDING` 是「物理到当前行」，两者在有并列排序键时必然不同。\n2) `RANGE` 只允许**恰好一个** ORDER BY 表达式（`ORDER BY paid_at, id RANGE ...` 会 ERROR 3598/3599），这也是很多人写不出来卡住的地方。等价的显式写法：先按 (uid, paid_at) 聚合成批次，再用 ROWS 累计；或 `ORDER BY UNIX_TIMESTAMP(paid_at) RANGE UNBOUNDED PRECEDING`。\n3) NTILE(4) 需要整个分区，无法用索引避免排序；桶大小按「余数摊给前面的桶」（5 行 → 2,1,1,1）。分桶必须给决定性 ORDER BY，否则并列行的桶号不可复现。\n4) 同一 SELECT 里两个窗口用了两套不同的 PARTITION/ORDER → 执行计划里是**两次独立排序**（EXPLAIN ANALYZE 会看到两个 sorting operation）。\n\n面试追问：\n- 若要「同日 23:59 之前已到账金额」的时区口径（UTC+8 报表日）改怎么改帧？→ 先物化 `report_day = DATE(paid_at + INTERVAL 8 HOUR)`，再 `SUM() OVER (PARTITION BY uid ORDER BY report_day)`；注意 `TIMESTAMP` 会按会话 time_zone 转换而 `DATETIME` 不会，混用必然口径漂移。\n- MySQL 没有 `PERCENTILE_CONT`：p50/p90 要用 `ROW_NUMBER()` + `COUNT(*) OVER()` 取位次，或 `PERCENT_RANK()` + `FIRST_VALUE`；`NTILE(4)[4]` 只能给分位桶，不是分位值。\n- 5000 万行怎么算？→ 按 uid 分片离线预聚合（批次表），在线只做 Top-K；或按 (uid, paid_at) 建索引让窗口复用索引顺序省掉一次排序。\n- `LAST_VALUE()` 在同帧陷阱下取不到分区末值，必须 `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`（或 `FIRST_VALUE` + DESC）。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS payments",
+      "CREATE TABLE payments (id INT PRIMARY KEY, uid INT NOT NULL, channel VARCHAR(12) NOT NULL, amount DECIMAL(10,2) NOT NULL, paid_at DATETIME NOT NULL, KEY idx_uid_paid (uid, paid_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO payments VALUES (1,1,'app',100.00,'2026-05-01 09:00:00'),(2,1,'web',200.00,'2026-05-01 09:00:00'),(3,1,'app',50.00,'2026-05-02 10:30:00'),(4,1,'pos',75.00,'2026-05-03 08:00:00'),(5,1,'web',25.00,'2026-05-03 08:00:00'),(6,2,'app',500.00,'2026-05-01 12:00:00'),(7,2,'web',100.00,'2026-05-01 12:00:00'),(8,2,'app',300.00,'2026-05-04 23:59:59')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "SELECT uid, id, amount,\n       SUM(amount) OVER (PARTITION BY uid ORDER BY paid_at) AS running_amount,\n       NTILE(4) OVER (PARTITION BY uid ORDER BY amount DESC, id) AS amount_bucket\nFROM payments\nORDER BY uid, id",
+    "naiveSolution": "SELECT uid, id, amount,\n       SUM(amount) OVER (PARTITION BY uid ORDER BY paid_at, id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_amount,\n       NTILE(4) OVER (PARTITION BY uid ORDER BY amount DESC, id) AS amount_bucket\nFROM payments\nORDER BY uid, id"
+  },
+  "estimatedMinutes": 14,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#12-默认帧陷阱本文件最高频的看起来对",
+    "addedBy": "content-agent-sql"
+  }
+}

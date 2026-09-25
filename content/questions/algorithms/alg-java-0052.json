@@ -1,0 +1,267 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0052",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "RocketMQ 消费重试的下一次投递：阶梯表顶端、投递次数与死信判定谁先判",
+  "statement": "## 背景\n\nApache RocketMQ 5.0《消费重试》给的是**表格与算式**，不是\"会重试几次\"这种口语【源 S13】：\n\n- 普通消息的重试间隔是**阶梯时间**：第 1 次 10 秒、第 2 次 30 秒、第 3 次 1 分钟、第 4 次 2 分钟、\n  第 5 次 3 分钟……第 13 次 20 分钟、第 14 次 30 分钟、第 15 次 1 小时、第 16 次 2 小时，\n  并且\"**若重试次数超过 16 次，后面每次重试间隔都为 2 小时**\"；\n- **最大重试次数由\"消费者分组创建时的元数据\"控制、支持自定义**（16 只是阶梯表的顶端，不是上限）；\n- \"**如果最大重试次数为 3 次，则该消息最多可被投递 4 次，1 次为原始消息，3 次为重试投递次数**\"；\n- 顺序消息的重试间隔是**固定时间**；\n- SimpleConsumer 的重试间隔是**预分配**的：不查阶梯表，直接复用不可见时间参数，\n  且\"**消息重试间隔 = 不可见时间 − 消息实际处理时长**\"，\n  若直到不可见时长用完仍未返回结果 ⇒ 消息超时、**立即重试、间隔为 0**；\n- 达到最大重试次数仍失败 ⇒ 进死信队列（DLQ 被定义为\"消费逻辑的最终兜底机制\"）。\n\n## 任务\n\n实现 `public static int[] nextDeliverPlan(int mode, int failedAttempt, int maxRetry, int orderlyIntervalMs, int invisibleMs, int costMs)`，\n返回 `{下一次投递的间隔毫秒, 下一次是第几次重试, 是否进死信, 到目前为止的投递次数}`。\n\n| 入参 | 含义 |\n| --- | --- |\n| `mode` | `0` = 普通消息（PushConsumer，查阶梯表）、`1` = 顺序消息（固定间隔）、`2` = SimpleConsumer（复用不可见时长） |\n| `failedAttempt` | **已经失败过几次**（= 已经发生过的重试投递次数；首次投递失败就是 1） |\n| `maxRetry` | 该消费者分组的最大重试次数（元数据里配的，不是 16） |\n| `orderlyIntervalMs` | 仅 `mode=1` 用 |\n| `invisibleMs` / `costMs` | 仅 `mode=2` 用：预分配的不可见时长 / 这次实际处理花了多久 |\n\n阶梯表（秒，第 1..16 次重试）：\n`10, 30, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 1200, 1800, 3600, 7200`，\n**第 17 次及以后一律 7200 秒**。\n\n## 判据顺序（**必须按这个顺序，越界与死信都比间隔先判**）\n\n1. 参数校验（见下表）；\n2. `投递次数 = 1 + min(failedAttempt, maxRetry)` —— 原始那一次永远算在内；\n3. **`failedAttempt >= maxRetry` ⇒ 进死信**：间隔 `0`、\"下一次是第几次重试\" `0`、\n   `willGoDlq = 1`。**注意是 `>=`**：`maxRetry = 3` 时第 3 次重试失败就是终点，\n   这条消息总共被投过 4 次；\n4. 否则 `nextAttempt = failedAttempt + 1`，按 mode 取间隔：\n   - `mode=0`：阶梯表第 `nextAttempt` 项（越界钳到最后一项，不许抛错也不许回卷）；\n   - `mode=1`：`orderlyIntervalMs`，**阶梯表完全不参与**；\n   - `mode=2`：`max(0, invisibleMs - costMs)`，**不许出现负间隔**。\n\n## 参数校验（抛 `IllegalArgumentException`，消息一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `mode` 不是 0/1/2 | `unknown consumer mode` |\n| `failedAttempt < 0` | `negative failed attempt` |\n| `maxRetry < 0` | `maxRetry must be non-negative` |\n| `orderlyIntervalMs < 0` | `orderly interval must be non-negative` |\n| `mode == 2` 且 `invisibleMs <= 0` | `invisible duration must be positive` |\n| `costMs < 0` | `negative cost` |\n\n**`invisibleMs` 的校验要带 `mode == 2` 这个前提**：普通消息模式下这个参数根本没被用到，\n给它一个 0 是完全正常的调用；无条件校验会让 `mode=0` 的整条路径抛错，\n那是\"参数校验写成全局约束\"的经典事故。\n\n## 这题真正考的东西\n\n两个方向相反的错法，线上都存在：\n\n- **把 16 当成上限**（而不是阶梯顶端）⇒ 自定义了 `maxRetry = 64` 的分组在第 17 次之后\n  被你提前送进死信，业务侧看到\"消息莫名其妙进了 DLQ\"；\n- **把\"重试次数\"当成\"投递次数\"** ⇒ 少投一次。素材 §4 考点 5 把这条写成硬结论：\n  **幂等窗口必须 ≥ 重试节奏**。投递次数少算一次，去重窗口的算术就跟着错一整个阶梯。\n\n阶梯顶端的 2 小时还有一条推论值得记：堆积的**追赶成本**不只由消费速率决定，\n还由\"毒丸消息要多久才被扔进死信\"决定 —— 一条 `maxRetry = 16` 的毒丸\n会在链路里躺很久（阶梯表末尾几档分别是 20 分钟、30 分钟、1 小时、2 小时、2 小时…），\n这正是官方建议\"减少重试次数 + 延长重试间隔来降低系统压力\"要解决的【源 S13】。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "rocketmq",
+    "consume-retry",
+    "ladder-backoff",
+    "dead-letter-queue",
+    "invisible-duration",
+    "modern:messaging"
+  ],
+  "cases": [
+    {
+      "name": "基线：已经重试过 1 次 ⇒ 下一次是第 2 次重试，间隔 30 秒，共投过 2 次",
+      "input": [
+        0,
+        1,
+        16,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        30000,
+        2,
+        0,
+        2
+      ],
+      "visible": true,
+      "note": "阶梯表第 k 项是\"第 k 次重试\"的间隔；已经失败 1 次 ⇒ 要取的是第 2 项"
+    },
+    {
+      "name": "边界：重试次数 3 ⇒ 最多投递 4 次，第 3 次失败后再失败就进死信",
+      "input": [
+        0,
+        3,
+        3,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        4
+      ],
+      "visible": true,
+      "note": "官方原文\"如果最大重试次数为 3 次，则该消息最多可被投递 4 次，1 次为原始消息，3 次为重试投递次数\""
+    },
+    {
+      "name": "阶梯顶端：第 16 次重试是 2 小时，第 40 次仍然是 2 小时（不是回到表头、也不是报错）",
+      "input": [
+        0,
+        40,
+        64,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        7200000,
+        41,
+        0,
+        41
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：第 13 次重试正好是 20 分钟（阶梯表不是等比数列）",
+      "input": [
+        0,
+        12,
+        64,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        1200000,
+        13,
+        0,
+        13
+      ],
+      "visible": true,
+      "note": "failedAttempt=12 ⇒ 下一次是第 13 次重试 ⇒ 取阶梯表第 13 项 1200 秒"
+    },
+    {
+      "name": "顺序消息：固定间隔，阶梯表完全不参与",
+      "input": [
+        1,
+        5,
+        16,
+        30000,
+        0,
+        0
+      ],
+      "expected": [
+        30000,
+        6,
+        0,
+        6
+      ],
+      "visible": true
+    },
+    {
+      "name": "SimpleConsumer：重试间隔 = 不可见时长 − 实际处理时长",
+      "input": [
+        2,
+        2,
+        16,
+        0,
+        30,
+        10
+      ],
+      "expected": [
+        20,
+        3,
+        0,
+        3
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：处理时长超过不可见时长 ⇒ 消息已超时，立即重试（间隔 0，不是负数）",
+      "input": [
+        2,
+        1,
+        16,
+        0,
+        30,
+        50
+      ],
+      "expected": [
+        0,
+        2,
+        0,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：maxRetry = 0 ⇒ 首次失败就直接进死信，不再排任何投递",
+      "input": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：DLQ 判定先于间隔计算 ⇒ 已达上限时 SimpleConsumer 的 cost 越界也不报错",
+      "input": [
+        2,
+        4,
+        4,
+        0,
+        30,
+        99999
+      ],
+      "expected": [
+        0,
+        0,
+        1,
+        5
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：mode 不是 0/1/2",
+      "input": [
+        7,
+        1,
+        16,
+        0,
+        0,
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown consumer mode"
+    },
+    {
+      "name": "非法：SimpleConsumer 却没给不可见时长",
+      "input": [
+        2,
+        1,
+        16,
+        0,
+        0,
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "invisible duration must be positive"
+    },
+    {
+      "name": "非法：处理时长为负",
+      "input": [
+        0,
+        1,
+        16,
+        0,
+        0,
+        -5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative cost"
+    },
+    {
+      "name": "非法：最大重试次数为负",
+      "input": [
+        0,
+        1,
+        -2,
+        0,
+        0,
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "maxRetry must be non-negative"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n顺序只有一处容易写错：**先判死信、再算间隔**，而投递次数用 `1 + min(failed, maxRetry)`。\n\n```java\nif (failedAttempt >= maxRetry) return new int[] {0, 0, 1, 1 + failedAttempt};\nint next = failedAttempt + 1;\ndelay = mode == 1 ? orderlyIntervalMs\n      : mode == 2 ? Math.max(0, invisibleMs - costMs)\n      : LADDER[Math.min(next, 16) - 1] * 1000;\n```\n\n**基线（mode=0、failed=1、maxRetry=16）⇒ `{30000, 2, 0, 2}`**：\n到这一刻为止已经投过 2 次（原始那一次 + 第 1 次重试），所以下一次是**第 2 次重试**，\n间隔取阶梯表第 2 项 = 30 秒。**间隔取的是\"下一次\"而不是\"这一次\"**，\n这是本题第一个 off-by-one：写成 `LADDER[failedAttempt]` 会给出 10 秒，\n在监控上表现为\"重试比官方口径更快\"，而幂等窗口的算术是按重试节奏定的，于是跟着一起错。\n\n**用例「边界：重试次数 3 ⇒ 最多投递 4 次」的输入是 `failedAttempt = 3, maxRetry = 3`**，\n输出 `{0, 0, 1, 4}`：三次重试全部用完 ⇒ 进死信，投递次数正好等于官方那句\"最多 4 次\"。\n把判定写成 `failedAttempt > maxRetry` 的实现会给出 `{120000, 4, 0, 4}` ——\n**多投了一次**（第 4 次重试，间隔取阶梯表第 4 项 120 秒）。\n这个 off-by-one 单独看无害，但它会让\"投递次数\"这一列与官方那句\"最多 4 次\"永远对不上：\n两边的数字都对，只是不在同一条消息上。反过来把判定写成 `failedAttempt + 1 >= maxRetry`\n（提前一次进死信）更糟：`maxRetry = 3` 的分组实际只被投 3 次，\n而幂等窗口与对账都是按 4 次设计的。\n\n**用例「阶梯顶端」`failedAttempt = 40, maxRetry = 64` ⇒ `{7200000, 41, 0, 41}`**：\n钳到最后一项，而不是越界。朴素解在这条上给出 `1000 << 40` 溢出的数 ——\n\"指数退避\"听着比\"阶梯表\"高级，实际会在第 30 次重试时给出一个比业务生命周期还长的延时，\n消息看起来\"在重试\"，其实永远不会再被消费。\n\n**用例「处理时长超过不可见时长」⇒ `{0, 2, 0, 2}`**：\n`max(0, 30 - 50) = 0`。官方语义是\"直到 30ms 仍未处理完成且未返回结果 ⇒ 消息超时、立即重试\"。\n写成 `invisible - cost` 会给出 `-20`，而\"负延时\"在大多数调度器里等价于\"排到很久以后\"\n（无符号比较或 `if (delay > 0)` 之后干脆不排），**症状是这条消息再也不来了**。\n\n**用例「边界：DLQ 判定先于间隔计算」`mode=2, failed=4, maxRetry=4, cost=99999`** ⇒\n`{0, 0, 1, 5}`：cost 荒谬也不报错，因为压根不需要算间隔。\n这条测的是\"校验顺序\"：`invisibleMs` 的校验带 `mode == 2` 前提，\n而 **cost 的合理性不该是校验项**（超过不可见时长恰恰是本题要模拟的正常事件）。\n把它当非法参数拒掉，等于把线上最常见的重复来源判成\"调用方错了\"。\n\n**工程延伸（面试追问点）**\n\n1. 幂等窗口该设多久？（素材考点 5 的结论：**窗口必须 ≥ 重试节奏**。\n   默认阶梯顶端 2 小时 + 自定义 `maxRetry` 的算术 ⇒ 窗口只设 5 分钟一定会漏，\n   漏的形态是\"重投被当成新消息处理了两次\"，而对账要几天后才看得见【源 S13】＋【推】。）\n2. 为什么\"不要用消费失败来触发限流等待\"？（官方错误示例：消费速度过高触发限流就返回消费失败\n   等下次重消费 —— 那会把一次限流放大成 16 档阶梯的全部流量，且每次都占一次投递配额。\n   正确示例是延迟获取消息稍后再消费【源 S13】。）\n3. 死信之后谁来管？（DLQ 是\"最终兜底\"，不是\"丢弃\"。素材把\"毒丸隔离与人工重放\"\n   列为这题的追问点：**死信要有业务口径的指标**（这批单最终有没有补上），\n   否则 DLQ 只是一个更体面的垃圾桶【推】。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] nextDeliverPlan(int mode, int failedAttempt, int maxRetry, int orderlyIntervalMs, int invisibleMs, int costMs)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  private static final int[] LADDER_SECONDS = {\n      10, 30, 60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 1200, 1800, 3600, 7200};\n\n  public static int[] nextDeliverPlan(int mode, int failedAttempt, int maxRetry, int orderlyIntervalMs,\n                                      int invisibleMs, int costMs) {\n    if (mode != 0 && mode != 1 && mode != 2) throw new IllegalArgumentException(\"unknown consumer mode\");\n    if (failedAttempt < 0) throw new IllegalArgumentException(\"negative failed attempt\");\n    if (maxRetry < 0) throw new IllegalArgumentException(\"maxRetry must be non-negative\");\n    if (orderlyIntervalMs < 0) throw new IllegalArgumentException(\"orderly interval must be non-negative\");\n    if (mode == 2 && invisibleMs <= 0) throw new IllegalArgumentException(\"invisible duration must be positive\");\n    if (costMs < 0) throw new IllegalArgumentException(\"negative cost\");\n\n    int total = 1 + Math.min(failedAttempt, maxRetry);\n    if (failedAttempt >= maxRetry) return new int[] {0, 0, 1, total};\n\n    int nextAttempt = failedAttempt + 1;\n    int delay;\n    if (mode == 1) {\n      delay = orderlyIntervalMs;                       // 顺序消息：固定间隔\n    } else if (mode == 2) {\n      delay = Math.max(0, invisibleMs - costMs);       // 重试间隔 = 不可见时长 - 实际处理时长\n    } else {\n      int idx = Math.min(nextAttempt, LADDER_SECONDS.length) - 1;\n      delay = LADDER_SECONDS[idx] * 1000;              // 超过 16 次恒为 2 小时\n    }\n    return new int[] {delay, nextAttempt, 0, total};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"指数退避 + 投递次数等于重试次数\"版：既没有阶梯表，也没有\"原始那一次\"，\n  // 于是最大重试 3 次的消息只投 3 次就没了（少一次），而间隔在长尾上比官方阶梯密得多。\n  public static int[] nextDeliverPlan(int mode, int failedAttempt, int maxRetry, int orderlyIntervalMs,\n                                      int invisibleMs, int costMs) {\n    if (mode != 0 && mode != 1 && mode != 2) throw new IllegalArgumentException(\"unknown consumer mode\");\n    if (failedAttempt < 0) throw new IllegalArgumentException(\"negative failed attempt\");\n    if (maxRetry < 0) throw new IllegalArgumentException(\"maxRetry must be non-negative\");\n    if (orderlyIntervalMs < 0) throw new IllegalArgumentException(\"orderly interval must be non-negative\");\n    if (mode == 2 && invisibleMs <= 0) throw new IllegalArgumentException(\"invisible duration must be positive\");\n    if (costMs < 0) throw new IllegalArgumentException(\"negative cost\");\n\n    int total = failedAttempt;\n    if (failedAttempt > maxRetry) return new int[] {0, 0, 1, total};\n    long delay = 1000L << Math.min(failedAttempt, 20);\n    return new int[] {(int) delay, failedAttempt + 1, 0, total};\n  }\n}"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（消息与交易异步链路方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 7（消费重试与死信：五状态机、普通消息阶梯间隔与\"超过 16 次恒定 2 小时\"、最大重试次数由消费者分组元数据控制、\"重试 3 次即最多投递 4 次\"、顺序消息固定间隔、SimpleConsumer 的\"重试间隔 = 不可见时长 − 实际处理时长\"；素材 §4 考点 7 的出题建议正是 nextDeliverTime 这类判定函数）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:45.761Z"
+  }
+}

@@ -1,0 +1,1200 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0023",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "任务状态轮询组件：竞态只认最新那次，轮询是\"完成后再等\"而不是 setInterval",
+  "statement": "## 背景（版本锚点：ahooks 3.10.0 / `alibaba/hooks@master` 的 `useRequest` 内核）\n\n中台页面里有一个\"任务状态\"查询：3 秒一次轮询一个任务进度接口。\n这类组件最容易写对的是\"能转起来\"，最容易写错的是**两件事**：\n\n1. **两次调用之间谁的结果可见**（竞态）——不是\"谁后到\"，是**谁后发起**；\n2. **\"下一次什么时候发\"**（轮询）——不是 `setInterval` 从发起时刻起算，\n   而是**上一次完成之后再等 `pollingInterval`**。\n\n这两条都不是风格问题，是判分点：前者决定用户会不会看到过期数据覆盖新数据，\n后者决定慢接口会不会被自己叠成 DDoS。\n\n## 你要实现的入口\n\n```ts\nexport function usePollingRequest<TData = unknown, TParams extends any[] = any[]>(\n  service: (...args: TParams) => Promise<TData>,\n  options?: Options<TData, TParams>,\n): Result<TData, TParams>;\n```\n\n```ts\ninterface Options<TData, TParams> {\n  manual?: boolean;                       // 默认 false：挂载时用 defaultParams 自动跑一次\n  defaultParams?: TParams;                // 默认 []\n  pollingInterval?: number;               // 默认 0；>0 才进入轮询模式\n  pollingWhenHidden?: boolean;            // 默认 true\n  pollingErrorRetryCount?: number;        // 默认 -1（无限次）\n  onSuccess?: (data: TData, params: TParams) => void;\n  onError?: (error: Error, params: TParams) => void;\n  onFinally?: (params: TParams, data?: TData, error?: Error) => void;\n}\n\ninterface Result<TData, TParams> {\n  loading: boolean;\n  data: TData | undefined;\n  error: Error | undefined;\n  run: (...args: TParams) => void;\n  runAsync: (...args: TParams) => Promise<TData>;\n  refresh: () => void;                    // 用上一次实参再跑一次（= run(...params)）\n  cancel: () => void;\n}\n```\n\n测试会渲染一个 `<Probe>`（判题器提供，你改不了它），上面有\n`loading / data / error / calls / events` 五个 `data-testid`，\n以及每个实参组两个按钮（`run-<i>` 走 `run`，`async-<i>` 走 `runAsync` 并把结果记进\n`events`）和一个 `cancel` 按钮。`service` 由判题器提供，每次调用把实参记进 `calls`，\n在指定毫秒数后 resolve 成 `'#<第几次调用>:<实参>'` 或 reject 成 `new Error('svc-<实参>')`。\n`onSuccess / onError / onFinally` 由判题器接线，只会往 `events` 里追加\n`success:<data>` / `error:<message>` / `finally:ok:<data>` / `finally:err:<message>`；\n`runAsync` 的按钮再追加 `resolved:<data>` 或 `reject:<error.name>`。\n（断言时 `loading/data/error` 从 DOM 读，`calls/events` 从判题器的记账数组读 ——\n后者是外部事实，不该取决于你有没有触发一次渲染。）\n\n## 语义清单（每一条都有用例）\n\n**A. 竞态裁决**\n\n1. 每次 `run`/`runAsync` 让一个调用计数 +1，并记住这次调用开始时的计数值 `currentCount`。\n2. promise 落回时先比 `currentCount` 与当前计数：**不相等就当作\"被覆盖\"**，\n   此时**不写 `data`、不写 `error`、不把 `loading` 置回 false、不触发\n   `onSuccess/onError/onFinally`**（裁决发生在写状态**之前**）。\n3. 被覆盖的那次调用：`run` **什么都不报告**；`runAsync` 的 promise 以\n   **`name === 'CancelledError'` 的 Error** reject。\n   ⚠️ 即使这次调用**自身是失败的**（service reject），被覆盖后也只能以 `CancelledError` reject\n   —— 业务错误不许浮上来。\n4. `cancel()` 只做两件事：让当前计数 +1（于是进行中的调用变成\"被覆盖\"）、\n   把 `loading` 置为 false、并停止轮询。\n   **它不会中止 service 的 promise**（那个 promise 照样会落地，只是结果不可见），\n   也**不会清空 `data`**。\n\n**B. 轮询续期**\n\n5. 只有 `pollingInterval > 0` 才进入轮询模式；`pollingInterval` 为 `0`/省略时，\n   成功与失败都**不**排下一次。\n6. 排期时机：**本次落回的时刻 + `pollingInterval`**（不是发起时刻，也不是固定频率）。\n7. 续期用 `refresh()`，即**复用上一次 `run`/`runAsync` 的实参**。\n8. 连续失败计数：失败 +1、**成功归零**。设了 `pollingErrorRetryCount = n` 时，\n   落回后按 `n === -1 || 连续失败数 <= n` 决定是否续期；不满足则把计数清零并**停止轮询**。\n   默认 `-1` ⇒ 无限次。\n9. 每一次新的 `run`/`runAsync` 与 `cancel()` 都会先**取消已有的排期**。\n10. `pollingInterval` 在运行中被改：从 `1000` 改成 `0` ⇒ 停掉排期；\n    从 `0` 改成 `1000` ⇒ **不会自动开始**，必须再 `run`/`runAsync` 一次才生效。\n11. `manual: true` ⇒ 挂载时不跑，因此也不会自动开始轮询。\n\n**C. 可见性**\n\n12. \"是否可见\"的判据是 `document.visibilityState !== 'hidden'`。\n    测试用 `applyHidden(v)` 改这个 getter 并在 `document` 上派发**冒泡的**\n    `visibilitychange` 事件（所以监听 `document` 或 `window` 都收得到）。\n13. `pollingWhenHidden: false` 且排期到点时页面隐藏 ⇒ **不发这一次请求**，\n    改为订阅可见性；**重新变为可见时补发一次 `refresh()`**，然后恢复常规排期。\n14. `pollingWhenHidden` 默认 `true` ⇒ 隐藏期间照旧发请求。\n    取消订阅的时机：新的 `run`/`runAsync`、`cancel()`、组件卸载。\n\n**D. 其它**\n\n15. `run`/`runAsync` 只把 `loading` 置真，**不清空 `data` 与 `error`**\n    （`Fetch.runAsync` 里是 `setState({ loading: true, params, ...state })`）。\n    只有落回时才写 `data`/`error`。\n16. `loading` 的初值是 `!manual`。\n17. 组件卸载时等价于 `cancel()`。\n\n不许引入第三方依赖（**包括 `ahooks` 本身**：本题要的就是这个内核，不是调用它）。\n不要写 `formatResult`（当前版本官方文档不提供该 API）。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "request-race",
+    "polling-semantics",
+    "async-state-machine",
+    "fake-timers",
+    "modern:data-layer"
+  ],
+  "cases": [
+    {
+      "name": "竞态：后发先至时，先发的那条既不写 data 也不报告任何东西",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 0
+        },
+        "argsets": [
+          [
+            "slow"
+          ],
+          [
+            "fast"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 900
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "click",
+            1
+          ],
+          [
+            "to",
+            200
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            950
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 100,
+          "obs": {
+            "loading": "1",
+            "data": "-",
+            "error": "-",
+            "calls": "slow",
+            "events": "-"
+          }
+        },
+        {
+          "t": 200,
+          "obs": {
+            "loading": "0",
+            "data": "#2:fast",
+            "error": "-",
+            "calls": "slow|fast",
+            "events": "success:#2:fast|finally:ok:#2:fast"
+          }
+        },
+        {
+          "t": 950,
+          "obs": {
+            "loading": "0",
+            "data": "#2:fast",
+            "error": "-",
+            "calls": "slow|fast",
+            "events": "success:#2:fast|finally:ok:#2:fast"
+          }
+        }
+      ],
+      "visible": true,
+      "note": "F20：`if (currentCount !== this.count) throw new CancelledError()` 位于 setState 之前"
+    },
+    {
+      "name": "竞态：被覆盖的 runAsync 以 CancelledError reject，而不是静默成功",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 0
+        },
+        "argsets": [
+          [
+            "slow"
+          ],
+          [
+            "fast"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 900
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "aclick",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "aclick",
+            1
+          ],
+          [
+            "to",
+            200
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            950
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 200,
+          "obs": {
+            "loading": "0",
+            "data": "#2:fast",
+            "error": "-",
+            "calls": "slow|fast",
+            "events": "success:#2:fast|finally:ok:#2:fast|resolved:#2:fast"
+          }
+        },
+        {
+          "t": 950,
+          "obs": {
+            "loading": "0",
+            "data": "#2:fast",
+            "error": "-",
+            "calls": "slow|fast",
+            "events": "success:#2:fast|finally:ok:#2:fast|resolved:#2:fast|reject:CancelledError"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "竞态反向：先发的那条自身失败，也只能以 CancelledError reject（业务错误被吞）",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 0
+        },
+        "argsets": [
+          [
+            "boom"
+          ],
+          [
+            "ok"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 400,
+            "fail": true
+          },
+          {
+            "delay": 150
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "aclick",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "aclick",
+            1
+          ],
+          [
+            "to",
+            250
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            450
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 250,
+          "obs": {
+            "loading": "0",
+            "data": "#2:ok",
+            "error": "-",
+            "calls": "boom|ok",
+            "events": "success:#2:ok|finally:ok:#2:ok|resolved:#2:ok"
+          }
+        },
+        {
+          "t": 450,
+          "obs": {
+            "loading": "0",
+            "data": "#2:ok",
+            "error": "-",
+            "calls": "boom|ok",
+            "events": "success:#2:ok|finally:ok:#2:ok|resolved:#2:ok|reject:CancelledError"
+          }
+        }
+      ],
+      "visible": true,
+      "note": "素材 F13 原话：\"即使它自身的 promise 是以 service 错误 reject 的，被覆盖的调用也只会以 CancelledError reject\""
+    },
+    {
+      "name": "cancel 只让结果不可见：不中止 promise、不清 data、loading 立刻归位",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 0
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 500
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "aclick",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "cancel"
+          ],
+          [
+            "to",
+            200
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            600
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 100,
+          "obs": {
+            "loading": "1",
+            "data": "-",
+            "error": "-",
+            "calls": "p",
+            "events": "-"
+          }
+        },
+        {
+          "t": 200,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "-",
+            "calls": "p",
+            "events": "-"
+          }
+        },
+        {
+          "t": 600,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "-",
+            "calls": "p",
+            "events": "reject:CancelledError"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "轮询：下一次在\"上一次完成 + interval\"才发，不是从发起时刻起算",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            1000
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            1100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            1200
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 100,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 1000,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 1100,
+          "obs": {
+            "loading": "1",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 1200,
+          "obs": {
+            "loading": "0",
+            "data": "#2:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "轮询：请求比 interval 还慢时自动串行化，不会叠加并发",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 1500
+          },
+          {
+            "delay": 1500
+          },
+          {
+            "delay": 1500
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            1000
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            1500
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            2000
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            2500
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 1000,
+          "obs": {
+            "loading": "1",
+            "data": "-",
+            "error": "-",
+            "calls": "p",
+            "events": "-"
+          }
+        },
+        {
+          "t": 1500,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 2000,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 2500,
+          "obs": {
+            "loading": "1",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "pollingErrorRetryCount:2 ⇒ 容忍 2 次，第 3 次连续失败才停（判据是 <=）",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000,
+          "pollingErrorRetryCount": 2
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            3400
+          ],
+          [
+            "assert"
+          ],
+          [
+            "to",
+            8000
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 3400,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "svc-p",
+            "calls": "p|p|p",
+            "events": "error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p"
+          }
+        },
+        {
+          "t": 8000,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "svc-p",
+            "calls": "p|p|p",
+            "events": "error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "失败计数是\"连续\"：中途成功一次就归零，总失败 3 次也只按 1 次算",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000,
+          "pollingErrorRetryCount": 1
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            6000
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 6000,
+          "obs": {
+            "loading": "0",
+            "data": "#2:p",
+            "error": "svc-p",
+            "calls": "p|p|p|p",
+            "events": "error:svc-p|finally:err:svc-p|success:#2:p|finally:ok:#2:p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p"
+          }
+        }
+      ],
+      "visible": true,
+      "note": "F23：onError 计数 +1、onSuccess 归零"
+    },
+    {
+      "name": "pollingErrorRetryCount 默认 -1 ⇒ 无限次：连错 5 次也还在轮询",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          },
+          {
+            "delay": 100,
+            "fail": true
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            4600
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 4600,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "svc-p",
+            "calls": "p|p|p|p|p",
+            "events": "error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "pollingWhenHidden:false ⇒ 隐藏时不排下一次，重新可见补发一次 refresh",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000,
+          "pollingWhenHidden": false
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "hide"
+          ],
+          [
+            "to",
+            3000
+          ],
+          [
+            "assert"
+          ],
+          [
+            "show"
+          ],
+          [
+            "to",
+            3200
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 100,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 3000,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 3200,
+          "obs": {
+            "loading": "0",
+            "data": "#2:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "pollingWhenHidden 默认 true ⇒ 页面隐藏也照打服务端（SRE 投诉的那条）",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "hide"
+          ],
+          [
+            "to",
+            1300
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 1300,
+          "obs": {
+            "loading": "0",
+            "data": "#2:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "pollingInterval 默认 0 ⇒ 压根不进入轮询模式",
+      "input": {
+        "options": {
+          "manual": true
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            5000
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 5000,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "pollingInterval 由 0 改成 1000 不会自动启动，必须再 run 一次",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 0
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "click",
+            0
+          ],
+          [
+            "to",
+            100
+          ],
+          [
+            "assert"
+          ],
+          [
+            "rerender",
+            {
+              "pollingInterval": 1000
+            }
+          ],
+          [
+            "to",
+            5000
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 100,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        },
+        {
+          "t": 5000,
+          "obs": {
+            "loading": "0",
+            "data": "#1:p",
+            "error": "-",
+            "calls": "p",
+            "events": "success:#1:p|finally:ok:#1:p"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "manual:true 时初始化不启动轮询（哪怕 interval 已经为正）",
+      "input": {
+        "options": {
+          "manual": true,
+          "pollingInterval": 1000
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "to",
+            3000
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 3000,
+          "obs": {
+            "loading": "0",
+            "data": "-",
+            "error": "-",
+            "calls": "-",
+            "events": "-"
+          }
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "manual 默认 false ⇒ 挂载即跑 defaultParams 并开始轮询，后续复用同一批实参",
+      "input": {
+        "options": {
+          "pollingInterval": 1000,
+          "defaultParams": [
+            "p"
+          ]
+        },
+        "argsets": [
+          [
+            "p"
+          ]
+        ],
+        "script": [
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          },
+          {
+            "delay": 100
+          }
+        ],
+        "program": [
+          [
+            "mount"
+          ],
+          [
+            "to",
+            1300
+          ],
+          [
+            "assert"
+          ]
+        ]
+      },
+      "expected": [
+        {
+          "t": 1300,
+          "obs": {
+            "loading": "0",
+            "data": "#2:p",
+            "error": "-",
+            "calls": "p|p",
+            "events": "success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p"
+          }
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n骨架就是 `Fetch` 类加一个轮询插件，**没有算法**，全部难度在\"哪一步该写状态\"上。\n\n**三条最容易写反的**\n\n1. **裁决式在写状态之前**（语义 2）。`await service()` 之后第一句必须是\n   `if (currentCount !== this.count) throw new CancelledError()`，然后才 `setState`。\n   反过来写（先 setState 再判断）的话，过期响应会把新数据盖掉，\n   而且 `loading:false` 也会被过期那条写一次 —— 用户看到的是\"闪回旧值\"。\n   `race` 那三条用例分别断到：`data` 不变、`loading` 不变、`events` 里\n   **一条回调记录都没有**、并且 `runAsync` 以 `name==='CancelledError'` reject。\n2. **\"后发先至\"里输的是先发起的那条，不是先落地的那条**（语义 1/3）。\n   用\"最后一个 resolve 赢\"的实现（`if (res === latest)` 之类）会挂反向那条：\n   `boom` 先发但**后**失败，按 `count` 裁决它必须被吞掉、`error` 也不许被写；\n   按\"谁后落地\"它就会把 `ok` 的结果覆盖成错误态。\n   这也是\"我用了 AbortController 所以没有竞态\"这类回答的照妖镜 ——\n   本题的 `cancel()` 语义（语义 4）明确写了**请求不会被中止**，\n   官方原话：\"调用 `cancel` 函数并不会取消 promise 的执行\"。\n3. **轮询是\"完成后再等\"，不是 `setInterval`**（语义 6）。\n   `interval=1000 / delay=100` 那条在第 1000ms 断\"还没发第二次\"；\n   `interval=1000 / delay=1500` 那条在第 2000ms 断\"还没发第二次\"。\n   `setInterval` 版两条全挂，而且它还会在慢接口上叠并发 ——\n   这正是\"轮询把自己打成 DDoS\"的成因。\n\n**连续失败计数：判据是 `<=`，默认是 -1**\n\n`pollingErrorRetryCount: 2` 给的是 **3 次失败**（1、2 容忍，第 3 次 `3 <= 2` 不成立才停）。\n写成 `<` 的实现只跑 2 次；写成\"总共 n 次\"的实现挂\"中途成功一次要归零\"那条\n（用例里 `err, ok, err, err` 在 `n=1` 下仍然发满 4 次，因为连续数从没超过 1）。\n默认值是 **`-1`（无限）**而不是 `0`：写成 `0` 的话第一次失败就停，\n`默认 -1 ⇒ 连错 5 次还在轮询` 那条就是专门抓它的。\n\n**可见性那一格考的是\"暂停 ≠ 取消\"**\n\n`pollingWhenHidden:false` + 隐藏 ⇒ 排期到点时**不发请求，但保留订阅**，\n重新可见时补发**一次** `refresh()`（不是把错过的次数全补上）。\n默认 `true` 那条对照着断：\"切到后台就不打了\"这句面试常说的话在这套栈里是错的，\n必须显式写 `pollingWhenHidden: false`。\n另外\"取消订阅\"的时机容易漏：新 `run`、`cancel()`、卸载三处都要清，\n否则一个隐藏期间挂上的监听会在组件已经不渲染之后再 `setState`。\n\n**`run` 不清 `data`/`error`（语义 15）是本题唯一\"反直觉\"的一格**\n\n多数人会写 `setState({ loading: true, data: undefined, error: undefined })`。\n`Fetch.ts` 里那一行是 `this.setState({ loading: true, params, ...state })`，\n`state` 是插件 `onBefore` 的返回值（常规情况下是 `{}`）——所以旧数据在 loading 期间**仍然可见**，\n这是列表页\"刷新时不闪空白\"的实现依据。`cancel` 那条用例在第 100ms 断到 `data` 仍是\n`-`（此时本来就没数据），而轮询那几条在第 1100ms 断到 `loading:'1'` 的同时\n`data` 还是 `#1:p` —— 清掉 data 的实现会写成 `-`，当场红。\n\n**工程延伸（面试追问点）**\n\n1. 什么场景**不该**丢弃过期响应？（分页/增量列表要**合并**而不是覆盖：\n   第 2 页和第 3 页并发返回时两条都该进列表。这时该做的是\"按 key 归并 + 请求序号只做展示排序\"，\n   而不是\"只认最新\"。把 `usePollingRequest` 当成万能药就会丢数据。）\n2. 轮询的退避怎么做？（`pollingErrorRetryCount` 只管\"失败几次就停\"，**没有退避**；\n   要指数退避得配合 `retryCount/retryInterval`（不设 `retryInterval` 时是\n   `1000 * 2 ** retryCount`，超过 30s 取 30s）或者自己在 service 外面包一层。）\n3. 页面隐藏仍打服务端的成本怎么算？（`pollingInterval * 隐藏时长` 就是纯浪费的 QPS；\n   真实治理是 `pollingWhenHidden:false` + 回到前台补一次，\n   并把\"任务已完成/失败\"作为停止轮询的**业务条件**（`cancel()`），\n   而不是让它在终态上一直转。）\n4. 为什么这套语义能脱离网络库来测？（判题器接管了三件事：service 的耗时/成败、\n   回调的记录、可见性的切换。于是\"竞态\"与\"轮询\"退化成一个**纯状态机 + 虚拟时钟**问题——\n   这也是本题不用 `antd Form` / `ahooks` 真身的原因：判题镜像里没有它们，\n   而机制本身可复刻，比 mock 一个外部库更不容易假绿。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "polling.test.tsx",
+        "content": "import { act, fireEvent, render, screen } from '@testing-library/react';\nimport { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';\nimport { usePollingRequest } from './Solution';\n\n/**\n * 断言由 fe_gen.py 里的 _Sim 时间线模型生成，不手算 ——\n * react-vitest 题的判分事实来源就是这份文件，抄错一次就永久错一次。\n *\n * 三个\"判题器自己接线\"的零件，候选人改不了：\n *   1) service 的耗时/成败由 spec 给定，并把每次调用的实参记进 log.calls；\n *   2) onSuccess/onError/onFinally 由 wire() 覆盖，只负责往 log.events 里追加；\n *   3) 可见性由 applyHidden() 改 document.visibilityState 并派发冒泡的 visibilitychange。\n * 所以本题判的是\"该不该调用、什么时候再调用\"，不是\"文案写得像不像 ahooks\"。\n */\ntype Log = { calls: string[]; events: string[] };\ntype Step = { delay: number; fail?: boolean };\n\nlet log: Log = { calls: [], events: [] };\n\nfunction makeService(steps: Step[]) {\n  return (...args: unknown[]) => {\n    const key = args.join(',');\n    log.calls.push(key);\n    const n = log.calls.length;\n    const spec = steps[Math.min(n - 1, steps.length - 1)];\n    return new Promise((resolve, reject) => {\n      setTimeout(() => {\n        if (spec.fail) reject(new Error('svc-' + key));\n        else resolve('#' + n + ':' + key);\n      }, spec.delay);\n    });\n  };\n}\n\nfunction applyHidden(v: boolean) {\n  Object.defineProperty(document, 'visibilityState', {\n    configurable: true,\n    get: () => (v ? 'hidden' : 'visible'),\n  });\n  document.dispatchEvent(new Event('visibilitychange', { bubbles: true }));\n}\n\nfunction wire(options: Record<string, unknown>) {\n  return {\n    ...options,\n    onSuccess: (data: unknown) => {\n      log.events.push('success:' + String(data));\n    },\n    onError: (e: unknown) => {\n      log.events.push('error:' + String((e as Error).message));\n    },\n    onFinally: (params: unknown[], data: unknown, e: unknown) => {\n      const key = (params ?? []).join(',');\n      log.events.push(e === undefined ? 'finally:ok:' + String(data) : 'finally:err:svc-' + key);\n    },\n  };\n}\n\nfunction Probe({ service, options, argsets }: { service: any; options: any; argsets: any[][] }) {\n  const res = usePollingRequest<any, any[]>(service, options);\n  return (\n    <div>\n      <span data-testid=\"loading\">{res.loading ? '1' : '0'}</span>\n      <span data-testid=\"data\">{res.data === undefined ? '-' : String(res.data)}</span>\n      <span data-testid=\"error\">{res.error === undefined ? '-' : String((res.error as Error).message)}</span>\n      <span data-testid=\"calls\">{log.calls.join('|') || '-'}</span>\n      <span data-testid=\"events\">{log.events.join('|') || '-'}</span>\n      {argsets.map((args: unknown[], i: number) => (\n        <span key={i}>\n          <button data-testid={'run-' + i} onClick={() => res.run(...args)} />\n          <button\n            data-testid={'async-' + i}\n            onClick={() => {\n              Promise.resolve(res.runAsync(...args)).then(\n                (v: unknown) => log.events.push('resolved:' + String(v)),\n                (e: unknown) => log.events.push('reject:' + (e as Error).name),\n              );\n            }}\n          />\n        </span>\n      ))}\n      <button data-testid=\"cancel\" onClick={() => res.cancel()} />\n    </div>\n  );\n}\n\nconst tick = async (ms: number) => {\n  await act(async () => {\n    await vi.advanceTimersByTimeAsync(ms);\n  });\n};\n\nconst obs = () => ({\n  // loading/data/error 走 DOM：它们只有在 React 真的重渲染后才会变，这正是要判的东西。\n  // calls/events 走判题器自己的数组：它们是\"外部记账\"，不该依赖候选人有没有触发渲染。\n  loading: screen.getByTestId('loading').textContent,\n  data: screen.getByTestId('data').textContent,\n  error: screen.getByTestId('error').textContent,\n  calls: log.calls.join('|') || '-',\n  events: log.events.join('|') || '-',\n});\n\ndescribe('usePollingRequest：竞态裁决与轮询续期', () => {\n  beforeEach(() => {\n    vi.useFakeTimers();\n    log = { calls: [], events: [] };\n    applyHidden(false);\n  });\n\n  afterEach(() => {\n    vi.useRealTimers();\n  });\n\n  it(\"竞态：后发先至时，先发的那条既不写 data 也不报告任何东西\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 900}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 0})} argsets={[[\"slow\"], [\"fast\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(100);  // t=100\n    await tick(0);\n    // t=100\n    expect(obs()).toEqual({\"loading\": \"1\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"slow\", \"events\": \"-\"});\n    fireEvent.click(screen.getByTestId(\"run-1\"));\n    await tick(100);  // t=200\n    await tick(0);\n    // t=200\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:fast\", \"error\": \"-\", \"calls\": \"slow|fast\", \"events\": \"success:#2:fast|finally:ok:#2:fast\"});\n    await tick(750);  // t=950\n    await tick(0);\n    // t=950\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:fast\", \"error\": \"-\", \"calls\": \"slow|fast\", \"events\": \"success:#2:fast|finally:ok:#2:fast\"});\n  });\n\n  it(\"竞态：被覆盖的 runAsync 以 CancelledError reject，而不是静默成功\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 900}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 0})} argsets={[[\"slow\"], [\"fast\"]]} />);\n    fireEvent.click(screen.getByTestId(\"async-0\"));\n    await tick(100);  // t=100\n    fireEvent.click(screen.getByTestId(\"async-1\"));\n    await tick(100);  // t=200\n    await tick(0);\n    // t=200\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:fast\", \"error\": \"-\", \"calls\": \"slow|fast\", \"events\": \"success:#2:fast|finally:ok:#2:fast|resolved:#2:fast\"});\n    await tick(750);  // t=950\n    await tick(0);\n    // t=950\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:fast\", \"error\": \"-\", \"calls\": \"slow|fast\", \"events\": \"success:#2:fast|finally:ok:#2:fast|resolved:#2:fast|reject:CancelledError\"});\n  });\n\n  it(\"竞态反向：先发的那条自身失败，也只能以 CancelledError reject（业务错误被吞）\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 400, \"fail\": true}, {\"delay\": 150}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 0})} argsets={[[\"boom\"], [\"ok\"]]} />);\n    fireEvent.click(screen.getByTestId(\"async-0\"));\n    await tick(100);  // t=100\n    fireEvent.click(screen.getByTestId(\"async-1\"));\n    await tick(150);  // t=250\n    await tick(0);\n    // t=250\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:ok\", \"error\": \"-\", \"calls\": \"boom|ok\", \"events\": \"success:#2:ok|finally:ok:#2:ok|resolved:#2:ok\"});\n    await tick(200);  // t=450\n    await tick(0);\n    // t=450\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:ok\", \"error\": \"-\", \"calls\": \"boom|ok\", \"events\": \"success:#2:ok|finally:ok:#2:ok|resolved:#2:ok|reject:CancelledError\"});\n  });\n\n  it(\"cancel 只让结果不可见：不中止 promise、不清 data、loading 立刻归位\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 500}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 0})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"async-0\"));\n    await tick(100);  // t=100\n    await tick(0);\n    // t=100\n    expect(obs()).toEqual({\"loading\": \"1\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"-\"});\n    fireEvent.click(screen.getByTestId('cancel'));\n    await tick(100);  // t=200\n    await tick(0);\n    // t=200\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"-\"});\n    await tick(400);  // t=600\n    await tick(0);\n    // t=600\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"reject:CancelledError\"});\n  });\n\n  it(\"轮询：下一次在\\\"上一次完成 + interval\\\"才发，不是从发起时刻起算\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(100);  // t=100\n    await tick(0);\n    // t=100\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await tick(900);  // t=1000\n    await tick(0);\n    // t=1000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await tick(100);  // t=1100\n    await tick(0);\n    // t=1100\n    expect(obs()).toEqual({\"loading\": \"1\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await tick(100);  // t=1200\n    await tick(0);\n    // t=1200\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p\"});\n  });\n\n  it(\"轮询：请求比 interval 还慢时自动串行化，不会叠加并发\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 1500}, {\"delay\": 1500}, {\"delay\": 1500}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(1000);  // t=1000\n    await tick(0);\n    // t=1000\n    expect(obs()).toEqual({\"loading\": \"1\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"-\"});\n    await tick(500);  // t=1500\n    await tick(0);\n    // t=1500\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await tick(500);  // t=2000\n    await tick(0);\n    // t=2000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await tick(500);  // t=2500\n    await tick(0);\n    // t=2500\n    expect(obs()).toEqual({\"loading\": \"1\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n  });\n\n  it(\"pollingErrorRetryCount:2 ⇒ 容忍 2 次，第 3 次连续失败才停（判据是 <=）\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000, \"pollingErrorRetryCount\": 2})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(3400);  // t=3400\n    await tick(0);\n    // t=3400\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"svc-p\", \"calls\": \"p|p|p\", \"events\": \"error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p\"});\n    await tick(4600);  // t=8000\n    await tick(0);\n    // t=8000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"svc-p\", \"calls\": \"p|p|p\", \"events\": \"error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p\"});\n  });\n\n  it(\"失败计数是\\\"连续\\\"：中途成功一次就归零，总失败 3 次也只按 1 次算\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100, \"fail\": true}, {\"delay\": 100}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000, \"pollingErrorRetryCount\": 1})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(6000);  // t=6000\n    await tick(0);\n    // t=6000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:p\", \"error\": \"svc-p\", \"calls\": \"p|p|p|p\", \"events\": \"error:svc-p|finally:err:svc-p|success:#2:p|finally:ok:#2:p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p\"});\n  });\n\n  it(\"pollingErrorRetryCount 默认 -1 ⇒ 无限次：连错 5 次也还在轮询\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}, {\"delay\": 100, \"fail\": true}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(4600);  // t=4600\n    await tick(0);\n    // t=4600\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"svc-p\", \"calls\": \"p|p|p|p|p\", \"events\": \"error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p|error:svc-p|finally:err:svc-p\"});\n  });\n\n  it(\"pollingWhenHidden:false ⇒ 隐藏时不排下一次，重新可见补发一次 refresh\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000, \"pollingWhenHidden\": false})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(100);  // t=100\n    await tick(0);\n    // t=100\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await act(async () => { applyHidden(true); });\n    await tick(2900);  // t=3000\n    await tick(0);\n    // t=3000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    await act(async () => { applyHidden(false); });\n    await tick(200);  // t=3200\n    await tick(0);\n    // t=3200\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p\"});\n  });\n\n  it(\"pollingWhenHidden 默认 true ⇒ 页面隐藏也照打服务端（SRE 投诉的那条）\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await act(async () => { applyHidden(true); });\n    await tick(1300);  // t=1300\n    await tick(0);\n    // t=1300\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p\"});\n  });\n\n  it(\"pollingInterval 默认 0 ⇒ 压根不进入轮询模式\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(5000);  // t=5000\n    await tick(0);\n    // t=5000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n  });\n\n  it(\"pollingInterval 由 0 改成 1000 不会自动启动，必须再 run 一次\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 0})} argsets={[[\"p\"]]} />);\n    fireEvent.click(screen.getByTestId(\"run-0\"));\n    await tick(100);  // t=100\n    await tick(0);\n    // t=100\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n    view.rerender(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    await tick(4900);  // t=5000\n    await tick(0);\n    // t=5000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#1:p\", \"error\": \"-\", \"calls\": \"p\", \"events\": \"success:#1:p|finally:ok:#1:p\"});\n  });\n\n  it(\"manual:true 时初始化不启动轮询（哪怕 interval 已经为正）\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"manual\": true, \"pollingInterval\": 1000})} argsets={[[\"p\"]]} />);\n    await tick(3000);  // t=3000\n    await tick(0);\n    // t=3000\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"-\", \"error\": \"-\", \"calls\": \"-\", \"events\": \"-\"});\n  });\n\n  it(\"manual 默认 false ⇒ 挂载即跑 defaultParams 并开始轮询，后续复用同一批实参\", async () => {\n    let view: ReturnType<typeof render>;\n    const service = makeService([{\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}, {\"delay\": 100}]);\n    view = render(<Probe service={service} options={wire({\"pollingInterval\": 1000, \"defaultParams\": [\"p\"]})} argsets={[[\"p\"]]} />);\n    await tick(1300);  // t=1300\n    await tick(0);\n    // t=1300\n    expect(obs()).toEqual({\"loading\": \"0\", \"data\": \"#2:p\", \"error\": \"-\", \"calls\": \"p|p\", \"events\": \"success:#1:p|finally:ok:#1:p|success:#2:p|finally:ok:#2:p\"});\n  });\n\n});\n"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import { useEffect, useRef, useState } from 'react';\n\nexport interface PollingOptions<TData, TParams extends any[]> {\n  manual?: boolean;\n  defaultParams?: TParams;\n  pollingInterval?: number;\n  pollingWhenHidden?: boolean;\n  pollingErrorRetryCount?: number;\n  onSuccess?: (data: TData, params: TParams) => void;\n  onError?: (error: Error, params: TParams) => void;\n  onFinally?: (params: TParams, data?: TData, error?: Error) => void;\n}\n\nclass CancelledError extends Error {\n  constructor(message = 'the request was cancelled or superseded') {\n    super(message);\n    this.name = 'CancelledError';\n  }\n}\n\nconst isCancelledError = (e: unknown): boolean => !!e && (e as Error).name === 'CancelledError';\nconst isDocumentVisible = (): boolean => document.visibilityState !== 'hidden';\n\ninterface Kernel {\n  count: number;\n  params: any[];\n  state: { loading: boolean; data?: unknown; error?: Error };\n  timer: ReturnType<typeof setTimeout> | undefined;\n  unsubscribe: (() => void) | undefined;\n  errCount: number;\n  options: any;\n  service: any;\n  write: (s: Partial<Kernel['state']>) => void;\n  run: (args: any[], asyncCall: boolean) => Promise<unknown>;\n  plainRun: (args: any[]) => void;\n  refreshNow: () => void;\n  stopPolling: () => void;\n  schedule: () => void;\n}\n\nexport function usePollingRequest<TData = unknown, TParams extends any[] = any[]>(\n  service: (...args: TParams) => Promise<TData>,\n  options: PollingOptions<TData, TParams> = {},\n) {\n  const [state, setStateRaw] = useState<{ loading: boolean; data?: TData; error?: Error }>({\n    loading: !options.manual,\n  });\n  const ref = useRef<Kernel | null>(null);\n  if (!ref.current) {\n    ref.current = {\n      count: 0,\n      params: [],\n      state: { loading: !options.manual },\n      timer: undefined,\n      unsubscribe: undefined,\n      errCount: 0,\n      options,\n      service,\n    } as Kernel;\n  }\n  const k = ref.current;\n  k.options = options;\n  k.service = service;\n\n  k.write = (s) => {\n    k.state = { ...k.state, ...s };\n    setStateRaw(k.state as any);\n  };\n\n  k.stopPolling = () => {\n    if (k.timer !== undefined) clearTimeout(k.timer);\n    k.timer = undefined;\n    if (k.unsubscribe) k.unsubscribe();\n    k.unsubscribe = undefined;\n  };\n\n  k.schedule = () => {\n    const opts = k.options;\n    const interval: number = opts.pollingInterval ?? 0;\n    if (!interval) return;\n    const retry: number = opts.pollingErrorRetryCount ?? -1;\n    const whenHidden: boolean = opts.pollingWhenHidden ?? true;\n    if (retry === -1 || k.errCount <= retry) {\n      k.timer = setTimeout(() => {\n        k.timer = undefined;\n        if (!whenHidden && !isDocumentVisible()) {\n          const onVisible = () => {\n            if (!isDocumentVisible()) return;\n            k.unsubscribe?.();\n            k.unsubscribe = undefined;\n            k.refreshNow();\n          };\n          document.addEventListener('visibilitychange', onVisible);\n          k.unsubscribe = () => document.removeEventListener('visibilitychange', onVisible);\n        } else {\n          k.refreshNow();\n        }\n      }, interval);\n    } else {\n      k.errCount = 0;\n    }\n  };\n\n  k.refreshNow = () => k.plainRun(k.params);\n\n  k.run = (args, asyncCall) => {\n    k.count += 1;\n    const currentCount = k.count;\n    k.stopPolling();\n    k.params = args;\n    // 只置 loading：不清 data / error（对应 setState({ loading: true, params, ...state })）\n    k.write({ loading: true });\n    const opts = k.options;\n    return (async () => {\n      try {\n        const res = await k.service(...args);\n        if (currentCount !== k.count) throw new CancelledError();\n        k.write({ data: res, error: undefined, loading: false });\n        opts.onSuccess?.(res, args as any);\n        k.errCount = 0;\n        opts.onFinally?.(args as any, res, undefined);\n        if (currentCount === k.count) k.schedule();\n        return res;\n      } catch (error) {\n        if (currentCount !== k.count) {\n          throw isCancelledError(error) ? (error as Error) : new CancelledError();\n        }\n        k.write({ error: error as Error, loading: false });\n        opts.onError?.(error as Error, args as any);\n        k.errCount += 1;\n        opts.onFinally?.(args as any, undefined, error as Error);\n        if (currentCount === k.count) k.schedule();\n        throw error;\n      }\n    })().catch((e) => {\n      if (asyncCall) throw e;\n      // run：取消不是失败，业务错误也不由 run 报告\n      return undefined;\n    });\n  };\n\n  k.plainRun = (args) => {\n    void k.run(args, false);\n  };\n\n  const cancel = () => {\n    k.count += 1;\n    k.write({ loading: false });\n    k.stopPolling();\n  };\n\n  useEffect(() => {\n    if (!options.manual) k.plainRun((options.defaultParams ?? []) as any);\n    return () => cancel();\n    // eslint-disable-next-line react-hooks/exhaustive-deps\n  }, []);\n\n  // 对应 usePollingPlugin 的 useUpdateEffect：interval 被改成 0 时停掉已排好的下一次。\n  // 反向（0 改成正数）**不做任何事** —— 必须再 run 一次才会启动轮询。\n  const prevInterval = useRef<number>(options.pollingInterval ?? 0);\n  useEffect(() => {\n    const next = options.pollingInterval ?? 0;\n    if (prevInterval.current !== next) {\n      prevInterval.current = next;\n      if (!next) k.stopPolling();\n    }\n  });\n\n  return {\n    loading: state.loading,\n    data: state.data,\n    error: state.error,\n    run: (...args: TParams) => { void k.run(args, false); },\n    runAsync: (...args: TParams) => k.run(args, true) as Promise<TData>,\n    refresh: () => k.refreshNow(),\n    cancel,\n  };\n}\n\nexport default usePollingRequest;\n",
+    "naiveSolution": "import { useCallback, useEffect, useRef, useState } from 'react';\n\n/**\n * 朴素解：setInterval + \"谁后到谁赢\" + 失败计数按总数算 + cancel 清空 data。\n * 四个症状各自对应一类真实事故：慢接口被自己叠成并发、旧响应盖掉新数据、\n * 轮询在第一次失败后就静默停止、切页面时列表闪成空。\n */\nexport function usePollingRequest(service: any, options: any = {}) {\n  const { manual = false, defaultParams, pollingInterval = 0, pollingErrorRetryCount = 1 } = options;\n  const [state, setState] = useState<any>({ loading: !manual });\n  const stateRef = useRef(state);\n  const paramsRef = useRef<any[]>([]);\n  const failsRef = useRef(0);\n\n  const write = (patch: any) => {\n    stateRef.current = { ...stateRef.current, ...patch };\n    setState(stateRef.current);\n  };\n\n  const once = useCallback(async (...args: any[]) => {\n    write({ loading: true, data: undefined, error: undefined });\n    try {\n      const res = await service(...args);\n      write({ data: res, loading: false });\n      options.onSuccess?.(res, args);\n      return res;\n    } catch (e) {\n      write({ error: e, loading: false });\n      failsRef.current += 1;\n      options.onError?.(e, args);\n      throw e;\n    }\n  }, [service]);\n\n  useEffect(() => {\n    if (!pollingInterval) return undefined;\n    const id = setInterval(() => {\n      if (failsRef.current >= pollingErrorRetryCount) return;\n      void once(...paramsRef.current).catch(() => undefined);\n    }, pollingInterval);\n    return () => clearInterval(id);\n  }, [pollingInterval, once]);\n\n  useEffect(() => {\n    if (!manual) void once(...(defaultParams ?? [])).catch(() => undefined);\n    // eslint-disable-next-line react-hooks/exhaustive-deps\n  }, []);\n\n  return {\n    loading: state.loading,\n    data: state.data,\n    error: state.error,\n    run: (...args: any[]) => { paramsRef.current = args; void once(...args).catch(() => undefined); },\n    runAsync: (...args: any[]) => { paramsRef.current = args; return once(...args); },\n    refresh: () => once(...paramsRef.current),\n    cancel: () => write({ loading: false, data: undefined, error: undefined }),\n  };\n}\n\nexport default usePollingRequest;\n"
+  },
+  "estimatedMinutes": 40,
+  "source": {
+    "company": "Alibaba",
+    "role": "前端工程（中台数据层 / 微前端基座方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-frontend-and-open-source.md#6 可判分事实表行 12（★）＋行 13、14（§1.3 竞态裁决与轮询续期，出处 §8 F13/F20/F21/F14/F23/F24；ahooks 按 alibaba/hooks@master 抓取）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-24T02:31:22.340Z"
+  }
+}

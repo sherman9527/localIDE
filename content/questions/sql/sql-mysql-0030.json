@@ -1,0 +1,450 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0030",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "事务消息对账：半消息未确认、回滚后仍投递、被消费的 ROLLBACK 与\"消息根本没发出去\"",
+  "statement": "## 背景\n\nRocketMQ 的事务消息被官方定位成\"达到分布式事务的**最终一致**\"，价值是\n\"不会因为某一个关联应用的不可用导致整体回滚，从而最大限度保证核心系统的可用性\"【源 S4】。\n它的流程要能默写【源 S1】：\n\n1. 生产者把消息发到服务端，服务端持久化成功后回 Ack，消息被标记为\"**暂不能投递**\"（半事务消息）；\n2. 生产者执行**本地事务**；\n3. 按本地事务结果二次确认：Commit ⇒ 可投递；Rollback ⇒ 不投递；\n4. 未收到二次确认或结果为 Unknown ⇒ \"**在经过固定时间后，服务端将对消息生产者发起消息回查**\"，\n   生产者收到回查后要\"检查对应消息的本地事务执行的最终结果\"。\n\n云侧口径补两条：回查的成因是\"网络闪断、生产者应用重启等原因导致二次确认丢失\"，\n服务端通过**扫描**发现长期处于半事务状态的消息才询问【源 S4】。\n\n素材 §2 追问 6 把回查的正确答案写成一句话：**只能查本地事务状态表，不能\"再执行一次本地事务\"**。\n\n## 表\n\n```\norder_txn(order_id BIGINT PK, status INT, local_commit_at INT)\n   -- status：0 = INIT（本地事务还在跑），1 = PAID（终态·提交），2 = CANCELLED（终态·回滚）\nhalf_msg(msg_id VARCHAR(32) PK, order_id BIGINT, half_state INT, checked_times INT)\n   -- half_state：0 = PENDING（半事务，未二次确认），1 = COMMITTED（可投递），2 = ROLLBACK\nconsume_log(log_id INT PK, msg_id VARCHAR(32), consumer_group VARCHAR(32), ok INT)\n   -- ok：1 = 该消费组消费成功，0 = 失败/未确认\n```\n\n`checked_times` 是服务端已经回查过几次。**这个数字只许原样带出，不许当判据用**\n（回查次数上限由服务端参数控制，不是业务事实）。\n\n## 任务\n\n只交**一条 SELECT**。输出每一笔\"订单 × 半消息\"的对账结果，列固定：\n\n```\norder_id, msg_id, half_state, finding, action, checked_times\n```\n\n`half_state` 用字符串：`PENDING / COMMITTED / ROLLBACK`，\n半消息不存在时输出 `ABSENT`；`msg_id` 输出 `NULL`。\n\n判据表（**对每个订单，先按其半消息处理；一个订单没有任何半消息时走最后一条**）：\n\n| # | 条件 | `finding` | `action` |\n| --- | --- | --- | --- |\n| 1 | `half_state = PENDING` 且订单已终态（status ≠ 0） | `half-pending` | `recheck-db` |\n| 2 | `half_state = PENDING` 且订单还在 INIT | `both-open` | `wait` |\n| 3 | `half_state = COMMITTED` 且订单 `status = 2`（已回滚） | `committed-after-rollback` | `compensate` |\n| 4 | `half_state = COMMITTED` 且订单还在 INIT | `committed-without-terminal` | `recheck-db` |\n| 5 | `half_state = ROLLBACK` 且**存在 `ok = 1` 的消费记录** | `rolled-back-but-consumed` | `alarm` |\n| 6 | `half_state = COMMITTED` 且消费记录全是 `ok = 0` | `committed-not-consumed` | `retry-consumer` |\n| 7 | 其余有半消息的情况 | `ok` | `none` |\n| 8 | 订单**没有任何半消息**且订单已终态 | `message-not-sent` | `recheck-db` |\n\n半消息指向的订单在 `order_txn` 里不存在时，**也要输出一行**（`order_id` 照实输出）。\n按 `order_id` 升序、同订单按 `msg_id` 升序。\n\n## 三条口径纪律\n\n- **第 3 条（COMMITTED + 订单回滚）是本题最贵的一条**，它不是\"消息丢了\"，是\n  \"**不该发生的投递发生了**\"。官方语义里 Rollback ⇒ 不投递，所以这一格出现就意味着\n  要么二次确认与本地事务结果不一致，要么有人在本地事务回滚后又把消息提交了。\n  处置只可能是 `compensate`（下游补偿），**不能靠重置位点** —— 素材【源 S6】写明\n  \"只能重置对消费者可见的消息，不能重置定时中、重试等待中的消息\"，\n  而且历史消息多属冷数据会引发冷读。\n- **第 5 条要 `EXISTS(ok = 1)` 而不是\"有消费记录\"**：回滚的消息如果**没人消费**是完全正常的，\n  有消费记录且成功才是事故。把两者混起来会让告警天天响（然后没人看）。\n- **第 8 条要求从订单侧出发**：半消息整行不存在 = 生产者根本没发出去（或者发出去了没落库）。\n  这条差异在\"以 `half_msg` 为主表\"的写法里**永远不会出现**，\n  而它恰恰是\"本地事务成功、下游永远不知道\"的唯一证据。\n\n只允许一条 `SELECT`。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "transactional-message",
+    "half-message",
+    "outbox-reconcile",
+    "back-check",
+    "left-join-both-ways",
+    "modern:distributed-transaction"
+  ],
+  "cases": [
+    {
+      "name": "基线：五笔对账结果各命中一种分类，且回查计数原样带出",
+      "input": [],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            "m-1001",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "committed-not-consumed",
+            "retry-consumer",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "rolled-back-but-consumed",
+            "alarm",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "1001 正常；1002 半消息未确认（订单已终态）→ recheck-db；1003 订单 CANCELLED 但消息已 COMMITTED → compensate；1005 消息提交但消费全失败 → retry-consumer；1006 消息回滚却被消费 → alarm；1004 订单进行中且无消息 → 不报"
+    },
+    {
+      "name": "边界：本地事务成功但半消息根本没发出去（ABSENT 行必须补出来）",
+      "input": [
+        "DELETE FROM half_msg WHERE msg_id = 'm-1001'"
+      ],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            null,
+            "ABSENT",
+            "message-not-sent",
+            "recheck-db",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "committed-not-consumed",
+            "retry-consumer",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "rolled-back-but-consumed",
+            "alarm",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "1001 变成一行 msg_id=NULL / finding=message-not-sent；只 join half_msg 的实现会把这条差异整个丢掉"
+    },
+    {
+      "name": "边界：PENDING 且订单也还在 INIT ⇒ 两边都没终审，不许报成待回查",
+      "input": [
+        "INSERT INTO half_msg VALUES ('m-1004', 1004, 0, 0)"
+      ],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            "m-1001",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1004,
+            "m-1004",
+            "PENDING",
+            "both-open",
+            "wait",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "committed-not-consumed",
+            "retry-consumer",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "rolled-back-but-consumed",
+            "alarm",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "1004 是 both-open / wait：回查此时查本地事务表也定不了论，提前返回 Rollback 会把一笔可能成功的交易取消掉"
+    },
+    {
+      "name": "边界：回滚的消息没有任何消费记录 ⇒ 不是事故（不告警）",
+      "input": [
+        "DELETE FROM consume_log WHERE log_id = 4",
+        "INSERT INTO half_msg VALUES ('m-1004', 1004, 2, 0)"
+      ],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            "m-1001",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1004,
+            "m-1004",
+            "ROLLBACK",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "committed-not-consumed",
+            "retry-consumer",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "ok",
+            "none",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "删掉 m-1006 那条 ok=1 的消费记录后它就不再是事故；新插入的 m-1004 是 ROLLBACK 且无消费记录 ⇒ 同样是 ok。第 5 条要求 EXISTS(ok=1)，\"有消费日志就告警\"会把两者都变成噪音"
+    },
+    {
+      "name": "退化：三张表全空 ⇒ 结果必须是空集",
+      "input": [
+        "DELETE FROM order_txn",
+        "DELETE FROM half_msg",
+        "DELETE FROM consume_log"
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "边界：一条消费日志都没有 ⇒ 只剩半消息侧的两类差异",
+      "input": [
+        "DELETE FROM consume_log"
+      ],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            "m-1001",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "ok",
+            "none",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "没有消费记录时 1005 不再是 committed-not-consumed（判据要求\"有记录且全失败\"），1006 也不再告警：这两条都必须沉默，而不是猜成\"下游没消费\""
+    },
+    {
+      "name": "非法形态：半消息指向一个不存在的订单（孤儿消息必须被点名）",
+      "input": [
+        "INSERT INTO half_msg VALUES ('m-9999', 9999, 1, 0)"
+      ],
+      "expected": {
+        "columns": [
+          "order_id",
+          "msg_id",
+          "half_state",
+          "finding",
+          "action",
+          "checked_times"
+        ],
+        "rows": [
+          [
+            1001,
+            "m-1001",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ],
+          [
+            1002,
+            "m-1002",
+            "PENDING",
+            "half-pending",
+            "recheck-db",
+            2
+          ],
+          [
+            1003,
+            "m-1003",
+            "COMMITTED",
+            "committed-after-rollback",
+            "compensate",
+            0
+          ],
+          [
+            1005,
+            "m-1005",
+            "COMMITTED",
+            "committed-not-consumed",
+            "retry-consumer",
+            0
+          ],
+          [
+            1006,
+            "m-1006",
+            "ROLLBACK",
+            "rolled-back-but-consumed",
+            "alarm",
+            0
+          ],
+          [
+            9999,
+            "m-9999",
+            "COMMITTED",
+            "ok",
+            "none",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "订单表没有 9999 ⇒ 以半消息侧为准，仍要输出一行；INNER JOIN 会把它吞掉，而那正是\"消息发出去了、本地事务回滚了\"的形态"
+    }
+  ],
+  "answer": "## 参考答案\n\n结构是\"**两半 UNION**\"：前半以半消息为主体（`half_msg LEFT JOIN order_txn`），\n后半补\"订单有、消息没有\"（`order_txn LEFT JOIN half_msg` 且 `m.msg_id IS NULL`）。\n`finding` 是一个八档 `CASE`。判分点全在顺序与\"哪一侧当主表\"。\n\n**基线只有五行**：1001 → `COMMITTED / ok / none`；1002 → `PENDING / half-pending /\nrecheck-db`；1003 → `COMMITTED / committed-after-rollback / compensate`；\n1005 → `COMMITTED / committed-not-consumed / retry-consumer`；\n1006 → `ROLLBACK / rolled-back-but-consumed / alarm`。\n**1004 一行都不出**：订单还在 INIT 且它压根没有半消息 ——\n第 8 条要求\"已终态\"才报，第 2 条要求\"有 PENDING 的半消息\"才报。\n一条进行中、什么消息都没有的订单**是正常现场，不是差异**；\n把它报出来，报表第一天就会被几百条\"其实还没付完款\"的订单灌满。\n（`both-open / wait` 这一格由用例「PENDING 且订单也还在 INIT」补出来。）\n\n**用例「本地事务成功但半消息根本没发出去」删掉 `m-1001`** ⇒ 1001 那一行变成\n`msg_id = NULL`、`half_state = 'ABSENT'`、`finding = 'message-not-sent'`。\n**这条差异是整道题里唯一\"两张表各自都完全正常\"的**：`half_msg` 里没有坏行、\n`order_txn` 里订单是好的 —— 只有从订单侧出发才看得见它。\n用 `half_msg JOIN order_txn` 的写法在这里直接少一行，而它的线上症状是\n\"购物车永远收不到这笔订单\"，而所有中间件指标都是绿的。\n\n**用例「PENDING 且订单也还在 INIT」**：1004 输出 `both-open / wait`。\n不能报成 `half-pending`，因为回查此刻**定不了论**：本地事务还在跑，\n查状态表读到的是\"还没有结果\"。官方对此有明确建议 ——\n\"**回查时对于正在进行中的事务不要返回 Rollback 或 Commit 结果，应继续保持 Unknown**\"【源 S1】，\n成因是\"事务执行较慢，消息回查太快\"。把它归进 `recheck-db` 会让人去把一笔\n可能成功的交易取消掉。\n\n**用例「边界：回滚的消息没有任何消费记录」**：`m-1004` 是 `ROLLBACK` 且无消费日志行 ⇒ `ok`。\n判据写成\"有消费记录就报\"的实现会把它报成事故。\n而 **`ROLLBACK` + `ok = 0` 也不算事故**（消费失败发生在收到消息之后，\n说明它压根不该被投递 —— 那是第 3 条的问题，不是第 5 条的）。\n本题第 5 条严格要求 `ok = 1`，就是这个意思。\n\n**用例「半消息指向一个不存在的订单」**：`m-9999` 的 `order_id = 9999` 在订单表里没有，\n必须输出 `[9999, 'm-9999', 'COMMITTED', 'ok', 'none', 0]`\n（第 7 条兜住：三值逻辑里 `status = 2` 与 `status = 0` 对 NULL 都不成立）。\n**\"孤儿半消息\"是合法的中间态**（本地事务表可能刚被清理），\n所以它进 `ok` 而不是进异常清单；用 `INNER JOIN` 的实现会整行丢掉，\n于是\"消息已投递给下游、订单却查不到\"这种最严重的形态在报表里隐身。\n\n**为什么 `checked_times` 要输出但不参与判定**：素材【源 S1】写的是\n\"回查的间隔时间与最大回查次数见参数限制\"，即**由服务端控制**。\n把它当判据等于把一次参数变更变成一批误报。\n\n**`naiveSolution` 挂四处**：用 `half_msg INNER JOIN order_txn`（丢 `message-not-sent`\n与孤儿消息两类）；`finding` 里不判 `status = 2`（把\"回滚后仍投递\"报成 `ok`）；\n把 `ROLLBACK + 有消费记录`（哪怕全是 `ok = 0`）报成事故；`checked_times` 被当成判定条件。\n\n**工程延伸（面试追问点）**\n\n1. 回查里具体查什么？（查**本地事务状态表 / 订单状态**，按\"一个本地事务关联的唯一 ID\"\n   校验（官方明确建议为事务消息配这个 ID【源 S1】）。答\"重跑本地事务\"直接判负。）\n2. `both-open` 卡住了怎么办？（素材把这条列进追问：**大量事务检查会导致性能受损**【源 S1】，\n   所以要把第一次回查时间设大一点，但代价是依赖回查的事务提交延迟变大 ——\n   这是一笔明确的取舍，不是\"调个参数\"。）\n3. 对账频率与窗口？（三层一致性各管一段：本地事务、半消息/回查、消费幂等；\n   对账要能区分\"哪一层漏了\"。素材 §2 追问 20 的归因清单就是这道题的口径版本。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS `order_txn`",
+      "DROP TABLE IF EXISTS `half_msg`",
+      "DROP TABLE IF EXISTS `consume_log`",
+      "CREATE TABLE order_txn (order_id BIGINT NOT NULL PRIMARY KEY, status INT NOT NULL, local_commit_at INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE half_msg (msg_id VARCHAR(32) NOT NULL PRIMARY KEY, order_id BIGINT NOT NULL, half_state INT NOT NULL, checked_times INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE consume_log (log_id INT NOT NULL PRIMARY KEY AUTO_INCREMENT, msg_id VARCHAR(32) NOT NULL, consumer_group VARCHAR(32) NOT NULL, ok INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO order_txn VALUES (1001, 1, 10), (1002, 1, 20), (1003, 2, 30), (1004, 0, 40), (1005, 1, 50), (1006, 2, 60)",
+      "INSERT INTO half_msg VALUES ('m-1001', 1001, 1, 0), ('m-1002', 1002, 0, 2), ('m-1003', 1003, 1, 0), ('m-1005', 1005, 1, 0), ('m-1006', 1006, 2, 0)",
+      "INSERT INTO consume_log VALUES (1, 'm-1001', 'cart', 1), (2, 'm-1003', 'cart', 1), (3, 'm-1005', 'cart', 0), (4, 'm-1006', 'cart', 1)"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 20000,
+    "referenceSolution": "SELECT m.order_id                                        AS order_id,\n       m.msg_id                                          AS msg_id,\n       CASE m.half_state WHEN 0 THEN 'PENDING'\n                         WHEN 1 THEN 'COMMITTED'\n                         WHEN 2 THEN 'ROLLBACK' END      AS half_state,\n       CASE\n         WHEN m.half_state = 0 AND o.status IS NOT NULL AND o.status <> 0 THEN 'half-pending'\n         WHEN m.half_state = 0 THEN 'both-open'\n         WHEN m.half_state = 1 AND o.status = 2 THEN 'committed-after-rollback'\n         WHEN m.half_state = 1 AND o.status = 0 THEN 'committed-without-terminal'\n         WHEN m.half_state = 2 AND EXISTS (SELECT 1 FROM consume_log c\n                                           WHERE c.msg_id = m.msg_id AND c.ok = 1)\n           THEN 'rolled-back-but-consumed'\n         WHEN m.half_state = 1\n              AND EXISTS (SELECT 1 FROM consume_log c WHERE c.msg_id = m.msg_id)\n              AND NOT EXISTS (SELECT 1 FROM consume_log c\n                              WHERE c.msg_id = m.msg_id AND c.ok = 1)\n           THEN 'committed-not-consumed'\n         ELSE 'ok'\n       END AS finding,\n       CASE\n         WHEN m.half_state = 0 AND o.status IS NOT NULL AND o.status <> 0 THEN 'recheck-db'\n         WHEN m.half_state = 0 THEN 'wait'\n         WHEN m.half_state = 1 AND o.status = 2 THEN 'compensate'\n         WHEN m.half_state = 1 AND o.status = 0 THEN 'recheck-db'\n         WHEN m.half_state = 2 AND EXISTS (SELECT 1 FROM consume_log c\n                                           WHERE c.msg_id = m.msg_id AND c.ok = 1)\n           THEN 'alarm'\n         WHEN m.half_state = 1\n              AND EXISTS (SELECT 1 FROM consume_log c WHERE c.msg_id = m.msg_id)\n              AND NOT EXISTS (SELECT 1 FROM consume_log c\n                              WHERE c.msg_id = m.msg_id AND c.ok = 1)\n           THEN 'retry-consumer'\n         ELSE 'none'\n       END AS action,\n       m.checked_times                                   AS checked_times\nFROM half_msg m\nLEFT JOIN order_txn o ON o.order_id = m.order_id\n\nUNION ALL\n\nSELECT o.order_id, NULL, 'ABSENT', 'message-not-sent', 'recheck-db', 0\nFROM order_txn o\nLEFT JOIN half_msg m ON m.order_id = o.order_id\nWHERE m.msg_id IS NULL AND o.status <> 0\nORDER BY order_id, msg_id",
+    "naiveSolution": "SELECT m.order_id AS order_id,\n       m.msg_id   AS msg_id,\n       CASE m.half_state WHEN 0 THEN 'PENDING' WHEN 1 THEN 'COMMITTED'\n                         ELSE 'ROLLBACK' END AS half_state,\n       CASE WHEN m.half_state = 0 THEN 'half-pending' ELSE 'ok' END AS finding,\n       CASE WHEN m.half_state = 0 THEN 'recheck-db' ELSE 'none' END AS action,\n       m.checked_times\nFROM half_msg m\nJOIN order_txn o ON o.order_id = m.order_id\nWHERE m.checked_times < 3\nORDER BY m.order_id, m.msg_id"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（交易与消息一致性方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 3（事务消息与回查：半消息定义、二阶段 Commit/Rollback、\"经过固定时间后服务端发起消息回查\"、\"回查只能查本地事务状态表不得重跑本地事务\"、\"达到分布式事务的最终一致\"【源 S1/S4】；素材该考点的出题建议正是\"mysql：本地事务表 + outbox，产出本地成功但消息未投出 / 本地回滚但消息已投出两类脏数据的对账 SQL\"。finding/action 的枚举与优先级是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:48:47.465Z"
+  }
+}

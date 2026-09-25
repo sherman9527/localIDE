@@ -1,0 +1,484 @@
+{
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "特征时点正确性：SCD2 生效区间与\"打分时刻可见集\"的交集才是样本的答案",
+  "statement": "## 背景\n\nMonolith 论文的问题陈述里有一条对数据侧同样成立【源 S1/S2】：\n批训与 serving 完全分离时\"模型无法实时接受用户反馈\"；而一旦把样本拼成\n\"曝光日志 join 行为流\"，**第一个要回答的问题就是：这条样本的特征取哪个版本。**\n\n素材 §2 追问 1 给的标准答案只有两个词：**打分时刻可见值** + **特征版本号**。\n这题就是把它写成一段可以判分对的 Spark。\n\n（SCD2、point-in-time join 这些是通用工程做法；本题的**规则**全部写在下面，\n不声称是字节官方实现 —— 素材 §7 第 3 条明确写了\"特征平台没有可核查的官方文档\"。）\n\n## 输入\n\nPySpark 3.5（判题容器内）。已注册一张表 `feature_rows`：\n\n```\nfeature_rows(\n  row_id INT,\n  row_kind STRING,        -- 'sample' | 'version'\n  sample_id INT,          -- 仅 sample 行\n  user_id STRING,\n  event_ts INT,           -- 仅 sample 行：打分时刻（epoch 秒）\n  version_no INT,         -- 仅 version 行\n  feature_value BIGINT,   -- 仅 version 行\n  valid_from INT,         -- 生效区间左端点（闭）\n  valid_to INT,           -- 生效区间右端点（开）\n  ingest_ts INT)          -- 这一行**落库**的时刻\n```\n\n**时间全部用整数 epoch 秒**，不要引入任何日期函数或时区。\n\n## 任务\n\n对每个 sample 输出一行，列固定为\n`sample_id, user_id, feature_value, version_no, leak`，按 `sample_id` 升序、再按 `user_id` 升序。\n\n## 规则\n\n对该用户的所有 version 行，按下面的顺序给每条打一个\"取用等级\" `rk`\n（`t` 是打分时刻，先判前面几条）：\n\n| rk | 条件 | 含义 |\n| --- | --- | --- |\n| 0 | `ingest_ts <= t` 且 `valid_from <= t < valid_to` | **可见且正覆盖**：这就是打分时刻的答案 |\n| 1 | `ingest_ts <= t` 且 `valid_from <= t`（但区间没覆盖 t） | 可见、但已过期：只能当\"最后已知值\" |\n| 2 | 区间覆盖 t 但 `ingest_ts > t` | **打分时刻它还不存在** —— 未来信息，永远不许被选中 |\n| 3 | 其余 | 与本样本无关 |\n\n只能从 `rk ∈ {0,1}` 里选：取 `rk` 最小者；同级时取 `valid_from` 最大者；\n再并列取 `version_no` 最大者。没有任何 `rk < 2` 的行时，`feature_value` 与 `version_no` 都输出 `null`\n（**不许兜成 0** —— 0 是一个合法的特征值，null 才是\"这一路没有可用值\"）。\n\n`leak` 按此表输出：\n\n| 条件 | `leak` |\n| --- | --- |\n| 选了 rk=0 且 rk=0 的行**只有一条** | `none` |\n| 选了 rk=0 且 rk=0 的行**不止一条** | `overlap` |\n| 有 rk=2 的行存在，且选的是 rk=1 或什么都没选 | `future-value` |\n| 选了 rk=1 且没有任何 rk=2 的行 | `stale-value` |\n| rk 0/1/2 都没有 | `no-coverage` |\n\n三条口径纪律，答不上来这题就白做了：\n\n- **`ingest_ts > t` 的行不是\"脏数据\"，是\"当时不可知\"。**\n  把它排除掉之后**仍然要输出结果**（用最后已知值），并把 `leak` 标成 `future-value`。\n  直接把这行数据删掉是最错的做法 —— 维表本身没错，错的是取用时刻。\n- **`rk=2` 存在会把 `stale-value` 升级成 `future-value`。**\n  同样是\"用了过期值\"，但一种是维表确实只到那儿，另一种是**回填晚了一步**。\n  后者的修法是补采集时序，前者的修法是加特征版本 —— 分不开就会去修错的东西。\n- **`overlap` 是数据质量事故，不是并列可选项。**\n  同一用户两段生效区间重叠 ⇒ 维表的 SCD2 闭合逻辑坏了；\n  本题要求\"照规则选一个并如实标记\"，**不许静默挑一个**。\n\n## 约束\n\n不许 `collect()` 到驱动侧；不许用 UDF 把行拉到 Python 里算。\n\n## 这题真正考的东西\n\n在线训练（Monolith 式）把这件事的代价放大了：批训练里一次取错版本，\n是\"离线指标虚高、上线掉点、复算不出来\"三件事同时发生；\n在线训练里取错版本会**持续污染参数**，因为你没有第二次机会重放那份样本。\n素材 §2 追问 2 那句\"你说可靠性可以换实时性，具体牺牲什么\"，\n数据侧的答案就是这一条：**牺牲的是\"样本可复算\"这个前提。**",
+  "judgeKind": "pyspark",
+  "tags": [
+    "feature-store",
+    "point-in-time-join",
+    "scd2",
+    "label-leakage",
+    "online-learning",
+    "modern:feature-consistency"
+  ],
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（推荐数据平台 / 实时特征方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 2（特征时点正确性与训练-服务一致性：pyspark 版建议\"给定事件流 + 维表 SCD2 做 point-in-time join，考核维表生效区间边界、迟到记录不覆盖新值\"；地基【源 S2】，规则细节按素材标注为【推】）＋ §2 追问 1/2",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:33:24.466Z"
+  },
+  "language": "python",
+  "cases": [
+    {
+      "name": "基线：可见性与生效区间都要判，六条样本落在四类结局上（none 与 overlap 各两次）",
+      "input": {
+        "view": "feature_rows",
+        "schema": "row_id int, row_kind string, sample_id int, user_id string, event_ts int, version_no int, feature_value bigint, valid_from int, valid_to int, ingest_ts int",
+        "rows": [
+          {
+            "row_id": -1,
+            "row_kind": "sample",
+            "sample_id": 1,
+            "user_id": "u1",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": -2,
+            "row_kind": "sample",
+            "sample_id": 2,
+            "user_id": "u1",
+            "event_ts": 1700000160,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": -3,
+            "row_kind": "sample",
+            "sample_id": 3,
+            "user_id": "u2",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": -4,
+            "row_kind": "sample",
+            "sample_id": 4,
+            "user_id": "u3",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": -5,
+            "row_kind": "sample",
+            "sample_id": 5,
+            "user_id": "u4",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": -6,
+            "row_kind": "sample",
+            "sample_id": 6,
+            "user_id": "u5",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": 11,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u1",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 70,
+            "valid_from": 1700000000,
+            "valid_to": 1700000120,
+            "ingest_ts": 1700000010
+          },
+          {
+            "row_id": 12,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u1",
+            "event_ts": null,
+            "version_no": 2,
+            "feature_value": 88,
+            "valid_from": 1700000120,
+            "valid_to": 1700000150,
+            "ingest_ts": 1700000130
+          },
+          {
+            "row_id": 13,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u1",
+            "event_ts": null,
+            "version_no": 3,
+            "feature_value": 99,
+            "valid_from": 1700000150,
+            "valid_to": 1700000300,
+            "ingest_ts": 1700000155
+          },
+          {
+            "row_id": 21,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u2",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 40,
+            "valid_from": 1700000000,
+            "valid_to": 1700000300,
+            "ingest_ts": 1700000005
+          },
+          {
+            "row_id": 22,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u2",
+            "event_ts": null,
+            "version_no": 2,
+            "feature_value": 41,
+            "valid_from": 1700000090,
+            "valid_to": 1700000300,
+            "ingest_ts": 1700000095
+          },
+          {
+            "row_id": 31,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u3",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 55,
+            "valid_from": 1700000000,
+            "valid_to": 1700000080,
+            "ingest_ts": 1700000005
+          },
+          {
+            "row_id": 41,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u4",
+            "event_ts": null,
+            "version_no": 9,
+            "feature_value": 12,
+            "valid_from": 1700000100,
+            "valid_to": 1700000300,
+            "ingest_ts": 1700000100
+          },
+          {
+            "row_id": 42,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u4",
+            "event_ts": null,
+            "version_no": 7,
+            "feature_value": 13,
+            "valid_from": 1700000100,
+            "valid_to": 1700000300,
+            "ingest_ts": 1700000100
+          },
+          {
+            "row_id": 43,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u4",
+            "event_ts": null,
+            "version_no": 8,
+            "feature_value": 14,
+            "valid_from": 1700000060,
+            "valid_to": 1700000090,
+            "ingest_ts": 1700000060
+          }
+        ]
+      },
+      "expected": [
+        {
+          "sample_id": 1,
+          "user_id": "u1",
+          "feature_value": 70,
+          "version_no": 1,
+          "leak": "none"
+        },
+        {
+          "sample_id": 2,
+          "user_id": "u1",
+          "feature_value": 99,
+          "version_no": 3,
+          "leak": "none"
+        },
+        {
+          "sample_id": 3,
+          "user_id": "u2",
+          "feature_value": 41,
+          "version_no": 2,
+          "leak": "overlap"
+        },
+        {
+          "sample_id": 4,
+          "user_id": "u3",
+          "feature_value": 55,
+          "version_no": 1,
+          "leak": "stale-value"
+        },
+        {
+          "sample_id": 5,
+          "user_id": "u4",
+          "feature_value": 12,
+          "version_no": 9,
+          "leak": "overlap"
+        },
+        {
+          "sample_id": 6,
+          "user_id": "u5",
+          "feature_value": null,
+          "version_no": null,
+          "leak": "no-coverage"
+        }
+      ],
+      "note": "s1/s2 走 u1（覆盖且唯一 / 后继版本已生效）；s3 走 u2（区间重叠，取 valid_from 最大）；s4 走 u3（只剩过期版本）；s5 走 u4（三条完全并列，取 version_no 最大）；s6 走 u5（一个版本都没有）",
+      "visible": true
+    },
+    {
+      "name": "边界：唯一覆盖该区间的版本在打分之后才落库 ⇒ 不许用，且如实标 future-value",
+      "input": {
+        "view": "feature_rows",
+        "schema": "row_id int, row_kind string, sample_id int, user_id string, event_ts int, version_no int, feature_value bigint, valid_from int, valid_to int, ingest_ts int",
+        "rows": [
+          {
+            "row_id": -1,
+            "row_kind": "sample",
+            "sample_id": 1,
+            "user_id": "u6",
+            "event_ts": 1700000050,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": 61,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u6",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 200,
+            "valid_from": 1700000000,
+            "valid_to": 1700000100,
+            "ingest_ts": 1700000120
+          }
+        ]
+      },
+      "expected": [
+        {
+          "sample_id": 1,
+          "user_id": "u6",
+          "feature_value": null,
+          "version_no": null,
+          "leak": "future-value"
+        }
+      ],
+      "note": "valid_from=0/valid_to=100 覆盖 t=50，但 ingest_ts=120 > 50 ⇒ 这条在打分时刻根本不存在。值是 null，leak 是 future-value",
+      "visible": true
+    },
+    {
+      "name": "退化：只有过期版本（区间早已结束）⇒ stale-value，不许当成\"没有特征\"",
+      "input": {
+        "view": "feature_rows",
+        "schema": "row_id int, row_kind string, sample_id int, user_id string, event_ts int, version_no int, feature_value bigint, valid_from int, valid_to int, ingest_ts int",
+        "rows": [
+          {
+            "row_id": -1,
+            "row_kind": "sample",
+            "sample_id": 1,
+            "user_id": "u7",
+            "event_ts": 1700000010,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": 71,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u7",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 300,
+            "valid_from": 1700000000,
+            "valid_to": 1700000005,
+            "ingest_ts": 1700000001
+          }
+        ]
+      },
+      "expected": [
+        {
+          "sample_id": 1,
+          "user_id": "u7",
+          "feature_value": 300,
+          "version_no": 1,
+          "leak": "stale-value"
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：最新可见版本的 valid_to 已过、且没有覆盖当下的版本 ⇒ stale-value",
+      "input": {
+        "view": "feature_rows",
+        "schema": "row_id int, row_kind string, sample_id int, user_id string, event_ts int, version_no int, feature_value bigint, valid_from int, valid_to int, ingest_ts int",
+        "rows": [
+          {
+            "row_id": -1,
+            "row_kind": "sample",
+            "sample_id": 1,
+            "user_id": "u8",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": 81,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u8",
+            "event_ts": null,
+            "version_no": 4,
+            "feature_value": 66,
+            "valid_from": 1700000000,
+            "valid_to": 1700000050,
+            "ingest_ts": 1700000001
+          },
+          {
+            "row_id": 82,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u8",
+            "event_ts": null,
+            "version_no": 5,
+            "feature_value": 77,
+            "valid_from": 1700000050,
+            "valid_to": 1700000090,
+            "ingest_ts": 1700000060
+          }
+        ]
+      },
+      "expected": [
+        {
+          "sample_id": 1,
+          "user_id": "u8",
+          "feature_value": 77,
+          "version_no": 5,
+          "leak": "stale-value"
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "重叠三条并列同 valid_from ⇒ 取 version_no 最大者，并标 overlap",
+      "input": {
+        "view": "feature_rows",
+        "schema": "row_id int, row_kind string, sample_id int, user_id string, event_ts int, version_no int, feature_value bigint, valid_from int, valid_to int, ingest_ts int",
+        "rows": [
+          {
+            "row_id": -1,
+            "row_kind": "sample",
+            "sample_id": 1,
+            "user_id": "u9",
+            "event_ts": 1700000100,
+            "version_no": null,
+            "feature_value": null,
+            "valid_from": null,
+            "valid_to": null,
+            "ingest_ts": null
+          },
+          {
+            "row_id": 91,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u9",
+            "event_ts": null,
+            "version_no": 1,
+            "feature_value": 10,
+            "valid_from": 1700000000,
+            "valid_to": 1700001000,
+            "ingest_ts": 1700000001
+          },
+          {
+            "row_id": 92,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u9",
+            "event_ts": null,
+            "version_no": 2,
+            "feature_value": 20,
+            "valid_from": 1700000000,
+            "valid_to": 1700001000,
+            "ingest_ts": 1700000002
+          },
+          {
+            "row_id": 93,
+            "row_kind": "version",
+            "sample_id": null,
+            "user_id": "u9",
+            "event_ts": null,
+            "version_no": 3,
+            "feature_value": 30,
+            "valid_from": 1700000000,
+            "valid_to": 1700001000,
+            "ingest_ts": 1700000003
+          }
+        ]
+      },
+      "expected": [
+        {
+          "sample_id": 1,
+          "user_id": "u9",
+          "feature_value": 30,
+          "version_no": 3,
+          "leak": "overlap"
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    r = spark.table('feature_rows')\n    t = F.col('event_ts')\n    s = (r.filter(F.col('row_kind') == 'sample')\n         .select('sample_id', 'user_id', t.alias('t')))\n    v = (r.filter(F.col('row_kind') == 'version')\n         .select('user_id', 'version_no', 'feature_value',\n                 F.col('valid_from').alias('vf'), F.col('valid_to').alias('vt'),\n                 F.col('ingest_ts').alias('ing')))\n    base = s.join(v, 'user_id', 'left')\n    visible = F.col('ing') <= F.col('t')\n    covering = (F.col('vf') <= F.col('t')) & (F.col('vt') > F.col('t'))\n    ranked = base.withColumn(\n        'rk',\n        F.when(visible & covering, F.lit(0))\n         .when(visible & (F.col('vf') <= F.col('t')), F.lit(1))\n         .when(covering & ~visible, F.lit(2))\n         .otherwise(F.lit(3)))\n\n    agg = ranked.groupBy('sample_id', 'user_id').agg(\n        F.min(F.when(F.col('rk') < 2, F.col('rk'))).alias('min_rk'),\n        F.count(F.when(F.col('rk') == 0, F.lit(1))).alias('n0'),\n        F.count(F.when(F.col('rk') == 2, F.lit(1))).alias('n2'))\n\n    w = Window.partitionBy('sample_id').orderBy(F.col('rk').asc(), F.col('vf').desc(),\n                                                F.col('version_no').desc())\n    picked = (ranked.filter(F.col('rk') < 2)\n              .withColumn('rn', F.row_number().over(w))\n              .filter(F.col('rn') == 1)\n              .select('sample_id', 'version_no', 'feature_value'))\n\n    leak = (F.when(agg['min_rk'].isNull() & (agg['n2'] > 0), F.lit('future-value'))\n            .when(agg['min_rk'].isNull(), F.lit('no-coverage'))\n            .when((agg['min_rk'] == 0) & (agg['n0'] > 1), F.lit('overlap'))\n            .when(agg['min_rk'] == 0, F.lit('none'))\n            .when((agg['min_rk'] == 1) & (agg['n2'] > 0), F.lit('future-value'))\n            .otherwise(F.lit('stale-value')))\n\n    return (agg.join(picked, 'sample_id', 'left')\n            .select('sample_id', 'user_id',\n                    F.when(agg['min_rk'].isNotNull(), F.col('feature_value'))\n                     .alias('feature_value'),\n                    F.when(agg['min_rk'].isNotNull(), F.col('version_no'))\n                     .alias('version_no'),\n                    leak.alias('leak'))\n            .orderBy('sample_id', 'user_id'))",
+    "naiveSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    # \"特征越新越好\"版：按 ingest_ts 取该用户最新的一条就用。\n    # 症状：打分时刻根本还没落库的值被写进训练样本 —— 离线 AUC 好看，上线就掉，\n    # 而且离线复算永远复现不出来（它用了未来信息）。\n    r = spark.table('feature_rows')\n    s = (r.filter(F.col('row_kind') == 'sample').select('sample_id', 'user_id',\n                                                        F.col('event_ts').alias('t')))\n    v = (r.filter(F.col('row_kind') == 'version')\n         .select('user_id', 'version_no', 'feature_value',\n                 F.col('ingest_ts').alias('ing')))\n    w = Window.partitionBy('sample_id').orderBy(F.col('ing').desc(), F.col('version_no').desc())\n    return (s.join(v, 'user_id', 'left')\n            .withColumn('rn', F.row_number().over(w))\n            .filter(F.col('rn') == 1)\n            .select('sample_id', 'user_id', 'feature_value', 'version_no',\n                    F.when(F.col('feature_value').isNotNull(), F.lit('none'))\n                     .otherwise(F.lit('no-coverage')).alias('leak'))\n            .orderBy('sample_id', 'user_id'))",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 35,
+  "answer": "## 参考答案要点\n\n一次 `sample × version` 的等值 join（只 join `user_id`，区间条件留给 `when` 链），\n然后**两路并行**：`groupBy` 算等级计数、`row_number` 选人，最后 join 回来贴标签。\n之所以不能用一个 `row_number` 搞定，是因为 `overlap` / `future-value` 这两个标签\n需要**总体计数**而不是\"选中了哪一条\"。\n\n**基线用例六条样本按 `sample_id` 的 `leak` 依次是\n`none / none / overlap / stale-value / overlap / no-coverage`。** 逐条：\n\n- s1 `u1@t=100`：只有 v1(0,120,ing=10) 覆盖且可见 ⇒ rk=0 恰好一条 ⇒ `none`，值 70、版本 1。\n- s2 `u1@t=160`：v2 的区间 (120,150) 在 160 已经关闭，v3(150,300,ing=155) 覆盖且可见\n  ⇒ rk=0 一条 ⇒ `none`，值 99、版本 3。**注意 `valid_to` 是开区间**：\n  t 恰好等于上一版右端点时上一版就已经不覆盖了，写成 `<=` 会多出一条 rk=0 ⇒ 假 `overlap`。\n- s3 `u2@t=100`：v1(0,300,ing=5) 与 v2(90,300,ing=95) 都覆盖 ⇒ rk=0 两条 ⇒ `overlap`，\n  取 `valid_from` 最大的 v2 ⇒ 值 41、版本 2。\n- s4 `u3@t=100`：只有 (0,80) 且早已过期 ⇒ rk=1 ⇒ `stale-value`，值 55。\n  **不输出 null**：最后已知值仍然是\"打分时刻能给出的最好答案\"，\n  判成 null 会把\"维表更新晚了\"与\"这个用户从来没有过特征\"混成一类。\n- s5 `u4@t=100`：版本 9 与版本 7 的 `valid_from/valid_to/ingest_ts` 完全相同 ⇒\n  `overlap` 且要靠 `version_no` 决胜 ⇒ 值 12、版本 9。\n  （第三条 (60,90) 不覆盖 t=100 ⇒ 它是 rk=1，被 rk=0 压住，不参与决胜。）\n- s6 `u5@t=100`：u5 一行 version 都没有 ⇒ 左连接后等级 3 ⇒ `no-coverage`，值 null。\n\n**边界用例（唯一覆盖者 `valid_from=0/valid_to=100/ingest_ts=120`，而 t=50）\n⇒ `feature_value=null`、`version_no=null`、`leak='future-value'`。**\n这是本题最重要的一条：**值必须是 null，标签必须是 `future-value`**。\n把它算成 `no-coverage` 的实现说明它压根没统计 rk=2 ——\n那在线上表现为\"缺失率涨了\"，而真实原因是\"回填来晚了\"，\n两条排查路径完全不同。**朴素解在这条上给出 200 号值**（它按 ingest_ts 倒序取最新），\n那就是把未来的值写进了过去的样本 —— 标签泄漏的标准形态。\n\n**工程延伸（面试追问点）**\n\n1. 为什么左连接 + 条件而不是把条件写进 join？（都可以；写进 join 里当 join key\n   用非等值条件时 Spark 会退化成 broadcast nested loop join。\n   本题只按 `user_id` 等值连接、区间判断放在投影里，是**可控**的形状。\n   真正的大表要加 `dt` 分区裁剪，并保证\"分区\"不等于\"生效区间\" —— 这是两个东西。）\n2. 特征版本号和模型版本要不要一起落日志？（必须。素材考点 2 那句\n   \"需要把特征版本 + 模型版本写进日志，否则线上 AUC 复算不出来\"。\n   本题的 `version_no` 就是这一列的工程形态。）\n3. 批流双路怎么对拍？（同一份特征定义出两份实现 ⇒ 采样对拍 + 差异率阈值；\n   上线前跑一次**未来信息检查**：把 t 之后的行喂进 t 的样本，正确实现的结果不许变化。\n   这个自动化用例其实就是本题的 `future-value` 那条。）\n4. 过期策略与参数版本怎么对齐？（Monolith 用\"可过期 embedding + 低频过滤\"压内存【源 S1】；\n   如果特征的过期判定与 embedding 的过期判定用不同时钟，\n   **缺失率会被过期策略放大**，而两边的日志都说自己没错 —— 素材考点 2 的最后一句。）",
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0021"
+}

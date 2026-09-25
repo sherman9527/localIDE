@@ -1,0 +1,338 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0017",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "新供给曝光份额：分母是总量不是行平均，未采集段两侧都要剔",
+  "statement": "## 背景\n\n产品要求\"新供给（上架 <7 天）的曝光份额要跟上它的供给份额\"。\n看板上一行字写着：新供给占供给 6%、只拿到 1.2% 曝光。\n这两个数都是\"份额\"，而份额类指标的算法错误几乎从不报错 —— 它只是让结论反过来。\n\n## 你要实现的入口\n\n```ts\nexport interface SegmentRow {\n  segment: string;             // 非空、不重复\n  supply: number;              // 该分段的房源数，>= 0\n  impressions: number | null;  // 该分段的曝光数；null = 这一段曝光未采集\n}\n\nexport interface SegmentShare {\n  segment: string;\n  supplySharePct: number | null;\n  exposureSharePct: number | null;\n  gapPct: number | null;\n  underExposed: boolean;\n  untracked: boolean;\n}\n\nexport function exposureShare(rows: SegmentRow[]): SegmentShare[]\n```\n\n## 口径（逐条都是判分点）\n\n1. **份额的分母是总量，不是行平均。**\n   `supplySharePct = 该段 supply / Σ supply × 100`，`exposureSharePct` 同理。\n   结果 `ROUND` 到 2 位小数（用 `Math.round(x * 100) / 100`）。\n2. **`impressions === null` 的段整条退出统计**：\n   它的 `supply` **也不能进供给分母**。\n   这条段自己的输出是 `supplySharePct / exposureSharePct / gapPct = null`、\n   `underExposed = false`、`untracked = true`。\n   只从曝光侧剔除而留着供给侧，会让\"其它段的供给份额之和\"超过 100% ——\n   这是份额类看板最常见也最难被发现的错。\n3. `gapPct = exposureSharePct - supplySharePct`（可为负，负得越多越是投放不足）。\n4. `underExposed = exposureSharePct < supplySharePct × 0.8`。\n   **严格小于**：正好等于 0.8 倍不算不足。\n5. `supplySharePct` 的分母为 0（没有任何有效供给）⇒ 该字段输出 `0`（不是 `null`）——\n   `null` 在本契约里专门表示\"这一段未采集\"，两种\"没有数\"必须能区分。\n6. 输出顺序与输入顺序一致（不排序）。空输入 ⇒ 空数组。\n\n## 抛错（`throw new Error(...)`，消息必须一致）\n\n`rows` 不是数组 ⇒ `'rows must be an array'`；\n某行是 `null` ⇒ `'row must be an object'`；\n`segment` 不是非空字符串 ⇒ `'empty segment'`；\n`supply` 不是非负整数 ⇒ `'negative supply'`；\n`impressions` 既不是 `null` 也不是非负整数 ⇒ `'negative impressions'`；\n`segment` 重复 ⇒ `'duplicated segment'`。\n\n不许引入第三方依赖。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "share-metric",
+    "denominator-consistency",
+    "null-vs-zero",
+    "alert-threshold",
+    "modern:marketplace-rules"
+  ],
+  "cases": [
+    {
+      "name": "基线：新供给只拿到 1.2% 曝光，判为投放不足",
+      "input": [
+        [
+          {
+            "segment": "new",
+            "supply": 60,
+            "impressions": 120
+          },
+          {
+            "segment": "established",
+            "supply": 940,
+            "impressions": 9880
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "new",
+          "supplySharePct": 6,
+          "exposureSharePct": 1.2,
+          "gapPct": -4.8,
+          "underExposed": true,
+          "untracked": false
+        },
+        {
+          "segment": "established",
+          "supplySharePct": 94,
+          "exposureSharePct": 98.8,
+          "gapPct": 4.8,
+          "underExposed": false,
+          "untracked": false
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "份额分母是总量而不是行平均：两行的段权重要按供给算",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": 100,
+            "impressions": 40
+          },
+          {
+            "segment": "b",
+            "supply": 100,
+            "impressions": 960
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "a",
+          "supplySharePct": 50,
+          "exposureSharePct": 4,
+          "gapPct": -46,
+          "underExposed": true,
+          "untracked": false
+        },
+        {
+          "segment": "b",
+          "supplySharePct": 50,
+          "exposureSharePct": 96,
+          "gapPct": 46,
+          "underExposed": false,
+          "untracked": false
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "未采集的那一段：供给与曝光两侧都剔除",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": 400,
+            "impressions": 500
+          },
+          {
+            "segment": "b",
+            "supply": 400,
+            "impressions": 500
+          },
+          {
+            "segment": "broken",
+            "supply": 200,
+            "impressions": null
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "a",
+          "supplySharePct": 50,
+          "exposureSharePct": 50,
+          "gapPct": 0,
+          "underExposed": false,
+          "untracked": false
+        },
+        {
+          "segment": "b",
+          "supplySharePct": 50,
+          "exposureSharePct": 50,
+          "gapPct": 0,
+          "underExposed": false,
+          "untracked": false
+        },
+        {
+          "segment": "broken",
+          "supplySharePct": null,
+          "exposureSharePct": null,
+          "gapPct": null,
+          "underExposed": false,
+          "untracked": true
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "阈值是严格小于：正好 0.8 倍不算投放不足",
+      "input": [
+        [
+          {
+            "segment": "x",
+            "supply": 100,
+            "impressions": 400
+          },
+          {
+            "segment": "y",
+            "supply": 100,
+            "impressions": 600
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "x",
+          "supplySharePct": 50,
+          "exposureSharePct": 40,
+          "gapPct": -10,
+          "underExposed": false,
+          "untracked": false
+        },
+        {
+          "segment": "y",
+          "supplySharePct": 50,
+          "exposureSharePct": 60,
+          "gapPct": 10,
+          "underExposed": false,
+          "untracked": false
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "零曝光的一段：份额 0 且必然判为不足",
+      "input": [
+        [
+          {
+            "segment": "z",
+            "supply": 50,
+            "impressions": 0
+          },
+          {
+            "segment": "w",
+            "supply": 50,
+            "impressions": 900
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "z",
+          "supplySharePct": 50,
+          "exposureSharePct": 0,
+          "gapPct": -50,
+          "underExposed": true,
+          "untracked": false
+        },
+        {
+          "segment": "w",
+          "supplySharePct": 50,
+          "exposureSharePct": 100,
+          "gapPct": 50,
+          "underExposed": false,
+          "untracked": false
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：完全没有曝光数据 ⇒ 两侧分母都是 0，份额全记 0",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": 0,
+            "impressions": 0
+          }
+        ]
+      ],
+      "expected": [
+        {
+          "segment": "a",
+          "supplySharePct": 0,
+          "exposureSharePct": 0,
+          "gapPct": 0,
+          "underExposed": false,
+          "untracked": false
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何分段",
+      "input": [
+        []
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "非法：分段名重复",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": 1,
+            "impressions": 1
+          },
+          {
+            "segment": "a",
+            "supply": 2,
+            "impressions": 2
+          }
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "duplicated segment"
+    },
+    {
+      "name": "非法：供给为负",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": -1,
+            "impressions": 1
+          }
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "negative supply"
+    },
+    {
+      "name": "非法：曝光为负",
+      "input": [
+        [
+          {
+            "segment": "a",
+            "supply": 1,
+            "impressions": -5
+          }
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "negative impressions"
+    },
+    {
+      "name": "非法：分段名是空串",
+      "input": [
+        [
+          {
+            "segment": "",
+            "supply": 1,
+            "impressions": 1
+          }
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "empty segment"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两次求和（`Σ supply`、`Σ impressions`）只在**有效段**上算，\n然后对每段做 `part / whole × 100` 并四舍五入两位；未采集段直接返回一组 `null`。\n真正的判分点不在算术，在两条口径：分母是总量还是行平均；未采集段是否两侧都剔。\n\n**\"份额\"的分母是整体，不是\"段的平均值\"**（用例「份额分母是总量而不是行平均」）：\n`a`、`b` 两段供给各 100、曝光 40/960。\n按总量算 ⇒ 供给份额各 50%、曝光份额 4%/96% ⇒ `a` 严重投放不足；\n按行平均算 ⇒ 每段都是\"自己除以平均\"，两段供给份额都是 100%，\n差异被抹平，看板上显示\"新供给与成熟供给曝光一致\"。\n份额指标最阴的地方在于**行平均版本看起来更\"正常\"**（数值都在 100 附近），\n所以没人会怀疑。\n\n**未采集段必须两侧都剔**（用例「未采集的那一段：供给与曝光两侧都剔除」）：\n数据 `a(400/500) b(400/500) broken(200/null)`。\n正确：有效供给 800 ⇒ a、b 各 50%；`broken` 三个数是 `null` 且 `untracked=true`。\n只从曝光侧剔 ⇒ 有效供给按 1000 算 ⇒ a、b 各 40%，\n于是**所有段的供给份额之和 = 80% 而不是 100%** ——\n这个不自洽不会报错，只会让每个段都\"看起来少了一点\"，\n产品结论变成\"所有分段投放都不足\"，而真实原因是某段的埋点断了。\n**份额类指标要写一条断言：可统计段的份额之和应约等于 100。**\n（本实现里它就是 `50 + 50 = 100`。）\n\n**`null` 与 `0` 是两件事**（规则 5）：\n`null` 表示\"这一段没有采集\"，`0` 表示\"采集了，值是零/分母为零\"。\n把未采集显示成 0%，运营会以为该段真的没曝光而去查投放，\n而真相是数据管道断了 —— 与 SRM 那道题里\"把埋点丢失算成无结果\"是同一个错误家族。\n\n**阈值方向**（用例「阈值是严格小于：正好 0.8 倍不算投放不足」）：\n`x` 供给份额 50%、曝光份额 40%，正好是 0.8 倍 ⇒ `underExposed = false`。\n写成 `<=` 会把\"正好卡在阈值\"的段全部标红，\n于是徽标失去区分度，一周后没人再看它 —— **告警的失效通常不是漏报，是滥报**。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"新供给 6% / 曝光 1.2%\"这种比较要小心？\n   （供给份额按房源数算，曝光份额按曝光次数算 —— 一个 listing 的曝光次数受它在榜时间影响。\n   新供给刚上架几天，天然分母窗口不同。诚实的对比是\"按 listing-天\"归一，\n   或者按同龄段（同为上架 0-7 天）互比。）\n2. 扶持要设上限吗？（要，而且上限必须是**可退出的**：\n   按质量信号（转化率、取消率、评价）动态退出，否则\"扶持\"变成长期补贴，\n   排序不再反映真实相关性，最终反噬成交。）\n3. 看板怎么防\"份额不自洽\"这类静默错误？\n   （把不变量做成断言并在页面渲染：可统计段的供给份额之和、曝光份额之和\n   都应在 100±0.5 内，超界就在表头挂一个\"数据不自洽\"的提示 ——\n   而不是等到有人肉眼发现每段都少了 10%。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "exposure.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { exposureShare } from './Solution';\n\n/**\n * 断言由 gen.py 里的同一个 share() 模型生成，不手抄 ——\n * react-vitest 题的判分事实来源就是这份测试文件，抄错一次就永久错一次。\n */\ndescribe('exposureShare：曝光份额与供给份额', () => {\n  it(\"基线：新供给只拿到 1.2% 曝光，判为投放不足\", () => {\n    expect(exposureShare([{\"segment\": \"new\", \"supply\": 60, \"impressions\": 120}, {\"segment\": \"established\", \"supply\": 940, \"impressions\": 9880}])).toEqual([{\"segment\": \"new\", \"supplySharePct\": 6.0, \"exposureSharePct\": 1.2, \"gapPct\": -4.8, \"underExposed\": true, \"untracked\": false}, {\"segment\": \"established\", \"supplySharePct\": 94.0, \"exposureSharePct\": 98.8, \"gapPct\": 4.8, \"underExposed\": false, \"untracked\": false}]);\n  });\n  it(\"份额分母是总量而不是行平均：两行的段权重要按供给算\", () => {\n    expect(exposureShare([{\"segment\": \"a\", \"supply\": 100, \"impressions\": 40}, {\"segment\": \"b\", \"supply\": 100, \"impressions\": 960}])).toEqual([{\"segment\": \"a\", \"supplySharePct\": 50.0, \"exposureSharePct\": 4.0, \"gapPct\": -46.0, \"underExposed\": true, \"untracked\": false}, {\"segment\": \"b\", \"supplySharePct\": 50.0, \"exposureSharePct\": 96.0, \"gapPct\": 46.0, \"underExposed\": false, \"untracked\": false}]);\n  });\n  it(\"未采集的那一段：供给与曝光两侧都剔除\", () => {\n    expect(exposureShare([{\"segment\": \"a\", \"supply\": 400, \"impressions\": 500}, {\"segment\": \"b\", \"supply\": 400, \"impressions\": 500}, {\"segment\": \"broken\", \"supply\": 200, \"impressions\": null}])).toEqual([{\"segment\": \"a\", \"supplySharePct\": 50.0, \"exposureSharePct\": 50.0, \"gapPct\": 0.0, \"underExposed\": false, \"untracked\": false}, {\"segment\": \"b\", \"supplySharePct\": 50.0, \"exposureSharePct\": 50.0, \"gapPct\": 0.0, \"underExposed\": false, \"untracked\": false}, {\"segment\": \"broken\", \"supplySharePct\": null, \"exposureSharePct\": null, \"gapPct\": null, \"underExposed\": false, \"untracked\": true}]);\n  });\n  it(\"阈值是严格小于：正好 0.8 倍不算投放不足\", () => {\n    expect(exposureShare([{\"segment\": \"x\", \"supply\": 100, \"impressions\": 400}, {\"segment\": \"y\", \"supply\": 100, \"impressions\": 600}])).toEqual([{\"segment\": \"x\", \"supplySharePct\": 50.0, \"exposureSharePct\": 40.0, \"gapPct\": -10.0, \"underExposed\": false, \"untracked\": false}, {\"segment\": \"y\", \"supplySharePct\": 50.0, \"exposureSharePct\": 60.0, \"gapPct\": 10.0, \"underExposed\": false, \"untracked\": false}]);\n  });\n  it(\"零曝光的一段：份额 0 且必然判为不足\", () => {\n    expect(exposureShare([{\"segment\": \"z\", \"supply\": 50, \"impressions\": 0}, {\"segment\": \"w\", \"supply\": 50, \"impressions\": 900}])).toEqual([{\"segment\": \"z\", \"supplySharePct\": 50.0, \"exposureSharePct\": 0.0, \"gapPct\": -50.0, \"underExposed\": true, \"untracked\": false}, {\"segment\": \"w\", \"supplySharePct\": 50.0, \"exposureSharePct\": 100.0, \"gapPct\": 50.0, \"underExposed\": false, \"untracked\": false}]);\n  });\n  it(\"退化：完全没有曝光数据 ⇒ 两侧分母都是 0，份额全记 0\", () => {\n    expect(exposureShare([{\"segment\": \"a\", \"supply\": 0, \"impressions\": 0}])).toEqual([{\"segment\": \"a\", \"supplySharePct\": 0.0, \"exposureSharePct\": 0.0, \"gapPct\": 0.0, \"underExposed\": false, \"untracked\": false}]);\n  });\n  it(\"退化：没有任何分段\", () => {\n    expect(exposureShare([])).toEqual([]);\n  });\n  it(\"非法：分段名重复\", () => {\n    expect(() => exposureShare([{\"segment\": \"a\", \"supply\": 1, \"impressions\": 1}, {\"segment\": \"a\", \"supply\": 2, \"impressions\": 2}] as never)).toThrow(\"duplicated segment\");\n  });\n  it(\"非法：供给为负\", () => {\n    expect(() => exposureShare([{\"segment\": \"a\", \"supply\": -1, \"impressions\": 1}] as never)).toThrow(\"negative supply\");\n  });\n  it(\"非法：曝光为负\", () => {\n    expect(() => exposureShare([{\"segment\": \"a\", \"supply\": 1, \"impressions\": -5}] as never)).toThrow(\"negative impressions\");\n  });\n  it(\"非法：分段名是空串\", () => {\n    expect(() => exposureShare([{\"segment\": \"\", \"supply\": 1, \"impressions\": 1}] as never)).toThrow(\"empty segment\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "export interface SegmentRow {\n  segment: string;\n  supply: number;\n  impressions: number | null;\n}\n\nexport interface SegmentShare {\n  segment: string;\n  supplySharePct: number | null;\n  exposureSharePct: number | null;\n  gapPct: number | null;\n  underExposed: boolean;\n  untracked: boolean;\n}\n\nfunction round2(x: number): number {\n  return Math.round(x * 100) / 100;\n}\n\nexport function exposureShare(rows: SegmentRow[]): SegmentShare[] {\n  if (!Array.isArray(rows)) throw new Error('rows must be an array');\n  const seen = new Set<string>();\n  for (const r of rows) {\n    if (r === null || r === undefined) throw new Error('row must be an object');\n    if (typeof r.segment !== 'string' || r.segment === '') throw new Error('empty segment');\n    if (!Number.isInteger(r.supply) || r.supply < 0) throw new Error('negative supply');\n    if (r.impressions !== null && (!Number.isInteger(r.impressions) || r.impressions < 0)) {\n      throw new Error('negative impressions');\n    }\n    if (seen.has(r.segment)) throw new Error('duplicated segment');\n    seen.add(r.segment);\n  }\n\n  // 未采集的那一段两侧都剔：只剔一边，剩下各段的供给份额之和就会超过 100%\n  const tracked = rows.filter((r) => r.impressions !== null);\n  const totalSupply = tracked.reduce((n, r) => n + r.supply, 0);\n  const totalImpr = tracked.reduce((n, r) => n + (r.impressions as number), 0);\n  const pct = (part: number, whole: number) => (whole === 0 ? 0 : round2((part * 100) / whole));\n\n  return rows.map((r) => {\n    if (r.impressions === null) {\n      return { segment: r.segment, supplySharePct: null, exposureSharePct: null,\n               gapPct: null, underExposed: false, untracked: true };\n    }\n    const supplySharePct = pct(r.supply, totalSupply);\n    const exposureSharePct = pct(r.impressions, totalImpr);\n    return {\n      segment: r.segment,\n      supplySharePct,\n      exposureSharePct,\n      gapPct: round2(exposureSharePct - supplySharePct),\n      underExposed: exposureSharePct < supplySharePct * 0.8,\n      untracked: false,\n    };\n  });\n}",
+    "naiveSolution": "export function exposureShare(rows: any[]): any[] {\n  // 行平均版：每段自己除以\"本段供给 + 本段曝光\"，再和邻居比 —— 份额根本不是份额\n  const avgSupply = rows.reduce((n, r) => n + r.supply, 0) / Math.max(rows.length, 1);\n  const tracked = rows.filter((r) => r.impressions !== null);\n  const avgImpr = tracked.reduce((n, r) => n + r.impressions, 0) / Math.max(tracked.length, 1);\n  return rows.map((r) => {\n    const supplySharePct = Math.round((r.supply / avgSupply) * 10000) / 100;\n    const exposureSharePct =\n      r.impressions === null ? 0 : Math.round((r.impressions / avgImpr) * 10000) / 100;\n    return {\n      segment: r.segment,\n      supplySharePct,\n      exposureSharePct,\n      gapPct: exposureSharePct - supplySharePct,\n      // 错在只从曝光侧剔除，未采集那段的 supply 仍留在供给分母里\n      underExposed: exposureSharePct <= supplySharePct * 0.8,\n      untracked: false,\n    };\n  });\n}"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "Airbnb",
+    "role": "搜索与发现 / 前端平台 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-search-ranking.md §4 与 §2.3（素材给出现象\"新供给占 6% 供给只拿到 1.2% 曝光\"与冷启扶持要点，未给可判分的份额口径与未采集处理）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T16:39:19.825Z"
+  }
+}

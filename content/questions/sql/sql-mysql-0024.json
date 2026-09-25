@@ -1,0 +1,413 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0024",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "差异定价体检：先把券加回成交价再比，展示价多几种不是红旗、没成交必须输出 NULL",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n两条硬合规边界（拼多多 20-F 原文引用）：\n《平台经济领域的反垄断指南》禁止 \"deploying big data analytics to set **discriminatory terms**\nfor merchandise prices or other transaction terms\"；\nPIPL 亦禁止基于个人信息自动分析从事 \"**price discrimination**\"。\n由此得到的工程结论是：**个性化可以作用于排序 / 展示 / 发券，不可以作用于\"同一商品、\n同一交易条件下的定价\"**。这条要能落成可验证的卡口才叫卡口 —— 本题就是那条卡口的体检版。\n\n```\nprice_log(id INT PK, sku_id INT, user_bucket VARCHAR(8), row_type VARCHAR(5),\n          show_price DECIMAL(12,2), trade_price DECIMAL(12,2) NULL,\n          coupon_deduct DECIMAL(12,2) NULL)     -- row_type: 'view' | 'trade'\nsku_base (sku_id INT PK, list_price DECIMAL(12,2))\n```\n\n- `row_type = 'view'`：一次曝光，只有 `show_price`（`trade_price` 为 NULL）；\n- `row_type = 'trade'`：一笔成交，`trade_price` 是**买家这一件商品的实付价**，\n  `coupon_deduct` 是这笔用的券抵扣（NULL = 没用券）。\n\n## 任务\n\n对 `sku_base` 里**每一个** SKU 输出一行（没有任何日志的 SKU 也要出），\n按 `sku_id` 升序，列名与顺序必须是：\n\n```\nsku_id, view_variants, trade_rows, effective_trade_variants, max_trade_spread, risk_flag\n```\n\n## 口径（这张表就是判分点）\n\n1. `view_variants` = 该 SKU **曝光行**里 `COUNT(DISTINCT show_price)`。\n   **展示价多几种不是红旗** —— 个性化允许作用于展示。\n2. `trade_rows` = 该 SKU 的成交行数。\n3. **有效成交价** `effective = trade_price + COALESCE(coupon_deduct, 0)`，只算成交行。\n   比较价格必须**先把券加回去**：两个桶实付不同、但加回券之后相等，\n   那是\"券的发放不同\"（允许），不是\"定价不同\"（禁止）。\n4. `effective_trade_variants` = 该 SKU 成交行上的 `COUNT(DISTINCT effective)`。\n5. `max_trade_spread` = `MAX(effective) − MIN(effective)`；\n   **没有任何成交行时输出 NULL**（不是 0 —— \"没卖过\"与\"卖得很一致\"是两件事）。\n6. `risk_flag` = 1 当且仅当 `effective_trade_variants > 1`。\n   即：**同一 SKU 的成交价在加回券之后仍然不一致**才算差异定价红旗。\n\n只提交**一条** `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- **判错方向就是判错性质**：拿 `show_price` 去比 ⇒ 一片假阳性\n  （平台允许展示个性化，越报越没人看）；拿 `trade_price` 直接比 ⇒ 漏报\n  （真正的差异定价被券掩盖）。两种错误在同一个报表上还会互相\"印证\"。\n- **NULL 与 0 的分界**（第 5 列）：把\"没成交\"输出成 0 极差，\n  报告上就出现\"这个 SKU 定价完全一致\"的假结论。\n- **没有日志的 SKU 也必须出一行**：漏掉它们，等于对\"从来没被买过的商品\"\n  做免检 —— 而差异定价最常藏在新品的头几笔里。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "price-consistency",
+    "compliance-check",
+    "null-vs-zero",
+    "coupon-attribution",
+    "modern:pricing-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：曝光价不同的合法行 vs 加回券仍不同的红旗行",
+      "input": [],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            2,
+            1,
+            0,
+            0
+          ],
+          [
+            11,
+            2,
+            2,
+            2,
+            10,
+            1
+          ],
+          [
+            12,
+            2,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "sku 10 有效价两边都是 99.00 ⇒ 不报；sku 11 是 90.00 vs 80.00 ⇒ 报"
+    },
+    {
+      "name": "把券加回去就一致了：给红旗行补一张 10.00 的券，risk_flag 归零",
+      "input": [
+        "UPDATE price_log SET coupon_deduct = '10.00' WHERE id = 8"
+      ],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            2,
+            1,
+            0,
+            0
+          ],
+          [
+            11,
+            2,
+            2,
+            1,
+            0,
+            0
+          ],
+          [
+            12,
+            2,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "80.00 + 10.00 = 90.00 与另一桶一致 ⇒ 差异变成\"发券不同\"，合规允许"
+    },
+    {
+      "name": "反向陷阱：让本来一致的 sku 10 出现两种有效价",
+      "input": [
+        "INSERT INTO price_log VALUES (13, 10, 'old', 'trade', '99.00', '95.00', '2.00')"
+      ],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            3,
+            2,
+            2,
+            1
+          ],
+          [
+            11,
+            2,
+            2,
+            2,
+            10,
+            1
+          ],
+          [
+            12,
+            2,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "有效价 97.00 vs 99.00 ⇒ 极差 2.00、risk_flag 1；只看 show_price 的实现看不到这次变化（新行的曝光价与已有的一种相同）"
+    },
+    {
+      "name": "退化：某 SKU 日志全删 ⇒ 行还在，四个数归零而极差必须是 NULL",
+      "input": [
+        "DELETE FROM price_log WHERE id = 9",
+        "DELETE FROM price_log WHERE id = 10"
+      ],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            2,
+            1,
+            0,
+            0
+          ],
+          [
+            11,
+            2,
+            2,
+            2,
+            10,
+            1
+          ],
+          [
+            12,
+            0,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "sku 12 只剩零条日志 ⇒ trade_rows 0、有效价种类 0、极差 NULL；以日志为驱动表的实现会让这一行整条消失"
+    },
+    {
+      "name": "边界：只剩一笔成交时极差是 0.00 而不是 NULL",
+      "input": [
+        "DELETE FROM price_log WHERE id = 3"
+      ],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            11,
+            2,
+            2,
+            2,
+            10,
+            1
+          ],
+          [
+            12,
+            2,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "sku 10 剩一条成交（实付 99.00、没券）⇒ 一种有效价、极差 0.00、不报；\"空集兜成 0\"与\"只有一条时该给 0\"是两件事，两条用例各钉一边"
+    },
+    {
+      "name": "曝光多样性上升，红旗数纹丝不动（判错方向就会报出一堆假阳性）",
+      "input": [
+        "INSERT INTO price_log VALUES (14, 11, 'vip', 'view', '57.00', NULL, NULL)",
+        "INSERT INTO price_log VALUES (15, 11, 'new', 'view', '61.00', NULL, NULL)"
+      ],
+      "expected": {
+        "columns": [
+          "sku_id",
+          "view_variants",
+          "trade_rows",
+          "effective_trade_variants",
+          "max_trade_spread",
+          "risk_flag"
+        ],
+        "rows": [
+          [
+            10,
+            2,
+            2,
+            1,
+            0,
+            0
+          ],
+          [
+            11,
+            4,
+            2,
+            2,
+            10,
+            1
+          ],
+          [
+            12,
+            2,
+            0,
+            0,
+            null,
+            0
+          ],
+          [
+            13,
+            1,
+            1,
+            1,
+            0,
+            0
+          ],
+          [
+            14,
+            0,
+            0,
+            0,
+            null,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "只加曝光行 ⇒ sku 11 的 view_variants 从 2 变 4，而 effective_trade_variants 与 risk_flag 不许动"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n先把成交行的 `effective = trade_price + COALESCE(coupon_deduct, 0)` 算出来\n（**一个 CTE 只做这一件事**），曝光行单独聚一个 `view_variants`，\n最后以 `sku_base` 为驱动表做两次 LEFT JOIN。\n驱动表是 SKU 目录而不是日志，这是\"没日志也要出一行\"的唯一写法。\n\n**基线五行的关键分岔**（用来核对 expected 是不是真的对）：\n`sku 10`：两个桶曝光价 99.00 / 89.00（两种展示价），\n成交实付 89.00（带 10.00 的券）与 99.00（没券）⇒ 有效价都是 99.00 ⇒\n`effective_trade_variants = 1`、极差 0.00、**risk_flag = 0**。\n这是全题最重要的一行：**展示价不同、实付不同，但定价相同** —— 差异只在发券。\n`sku 11`：实付 90.00（券 0.00）与 80.00（没券）⇒ 有效价 90.00 / 80.00 ⇒\n`effective_trade_variants = 2`、极差 10.00、**risk_flag = 1**。\n`sku 12`：只有曝光没有成交 ⇒ `trade_rows = 0`、有效价种类 0、极差 **NULL**、risk_flag 0。\n`sku 13`：一笔成交，有效价 `20.00 + 2.00 = 22.00` ⇒ 一种、极差 0.00、不报。\n`sku 14`：完全没日志 ⇒ 四个数是 0/0/0/NULL、risk_flag 0，**但这一行必须存在**。\n\n**\"先加回券再比\"为什么是判分点**：券的发放本来就是允许的个性化维度。\n直接比 `trade_price`，`sku 10` 会被误报成差异定价 —— 而它的曝光价与实付价都\"看起来不同\"，\n所以这个误报特别可信。**误报的代价不是吵，是把唯一那条真红旗（`sku 11`）埋起来。**\n\n**极差为 NULL 的两行**（`sku 12`、`sku 14`）：\n`MAX/MIN` 在空集上是 NULL，兜成 0 就得到\"这个 SKU 定价完全一致\"。\n体检报告里\"一致\"和\"没数据\"必须能区分 —— 这与本仓库 DQC 那道题里\n\"分母为 0 时比率输出 NULL 而不是 0%\"是同一条纪律：**判不了就不要装作判过了。**\n\n**为什么以 SKU 目录为驱动表**（用例「某 SKU 日志全删」）：\n以日志为驱动表时，日志被清空的商品会**整行消失**，\n报告上看不出任何异常，而实际上它对体检彻底免疫。\n\n**工程延伸（面试追问点）**\n\n1. 这个查询能当上线卡口吗？（不能，它只能事后体检。上线卡口要落在**价格决策日志**上：\n   每次出价记录 `(sku_id, user_bucket, 决策依据版本, 输出价)`，\n   灰度阶段跑同样的\"加回券再比\"，不一致就阻断发布。）\n2. 什么情况下有效价不同是合法的？（限时限量购、活动批次、券批次过期、\n   `pdd.order_change_amount`（订单改价）都会让有效价不同 —— 所以真实系统里\n   `risk_flag` 只是**待复核**标记，必须再挂一层\"能否用活动/改价解释\"的白名单，\n   否则误杀量会把人工复核队列压满。）\n3. `user_bucket` 应该怎么设计才不会自证清白？（不能用价格模型自己的分桶作为检查维度 ——\n   那等于让被测系统提供观测口径。检查要用**独立分桶**（按账号哈希重切一遍）。\n   这与广告那道题\"分流桶与报表分组必须同构\"是一对镜像：\n   对齐时同构，检查时必须不同构才能发现漂移。）\n4. 曝光多样性要不要监控？（要，但作为**另一个指标**：曝光价方差反映的是发券与展示策略，\n   把它和差异定价混在一列里，等于把两个责任人不同的东西塞进同一个告警。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS price_log",
+      "DROP TABLE IF EXISTS sku_base",
+      "CREATE TABLE price_log (id INT PRIMARY KEY, sku_id INT NOT NULL, user_bucket VARCHAR(8) NOT NULL, row_type VARCHAR(5) NOT NULL, show_price DECIMAL(12,2) NOT NULL, trade_price DECIMAL(12,2) NULL, coupon_deduct DECIMAL(12,2) NULL) ENGINE=InnoDB",
+      "CREATE TABLE sku_base (sku_id INT PRIMARY KEY, list_price DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO price_log VALUES (1, 10, 'new', 'view', '99.00', NULL, NULL), (2, 10, 'old', 'view', '89.00', NULL, NULL), (3, 10, 'new', 'trade', '99.00', '89.00', '10.00'), (4, 10, 'old', 'trade', '89.00', '99.00', NULL), (5, 11, 'new', 'view', '59.00', NULL, NULL), (6, 11, 'old', 'view', '58.00', NULL, NULL), (7, 11, 'new', 'trade', '59.00', '90.00', '0.00'), (8, 11, 'old', 'trade', '58.00', '80.00', NULL), (9, 12, 'new', 'view', '10.00', NULL, NULL), (10, 12, 'old', 'view', '12.00', NULL, NULL), (11, 13, 'new', 'trade', '20.00', '20.00', '2.00'), (12, 13, 'new', 'view', '20.00', NULL, NULL)",
+      "INSERT INTO sku_base VALUES (10, '99.00'), (11, '59.00'), (12, '11.00'), (13, '18.00'), (14, '7.00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 9000,
+    "referenceSolution": "WITH trades AS (\n  SELECT p.sku_id,\n         p.trade_price + COALESCE(p.coupon_deduct, 0) AS effective\n  FROM price_log p\n  WHERE p.row_type = 'trade'\n), view_variants AS (\n  SELECT p.sku_id, COUNT(DISTINCT p.show_price) AS variants\n  FROM price_log p\n  WHERE p.row_type = 'view'\n  GROUP BY p.sku_id\n), agg AS (\n  SELECT t.sku_id,\n         COUNT(*) AS trade_rows,\n         COUNT(DISTINCT t.effective) AS eff_variants,\n         MAX(t.effective) - MIN(t.effective) AS spread\n  FROM trades t\n  GROUP BY t.sku_id\n)\nSELECT b.sku_id,\n       COALESCE(v.variants, 0) AS view_variants,\n       COALESCE(a.trade_rows, 0) AS trade_rows,\n       COALESCE(a.eff_variants, 0) AS effective_trade_variants,\n       a.spread AS max_trade_spread,\n       CASE WHEN COALESCE(a.eff_variants, 0) > 1 THEN 1 ELSE 0 END AS risk_flag\nFROM sku_base b\nLEFT JOIN view_variants v ON v.sku_id = b.sku_id\nLEFT JOIN agg a ON a.sku_id = b.sku_id\nORDER BY b.sku_id",
+    "naiveSolution": "-- \"看展示价就行\"版：拿 show_price 算差异 ⇒ 假阳性一片；\n-- 而 trade_price 加回券之后真正不一致的那个 SKU 反而没被抓出来。\nSELECT b.sku_id,\n       COUNT(DISTINCT p.show_price) AS view_variants,\n       COUNT(p.id) AS trade_rows,\n       COUNT(DISTINCT p.show_price) AS effective_trade_variants,\n       COALESCE(MAX(p.show_price) - MIN(p.show_price), 0) AS max_trade_spread,\n       CASE WHEN COUNT(DISTINCT p.show_price) > 1 THEN 1 ELSE 0 END AS risk_flag\nFROM sku_base b\nLEFT JOIN price_log p ON p.sku_id = b.sku_id\nGROUP BY b.sku_id\nORDER BY b.sku_id"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（商品与价格链路方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#4 考点 6（`pdd.goods.price.check` / `pdd.goods.advice.price.get` / `pdd.order_change_amount` 三个官方接口 + 20-F 引用的反垄断指南 \"discriminatory terms\" 与 PIPL \"price discrimination\" 原文；素材建议 judgeKind=mysql「同一 SKU 多次展示价方差/差异定价体检」，未给判据表",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.124Z"
+  }
+}

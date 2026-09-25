@@ -1,0 +1,369 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0005",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "分区键治理 + at-least-once 重复投递：目录爆炸与 __HIVE_DEFAULT_PARTITION__ 的根治",
+  "statement": "## 背景与数据规模\n订单落地表（生产：**日均 4.7 亿行、过去 900 天共 3800 亿行**）由 Kafka → Spark 微批写入，链路是 at-least-once，所以同一订单会被投递多次。\n上一版有两个事故：\n1. 有人用 `ingest_ts`（甚至 `ingest_ts` 的**秒**）做分区列 → 单表 **41 万个分区目录**，`listStatus` 一次要 90 秒，对象存储 GET 请求费爆炸，元数据把 NameNode/catalog 打满；\n2. `tenant_id` 直接当分区值（含 NULL、大小写混杂、前后空格）→ 产出 `__HIVE_DEFAULT_PARTITION__` 与 `ACME / acme / 'acme '` 三份同一租户，下游按租户过滤时静默漏数。\n本题要求你在结果层面把「**分区键派生规则 + 幂等去重**」写对。\n\n## 输入\n临时视图 `raw_deliveries`（每个用例单独灌入，`spark.table('raw_deliveries')`）：\n- `order_id STRING` 业务主键（同一 id 可能多行 = 重复投递）\n- `tenant_id STRING` 可能为 NULL / 空串 / 纯空白 / `'-'` / `'NULL'` / `'None'` / 大小写与空格混杂\n- `created_at STRING` 业务发生时间（UTC，`yyyy-MM-dd HH:mm:ss`；可能为 NULL 或非法文本）\n- `ingest_ts STRING` 落到湖里的时间（UTC，同上格式）\n- `status STRING` 状态文本\n\n## 规则（必须严格实现）\n1. **先清洗再裁决**：`created_at` 为 NULL 或无法解析的行**整行丢弃**（它没有合法分区可落，生产上应进 quarantine）。\n2. **幂等去重**：同一 `order_id` 视为一条有效记录，保留键为 `ingest_ts DESC → created_at DESC → status ASC` 的第一条（三级写全，禁止用 `first()`）。\n3. **分区键派生**：\n   - `event_date` = 保留行的 `created_at` 的 **UTC 日期**（`yyyy-MM-dd`）。绝对禁止用 `ingest_ts` 或更细粒度做分区列。\n   - `tenant_bucket` = `lower(trim(tenant_id))`；若结果为 NULL、空串、`'-'`、`'null'`、`'none'` 之一 → `'unknown'`。\n   - `part_path` = `event_date=<event_date>/tenant=<tenant_bucket>`（写出目录的字面形态，用于核对分区裁剪是否生效）。\n4. **重复行的归属**：被丢弃的重复行计入**保留行所在分区**的 `dup_dropped`（同一订单不得因为投递时的脏值被拆到两个分区——这是跨分区重复的根因）。\n5. 按 `(event_date, tenant_bucket)` 输出一行：`valid_rows`（去重后行数）、`dup_dropped`（归属本分区的被丢弃行数）、`min_created` / `max_created`（本分区保留行 `created_at` 的字符串最小/最大值，用于人工核对「分区无跨日泄漏」）。\n\n## 输出\nDataFrame，列**必须严格是** `event_date, tenant_bucket, part_path, valid_rows, dup_dropped, min_created, max_created`。\n判题按行集合比对（行序不敏感）；生产写法请 `orderBy('event_date','tenant_bucket')`。\n\n## 约束与追问\n- 禁止 `collect()`/`toPandas()`；禁止 `coalesce(1)`「治小文件」（那会把全部数据压给一个 task，产出巨大单文件且尾部倾斜）。\n- 正确姿势是写出前 `repartition('event_date','tenant_bucket')` 让同一分区的行落到同一批 writer task，再配合湖仓 compaction（Iceberg `rewrite_data_files` bin-pack / Paimon 自动 compaction）控制文件数；本题只看语义，追问会让你给出「目标单文件 128–256 MB、每天每租户一个文件」的定容推导与 compaction 预算。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "small-files-write",
+    "partition-governance",
+    "idempotent-dedup",
+    "hive-default-partition",
+    "pyspark",
+    "modern:iceberg-v3"
+  ],
+  "cases": [
+    {
+      "name": "基础：重复投递去重 + 租户大小写与空格归一",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": [
+          {
+            "order_id": "o1",
+            "tenant_id": "T1",
+            "created_at": "2026-09-01 10:00:00",
+            "ingest_ts": "2026-09-01 10:00:05",
+            "status": "paid"
+          },
+          {
+            "order_id": "o1",
+            "tenant_id": "T1",
+            "created_at": "2026-09-01 10:00:00",
+            "ingest_ts": "2026-09-01 10:09:00",
+            "status": "refunded"
+          },
+          {
+            "order_id": "o2",
+            "tenant_id": " t1 ",
+            "created_at": "2026-09-01 11:00:00",
+            "ingest_ts": "2026-09-01 11:00:01",
+            "status": "paid"
+          },
+          {
+            "order_id": "o3",
+            "tenant_id": "T2",
+            "created_at": "2026-09-01 12:00:00",
+            "ingest_ts": "2026-09-01 12:00:01",
+            "status": "paid"
+          },
+          {
+            "order_id": "o4",
+            "tenant_id": null,
+            "created_at": "2026-09-01 13:00:00",
+            "ingest_ts": "2026-09-01 13:00:01",
+            "status": "paid"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "event_date": "2026-09-01",
+          "tenant_bucket": "t1",
+          "part_path": "event_date=2026-09-01/tenant=t1",
+          "valid_rows": 2,
+          "dup_dropped": 1,
+          "min_created": "2026-09-01 10:00:00",
+          "max_created": "2026-09-01 11:00:00"
+        },
+        {
+          "event_date": "2026-09-01",
+          "tenant_bucket": "t2",
+          "part_path": "event_date=2026-09-01/tenant=t2",
+          "valid_rows": 1,
+          "dup_dropped": 0,
+          "min_created": "2026-09-01 12:00:00",
+          "max_created": "2026-09-01 12:00:00"
+        },
+        {
+          "event_date": "2026-09-01",
+          "tenant_bucket": "unknown",
+          "part_path": "event_date=2026-09-01/tenant=unknown",
+          "valid_rows": 1,
+          "dup_dropped": 0,
+          "min_created": "2026-09-01 13:00:00",
+          "max_created": "2026-09-01 13:00:00"
+        }
+      ],
+      "note": "o2 的 ' t1 ' 必须并进 t1；绝不能出现 'null'/'__HIVE_DEFAULT_PARTITION__'/' t1 ' 这些桶。"
+    },
+    {
+      "name": "边界：分区键取 created_at 而不是 ingest_ts（跨日投递）",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": [
+          {
+            "order_id": "o5",
+            "tenant_id": "T3",
+            "created_at": "2026-09-01 23:59:59",
+            "ingest_ts": "2026-09-02 06:00:00",
+            "status": "paid"
+          },
+          {
+            "order_id": "o5",
+            "tenant_id": "T3",
+            "created_at": "2026-09-01 23:59:59",
+            "ingest_ts": "2026-09-02 07:00:00",
+            "status": "paid"
+          },
+          {
+            "order_id": "o6",
+            "tenant_id": "T3",
+            "created_at": "2026-09-02 00:00:00",
+            "ingest_ts": "2026-09-02 00:00:01",
+            "status": "paid"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "event_date": "2026-09-01",
+          "tenant_bucket": "t3",
+          "part_path": "event_date=2026-09-01/tenant=t3",
+          "valid_rows": 1,
+          "dup_dropped": 1,
+          "min_created": "2026-09-01 23:59:59",
+          "max_created": "2026-09-01 23:59:59"
+        },
+        {
+          "event_date": "2026-09-02",
+          "tenant_bucket": "t3",
+          "part_path": "event_date=2026-09-02/tenant=t3",
+          "valid_rows": 1,
+          "dup_dropped": 0,
+          "min_created": "2026-09-02 00:00:00",
+          "max_created": "2026-09-02 00:00:00"
+        }
+      ],
+      "note": "用 ingest_ts 分区的写法会把 o5 塞进 09-02，导致 09-01 的订单永久漏在错误分区里（回填时也找不到）。"
+    },
+    {
+      "name": "重复：同订单四次投递且投递间租户值不同，全部归属保留行分区",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": [
+          {
+            "order_id": "o20",
+            "tenant_id": "TA",
+            "created_at": "2026-09-03 01:00:00",
+            "ingest_ts": "2026-09-03 01:00:00",
+            "status": "a"
+          },
+          {
+            "order_id": "o20",
+            "tenant_id": "TA",
+            "created_at": "2026-09-03 01:00:00",
+            "ingest_ts": "2026-09-03 02:00:00",
+            "status": "b"
+          },
+          {
+            "order_id": "o20",
+            "tenant_id": "TB",
+            "created_at": "2026-09-03 01:00:00",
+            "ingest_ts": "2026-09-03 03:00:00",
+            "status": "c"
+          },
+          {
+            "order_id": "o20",
+            "tenant_id": "TB",
+            "created_at": "2026-09-03 01:00:00",
+            "ingest_ts": "2026-09-03 00:00:00",
+            "status": "d"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "event_date": "2026-09-03",
+          "tenant_bucket": "tb",
+          "part_path": "event_date=2026-09-03/tenant=tb",
+          "valid_rows": 1,
+          "dup_dropped": 3,
+          "min_created": "2026-09-03 01:00:00",
+          "max_created": "2026-09-03 01:00:00"
+        }
+      ],
+      "note": "保留行是 ingest 最大的那条（tenant=TB）；结果里绝不能出现 ta 桶——按各行自身租户聚合的错误写法会产出两行。"
+    },
+    {
+      "name": "极端：全部租户值都是毒数据，统一落 unknown",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": [
+          {
+            "order_id": "o7",
+            "tenant_id": "-",
+            "created_at": "2026-09-05 01:00:00",
+            "ingest_ts": "2026-09-05 01:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o8",
+            "tenant_id": "",
+            "created_at": "2026-09-05 02:00:00",
+            "ingest_ts": "2026-09-05 02:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o9",
+            "tenant_id": "   ",
+            "created_at": "2026-09-05 03:00:00",
+            "ingest_ts": "2026-09-05 03:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o10",
+            "tenant_id": "NULL",
+            "created_at": "2026-09-05 04:00:00",
+            "ingest_ts": "2026-09-05 04:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o11",
+            "tenant_id": "None",
+            "created_at": "2026-09-05 05:00:00",
+            "ingest_ts": "2026-09-05 05:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o12",
+            "tenant_id": "ACME",
+            "created_at": "2026-09-05 06:00:00",
+            "ingest_ts": "2026-09-05 06:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o13",
+            "tenant_id": "acme",
+            "created_at": "2026-09-05 07:00:00",
+            "ingest_ts": "2026-09-05 07:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o14",
+            "tenant_id": "Acme  ",
+            "created_at": "2026-09-05 08:00:00",
+            "ingest_ts": "2026-09-05 08:00:00",
+            "status": "x"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "event_date": "2026-09-05",
+          "tenant_bucket": "unknown",
+          "part_path": "event_date=2026-09-05/tenant=unknown",
+          "valid_rows": 5,
+          "dup_dropped": 0,
+          "min_created": "2026-09-05 01:00:00",
+          "max_created": "2026-09-05 05:00:00"
+        },
+        {
+          "event_date": "2026-09-05",
+          "tenant_bucket": "acme",
+          "part_path": "event_date=2026-09-05/tenant=acme",
+          "valid_rows": 3,
+          "dup_dropped": 0,
+          "min_created": "2026-09-05 06:00:00",
+          "max_created": "2026-09-05 08:00:00"
+        }
+      ]
+    },
+    {
+      "name": "空分区：无有效投递返回零行",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": []
+      },
+      "expected": []
+    },
+    {
+      "name": "脏 created_at 边界：非法日期行丢弃且不参与版本裁决",
+      "input": {
+        "view": "raw_deliveries",
+        "schema": "order_id string, tenant_id string, created_at string, ingest_ts string, status string",
+        "rows": [
+          {
+            "order_id": "o21",
+            "tenant_id": "TC",
+            "created_at": "bad-time",
+            "ingest_ts": "2026-09-04 09:00:00",
+            "status": "z"
+          },
+          {
+            "order_id": "o21",
+            "tenant_id": "TC",
+            "created_at": "2026-09-04 10:00:00",
+            "ingest_ts": "2026-09-04 10:00:00",
+            "status": "y"
+          },
+          {
+            "order_id": "o22",
+            "tenant_id": "TC",
+            "created_at": null,
+            "ingest_ts": "2026-09-04 11:00:00",
+            "status": "x"
+          },
+          {
+            "order_id": "o22",
+            "tenant_id": "TD",
+            "created_at": "2026-09-04 12:00:00",
+            "ingest_ts": "2026-09-04 12:00:00",
+            "status": "w"
+          },
+          {
+            "order_id": "o23",
+            "tenant_id": "TD",
+            "created_at": "2026-13-45 00:00:00",
+            "ingest_ts": "2026-09-04 13:00:00",
+            "status": "v"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "event_date": "2026-09-04",
+          "tenant_bucket": "tc",
+          "part_path": "event_date=2026-09-04/tenant=tc",
+          "valid_rows": 1,
+          "dup_dropped": 0,
+          "min_created": "2026-09-04 10:00:00",
+          "max_created": "2026-09-04 10:00:00"
+        },
+        {
+          "event_date": "2026-09-04",
+          "tenant_bucket": "td",
+          "part_path": "event_date=2026-09-04/tenant=td",
+          "valid_rows": 1,
+          "dup_dropped": 0,
+          "min_created": "2026-09-04 12:00:00",
+          "max_created": "2026-09-04 12:00:00"
+        }
+      ],
+      "note": "o21/o22 各有一条非法行：既不能产出 null 分区，也不能被算成 dup_dropped。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\nTOSS = ['', '-', 'null', 'none']\n\n\ndef solve(spark):\n    win = Window.partitionBy('order_id').orderBy(\n        F.col('ingest_ts').desc(), F.col('created_at').desc(), F.col('status').asc()\n    )\n    cleaned = F.lower(F.trim('tenant_id'))\n    tagged = (\n        spark.table('raw_deliveries')\n        .withColumn('event_date', F.substring(F.to_timestamp('created_at'), 1, 10))\n        .withColumn(\n            'tenant_bucket',\n            F.when(cleaned.isNull() | cleaned.isin(TOSS), F.lit('unknown')).otherwise(cleaned),\n        )\n        .filter(F.col('event_date').isNotNull())\n        .withColumn('rk', F.row_number().over(win))\n    )\n    kept = tagged.filter(F.col('rk') == 1)\n    kept_keys = kept.select(\n        F.col('order_id'),\n        F.col('event_date').alias('k_date'),\n        F.col('tenant_bucket').alias('k_bucket'),\n    )\n    drops = (\n        tagged.filter(F.col('rk') > 1)\n        .join(F.broadcast(kept_keys), 'order_id', 'inner')\n        .groupBy('k_date', 'k_bucket')\n        .agg(F.count(F.lit(1)).alias('dup_dropped'))\n    )\n    agg = kept.groupBy('event_date', 'tenant_bucket').agg(\n        F.count(F.lit(1)).alias('valid_rows'),\n        F.min('created_at').alias('min_created'),\n        F.max('created_at').alias('max_created'),\n    )\n    return (\n        agg.join(F.broadcast(drops), (agg['event_date'] == drops['k_date']) & (agg['tenant_bucket'] == drops['k_bucket']), 'left')\n        .fillna({'dup_dropped': 0})\n        .select(\n            'event_date',\n            'tenant_bucket',\n            F.concat(F.lit('event_date='), F.col('event_date'), F.lit('/tenant='), F.col('tenant_bucket')).alias('part_path'),\n            'valid_rows',\n            F.col('dup_dropped').cast('int').alias('dup_dropped'),\n            'min_created',\n            'max_created',\n        )\n        .orderBy('event_date', 'tenant_bucket')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    return (\n        spark.table('raw_deliveries')\n        .withColumn('event_date', F.substring(F.col('ingest_ts'), 1, 10))\n        .withColumn('tenant_bucket', F.coalesce(F.col('tenant_id'), F.lit('missing')))\n        .groupBy('event_date', 'tenant_bucket')\n        .agg(\n            F.count(F.lit(1)).alias('valid_rows'),\n            F.lit(0).alias('dup_dropped'),\n            F.min('created_at').alias('min_created'),\n            F.max('created_at').alias('max_created'),\n        )\n        .withColumn('part_path', F.concat(F.lit('event_date='), F.col('event_date'), F.lit('/tenant='), F.col('tenant_bucket')))\n        .select('event_date', 'tenant_bucket', 'part_path', 'valid_rows', 'dup_dropped', 'min_created', 'max_created')\n    )\n"
+  },
+  "answer": "## 参考要点\n1. 三条独立的治理动作，缺一就出事：**分区键粒度**（只到 UTC 日，粒度由「查询过滤模式 + 分区数上限」推导：3800 亿行 / 900 天 → 每天 5 亿行，再按租户二级分区把单分区体量压到可裁剪范围）、**幂等去重**（业务主键 + 完整裁决键，at-least-once 链路的必备项）、**脏值分桶**（NULL/空串/大小写/占位符统一规则，且规则必须与下游过滤条件同源，否则「按租户查不到数」）。\n2. 重复行的归属是本题的隐藏考点：如果按各行自身派生的分区键做聚合，脏投递会把同一订单劈到两个桶（case3 的 ta/tb），既是正确性问题也是「为什么我按天 count 会大于订单数」的经典答案。正确做法是**先确定保留行，再把被丢弃行按保留行的键归属**。\n3. 小文件与写侧的真实解法（面试重点，判题不看）：写出前 `repartition('event_date','tenant_bucket')`（不是 `coalesce(1)`）把同分区数据聚到少量 writer；目标单文件 128–256 MB；微批提交间隔直接决定文件数（30 秒一批 × 900 天 × N 租户 = 目录爆炸），所以要么攒批、要么把 compaction 做成表的一等公民（Iceberg `rewrite_data_files` 定时 bin-pack、Paimon `num-sorted-run.stop-trigger` 与 full compaction 窗口）。\n4. 成本项要能报出来：对象存储按 LIST/GET 请求计费，分区数从 41 万降到 900×租户数后，`listStatus` 从 90 秒降到亚秒；同时 `min_created/max_created` 这类「分区边界自检」应该沉淀成 DQC 不变量（分区内不得跨日、`valid_rows` 波动双条件阈值），而不是靠人肉看。\n5. 幂等回填：重跑某天要 `partitionOverwriteMode=dynamic` + 按分区覆盖（默认 static 会把全表清掉），湖仓里用 `MERGE INTO` / 主键表 upsert；`__HIVE_DEFAULT_PARTITION__` 一旦产生，修复要显式重写这些目录并核对下游读取方。\n\n## 追问\n- 「为什么不直接把 `tenant_id` 用 `bucket(N, id)` 分桶？」→ 分桶数一旦改变要全量重刷（且历史桶文件与新桶不兼容），它服务的是 join 加速而不是治理；租户这种动态基数应该做分区值 + 排序键，跨引擎（Trino/ClickHouse/Doris 直读）才不会失效。\n- 「怎么证明没有跨分区泄漏？」→ 用 `(event_date, tenant_bucket)` 分组后的 `min_created/max_created` 断言二者都落在该日内；把这条断言写成阻断级 DQC。\n- 「上游突然新增一个租户导致分区数翻倍，你的告警在哪？」→ 分区基数（每日新增分区数）与元数据体量作为作业级指标监控，配合「新租户首日行数为 0 则告警」的就绪传感器。",
+  "estimatedMinutes": 26,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/spark-shuffle-tuning.md#small-files-write",
+    "addedBy": "content-agent-bd"
+  }
+}

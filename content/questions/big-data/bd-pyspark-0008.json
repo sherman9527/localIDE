@@ -1,0 +1,333 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0008",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "回溯不许污染已发布分区：冻结日拦截 + 未发布日重算（可重跑的回填语义）",
+  "statement": "## 背景与数据规模\n日粒度预订指标 `daily_bookings_metrics` 对外承诺 **T+1 09:00 发布**，发布后进入财务/合规口径的**不可变期**（保留 2 年，禁止被追改）。\n但事实流里持续会有**迟到与修数**（生产实测：迟到 0–48 小时的行占 1.9%，48 小时之后的修数主要来自上游补数与删除事件回填，日均 300 万行）。\n上一版回填作业是「按天全量重算 + `mode(overwrite)`」，结果把两个已发布日的数字改了 0.4%，导致对外报表与当月已签字的财务口径不一致——这是**回溯边界**事故，不是计算错误。\n\n## 输入\n1. 临时视图 `published_metrics`（建表阶段灌入，全题固定，代表**已发布且冻结**的日结果）：\n   `biz_date STRING, order_cnt BIGINT, gmv DECIMAL(18,2)`\n   判题数据里已发布 `2026-09-01`（100 单 / 500.00）与 `2026-09-02`（40 单 / 200.00）。\n2. 临时视图 `late_facts`（每个用例单独灌入，`spark.table('late_facts')`）：\n   `biz_date STRING(可能 NULL / 空串 / 非法文本), order_id STRING, amount STRING(十进制文本或脏值), is_deleted BOOLEAN(可能 NULL)`\n   已经是**去重后的明细**（一行一个 `order_id`）：`is_deleted=false` 表示存活订单，`true` 表示删除事件，`NULL` 表示状态未知。\n\n## 冻结与重算规则（必须严格实现）\n1. **冻结优先**：`late_facts` 里的 `biz_date`（归一后，见 R3）若已存在于 `published_metrics` → 该日**一律不得重算**：输出 `published_metrics` 的原值，`source='PUBLISHED'`，并把该日在 `late_facts` 中的行计入 `held_rows`（全部行数）与 `held_amount`（仅 `is_deleted=false` 且金额可解析的行求和，其余按 0）。\n2. **未发布日重算**：`source='RECOMPUTED'`，`order_cnt` = 该日 `is_deleted` 为 false 的行数（NULL/true 都不计），`gmv` = 这些行的金额之和（脏值/NULL 按 0，用 `coalesce`），`held_rows=0`、`held_amount=0`。\n3. **归一分区键**：`biz_date` 为 NULL、空串或纯空白的行统一归入 `'INVALID'`；`'INVALID'` 永远不在已发布集合里，因此**总是可重算**（生产上它对应 quarantine 分区，重算不会破坏对外承诺）。\n4. **输出必须包含 `published_metrics` 的全部行**：即使某个已发布日在本次 `late_facts` 中完全没出现，也要原样输出（`source='PUBLISHED'`、`held_rows=0`、`held_amount=0`）——因为结果集代表「对外可见的当前态视图」。\n5. **幂等**：同一份 `late_facts` 连续执行两次，结果必须完全一致（本函数只读输入、不累积状态；不要按「已经处理过哪些行」做任何增量判断）。\n\n## 输出\nDataFrame，列**必须严格是** `biz_date, order_cnt, gmv, source, held_rows, held_amount`；`source` 取值只有 `'PUBLISHED'` 与 `'RECOMPUTED'`。\n判题按行集合比对（行序不敏感）；生产写法请 `orderBy('biz_date')`。\n\n## 约束与追问\n- 禁止 `collect()`/`toPandas()`；禁止「先 union 再 groupBy」这种会把已发布值与新值混在一起的写法。\n- 金额列以字符串投递，必须显式 `cast` 成 `DECIMAL(18,2)` 再求和。\n- 追问会让你把这套语义搬到真实湖仓上：为什么「按分区覆盖 + 冻结标记表」比 `MERGE INTO` 更适合财务口径；如何用 Iceberg `snapshot`/`branch` 或 Paimon `tag` 固化「发布点」；如何设计「重算 vs 截断」的决策规则与告警（已发布日被触碰必须 P0）；以及回填作业与在线作业的资源隔离、双跑对账放行判据（行数 / 主键集合差 / 关键指标差异率 / Top-K 一致 + 差异样本可解释）。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "backfill-reprocessing",
+    "immutable-partition",
+    "sla-governance",
+    "idempotent-write",
+    "pyspark",
+    "modern:spark-4-2-auto-cdc"
+  ],
+  "cases": [
+    {
+      "name": "基础：已发布日拦截、未发布日重算",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": [
+          {
+            "biz_date": "2026-09-01",
+            "order_id": "a1",
+            "amount": "10.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-01",
+            "order_id": "a2",
+            "amount": "20.00",
+            "is_deleted": true
+          },
+          {
+            "biz_date": "2026-09-03",
+            "order_id": "b1",
+            "amount": "5.50",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-03",
+            "order_id": "b2",
+            "amount": "4.50",
+            "is_deleted": false
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 2,
+          "held_amount": 10
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-03",
+          "order_cnt": 2,
+          "gmv": 10,
+          "source": "RECOMPUTED",
+          "held_rows": 0,
+          "held_amount": 0
+        }
+      ],
+      "note": "09-01 的数字必须仍是 100/500.00（不得被 1 单 10.00 改写）；held_amount 只累计未删除行。"
+    },
+    {
+      "name": "边界：变更全部落在已发布日 → 结果与 published 逐字段相同",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": [
+          {
+            "biz_date": "2026-09-02",
+            "order_id": "c1",
+            "amount": "999999.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-02",
+            "order_id": "c2",
+            "amount": "1.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-01",
+            "order_id": "c3",
+            "amount": "2.00",
+            "is_deleted": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 1,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 2,
+          "held_amount": 1000000
+        }
+      ],
+      "note": "`is_deleted` 为 NULL 的行计入 held_rows 但不计金额（状态未知不得当作存活）。"
+    },
+    {
+      "name": "空变更集：只输出已发布日（重算不得凭空造日）",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": []
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        }
+      ]
+    },
+    {
+      "name": "非法分区键边界：NULL/空串/空白归 INVALID 且总是可重算",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": [
+          {
+            "biz_date": null,
+            "order_id": "x1",
+            "amount": "3.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "",
+            "order_id": "x2",
+            "amount": "N/A",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "   ",
+            "order_id": "x3",
+            "amount": "7.00",
+            "is_deleted": true
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "INVALID",
+          "order_cnt": 2,
+          "gmv": 3,
+          "source": "RECOMPUTED",
+          "held_rows": 0,
+          "held_amount": 0
+        }
+      ],
+      "note": "x2 金额脏值按 0 计入 order_cnt；x3 是删除事件不计入。三个非法 biz_date 必须合成一行而不是三行 __HIVE_DEFAULT_PARTITION__。"
+    },
+    {
+      "name": "重复：同一批变更重放两次结果不变（幂等自检）",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": [
+          {
+            "biz_date": "2026-09-04",
+            "order_id": "r1",
+            "amount": "12.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-04",
+            "order_id": "r2",
+            "amount": "8.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-01",
+            "order_id": "r3",
+            "amount": "1.00",
+            "is_deleted": false
+          },
+          {
+            "biz_date": "2026-09-01",
+            "order_id": "r3",
+            "amount": "1.00",
+            "is_deleted": false
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 2,
+          "held_amount": 2
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-04",
+          "order_cnt": 2,
+          "gmv": 20,
+          "source": "RECOMPUTED",
+          "held_rows": 0,
+          "held_amount": 0
+        }
+      ],
+      "note": "重复投递的 held 行也要如实计数（拦截量是运维指标），但绝不能改变已发布数字。"
+    },
+    {
+      "name": "极端：未发布日全是删除事件，必须产出 0/0.00 的一行",
+      "input": {
+        "view": "late_facts",
+        "schema": "biz_date string, order_id string, amount string, is_deleted boolean",
+        "rows": [
+          {
+            "biz_date": "2026-09-05",
+            "order_id": "z1",
+            "amount": "50.00",
+            "is_deleted": true
+          },
+          {
+            "biz_date": "2026-09-05",
+            "order_id": "z2",
+            "amount": null,
+            "is_deleted": null
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_date": "2026-09-01",
+          "order_cnt": 100,
+          "gmv": 500,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-02",
+          "order_cnt": 40,
+          "gmv": 200,
+          "source": "PUBLISHED",
+          "held_rows": 0,
+          "held_amount": 0
+        },
+        {
+          "biz_date": "2026-09-05",
+          "order_cnt": 0,
+          "gmv": 0,
+          "source": "RECOMPUTED",
+          "held_rows": 0,
+          "held_amount": 0
+        }
+      ],
+      "note": "全删除日不能因为「没有存活行」而整行消失（下游按日 join 会出现空洞，被误判为数据缺失）。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW published_metrics AS SELECT * FROM VALUES ('2026-09-01', CAST(100 AS BIGINT), CAST(500.00 AS DECIMAL(18,2))), ('2026-09-02', CAST(40 AS BIGINT), CAST(200.00 AS DECIMAL(18,2))) AS t(biz_date, order_cnt, gmv)"
+    ],
+    "referenceSolution": "import pyspark.sql.functions as F\n\nZERO_DEC = F.lit(0).cast('decimal(18,2)')\n\n\ndef solve(spark):\n    facts = (\n        spark.table('late_facts')\n        .withColumn(\n            'biz_key',\n            F.coalesce(F.nullif(F.trim(F.col('biz_date')), F.lit('')), F.lit('INVALID')),\n        )\n        .withColumn('alive', F.col('is_deleted') == F.lit(False))\n        .withColumn(\n            'amt',\n            F.when(F.col('alive'), F.coalesce(F.col('amount').cast('decimal(18,2)'), ZERO_DEC)).otherwise(ZERO_DEC),\n        )\n    )\n    touched = facts.groupBy('biz_key').agg(\n        F.count(F.lit(1)).alias('rows_in'),\n        F.sum(F.when(F.col('alive'), F.lit(1)).otherwise(F.lit(0))).cast('bigint').alias('new_cnt'),\n        F.coalesce(F.sum('amt'), ZERO_DEC).cast('decimal(18,2)').alias('new_gmv'),\n    )\n    pub = spark.table('published_metrics')\n    j = touched.join(F.broadcast(pub), touched['biz_key'] == pub['biz_date'], 'left')\n    frozen = j.filter(j['biz_date'].isNotNull()).select(\n        F.col('biz_key').alias('biz_date'),\n        F.col('order_cnt').cast('bigint'),\n        F.col('gmv').cast('decimal(18,2)'),\n        F.lit('PUBLISHED').alias('source'),\n        F.col('rows_in').cast('bigint').alias('held_rows'),\n        F.col('new_gmv').cast('decimal(18,2)').alias('held_amount'),\n    )\n    fresh = j.filter(j['biz_date'].isNull()).select(\n        F.col('biz_key').alias('biz_date'),\n        F.col('new_cnt').cast('bigint').alias('order_cnt'),\n        F.col('new_gmv').cast('decimal(18,2)').alias('gmv'),\n        F.lit('RECOMPUTED').alias('source'),\n        F.lit(0).cast('bigint').alias('held_rows'),\n        ZERO_DEC.cast('decimal(18,2)').alias('held_amount'),\n    )\n    untouched = (\n        pub.join(F.broadcast(touched), pub['biz_date'] == touched['biz_key'], 'left_anti')\n        .select(\n            F.col('biz_date'),\n            F.col('order_cnt').cast('bigint'),\n            F.col('gmv').cast('decimal(18,2)'),\n            F.lit('PUBLISHED').alias('source'),\n            F.lit(0).cast('bigint').alias('held_rows'),\n            ZERO_DEC.cast('decimal(18,2)').alias('held_amount'),\n        )\n    )\n    return (\n        fresh.unionByName(frozen).unionByName(untouched)\n        .select('biz_date', 'order_cnt', 'gmv', 'source', 'held_rows', 'held_amount')\n        .orderBy('biz_date')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    facts = spark.table('late_facts').withColumn(\n        'biz_key', F.coalesce(F.trim(F.col('biz_date')), F.lit('INVALID'))\n    )\n    recompute = facts.groupBy('biz_key').agg(\n        F.count(F.lit(1)).alias('order_cnt'),\n        F.coalesce(F.sum(F.col('amount').cast('decimal(18,2)')), F.lit(0).cast('decimal(18,2)')).alias('gmv'),\n    )\n    published = spark.table('published_metrics').select(\n        F.col('biz_date').alias('biz_key'), 'order_cnt', 'gmv'\n    )\n    return (\n        published.unionByName(recompute)\n        .groupBy('biz_key')\n        .agg(\n            F.max('order_cnt').alias('order_cnt'),\n            F.max('gmv').alias('gmv'),\n            F.lit('MIXED').alias('source'),\n            F.lit(0).cast('bigint').alias('held_rows'),\n            F.lit(0).cast('decimal(18,2)').alias('held_amount'),\n        )\n        .withColumnRenamed('biz_key', 'biz_date')\n        .select('biz_date', 'order_cnt', 'gmv', 'source', 'held_rows', 'held_amount')\n    )\n"
+  },
+  "answer": "## 参考要点\n1. 先分「**冻结域**」与「**可重算域**」再动手：回填的正确单位是分区（日），而分区是否可写取决于「是否已发布」这一外部事实，不取决于数据新旧。实现上必须是「published 驱动输出、变更集只做拦截统计」，而不是「以事实为主表 + union published」——后者正是 case1 被改写的根因。\n2. `held_rows / held_amount` 不是装饰：被拦下的迟到量就是**该报表口径与真实事实之间的偏差预算**，必须可见、可告警（例如「某已发布日 held_amount / gmv > 0.1% → P1，触发截断或重发公告」），否则冻结就变成了「数字悄悄不更新」，比被改更糟。\n3. 「重算 vs 截断」的决策规则要显式：财务/合规口径不可重算（截断 + 公告 + 下月调整项）；分析口径可重算但必须标注版本与生效时间；两者之间要有映射表与对账。这条是治理问题而不是技术问题，principal 面试会重点问。\n4. 幂等与可重跑：函数只读输入、不依赖「上次跑到哪」；写出侧配 `partitionOverwriteMode=dynamic` + 按分区覆盖（默认 static 会清全表），或湖仓 `MERGE INTO`/主键表 upsert；用 Iceberg snapshot / branch 或 Paimon tag 把「发布点」固化，回滚就是切回那个 snapshot，而不是重跑。\n5. 与在线链路共存：回填走独立队列 + 并发上限 + 时间窗错峰；回填写 sink 时的 version 必须**低于**在线值（否则倒灌），这与 bd-pyspark-0003 是同一条不变式的两端。\n6. 放行判据要可度量：双跑对账（行数 / 主键集合差 / 关键指标差异率 / Top-K 一致 + 差异样本归因），连续 K 天满足阈值才切读；调度上「数据就绪 + 质量规则通过」驱动，而不是纯时间驱动。\n7. Spark 4.2 的 `CHANGES` / Auto CDC 与声明式 pipelines 能把「按分区的增量重算 + upsert」变成声明，但**冻结策略仍然要自己实现**（引擎不会知道哪天已发布）；把 published 标记表做成一等公民（带生效时间、不可变、可审计）才是关键。\n\n## 追问\n- 「如果业务方坚持要改已发布日怎么办？」→ 走「重述（restatement）」流程：新版本快照 + 差异说明 + 下游通知 + 保留原发布点可查；技术上用分支/tag，流程上要审批与冻结窗口。\n- 「怎么防止下一次同类事故？」→ 卡口：写出前断言目标分区不在冻结清单（除非带 restatement 标记）；DQC 规则「PUBLISHED 行的 order_cnt/gmv 与上次运行完全一致」；把这条断言做成 CI 里的 golden dataset 对比。\n- 「删除事件为什么要保留而不是直接减？」→ 删除是事实，不是数据缺失；直接减会让「订单数」与「净额」在不同回算路径下不一致，且无法向下游重放。正确做法是 `is_deleted` + 版本裁决（见 bd-pyspark-0003），在指标层显式排除。",
+  "estimatedMinutes": 32,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/warehouse-modeling-quality-backfill.md#backfill-reprocessing",
+    "addedBy": "content-agent-bd"
+  }
+}

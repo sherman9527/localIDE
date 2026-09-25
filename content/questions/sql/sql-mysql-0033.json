@@ -1,0 +1,733 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0033",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "派生指标口径门禁：原子指标 × 业务限定 × 统计周期，同名两种定义必须被点名",
+  "statement": "## 背景\n\nDataphin 官方把规范定义写成一句话【源 D19】：\n\n> \"以**维度建模**作为理论基础，划分并定义**主题域、业务过程、维度、原子指标、\n> 统计周期和派生指标**。\"\n\n而派生指标的创建页给的是另一句更硬的话【源 D18】：\n\n> \"**派生指标用于圈定原子指标统计业务的范围**\"，前提是要先完成**业务实体**与\n> **业务限定**的创建。\n\n两句合起来就是本题的最小口径元组：**原子指标（度量 + 业务过程）+ 业务限定 + 统计周期 = 派生指标**。\n缺任一项，两个团队就会算出不同的\"支付金额\"。\n素材据此推出的一条治理规则（按【推】处理，题面把它写成可判的契约）：\n**改业务限定或统计周期 = 新指标，必须能被发现，不许覆盖同名指标。**\n\n## 表\n\n```\npay_fact(pay_id INT PK, order_id BIGINT, buyer_id INT, amount_pennies BIGINT,\n         biz_date INT, channel VARCHAR(8), refunded INT)     -- refunded 可为 NULL（未回填）\nmetric_def(def_id INT PK, metric_name VARCHAR(32), atomic_metric VARCHAR(32),\n           filter_code VARCHAR(16), period_code VARCHAR(8), version INT)\n```\n\n- `biz_date` 是 `yyyyMMdd` 整数，**不许引入日期函数或时区**；\n- 统计周期的展开是本题设定的常量：`day` = `biz_date = 20260901`，\n  `week` = `biz_date BETWEEN 20260826 AND 20260901`；\n- 业务限定的展开：`all` 无过滤；`no-refund` = `refunded = 0`；`app` = `channel = 'APP'`；\n  `refund` = `refunded = 1`；\n- 原子指标的展开：`sum_amount` = `SUM(amount_pennies)`；`count_buyer` = `COUNT(DISTINCT buyer_id)`。\n\n## 任务\n\n只交**一条 SELECT**，输出四类行，列固定\n`kind, metric_name, filter_code, period_code, value`，按这四列升序：\n\n| `kind` | 判据 | `value` |\n| --- | --- | --- |\n| `derived-metric` | `metric_def` 里**去重后**的每个 `(atomic_metric, filter_code, period_code)` 组合，按 `metric_name` 各出一行 | 该组合的指标值（**单位是分**；空集必须输出 `0`，不许 NULL、不许掉行） |\n| `definition-count` | 某个 `metric_name` 下不同 `(atomic, filter, period)` 三元组数 > 1 | 三元组数；同时把 `filter_code` 放三元组数、`period_code` 放**不同 version 的个数** |\n| `duplicate-registration` | 同一个 `(metric_name, atomic, filter, period)` 被登记多行 | 登记行数 |\n| `scope-gap` | 固定一行：`pay_amount / no-refund / week` | 周窗口内 `refunded IS NULL` 的行数 |\n\n**注意 `derived-metric` 要用去重后的三元组**：\n同一组合被登记两次时，指标值只出一份（否则\"重复登记\"与\"重复出数\"会混在一起）。\n\n## 三条口径纪律\n\n- **`no-refund` 是 `refunded = 0`，不是 `refunded <> 1`**：\n  三值逻辑下后者会把 `NULL` 行**也排除掉**，于是\"未回填\"被静默当成\"未退款\"，\n  口径会随回填进度漂移 —— 而这正是\"昨天的数今天变了\"的制度性成因。\n  `scope-gap` 那一行就是为了让这批发被看见，而不是被悄悄吃掉。\n- **`definition-count` 与 `duplicate-registration` 是两回事**：\n  前者是\"同一个名字有两种算法\"（**不可比**，要拆名字或升版本），\n  后者是\"同一种算法登记了两遍\"（**只是脏元数据**，值不会错）。\n  合并成一列会让治理同学对第二种也去追问口径。\n- **`derived-metric` 的组合必须从 `metric_def` 出发，而不是硬编码六个**：\n  新增一个业务限定时报表要自动多一行；写死组合的实现会在扩容那天悄悄少报一格。\n\n只允许一条 `SELECT`（可用 `WITH`）。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "metric-definition",
+    "derived-metric",
+    "null-semantics",
+    "metadata-governance",
+    "three-value-logic",
+    "modern:semantic-layer"
+  ],
+  "cases": [
+    {
+      "name": "基线：pay_amount 在三种业务限定 × 两种统计周期下给出六个数（全表 13 行）",
+      "input": [],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            35800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            58877
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            28700
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            48477
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            30800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            42800
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            5000
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            2
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "业务限定 no-refund 只含 refunded=0 —— 第 7 行 refunded 是 NULL，它既不算\"未退\"也不算\"已退\"；scope-gap 那一行就是它的可见计数"
+    },
+    {
+      "name": "边界：把未回填的 refunded 补成 0 ⇒ no-refund 的周值变大、scope-gap 归零",
+      "input": [
+        "UPDATE pay_fact SET refunded = 0 WHERE pay_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            35800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            58877
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            28700
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            48477
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            30800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            50577
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            5000
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            2
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "这条证明 refunded IS NULL 与 refunded = 0 是两件事：补数据会改变指标值，而不是改变指标口径"
+    },
+    {
+      "name": "边界：把 8/25 那行搬进周窗口 ⇒ 三个周口径各多 4450，天窗口完全不变",
+      "input": [
+        "UPDATE pay_fact SET biz_date = 20260826 WHERE pay_id = 6"
+      ],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            35800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            63327
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            28700
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            52927
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            30800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            47250
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            5000
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            2
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：事实表清空 ⇒ 九个派生指标都是 0 且必须仍然出行（不许掉行）",
+      "input": [
+        "DELETE FROM pay_fact"
+      ],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            0
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            0
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            0
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            0
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            2
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "SUM 在空集上是 NULL，必须 COALESCE 成 0；掉行会让\"这个指标今天没数\"和\"这个指标没人维护\"长得一模一样"
+    },
+    {
+      "name": "非法形态：同名指标被登记成两种业务限定 ⇒ definition-count 报 2，值不合并",
+      "input": [
+        "INSERT INTO metric_def VALUES (11, 'gmv', 'count_buyer', 'app', 'day', 1)",
+        "INSERT INTO metric_def VALUES (12, 'gmv', 'count_buyer', 'all', 'day', 1)"
+      ],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "gmv",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "gmv",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "gmv",
+            "app",
+            "day",
+            2
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            35800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            58877
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            28700
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            48477
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            30800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            42800
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            5000
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            2
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "gmv 出现两个定义（app / all），素材考点 12 的口径纪律是\"改业务限定或统计周期 = 新指标\"，所以两个数都要单独出行，并额外报一行 definition-count"
+    },
+    {
+      "name": "边界：同一定义再登记一次 ⇒ duplicate-registration 报 3，派生指标不重复出行",
+      "input": [
+        "INSERT INTO metric_def VALUES (13, 'refund_amount', 'sum_amount', 'refund', 'day', 2)"
+      ],
+      "expected": {
+        "columns": [
+          "kind",
+          "metric_name",
+          "filter_code",
+          "period_code",
+          "value"
+        ],
+        "rows": [
+          [
+            "definition-count",
+            "active_buyer",
+            "2",
+            "1",
+            2
+          ],
+          [
+            "definition-count",
+            "pay_amount",
+            "6",
+            "1",
+            6
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "all",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "active_buyer",
+            "no-refund",
+            "day",
+            3
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "day",
+            35800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "all",
+            "week",
+            58877
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "day",
+            28700
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "app",
+            "week",
+            48477
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "day",
+            30800
+          ],
+          [
+            "derived-metric",
+            "pay_amount",
+            "no-refund",
+            "week",
+            42800
+          ],
+          [
+            "derived-metric",
+            "refund_amount",
+            "refund",
+            "day",
+            5000
+          ],
+          [
+            "duplicate-registration",
+            "refund_amount",
+            "refund",
+            "day",
+            3
+          ],
+          [
+            "scope-gap",
+            "pay_amount",
+            "no-refund",
+            "week",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "refund_amount 原本已有一行同定义 ⇒ 现在 3 行。definition-count 不看它（组合数仍是 1），只有重复登记那一列会涨"
+    }
+  ],
+  "answer": "## 参考答案\n\n`WITH scope`（把 day/week 两个窗口展开成一份带 `period_code` 的行集）+\n`combos`（`SELECT DISTINCT` 三元组）+ 三段 `UNION ALL`。\n核心是**组合从元数据出发**，以及 `no-refund` 只认 `= 0`。\n\n**基线六个 `derived-metric`（pay_amount，单位分）**：\n`day/all = 19900+5000+8800+2100 = 35800`；\n`day/no-refund = 19900+8800+2100 = 30800`（第 2 行 refunded=1 被排、\n第 7 行 refunded 是 NULL 也**不在窗口里**，因为它 biz_date=20260828）；\n`day/app = 19900+8800 = 28700`；\n`week/all = 35800 + 12000 + 3300 + 7777 = 58877`；\n`week/no-refund = 30800 + 12000 = 42800`；\n`week/app = 28700 + 12000 + 7777 = 48477`（第 6 行 `pay_id=6` 是 8/25，**在周窗口外**）。\n再加 `active_buyer` 的两行（`day/all` = 3 个买家：101 / 102 / 104，第 1、2 行是同一个人；\n`day/no-refund` = 3 —— 少掉的那条正是 refunded=1 的 pay_id=2）与\n`refund_amount` 的一行（`day/refund` = 5000），\n以及 `definition-count/pay_amount/6/1/6`（六种算法、一个版本）、\n`definition-count/active_buyer/2/1/2`、`duplicate-registration/refund_amount/refund/day/2`、\n`scope-gap/pay_amount/no-refund/week/1`。\n\n**`scope-gap = 1` 与 `week/no-refund` 是同一件事的两面**：\n第 7 行（`refunded IS NULL`、20260828）落在周窗口里，\n`refunded = 0` 不选它 ⇒ `no-refund` 周值 42800 里**没有** 7777。\n用例「把未回填的 refunded 补成 0」让 `week/no-refund` 变成 50577、`scope-gap` 变 0 ——\n**指标值变了、口径没变**。这正是\"补数据\"与\"改口径\"必须分开登记的原因：\n前者是数据问题（可以让回填任务解决），后者是**新指标**（要通知下游、要双跑对账）。\n\n**朴素解最像、也最错的一格**：它把 `no-refund` 写成 `refunded <> 1`。\n基线上这**恰好给出同一个数**（因为那条 NULL 行不在日窗口里），\n所以基线看不出问题；真正把它打回原形的是**周窗口那三行**：\n朴素实现只有三行 `day/*`，压根没有周口径，\n而 `definition-count` 被它写成 `COUNT(*)`（`pay_amount` 给出 6 —— 蒙对了，\n但 `duplicate-registration` 一格都没有，`scope-gap` 也没有）。\n**\"蒙对一格\"正是这类口径 bug 能活很久的原因**，所以本题把 NULL 行放在周窗口内。\n\n**用例「把 8/25 那行搬进周窗口」**才是那个\"只有周口径会动\"的判据：\n`pay_id=6`（4450、APP、refunded=0、原本 biz_date=20260825）挪到 20260826 之后，\n`week/all` 58877 → 63327、`week/app` 48477 → 52927、`week/no-refund` 42800 → 47250，\n**三行各多 4450**，而四个 `day/*` 口径与 `scope-gap` 一行都不动。\n\n**用例「同名指标被登记成两种业务限定」**（新登记 `gmv` 两条：`count_buyer/app/day` 与\n`count_buyer/all/day`）会多出三行：两个 `derived-metric`（`app` 与 `all` 各一个数）\n+ 一行 `definition-count/gmv/2/1/2`。\n**注意值不能合并**：素材的结论是\"改业务限定即新指标\"，\n合并之后两个团队看同一张报表会得出相反的判断。\n\n**用例「同一定义再登记一次」**：`refund_amount` 从 2 行变 3 行，\n但 `definition-count` **不报**（三元组仍是 1 种），只有\n`duplicate-registration/refund_amount/refund/day/3` 涨。\n这条把\"脏元数据\"与\"口径分叉\"分开 —— 前者清理即可，后者必须走变更流程。\n\n**工程延伸（面试追问点）**\n\n1. 语义层怎么落地？（本题的 `combos` 就是语义层的形状：**指标定义是数据，不是 SQL 文本**。\n   素材 §2 追问 16 的判据是\"任一要素变化即为新指标，需版本与对账\"。）\n2. 只有 `version` 列够不够？（不够。基线里 `pay_amount` 有 6 种算法但 version 全是 1\n   —— 这正是\"覆盖式改名\"的现场。所以 `definition-count` 要看三元组数，\n   并把不同 version 的个数放在旁边一列做对照。）\n3. 口径类规则怎么进 DQC？（素材考点 13 的监控分类里有\"业务规则和逻辑规则\"【源 D17】——\n   这两列就是可以直接挂成规则的产物：`definition-count > 1` 阻断发布、\n   `scope-gap > 阈值` 告警。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS `pay_fact`",
+      "DROP TABLE IF EXISTS `metric_def`",
+      "CREATE TABLE pay_fact (pay_id INT NOT NULL PRIMARY KEY, order_id BIGINT NOT NULL, buyer_id INT NOT NULL, amount_pennies BIGINT NOT NULL, biz_date INT NOT NULL, channel VARCHAR(8) NOT NULL, refunded INT NULL) ENGINE=InnoDB",
+      "CREATE TABLE metric_def (def_id INT NOT NULL PRIMARY KEY, metric_name VARCHAR(32) NOT NULL, atomic_metric VARCHAR(32) NOT NULL, filter_code VARCHAR(16) NOT NULL, period_code VARCHAR(8) NOT NULL, version INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO pay_fact VALUES (1, 9001, 101, 19900, 20260901, 'APP', 0), (2, 9002, 101, 5000, 20260901, 'H5', 1), (3, 9003, 102, 8800, 20260901, 'APP', 0), (4, 9004, 102, 12000, 20260830, 'APP', 0), (5, 9005, 103, 3300, 20260826, 'PC', 1), (6, 9006, 103, 4450, 20260825, 'APP', 0), (7, 9007, 104, 7777, 20260828, 'APP', NULL), (8, 9008, 104, 2100, 20260901, 'H5', 0)",
+      "INSERT INTO metric_def VALUES (1, 'pay_amount', 'sum_amount', 'all', 'day', 1), (2, 'pay_amount', 'sum_amount', 'no-refund', 'day', 1), (3, 'pay_amount', 'sum_amount', 'app', 'day', 1), (4, 'pay_amount', 'sum_amount', 'all', 'week', 1), (5, 'pay_amount', 'sum_amount', 'no-refund', 'week', 1), (6, 'pay_amount', 'sum_amount', 'app', 'week', 1), (7, 'active_buyer', 'count_buyer', 'all', 'day', 1), (8, 'active_buyer', 'count_buyer', 'no-refund', 'day', 1), (9, 'refund_amount', 'sum_amount', 'refund', 'day', 2), (10, 'refund_amount', 'sum_amount', 'refund', 'day', 2)"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 25000,
+    "referenceSolution": "WITH scope AS (\n  SELECT 'day' AS period_code, p.* FROM pay_fact p WHERE p.biz_date = 20260901\n  UNION ALL\n  SELECT 'week', p.* FROM pay_fact p\n  WHERE p.biz_date BETWEEN 20260826 AND 20260901\n),\ncombos AS (\n  SELECT DISTINCT metric_name, atomic_metric, filter_code, period_code FROM metric_def\n),\nderived AS (\n  SELECT 'derived-metric' AS kind, c.metric_name, c.filter_code, c.period_code,\n         CASE WHEN c.atomic_metric = 'sum_amount'\n              THEN COALESCE((SELECT SUM(s.amount_pennies) FROM scope s\n                             WHERE s.period_code = c.period_code\n                               AND (c.filter_code = 'all'\n                                    OR (c.filter_code = 'no-refund' AND s.refunded = 0)\n                                    OR (c.filter_code = 'app' AND s.channel = 'APP')\n                                    OR (c.filter_code = 'refund' AND s.refunded = 1))), 0)\n              ELSE COALESCE((SELECT COUNT(DISTINCT s.buyer_id) FROM scope s\n                             WHERE s.period_code = c.period_code\n                               AND (c.filter_code = 'all'\n                                    OR (c.filter_code = 'no-refund' AND s.refunded = 0)\n                                    OR (c.filter_code = 'app' AND s.channel = 'APP')\n                                    OR (c.filter_code = 'refund' AND s.refunded = 1))), 0)\n         END AS value\n  FROM combos c\n)\nSELECT kind, metric_name, filter_code, period_code, value FROM derived\nUNION ALL\nSELECT 'definition-count', d.metric_name, CAST(COUNT(DISTINCT CONCAT(d.atomic_metric, '|',\n       d.filter_code, '|', d.period_code)) AS CHAR),\n       CAST(COUNT(DISTINCT d.version) AS CHAR),\n       COUNT(DISTINCT CONCAT(d.atomic_metric, '|', d.filter_code, '|', d.period_code))\nFROM metric_def d\nGROUP BY d.metric_name\nHAVING COUNT(DISTINCT CONCAT(d.atomic_metric, '|', d.filter_code, '|', d.period_code)) > 1\nUNION ALL\nSELECT 'duplicate-registration', d.metric_name, d.filter_code, d.period_code, COUNT(*)\nFROM metric_def d\nGROUP BY d.metric_name, d.atomic_metric, d.filter_code, d.period_code\nHAVING COUNT(*) > 1\nUNION ALL\nSELECT 'scope-gap', 'pay_amount', 'no-refund', 'week',\n       (SELECT COUNT(*) FROM pay_fact p\n        WHERE p.refunded IS NULL\n          AND p.biz_date BETWEEN 20260826 AND 20260901)\nORDER BY kind, metric_name, filter_code, period_code",
+    "naiveSolution": "SELECT 'derived-metric' AS kind, 'pay_amount' AS metric_name,\n       'all' AS filter_code, 'day' AS period_code,\n       SUM(p.amount_pennies) AS value\nFROM pay_fact p WHERE p.biz_date = 20260901\nUNION ALL\nSELECT 'derived-metric', 'pay_amount', 'no-refund', 'day', SUM(p.amount_pennies)\nFROM pay_fact p WHERE p.biz_date = 20260901 AND p.refunded <> 1\nUNION ALL\nSELECT 'derived-metric', 'pay_amount', 'app', 'day', SUM(p.amount_pennies)\nFROM pay_fact p WHERE p.biz_date = 20260901 AND p.channel = 'APP'\nUNION ALL\nSELECT 'definition-count', d.metric_name, '', '', COUNT(*)\nFROM metric_def d GROUP BY d.metric_name"
+  },
+  "estimatedMinutes": 32,
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发（指标体系与语义层方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-data-and-storage.md#4 考点 12（指标口径治理：规范定义六要素\"主题域、业务过程、维度、原子指标、统计周期和派生指标\"【源 D19】、\"派生指标用于圈定原子指标统计业务的范围\"+ 前提是业务实体与业务限定已建【源 D18】；素材该考点的出题建议正是\"同一支付金额在三种业务限定/统计周期下的正确 SQL，并要求输出派生指标元组\"。\"改限定即新指标\"与 definition-count/duplicate-registration 的拆分是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T15:57:40.229Z"
+  }
+}

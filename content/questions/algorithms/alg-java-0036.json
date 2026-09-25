@@ -1,0 +1,324 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0036",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "截止时间准入：承诺对象是全部已接受请求，不是当前这一个",
+  "statement": "## 背景\n\n推理服务有硬 SLO：一个请求如果在它的截止时间之前**不可能**算完，\n继续排队只是白占显存 —— 正确做法是**当场拒绝**，让调用方去改日期、换模型或降级。\n这就是背压（backpressure）里\"背\"的那一半：不是把队列加长，而是让准入变得诚实。\n\n## 你要实现的入口\n\n```java\npublic static int[] admit(long[] arrivalMs, long[] workMs, long[] deadlineMs)\n```\n\n三根数组按下标对齐，按到达顺序给出每个请求：到达时刻、所需服务时长、截止时刻。\n返回逐条的 **`1` = 接受 / `0` = 拒绝**。\n\n## 调度与服务模型\n\n- **单服务槽**（一台实例同一时刻只跑一个请求），**非抢占**。\n- 已接受的请求按 **EDF（最早截止优先）** 执行：每当服务槽空闲，\n  从\"已到达且未完成\"的请求里选 `deadline` 最小的；\n  并列时选 `arrival` 更早的；再并列选下标更小的。\n- 服务槽空闲且没有已到达的请求时，直接前进到下一个到达时刻（不空转计费）。\n\n## 准入规则（判分点）\n\n1. 处理第 `i` 个请求时，**把候选加进\"此前已被接受的前缀\"，然后判断整个集合在 EDF 下\n   是否所有请求都能不误期**。全部不误期 ⇒ 接受；否则 ⇒ 拒绝。\n   关键是**整集合**：只检查候选自己会不会超期的实现，会把已经承诺给别人的请求挤到超期，\n   而\"已接受的承诺必须兑现\"正是准入控制存在的全部理由。\n2. 拒绝是纯动作：不改变任何已有状态。\n3. 请求自己 `deadline < arrival`（到达时就已过期）⇒ 一定拒（它在规则 1 下必然让集合不可行）。\n4. `workMs[i] == 0` 是合法的（结果已缓存/命中前缀），它不占服务时间。\n5. 输入非法抛 `IllegalArgumentException`：三根数组长度不一致、`arrivalMs` 逆序、\n   到达时刻为负、`workMs` 为负。\n   注意 `deadline < arrival` **不是**非法输入而是\"必然被拒\"的正常业务情况 ——\n   抛错等于让调用方的一个坏请求打死整批判定。\n\n数据规模很小（`arrivalMs.length <= 12`），**直接模拟调度是预期做法** ——\n不需要也没有\"可行性充要条件\"的闭式公式。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "backpressure",
+    "admission-control",
+    "edf-scheduling",
+    "simulation",
+    "modern:inference-scheduling"
+  ],
+  "cases": [
+    {
+      "name": "基线：两条都赶得上",
+      "input": [
+        [
+          0,
+          0
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          10,
+          10
+        ]
+      ],
+      "expected": [
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "候选自己赶得上，但会把已承诺的挤超期",
+      "input": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          6,
+          6,
+          1
+        ],
+        [
+          6,
+          12,
+          7
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "j0、j1 先接受（EDF 下 6 与 12 都赶上）。j2 只要 1ms、deadline=7，自己当然赶得上 —— 但 EDF 会把它插到 j1 前面，把已承诺的 j1 推到 13 > 12 ⇒ 拒 j2"
+    },
+    {
+      "name": "FCFS 会误拒：EDF 能重排出来",
+      "input": [
+        [
+          0,
+          0
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          10,
+          6
+        ]
+      ],
+      "expected": [
+        1,
+        1
+      ],
+      "visible": true,
+      "note": "按到达序第二条 10 > 6；EDF 先跑 deadline=6 ⇒ 5 与 10 都赶上 ⇒ 两条都收"
+    },
+    {
+      "name": "到达时已过期的请求：正常拒绝而不是抛错",
+      "input": [
+        [
+          0,
+          100
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          10,
+          99
+        ]
+      ],
+      "expected": [
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "零工作量合法：命中缓存不占服务时间",
+      "input": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          9,
+          0,
+          9
+        ],
+        [
+          10,
+          10,
+          19
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "非抢占：晚到的紧截止请求插不进去，只能拒",
+      "input": [
+        [
+          0,
+          5
+        ],
+        [
+          10,
+          3
+        ],
+        [
+          20,
+          8
+        ]
+      ],
+      "expected": [
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "第一条从 0 跑到 10（非抢占 ⇒ 不能中途让位），第三条届时要 13 > 8 ⇒ 整个集合不可行。EDF 的插队能力受限于\"服务槽什么时候真空出来\""
+    },
+    {
+      "name": "突发里第 3 条赶不上，但第 4 条仍然可行",
+      "input": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          5,
+          5,
+          5,
+          5
+        ],
+        [
+          5,
+          10,
+          12,
+          20
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "deadline=12 那条需要 15 才能跑完 ⇒ 拒；拒绝是纯动作，所以第 4 条（deadline=20）照样被接受 ⇒ [1,1,0,1]"
+    },
+    {
+      "name": "间隔很大：每个都独立可行",
+      "input": [
+        [
+          0,
+          100,
+          200
+        ],
+        [
+          10,
+          10,
+          10
+        ],
+        [
+          20,
+          120,
+          220
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何请求",
+      "input": [
+        [],
+        [],
+        []
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "非法：三根数组长度不一致",
+      "input": [
+        [
+          0,
+          1
+        ],
+        [
+          5
+        ],
+        [
+          10,
+          10
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：到达时刻逆序",
+      "input": [
+        [
+          10,
+          5
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          20,
+          20
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：服务时长为负",
+      "input": [
+        [
+          0
+        ],
+        [
+          -1
+        ],
+        [
+          10
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：到达时刻为负",
+      "input": [
+        [
+          -5
+        ],
+        [
+          1
+        ],
+        [
+          10
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n每来一个请求就把它加进\"此前已接受的集合\"，然后用 EDF **真模拟一遍**：\n`schedule` 每次从\"已到达未完成\"里挑 `deadline` 最小者执行，任一请求完成时刻超过它的\ndeadline 就判定不可行。n ≤ 12 ⇒ 最坏 `2^12` 级别里的 12 次模拟，每次模拟是 `O(n²)`，\n完全够。\n\n**为什么必须重跑整个前缀**（用例「候选自己赶得上，但会把已承诺的挤超期」）：\n这是准入控制与\"排队策略\"的根本区别。\n朴素版维护一个 `serverFree` 游标，只看新请求接上队尾赶不赶得上 ——\n它隐含假设\"新请求排在最后\"，而 EDF 下新来的紧 deadline 请求会**插到前面**，\n把已接受的松 deadline 请求推到超期。\n后果不是新请求失败，而是**我们已经答应的请求失败**，而这在监控上表现为\n\"接受了却误期\"，比\"直接拒绝\"糟得多：调用方以为排上了，用户白等。\n判据一句话：**准入的承诺对象是全部已接受请求，不是当前这一个。**\n\n**EDF 而非 FCFS**（用例「FCFS 会误拒：EDF 能重排出来」）：\n`arrival=[0,0] work=[5,5] deadline=[10,6]` ⇒ FCFS 按到达序执行，\n第二个在 10 完成 > 6 ⇒ 判不可行而拒掉；EDF 先跑 deadline=6 的那个 ⇒ 5、10 都不误期 ⇒ 接受。\n（顺序并列时\"更早到达优先、再按下标\"是纯为确定性，不影响可行性判定。）\n\n**拒绝必须是纯动作**：如果实现是\"先接受、发现不行再撤销\"，\n撤销时把 `accepted` 改坏了，后面的判定就全歪 —— 这是状态机题里最常见的一类 bug。\n本参考实现的写法是先构造 `candidate` 副本，只有可行才 `accepted = candidate`。\n\n**`deadline < arrival` 不是非法输入**（用例「到达时已过期的请求」）：\n它是一次普通的拒绝。把它抛出去等于让调用方一个坏请求打死整批判定 ——\n而\"到达即过期\"在高负载推理服务里是**常态**（排队时间已经超过 SLO），\n不是编码错误。\n\n**工程延伸（面试追问点）**\n\n1. 单服务槽之外还有什么？（真实推理服务是 continuous batching：一个批内可以塞多个请求，\n   \"服务时长\"取决于批的形状，且**批本身会随新请求动态加入**。\n   于是可行性判定不再是离散模拟，而要按 token 预算算：这题的 `workMs` 就是它的抽象。\n   面试时要把这个差距主动说出来。）\n2. 怎么避免每来一个都重跑全量模拟？（增量：接受一个请求只会让\"完成时刻表\"整体右移，\n   可以对前缀维护一个已算好的时间表，只检查被推后的那部分。\n   但更实际的答案是**在入口处限制窗口**：准入判定本身要 O(1) 才能上关键路径，\n   所以工程上普遍换成充分条件（队列长度/预估等待时间上界），\n   代价是会误拒一部分本可行的请求 —— 这个取舍要显式记录，不能悄悄做。）\n3. 被拒的请求怎么处理？（必须给调用方可行动的信息：建议的重试时刻、可降级的模型档位、\n   或\"改成排队回调\"。只返回 429 是把背压变成客户端轮询风暴。）\n4. 多个实例时这套判定放哪？（放在实例本地 ⇒ 全局会超卖（每台都以为自己可行）；\n   放在中心 ⇒ 中心成为延迟与故障源。常见解法是\"本地精确 + 全局预算\"：\n   中心发 token 配额（近似总容量），本地做这题的可行性判定。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] admit(long[] arrivalMs, long[] workMs, long[] deadlineMs)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  private static final class Job {\n    final int idx;\n    final long arrival, work, deadline;\n\n    Job(int idx, long arrival, long work, long deadline) {\n      this.idx = idx;\n      this.arrival = arrival;\n      this.work = work;\n      this.deadline = deadline;\n    }\n  }\n\n  public static int[] admit(long[] arrivalMs, long[] workMs, long[] deadlineMs) {\n    int n = arrivalMs.length;\n    if (workMs.length != n || deadlineMs.length != n) {\n      throw new IllegalArgumentException(\"arrays disagree\");\n    }\n    for (int i = 0; i < n; i++) {\n      if (arrivalMs[i] < 0) throw new IllegalArgumentException(\"negative arrival\");\n      if (workMs[i] < 0) throw new IllegalArgumentException(\"negative work\");\n      if (i > 0 && arrivalMs[i] < arrivalMs[i - 1]) {\n        throw new IllegalArgumentException(\"arrivals must be non-decreasing\");\n      }\n    }\n\n    List<Job> accepted = new ArrayList<>();\n    int[] out = new int[n];\n    for (int i = 0; i < n; i++) {\n      List<Job> candidate = new ArrayList<>(accepted);\n      candidate.add(new Job(i, arrivalMs[i], workMs[i], deadlineMs[i]));\n      if (schedule(candidate) == null) {\n        out[i] = 0;                         // 拒绝：accepted 一字不动\n      } else {\n        accepted = candidate;\n        out[i] = 1;\n      }\n    }\n    return out;\n  }\n\n  /** 按 EDF 真跑一遍。所有请求都不误期 ⇒ 返回完成时刻表；否则返回 null。 */\n  private static long[] schedule(List<Job> jobs) {\n    List<Job> remaining = new ArrayList<>(jobs);\n    long[] finish = new long[jobs.size() + 1];\n    long t = 0;\n    int done = 0;\n    while (!remaining.isEmpty()) {\n      Job pick = null;\n      for (Job j : remaining) {\n        if (j.arrival > t) {\n          continue;\n        }\n        if (pick == null\n            || j.deadline < pick.deadline\n            || (j.deadline == pick.deadline\n                && (j.arrival < pick.arrival\n                    || (j.arrival == pick.arrival && j.idx < pick.idx)))) {\n          pick = j;\n        }\n      }\n      if (pick == null) {                   // 没有已到达的：前进到下一个到达时刻\n        long next = Long.MAX_VALUE;\n        for (Job j : remaining) {\n          next = Math.min(next, j.arrival);\n        }\n        t = next;\n        continue;\n      }\n      remaining.remove(pick);\n      t += pick.work;\n      if (t > pick.deadline) {\n        return null;\n      }\n      done++;\n    }\n    return finish;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"队列没满就收\"版：只看候选自己赶不赶得上，也不重排已接受的承诺\n  public static int[] admit(long[] arrivalMs, long[] workMs, long[] deadlineMs) {\n    int n = arrivalMs.length;\n    if (workMs.length != n || deadlineMs.length != n) {\n      throw new IllegalArgumentException(\"arrays disagree\");\n    }\n    for (int i = 0; i < n; i++) {\n      if (arrivalMs[i] < 0) throw new IllegalArgumentException(\"negative arrival\");\n      if (workMs[i] < 0) throw new IllegalArgumentException(\"negative work\");\n      if (i > 0 && arrivalMs[i] < arrivalMs[i - 1]) {\n        throw new IllegalArgumentException(\"arrivals must be non-decreasing\");\n      }\n    }\n    long serverFree = 0;\n    int[] out = new int[n];\n    for (int i = 0; i < n; i++) {\n      long start = Math.max(serverFree, arrivalMs[i]);\n      if (deadlineMs[i] < arrivalMs[i]) {\n        out[i] = 0;                         // 自己已过期 ⇒ 拒（这条是对的）\n        continue;\n      }\n      if (start + workMs[i] <= deadlineMs[i]) {\n        out[i] = 1;                         // 错：只看这一个请求，不看会把谁挤超期\n        serverFree = start + workMs[i];\n      } else {\n        out[i] = 0;\n      }\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理引擎 / 调度与容量 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#30（原文把\"背压\"答成\"队列 + 限流\"，未给\"已接受承诺必须兑现\"这个可判分口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:38:41.150Z"
+  }
+}

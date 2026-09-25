@@ -1,0 +1,263 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0023",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "增量拉单取证：漏单、错窗、重单是三件事，职责范围由水位线而不是由\"今天\"定义",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n拼多多官方增量拉单接口 `pdd.order.number.list.increment.get` 有三条硬约束：\n**按最后更新时间切片**、**窗口跨度不超过 30 分钟**、**必须倒序分页（从最后一页往回取）才能避免漏单**。\n本题不考翻页算法（那是算法题），考的是**事后取证**：给定订单表与拉取留痕，\n找出\"哪些单出了问题、分别属于哪一类\"。\n\n```\norders    (order_sn INT PK, updated_at DATETIME, confirm_status TINYINT)\npull_log  (id INT PK, snapshot_id VARCHAR(8), order_sn INT,\n           window_start DATETIME, window_end DATETIME)   -- 每一次\"确实把这单拉回去了\"的留痕\nwatermark (id INT PK, watermark_end DATETIME)            -- 作业声称已处理到的位置\n```\n\n## 任务\n\n输出**所有有问题的订单**，每行两列 `order_sn, issue`，按 `order_sn` 升序、再按 `issue` 升序。\n一个订单可以同时有多个问题 ⇒ 出多行。没有任何问题时返回**空结果集**。\n\n## 三种 issue 的定义（这张表就是判分点）\n\n设 `W` = `watermark.watermark_end`，`u(订单)` = 它的 `updated_at`。\n**作业职责范围** = `u <= W` 的订单（`u > W` 的还不归这次作业管，一律不出问题）。\n\n| `issue` | 判据 |\n| --- | --- |\n| `missed` | 在职责范围内，但 `pull_log` 里**一条都没有**引用到这个 `order_sn` |\n| `out-of-window` | `pull_log` 引用了它，但那条记录的窗口**没包住**它的 `updated_at`：即 `window_start > u` 或 `window_end < u`。窗口边界**闭区间**（`window_start <= u <= window_end` 算包住） |\n| `pulled-twice` | 同一个 `order_sn` 在 `pull_log` 里出现 **≥ 2 条**（跨快照重叠窗口也算 —— 幂等合并是消费方的义务，但\"被拉过两次\"必须被看见） |\n\n另外三条口径：\n\n1. `pull_log` 里引用了**不存在的 `order_sn`** 时，按\"错窗\"处理\n   （它说明留痕与主表已经对不上，这是比漏单更严重的问题）。\n2. `missed` 与 `out-of-window` **互斥**吗？不互斥 —— 同一单可以既被漏、又被别的快照错窗引用。\n3. 水位线 `W` 之后的订单一律不判（**不许**把它们算成漏单，那是把\"还没到时候\"读成\"丢了\"）。\n\n只提交**一条** `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- **\"没人拉过\"和\"拉了但窗口不对\"是两类问题**，责任人与修法完全不同：\n  前者是翻页/分页丢了行（要改翻页方式 + 补拉），后者是窗口算错或时钟漂移（要修窗口与水位线）。\n  合成一个 `anomaly` 的实现在告警出来之后什么也做不了。\n- **职责范围必须由水位线定义，而不是由\"今天有没有数据\"定义。**\n  把 `u > W` 的单也算成漏单，是这类系统最典型的滥报 —— 它会永久存在，于是很快没人看。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "incremental-sync",
+    "audit-trail",
+    "watermark",
+    "missed-record",
+    "modern:data-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：漏单与错窗同时存在",
+      "input": [],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ],
+          [
+            104,
+            "missed"
+          ],
+          [
+            105,
+            "missed"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "三类 issue 各自的条件都要能命中；expected 由行集算出，不手算"
+    },
+    {
+      "name": "补齐留痕：把漏掉的单都记上，missed 归零",
+      "input": [
+        "INSERT INTO pull_log VALUES (7, 'S2', 104, '2026-05-01 09:30:00', '2026-05-01 09:59:00')",
+        "INSERT INTO pull_log VALUES (8, 'S2', 105, '2026-05-01 09:30:00', '2026-05-01 09:59:00')"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "职责边界：水位线推到 09:30，之后的单一律不判",
+      "input": [
+        "UPDATE watermark SET watermark_end = '2026-05-01 09:30:00' WHERE id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "只有 updated_at <= 09:30 的单在职责范围内；把晚到的算成漏单是滥报"
+    },
+    {
+      "name": "错窗：上游把订单的 updated_at 写成未来时间，窗口再也包不住它",
+      "input": [
+        "UPDATE orders SET updated_at = '2026-05-01 11:00:00' WHERE order_sn = 106",
+        "UPDATE watermark SET watermark_end = '2026-05-01 12:00:00' WHERE id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ],
+          [
+            104,
+            "missed"
+          ],
+          [
+            105,
+            "missed"
+          ],
+          [
+            106,
+            "out-of-window"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "S3 那条留痕的窗口是 [10:00,10:30]，而订单已经变成 11:00 ⇒ out-of-window。未来时间还会被下一轮水位线吞掉，所以必须隔离而不是丢弃"
+    },
+    {
+      "name": "重单：同一单被两个快照都拉过，只出一条 pulled-twice",
+      "input": [
+        "INSERT INTO pull_log VALUES (9, 'S4', 101, '2026-05-01 09:00:00', '2026-05-01 09:30:00')"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            101,
+            "pulled-twice"
+          ],
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ],
+          [
+            104,
+            "missed"
+          ],
+          [
+            105,
+            "missed"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "101 出现 2 次 ⇒ 一条 pulled-twice；重复是设计使然，但要被看见"
+    },
+    {
+      "name": "退化：订单与留痕都清空 ⇒ 空结果集（不是返回一行 0）",
+      "input": [
+        "DELETE FROM pull_log WHERE id = 1",
+        "DELETE FROM pull_log WHERE id = 2",
+        "DELETE FROM pull_log WHERE id = 3",
+        "DELETE FROM pull_log WHERE id = 4",
+        "DELETE FROM pull_log WHERE id = 5",
+        "DELETE FROM pull_log WHERE id = 6",
+        "DELETE FROM orders WHERE order_sn = 101",
+        "DELETE FROM orders WHERE order_sn = 102",
+        "DELETE FROM orders WHERE order_sn = 103",
+        "DELETE FROM orders WHERE order_sn = 104",
+        "DELETE FROM orders WHERE order_sn = 105",
+        "DELETE FROM orders WHERE order_sn = 106",
+        "DELETE FROM orders WHERE order_sn = 107"
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "两边都空 ⇒ 零行。只删订单会让留痕全变孤儿，那是一堆 out-of-window，不是空结果 —— 空结果集在 mysql 判题里必须写成裸 []"
+    },
+    {
+      "name": "孤儿留痕：pull_log 引用了不存在的订单，按错窗处理",
+      "input": [
+        "INSERT INTO pull_log VALUES (10, 'S5', 999, '2026-05-01 09:00:00', '2026-05-01 09:30:00')"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            102,
+            "out-of-window"
+          ],
+          [
+            102,
+            "pulled-twice"
+          ],
+          [
+            104,
+            "missed"
+          ],
+          [
+            105,
+            "missed"
+          ],
+          [
+            999,
+            "out-of-window"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三类问题各自一条 `UNION ALL`，共用一个 `pulled` 聚合（每个 `order_sn` 一条，\n带 `times` 与 `outside` 两个计数）。这样\"漏单\"是 `pulled` 里查不到的差集，\n\"错窗/重单\"是它的两个条件投影 —— 三件事看的是同一份留痕。\n\n**基线报出的四条**（用来核对 expected 是不是真的对，`W = 10:30`）：\n`102` 同时中两条 —— 它在 S1 `[09:00,09:30]` 里（`updated_at = 09:20` 被包住），\n又在 S2 `[09:30,09:59]` 里（09:20 落在 `window_start` 之前 ⇒ **没被包住**）\n⇒ `out-of-window` + `pulled-twice`。\n`104`（09:40）与 `105`（09:55）在职责范围内但 `pull_log` 里一条都没有 ⇒ 各自 `missed`。\n`103` 被 S2 的窗口正常包住、`106/107` 被 S3 包住 ⇒ 干净，不出现。\n**四类判据各自只命中该命中的行**：`102` 不能被算成 `missed`（它明明有留痕），\n`107` 也不能因为\"团已取消\"而被跳过（职责范围只看 `updated_at` 与水位线）。\n\n**为什么\"错窗\"要单独一类**：漏单是\"没拉到\"，错窗是\"拉到了但那次查询根本不该返回它\"。\n后者的典型成因是 `updated_at` 被上游写成未来时间、或窗口边界用成了开区间。\n它比漏单更阴：**数据在 `pull_log` 里看起来被处理过，所以差集补拉不会把它捞回来**。\n\n**为什么 `pulled-twice` 也要报**：重叠窗口 + 倒序分页**必然**造成重复拉取，\n这是设计的一部分（宁可重、不可漏）。但\"重\"要求消费方按 `order_sn` 幂等合并 ——\n报出来是为了给幂等合并留一个可对账的证据链，而不是为了当故障处理。\n\n**水位线之外的单不许算漏单**（用例「职责边界」）：\n朴素解那句 `WHERE NOT EXISTS(...)` 没有 `updated_at <= W` 的限制，\n于是\"刚进来还没来得及拉\"的单被永久判成漏单。\n**滥报的代价不是吵，是这条告警再也没有人处理** —— 于是真正的漏单跟着一起被忽略。\n\n**工程延伸（面试追问点）**\n\n1. 这题的判据能不能实时跑？（可以，但窗口要留安全滞后：\n   正在被更新的单会短暂处于\"留痕未落\"的状态，实时判会把它们读成漏单。\n   标准做法是只判 `updated_at < now − 滞后` 的部分。）\n2. 留痕为什么要带 `window_start/window_end` 而不是只带 `pulled_at`？\n   （只有带着窗口边界才能区分\"漏\"与\"错窗\"。只记时间戳的留痕\n   在取证时只能回答\"拉过没有\"，回答不了\"这次拉取有没有资格说它拉过\"。）\n3. 怎么证明没漏？（周期性拿\"按成交时间的全量集合\"与 `pull_log` 的 `order_sn` 集合做差集，\n   差集基数就是漏单率的分子。**漏单率本身是 SLI**，不是事后复盘的产物。）\n4. `order_status` 的 `5 = 全部` 在这里是个坑吗？（是，但属于另一道题：\n   它是筛选值混进枚举值，`pull_log` 的筛选条件与订单表的实际状态列语义不同。\n   留痕表要存**筛选条件的原样**（`order_status` 参数值），而不是只存结果。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS orders",
+      "DROP TABLE IF EXISTS pull_log",
+      "DROP TABLE IF EXISTS watermark",
+      "CREATE TABLE orders (order_sn INT PRIMARY KEY, updated_at DATETIME NOT NULL, confirm_status TINYINT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE pull_log (id INT PRIMARY KEY, snapshot_id VARCHAR(8) NOT NULL, order_sn INT NOT NULL, window_start DATETIME NOT NULL, window_end DATETIME NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE watermark (id INT PRIMARY KEY, watermark_end DATETIME NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO orders VALUES (101, '2026-05-01 09:05:00', 1), (102, '2026-05-01 09:20:00', 1), (103, '2026-05-01 09:31:00', 1), (104, '2026-05-01 09:40:00', 0), (105, '2026-05-01 09:55:00', 1), (106, '2026-05-01 10:10:00', 1), (107, '2026-05-01 10:25:00', 2)",
+      "INSERT INTO pull_log VALUES (1, 'S1', 101, '2026-05-01 09:00:00', '2026-05-01 09:30:00'), (2, 'S1', 102, '2026-05-01 09:00:00', '2026-05-01 09:30:00'), (3, 'S2', 103, '2026-05-01 09:30:00', '2026-05-01 09:59:00'), (4, 'S2', 102, '2026-05-01 09:30:00', '2026-05-01 09:59:00'), (5, 'S3', 107, '2026-05-01 10:00:00', '2026-05-01 10:30:00'), (6, 'S3', 106, '2026-05-01 10:00:00', '2026-05-01 10:30:00')",
+      "INSERT INTO watermark VALUES (1, '2026-05-01 10:30:00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 9000,
+    "referenceSolution": "WITH scope AS (\n  SELECT o.order_sn, o.updated_at FROM orders o\n  WHERE o.updated_at <= (SELECT MAX(w.watermark_end) FROM watermark w)\n), pulled AS (\n  SELECT p.order_sn,\n         COUNT(*) AS times,\n         MAX(o.updated_at) AS upd_at,\n         SUM(CASE WHEN o.order_sn IS NULL\n                    OR p.window_start > o.updated_at\n                    OR p.window_end < o.updated_at\n                  THEN 1 ELSE 0 END) AS outside\n  FROM pull_log p\n  LEFT JOIN orders o ON o.order_sn = p.order_sn\n  GROUP BY p.order_sn\n)\nSELECT s.order_sn, 'missed' AS issue\nFROM scope s\nLEFT JOIN pulled p ON p.order_sn = s.order_sn\nWHERE p.order_sn IS NULL\nUNION ALL\nSELECT p.order_sn, 'out-of-window'\nFROM pulled p\nWHERE p.outside > 0\n  AND (p.upd_at IS NULL OR p.upd_at <= (SELECT MAX(w.watermark_end) FROM watermark w))\nUNION ALL\nSELECT p.order_sn, 'pulled-twice'\nFROM pulled p\nWHERE p.times >= 2\n  AND p.upd_at <= (SELECT MAX(w.watermark_end) FROM watermark w)\nORDER BY order_sn, issue",
+    "naiveSolution": "-- \"有留痕就算拉走过\"版：只看 pull_log 里有没有出现过，\n-- 于是错窗与重单永远查不出来；并且把水位线之后的单也算成漏单（滥报）。\nSELECT o.order_sn, 'missed' AS issue\nFROM orders o\nWHERE NOT EXISTS (SELECT 1 FROM pull_log p WHERE p.order_sn = o.order_sn)\nORDER BY o.order_sn"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "PDD",
+    "role": "数据平台（同步与对账方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 3（30 分钟窗口 + 倒序分页防漏单的官方原文）＋ 考点 4「素材建议 judgeKind=mysql：给定多次快照算漏单/重单、水位线推进」，未给判据表",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.122Z"
+  }
+}

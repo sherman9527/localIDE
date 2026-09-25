@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0004",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "Stream 消费组：PEL 收敛、接管崩溃者，且近似裁剪不算裁剪",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7；`XAUTOCLAIM` 需要 6.2+，`XADD`/`XREADGROUP`/`XPENDING` 全程只用开源内核命令）。\n\n上游已经把 4 条订单消息用**显式 ID** 写进 `orders:stream`（判题要可复现，所以禁止用 `*` 生成 ID，也禁止 `TIME`）：\n  0-1 p alice / 0-2 p bob / 0-3 p carol / 0-4 p dave\n（字段名固定 `p`，值分别是 alice、bob、carol、dave）\n\n按时间线顺序提交命令序列（消费组名固定 `workers`，消费者名 `c1`/`c2`，死信流 `orders:dlq`）：\n  t1 创建消费组，起点必须是 0-0（保证 4 条历史消息都能被本组消费）\n  t2 c1 一次拉 2 条\n  t3 c1 **处理成功后** ACK 这 2 条（0-1、0-2）\n  t4 c1 再拉 2 条（0-3、0-4）\n  t5 c1 进程崩溃：0-3、0-4 留在 PEL（pending entries list）里，**没有** ACK\n  t6 c2 接管 c1 遗留在途的消息（判题是串行执行的，没有真实等待时间，所以 min-idle-time 给 0、游标给 0-0；生产要给出真实阈值，见答案）\n  t7 c2 成功处理 0-3 → ACK 0-3\n  t8 c2 处理 0-4 **失败** → 把它投递到死信流 `orders:dlq`（字段 `reason` = `handle-error`，ID 可用 `*`），但**绝不 ACK 0-4**：这条必须继续留在 PEL 里等待重试/人工介入\n  t9 内存治理：把 `orders:stream` 精确裁剪到最多 2 条（必须保留最新的 0-3、0-4）\n\n硬性要求与提醒：\n- 判题只看最终键状态，所以「先 ACK 再处理」这种写法在 XPENDING 上会假装干净，但它过不了 t8 的用例；\n- 近似裁剪 `MAXLEN ~` 在小流上**根本不会裁剪**，`XLEN` 会当场暴露；\n- 禁止 KEYS/FLUSHALL/EVAL/SCRIPT/OBJECT/SORT/DEBUG。",
+  "judgeKind": "redis",
+  "tags": [
+    "streams",
+    "consumer-group",
+    "pel-repair",
+    "dead-letter",
+    "memory-bound",
+    "modern:redis7-streams"
+  ],
+  "cases": [
+    {
+      "name": "PEL 只剩那条处理失败的消息（滞留边界）",
+      "input": ["XPENDING orders:stream workers"],
+      "expected": [1, "0-4", "0-4", [["c2", 1]]],
+      "note": "恰好 1 条、归属 c2：证明消费组真的在用、ACK 只给了成功处理的消息、接管也真的发生了。"
+    },
+    {
+      "name": "崩溃消费者的 PEL 必须被搬走",
+      "input": ["XPENDING orders:stream workers - + 10 c1"],
+      "expected": [],
+      "note": "参数顺序是 `XPENDING key group start end count [consumer]`——把消费者名写在 group 后面会得到 `value is not an integer`。"
+    },
+    {
+      "name": "c1 重连后按 0 读自己的 PEL 应当为空",
+      "input": ["XREADGROUP GROUP workers c1 STREAMS orders:stream 0"],
+      "expected": [["orders:stream", []]],
+      "note": "RESP2 下 XREADGROUP 一定先返回流名，再返回条目列表；空 PEL 是空数组而不是 nil。"
+    },
+    {
+      "name": "精确裁剪后剩下的必须是最新两条",
+      "input": ["XRANGE orders:stream - +"],
+      "expected": [["0-3", ["p", "carol"]], ["0-4", ["p", "dave"]]]
+    },
+    {
+      "name": "流长度上界",
+      "input": ["XLEN orders:stream"],
+      "expected": 2
+    },
+    {
+      "name": "死信流只有一条",
+      "input": ["XLEN orders:dlq"],
+      "expected": 1
+    },
+    {
+      "name": "重复 ACK 的幂等边界",
+      "input": ["XACK orders:stream workers 0-3 0-4"],
+      "expected": 1,
+      "note": "此刻 PEL 里只有 0-4：重复 ACK 0-3 返回 0、ACK 0-4 返回 1，所以总数必须是 1。把全部消息在 t3 就一次 ACK 完的实现这里会返回 0。"
+    }
+  ],
+  "answer": "参考解：\n```\nXGROUP CREATE orders:stream workers 0-0\nXREADGROUP GROUP workers c1 COUNT 2 STREAMS orders:stream >\nXACK orders:stream workers 0-1 0-2\nXREADGROUP GROUP workers c1 COUNT 2 STREAMS orders:stream >\nXAUTOCLAIM orders:stream workers c2 0 0-0\nXACK orders:stream workers 0-3\nXADD orders:dlq * reason handle-error\nXTRIM orders:stream MAXLEN 2\n```\n要点：\n1) **at-least-once 的现实形态**：`XREADGROUP` 只是把消息挂进 PEL，处理成功才 `XACK`。t8 故意不 ACK —— 失败消息必须留在 PEL 里才能被 `XAUTOCLAIM`/`XCLAIM` 重试，这就是「重试队列免费拿到」的原因；反过来，**先 ACK 再处理**的写法一旦崩溃就是永久丢消息，而 `XPENDING` 显示 0 滞留，看起来非常健康（这正是本题用例 1 要抓的）。\n2) **接管崩溃者**：`XPENDING <key> <group>` 看总量与归属分布，完整形式是 `XPENDING <key> <group> [IDLE <min-idle-ms>] <start> <end> <count> [consumer]`（**消费者名在最后**，写错位置会得到 `value is not an integer`；`IDLE` 变体 6.2+）；批量接管并改归属用 `XAUTOCLAIM`/`XCLAIM`。`XREADGROUP ... STREAMS key 0` 是「读自己 PEL」的正确姿势（`>` 只读新消息）。判题里 `XPENDING ... - + 10 c1 == []` 就是证明归属真的转移了 —— 只 ACK 不 claim 的话 0-3/0-4 会永远挂在死掉的 c1 名下。\n3) **`XAUTOCLAIM` 的返回值是三元组** `[下次游标, [被接管的条目], [已被删除的 id]]`（第三段 7.0 起才有）：被 PEL 引用但已从流里被裁剪掉的「幽灵 id」会出现在第三段 —— 这直接把下一条的坑连起来了。\n4) **`MAXLEN ~` 不是「约等于」**：近似裁剪只在节点边界生效（小流上等于不裁剪），要硬上界必须写精确 `MAXLEN n`。而精确裁剪又会删掉仍被 PEL 引用的条目 → `XLEN` 达标但 `XPENDING` 里出现幽灵消息、后续 `XCLAIM` 复活失败。Redis 8.2 才给出 `XDELEX`/`XACKDEL` 与 `XTRIM ... DELREF/ACKED` 这类「删条目与处理 PEL 同步」的语义；7.2 的正确姿势是「先 ACK/移入 DLQ，再裁剪」，并给 DLQ 单独设 MAXLEN。\n5) 判题为什么不能断言时间类字段：`XPENDING <key> <group> <count>` 的明细行是 `[id, consumer, 空闲毫秒, 投递次数]`，后两项依赖墙钟 → 用例 2 只能断言「空数组」，一旦非空就必须改用幂等的 `XACK` 返回值（用例 7）来间接验证 PEL 内容。\n6) `XGROUP CREATE` 的起点：用 `0-0`（或 `$` + 另外回放）。用 `$` 会漏掉全部历史消息；漏建组时所有读都返回 `NOGROUP`（7.0 起消息会**自动创建消费者**，但不会自动创建组）。\n\n追问：\n- 死信要不要自动进？→ 需要重试计数：PEL 的 delivery time / `XCLAIM ... JUSTID` + `IDLE` 做退避，超过 N 次才移入 DLQ，否则会形成「毒消息风暴」反复重投。\n- 消费幂等怎么做？→ 下游用 `SET idem:<entryId> 1 NX EX ...` 或与业务唯一键绑定的幂等表；消息 ID 在 `XAUTOCLAIM` 之后不变，因此是可靠的去重键。\n- 集群下怎么部署？→ Stream 是单键，天然同 slot；但 DLQ 与业务键跨 slot 时不能放同一条多键命令（`CROSSSLOT`），要拆成两次调用并接受非原子。\n- 与发布订阅的边界：pub/sub 是 fire-and-forget（无客户端时消息直接丢、不持久化、不能回放），只能做「在线通知」；任何要求「至少一次到达」的链路必须用 Stream。",
+  "runner": {
+    "setup": [
+      "DEL orders:stream",
+      "DEL orders:dlq",
+      "XADD orders:stream 0-1 p alice",
+      "XADD orders:stream 0-2 p bob",
+      "XADD orders:stream 0-3 p carol",
+      "XADD orders:stream 0-4 p dave"
+    ],
+    "timeoutMs": 10000,
+    "referenceSolution": "XGROUP CREATE orders:stream workers 0-0\nXREADGROUP GROUP workers c1 COUNT 2 STREAMS orders:stream >\nXACK orders:stream workers 0-1 0-2\nXREADGROUP GROUP workers c1 COUNT 2 STREAMS orders:stream >\nXAUTOCLAIM orders:stream workers c2 0 0-0\nXACK orders:stream workers 0-3\nXADD orders:dlq * reason handle-error\nXTRIM orders:stream MAXLEN 2",
+    "naiveSolution": "XGROUP CREATE orders:stream workers 0-0\nXREADGROUP GROUP workers c1 COUNT 4 STREAMS orders:stream >\nXACK orders:stream workers 0-1 0-2 0-3 0-4\nXADD orders:dlq 0-1 reason handle-error\nXTRIM orders:stream MAXLEN ~ 2"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#15-高频生产模式含命令级细节",
+    "addedBy": "content-agent-sql"
+  }
+}

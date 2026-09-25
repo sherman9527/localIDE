@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0009",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "Spark SQL 生成 SCD2 拉链：从每日全量快照切段（属性回改、缺快照日、NULL 取值）",
+  "statement": "## 背景与数据规模\n商品维度只有**每日全量快照**（ODS 层，`listing_dim_snapshot`，**4800 万 listing × 1000 天**），下游要按「事件时点的国家归属」算历史 GMV。\n没有拉链就没有时点正确性——直接 join 当前快照会让「房东搬家 / listing 换国家」重写全部历史指标（最典型的静默口径事故）。\n本题只要求你从快照**生成 SCD2 拉链**，Spark 4.2 起可以用 `QUALIFY` 简化窗口过滤、用 `MERGE INTO` 增量维护拉链，但本题在通用 SQL 能力上完成。\n\n## 输入\n临时视图 `snap`（每个用例单独灌入）：`dt STRING(yyyy-MM-dd), listing_id STRING, country STRING(可能为 NULL)`\n\n## 口径定义（必须严格实现）\n1. **同日重复快照视为重复投递**：对 `(dt, listing_id)` 去重，取 `country` 的**非 NULL 字典序最小值**；该组全为 NULL 时结果为 NULL。（即 `MIN(country)` 的语义。）\n2. `dt IS NULL` 或 `listing_id IS NULL` 的行丢弃。\n3. **只有属性真正变化才切段**：`country` 与前一条快照**不等**才算新段起点。比较必须是 **null-safe**（`<=>`）：`country` 从 `'US'` 变成 `NULL`、或从 `NULL` 变回 `'US'` 都算变化；用 `prev_country <> country` 会因为 NULL 返回 NULL 而**漏切段**。\n4. **缺失快照日不切段也不造洞**：某 listing 在中间日期没有快照时，前一段的区间自然延长（本题快照按 `dt` 排序后逐段推进，不做日历补齐）。\n5. 段边界：`valid_from` = 该段首个快照日；`valid_to` = **下一段 `valid_from` 的前一天**；最后一段 `valid_to = '9999-12-31'`、`is_current = 'Y'`，其余 `'N'`。三个日期列都输出 `yyyy-MM-dd` **字符串**。\n6. 属性回改必须产生 3 段：`US → FR → US` 是三段，不是两段（不能只按 `country` 分组求 min/max，那样会把两段 US 合并成一段并吞掉中间的 FR）。\n\n## 输出\nDataFrame/结果集，列**必须严格是** `listing_id, country, valid_from, valid_to, is_current`。\n**判题为行序敏感**：你必须自己写全序 `ORDER BY listing_id ASC, valid_from ASC`（`listing_id` 与 `valid_from` 都不会为 NULL，因此该排序是全序）。\n\n## 约束\n- 只提交**一条** SELECT 或 WITH 查询（可多行、可用 CTE/窗口函数；不要分号分隔多条语句）。\n- 禁止用「自连接 + `a.dt <= b.dt`」推拉链：4800 万 × 1000 天的规模下它退化成笛卡尔积。用 `LAG` + 累计 `SUM` 的 gaps-and-islands 写法。",
+  "judgeKind": "pyspark",
+  "language": "sql",
+  "tags": [
+    "scd2-zipper",
+    "dimensional-modeling",
+    "gaps-and-islands",
+    "spark-sql",
+    "null-safe-comparison",
+    "modern:spark-4-2-qualify"
+  ],
+  "cases": [
+    {
+      "name": "基础：属性回改必须产出三段（并列快照日不切段）",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": [
+          { "dt": "2026-01-01", "listing_id": "L1", "country": "US" },
+          { "dt": "2026-01-02", "listing_id": "L1", "country": "US" },
+          { "dt": "2026-01-03", "listing_id": "L1", "country": "FR" },
+          { "dt": "2026-01-05", "listing_id": "L1", "country": "US" }
+        ]
+      },
+      "expected": [
+        { "listing_id": "L1", "country": "US", "valid_from": "2026-01-01", "valid_to": "2026-01-02", "is_current": "N" },
+        { "listing_id": "L1", "country": "FR", "valid_from": "2026-01-03", "valid_to": "2026-01-04", "is_current": "N" },
+        { "listing_id": "L1", "country": "US", "valid_from": "2026-01-05", "valid_to": "9999-12-31", "is_current": "Y" }
+      ],
+      "note": "FR 段的 valid_to 是 01-04（下一段起点 01-05 的前一天）——01-04 没有快照也必须被覆盖。"
+    },
+    {
+      "name": "边界：中间缺快照日不切段也不留空洞",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": [
+          { "dt": "2026-01-01", "listing_id": "L2", "country": "DE" },
+          { "dt": "2026-01-04", "listing_id": "L2", "country": "DE" },
+          { "dt": "2026-01-08", "listing_id": "L2", "country": "IT" }
+        ]
+      },
+      "expected": [
+        { "listing_id": "L2", "country": "DE", "valid_from": "2026-01-01", "valid_to": "2026-01-07", "is_current": "N" },
+        { "listing_id": "L2", "country": "IT", "valid_from": "2026-01-08", "valid_to": "9999-12-31", "is_current": "Y" }
+      ],
+      "note": "01-01..01-04 的三次 DE 快照是一段时间（同属性不得按快照日切成多段）。"
+    },
+    {
+      "name": "NULL 取值边界：US → NULL → US 必须三段（需要 <=> 比较）",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": [
+          { "dt": "2026-01-01", "listing_id": "L3", "country": "US" },
+          { "dt": "2026-01-02", "listing_id": "L3", "country": null },
+          { "dt": "2026-01-03", "listing_id": "L3", "country": null },
+          { "dt": "2026-01-04", "listing_id": "L3", "country": "US" }
+        ]
+      },
+      "expected": [
+        { "listing_id": "L3", "country": "US", "valid_from": "2026-01-01", "valid_to": "2026-01-01", "is_current": "N" },
+        { "listing_id": "L3", "country": null, "valid_from": "2026-01-02", "valid_to": "2026-01-03", "is_current": "N" },
+        { "listing_id": "L3", "country": "US", "valid_from": "2026-01-04", "valid_to": "9999-12-31", "is_current": "Y" }
+      ],
+      "note": "`prev <> cur` 在 cur 为 NULL 时返回 NULL → CASE 落 ELSE → 漏切段；连续两个 NULL 也不能各成一段。"
+    },
+    {
+      "name": "重复：同日同 listing 多行（含 NULL）取非 NULL 字典序最小",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": [
+          { "dt": "2026-01-01", "listing_id": "L4", "country": "US" },
+          { "dt": "2026-01-01", "listing_id": "L4", "country": "AA" },
+          { "dt": "2026-01-01", "listing_id": "L4", "country": null },
+          { "dt": "2026-01-02", "listing_id": "L4", "country": "US" },
+          { "dt": null, "listing_id": "L4", "country": "ZZ" },
+          { "dt": "2026-01-03", "listing_id": null, "country": "BB" }
+        ]
+      },
+      "expected": [
+        { "listing_id": "L4", "country": "AA", "valid_from": "2026-01-01", "valid_to": "2026-01-01", "is_current": "N" },
+        { "listing_id": "L4", "country": "US", "valid_from": "2026-01-02", "valid_to": "9999-12-31", "is_current": "Y" }
+      ],
+      "note": "dt 为 NULL 与 listing_id 为 NULL 的行都必须被丢弃（否则会出现幽灵段）。"
+    },
+    {
+      "name": "单条快照与多 listing 并行：各自只有一段且为当前",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": [
+          { "dt": "2026-01-01", "listing_id": "L5", "country": "JP" },
+          { "dt": "2026-01-01", "listing_id": "L6", "country": null },
+          { "dt": "2026-01-02", "listing_id": "L6", "country": null }
+        ]
+      },
+      "expected": [
+        { "listing_id": "L5", "country": "JP", "valid_from": "2026-01-01", "valid_to": "9999-12-31", "is_current": "Y" },
+        { "listing_id": "L6", "country": null, "valid_from": "2026-01-01", "valid_to": "9999-12-31", "is_current": "Y" }
+      ]
+    },
+    {
+      "name": "空快照分区：返回零行而不是全 NULL 一行",
+      "input": {
+        "view": "snap",
+        "schema": "dt string, listing_id string, country string",
+        "rows": []
+      },
+      "expected": []
+    }
+  ],
+  "runner": {
+    "entry": "sql",
+    "timeoutMs": 75000,
+    "orderSensitive": true,
+    "referenceSolution": "WITH snap_clean AS (\n  SELECT listing_id, dt, MIN(country) AS country\n  FROM snap\n  WHERE dt IS NOT NULL AND listing_id IS NOT NULL\n  GROUP BY listing_id, dt\n),\nflagged AS (\n  SELECT listing_id, dt, country,\n         LAG(country) OVER (PARTITION BY listing_id ORDER BY dt) AS prev_country,\n         ROW_NUMBER() OVER (PARTITION BY listing_id ORDER BY dt) AS rn\n  FROM snap_clean\n),\nmarked AS (\n  SELECT listing_id, dt, country,\n         CASE WHEN rn = 1 OR NOT (country <=> prev_country) THEN 1 ELSE 0 END AS is_new\n  FROM flagged\n),\nsegmented AS (\n  SELECT listing_id, dt, country,\n         SUM(is_new) OVER (PARTITION BY listing_id ORDER BY dt ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS seg\n  FROM marked\n),\nbounds AS (\n  SELECT listing_id, country, seg, MIN(dt) AS valid_from, MAX(dt) AS last_seen\n  FROM segmented\n  GROUP BY listing_id, country, seg\n),\nsequenced AS (\n  SELECT listing_id, country, valid_from,\n         LEAD(valid_from) OVER (PARTITION BY listing_id ORDER BY valid_from) AS next_from\n  FROM bounds\n)\nSELECT listing_id, country, valid_from,\n       COALESCE(DATE_FORMAT(DATE_SUB(TO_DATE(next_from), 1), 'yyyy-MM-dd'), '9999-12-31') AS valid_to,\n       CASE WHEN next_from IS NULL THEN 'Y' ELSE 'N' END AS is_current\nFROM sequenced\nORDER BY listing_id ASC, valid_from ASC",
+    "naiveSolution": "WITH flagged AS (\n  SELECT listing_id, dt, country,\n         LAG(country) OVER (PARTITION BY listing_id ORDER BY dt) AS prev_country\n  FROM snap\n),\nmarked AS (\n  SELECT listing_id, dt, country,\n         CASE WHEN prev_country IS NULL OR prev_country <> country THEN 1 ELSE 0 END AS is_new\n  FROM flagged\n),\nsegmented AS (\n  SELECT listing_id, dt, country,\n         SUM(is_new) OVER (PARTITION BY listing_id ORDER BY dt) AS seg\n  FROM marked\n),\nbounds AS (\n  SELECT listing_id, country, seg, MIN(dt) AS valid_from, MAX(dt) AS valid_to\n  FROM segmented\n  GROUP BY listing_id, country, seg\n)\nSELECT listing_id, country, valid_from, valid_to,\n       CASE WHEN valid_to = '2026-12-31' THEN 'Y' ELSE 'N' END AS is_current\nFROM bounds\nORDER BY listing_id ASC, valid_from ASC"
+  },
+  "answer": "## 参考要点\n1. 正确的骨架是「**LAG 判变化 → 累计 SUM 生成分段号 → GROUP BY 收敛段边界 → LEAD 求下一段起点**」。跳过「累计 SUM」直接 `GROUP BY listing_id, country` 会把回改的两段 US 合并（case1 变成 2 行、FR 段被吞），这是最高频的错误答案。\n2. NULL 处理有三处：同日去重要 `MIN(country)`（忽略 NULL 但全 NULL 时得 NULL）；切段判断必须 `<=>`（普通 `<>` 遇 NULL 返回 NULL，CASE 落 ELSE，直接漏段）；`is_current` 不能靠「valid_to 等于某个魔法日期」判断，必须由 `LEAD(...) IS NULL` 导出（把 `'9999-12-31'` 当判断条件会在快照末日恰好是 12-31 时出错，naive 就是这类硬编码）。\n3. 窗口帧细节：case1/case2 里 `SUM(is_new) OVER (PARTITION BY ... ORDER BY dt)` 用默认 RANGE 帧是安全的（`(listing_id, dt)` 已去重、无并列行），但一旦去重被漏掉（case4）RANGE 会把并列行算成同一个 seg，产生错误的段起点——所以「先去重再开窗」不是风格问题而是正确性前提。\n4. 生产化要点（判题外，面试重点）：\n   - 全量快照 4800 万 × 1000 天不能每天全量重刷拉链：用 `MERGE INTO`（Iceberg v3 deletion vectors / Paimon 主键表 + `sequence.field`）做增量拉链，只有属性变化的 key 才闭旧段、开新段；\n   - 迟到快照（回填历史某天）会插入到区间**中间**，必须支持「重开一段」而不是简单 upsert：这是 SCD2 最难的部分，需要按 `(listing_id, dt)` 重算受影响区间并覆盖写该日之后的分区；\n   - 拉链表的 `valid_from/valid_to` 用 `DATE` 而非字符串（跨引擎比较与分区裁剪更安全），本题为了判分稳定用字符串，生产必须说明差异；\n   - 时点 join 的边界必须显式钉死：`fact.ts >= valid_from AND fact.ts < date_add(valid_to, 1)`（或 `BETWEEN` 含尾），并在文档里给出「变更当天归新段」的例子，两套口径混用就是「财务与 BI 差一天」的根因。\n5. 可验证性：上线卡口应包含「同 key 区间不重叠、不空洞、有且仅有一个 current 段」三条不变式（用 `LAG` 自检生成 DQC 规则），外加「拉链行数 vs 快照行数 × 变化率」的量级校验。\n\n## 追问\n- 「Spark 4.2 上你怎么简化？」→ `QUALIFY ROW_NUMBER() OVER (...) = 1` 省掉一层子查询并让优化器更早做窗口过滤；但切段逻辑与 NULL 语义仍要自己写对，语法糖不解决口径。\n- 「为什么不直接保留每日快照当维表？」→ 存储翻 1000 倍、且查询必须按 `dt` 精确命中（快照缺失日就查不到），拉链的代价是要维护正确性；折中是「快照 + 仅变化日入拉链」的变化数据捕获（CDC）。\n- 「维度里的 country 一天内变了两次怎么办？」→ 快照粒度决定了拉链粒度：日快照只能得到日级拉链，需要日内变更就必须换成事件粒度源（CDC）+ `valid_from/valid_to` 用 timestamp，并重新评估存储与 join 代价。",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/warehouse-modeling-quality-backfill.md#dimensional-modeling",
+    "addedBy": "content-agent-bd"
+  }
+}

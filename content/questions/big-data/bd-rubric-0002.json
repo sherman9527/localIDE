@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0002",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "Iceberg v3 vs Paimon 主键表：实时湖仓选型、compaction 归属与多引擎读写矩阵",
+  "statement": "## 场景（Airbnb 数据平台方向，35 分钟）\n你要为一条「MySQL 分库分表 CDC + Kafka 行为事件」双源链路选湖仓底座，并统一到一套对外供数接口。约束与现状：\n- 规模：**订单事实 6 年内 2.1 万亿行**、日增量 42 亿行；SKU/卖家维度 4800 万行、日变更 3%；行为事件日均 90 亿条（半结构化 `attributes` 占 35%）。\n- 写入侧：Flink 2.x 为主（CDC 直写湖表），Spark 4.x 批回填与修数，偶有 Trino 交互式查询、Doris/StarRocks 直读做看板、ClickHouse 做日志类检索。\n- 消费侧三类：① BI 看板（200 QPS、p95 < 1s、要 join 维表）；② 财务对账（必须可重算可审计、按发布点冻结、错一分钱要能追到「哪一次提交改的」）；③ 算法特征（point-in-time 正确、要按天快照与回灌）。\n- 现有痛点：Hive 表「小文件 1.9 亿个、`listStatus` 90 秒」；上游改过一次列类型导致 BI 静默错 4 小时；回填和在线并发跑会把旧值倒灌；同一张表被 5 种引擎读写，特性支持进度不一。\n\n## 请回答\n1. **选型结论与理由**：Iceberg（含 v3：deletion vectors、row lineage、default values）与 Paimon 主键表（LSM、changelog producer）分别放在链路的哪个位置？给出「为什么不是只用一个」的判据（写放大/读放大、点查、流读 changelog、引擎生态、运维归属），并明确你会怎么**拒绝**把两种格式同时铺到所有表。\n2. **主键与分桶/排序设计**：订单表、维度表、事件表各自的 key/bucket/sort 方案与依据；更新与删除事件怎么落（tombstone、`sequence.field`、partial-update、聚合合并引擎各用在什么场景）。\n3. **维护即产品**：compaction（bin-pack/sort/z-order、`rewrite_data_files`、Paimon `num-sorted-run.stop-trigger` 与 full compaction 窗口）、snapshot 过期与时间旅行窗口、orphan 清理、manifest 压缩——各自的触发条件、预算（占写入资源的百分比）与冲突场景（长查询/流读正在读的 snapshot 被清）。\n4. **多引擎读写矩阵与 catalog**：哪些能力必须实测才能用（v3 特性、MERGE、时间旅行、schema 演进、行级权限）；HMS → REST catalog（Polaris/Lakekeeper 类）迁移的动因与并发提交/锁语义风险。\n5. **可回滚的落地路径**：从 Hive 迁到湖仓（不停写）、双写与对账、以及一旦选错的退出成本。\n\n要求：所有结论都要有量级或判据支撑；不确定 GA 状态的特性（例如新类型、向量/多模态索引）请明确标注「需核实到具体版本与发行说明」，不要写「都支持」。",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "lakehouse-selection",
+    "iceberg-v3",
+    "paimon-lsm",
+    "compaction-governance",
+    "multi-engine-read",
+    "modern:paimon-1.4"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "notes": "重点看是否按「写侧模型 + 读侧形态 + 运维归属」三维选型，而不是格式信仰。凡出现「所有引擎都支持」而无核实路径，相应考点扣一半。",
+    "points": [
+      {
+        "label": "选型判据与职责边界（3 分）",
+        "weight": 3,
+        "criteria": "命中条件：给出**分层结论**（例如：事件/日志类大追加走 Iceberg 追加表或列式湖表；强实时 upsert/主键语义、下游要流读 changelog 的走 Paimon 主键表；BI 服务层另放 OLAP），并能用机理支撑：LSM 的写放大/读放大与 sorted-run 反压 vs Iceberg v3 deletion vectors 把「点改」从整文件重写变成向量追加、row lineage 让「这行被哪次提交改过」可查（直接服务财务审计与跨区复制校验）；说清各自 compaction 归属与团队技能要求；并明确「两种格式铺满所有表」的代价（元数据/维护作业翻倍、口径分裂、值班复杂度）。只按「Paimon 更新强 / Iceberg 生态好」贴标签、无写读放大与运维归属论证的 ≤1 分。"
+      },
+      {
+        "label": "主键、分桶与更新语义设计（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：三类表分别给 key/bucket/sort 并说明依据（点查与剪枝 vs 扫描聚合；分桶数如何由日增量与目标文件大小推导、改桶数的重刷代价要明确承认）；更新删除落到 `sequence.field`/version 裁决 + tombstone，讲清为什么不能靠 `max(updated_at)`（时钟回拨、批量修数带旧时间、丢删除）；partial-update 用于「多流补列」、聚合合并引擎用于「预聚合上卷」各自的适用与陷阱（null 语义、删除事件与 partial-update 的冲突）。"
+      },
+      {
+        "label": "维护作业与预算（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：把维护当产品——bin-pack/sort/z-order 各服务什么查询模式；compaction 资源预算（占写入 CPU/IO 的比例、错峰窗口、写放大倍数）、Paimon `num-sorted-run.stop-trigger` 导致「写被阻塞」的因果与处置（compaction 并行度、full compaction 时段、反压传导）；`expire_snapshots`/`snapshot.time-retained` 与时间旅行/合规保留/长查询流读的冲突（读到被清快照的失败模式与规避：保留窗口 + 读时重试 + 下游 SLA 对齐）；orphan 清理与 manifest 压缩的调度频率与判据（小文件数、listing 耗时）。只说「定时跑 compaction」不给指标与预算的 ≤1 分。"
+      },
+      {
+        "label": "多引擎兼容矩阵与 catalog 治理（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：明确「格式统一 ≠ 能力统一」，列出必须**逐引擎实测**的能力清单（v3 写入/读取、deletion vectors 兼容、MERGE/UPDATE/DELETE、时间旅行与增量读、schema 演进规则、行/列级权限、统计信息），并给出核实路径（版本、发行说明、灰度双读对比）；说清 catalog 选型影响：HMS vs REST catalog（Polaris/Lakekeeper 类）在并发提交冲突、条件写/锁语义、跨引擎原子性、策略与审计上的差别，以及迁移的动因与风险（双 catalog 期的元数据漂移）。"
+      },
+      {
+        "label": "迁移路径与退出成本（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：给出不停写路径（新建湖表 → 双写 → 影子读对账（行数/主键集合/校验和/关键指标差异率）→ 逐消费方切读 → 停旧），保留回滚点（原表或旧 snapshot 可切回的时间窗）；说明回填期间的边界一致性（快照点 + version 裁决）；并诚实给出「选错格式的退出成本」评估方法（数据可被另一格式读取的程度、元数据/口径资产的重建代价、下游改造工作量）。"
+      }
+    ]
+  },
+  "answer": "## 参考要点\n1. 结论应当是「**按写侧模型分表，而不是按信仰选格式**」：追加型大表（事件/日志）用 Iceberg（v3 deletion vectors 之后点改不再是全文件重写；row lineage 直接支撑审计与跨区校验）；强实时 upsert 且下游要流读 changelog 的用 Paimon 主键表（LSM + changelog producer 决定下游能否增量消费，`input` vs `lookup`/`full-compaction` 的取舍必须讲）；高并发看板仍然要在 OLAP 服务层物化，不要指望直读湖满足 p95 < 1s（见 bd-rubric-0003）。\n2. 表设计三要素：主键（决定 upsert 与点查）、分桶（决定并发与 colocate，改桶数=全量重刷，必须提前定容）、排序/分区（决定剪枝效率）。合并引擎按业务挑：`partial-update`（多流补列，注意 NULL 语义与删除事件的交互）、聚合合并（预聚合上卷，不可加指标不能用它跨维求和）、版本裁决（`sequence.field = version`，呼应 bd-pyspark-0003）。\n3. 维护四件套要成作业并有预算：`rewrite_data_files`（bin-pack 治 1.9 亿小文件；sort/z-order 只在有明确过滤模式时做）、`remove_orphan_files`、`expire_snapshots`（与时间旅行/合规保留/正在读快照的长查询冲突，这是真实故障源）、manifest 压缩。Paimon 侧对应 `compact` / full compaction 窗口与 `num-sorted-run.stop-trigger`（写被阻塞的根因是 compaction 跟不上，加并行度只是把问题推到 IO）。\n4. 多引擎与 catalog：能力矩阵必须实测（Spark/Flink/Trino/Doris/StarRocks/ClickHouse 对 v3、增量读、MERGE、权限的支持进度不同）；REST catalog 的价值是并发提交的条件写/锁语义、策略与审计、跨引擎一致性，迁移风险在双 catalog 期的元数据漂移与「谁是真值」。\n5. 治理配套：schema 契约与演进策略（加列可自动传播；改名/改类型必须显式审批，否则就是那次「BI 静默错 4 小时」的根因）、Spark 4.2 `CHANGES`/Auto CDC 与表格式 CDC 视图的分工（声明式合并 ≠ 冻结策略）、隐私删除请求的落地（deletion vector + crypto-shredding + 备份/湖内延迟删除承诺与可证明性）。\n\n## 追问\n- 「为什么不全部上 Paimon？它不是更适合 CDC 吗？」→ 要答出 LSM 写放大与 compaction 归属、下游流读语义依赖 changelog producer、以及非 Flink 引擎读写主键表的兼容性；再给出「按表分级」的收敛方案。\n- 「row lineage 与快照时间旅行有什么本质区别？」→ 时间旅行是「表在某时刻的状态」，row lineage 是「这一行由哪次提交产生/修改」；前者服务复现与回滚，后者服务审计、删除可证明性与跨区复制校验。\n- 「怎么证明你的 compaction 有效？」→ 用文件数、平均文件大小、查询扫描字节、`listStatus` 耗时、以及单位写入的 compaction CPU 开销五个指标做前后对比，并给出成本增量。",
+  "estimatedMinutes": 35,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/streaming-lakehouse-flink-paimon-iceberg.md#lakehouse-selection",
+    "addedBy": "content-agent-bd"
+  }
+}

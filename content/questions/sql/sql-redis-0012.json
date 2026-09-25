@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0012",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "消息幂等窗口的 Redis 落地：有界去重、重放走 NX、慢消费者只标记不删除",
+  "statement": "## 背景\n\n火山引擎《消息队列 RocketMQ 版 · 相关概念》给出了这题全部的可核查地基【源 S19/S15】：\n\n- **集群消费**：\"同一 Topic 的消息只需被集群内的任意一个消费者处理……每条消息仅被消费一次\"；\n  **广播消费**：\"同一 Topic 的消息会被**所有**订阅的消费者都消费一次……**每条消息会被消费多次**\"；\n- **三类位点**：`MaxOffset`（分区总数）、`MinOffset`（起始）、`ConsumerOffset`（已消费条数）；\n- **死信**：\"达到最大重试次数后消费依然失败\"，且\"**订阅关系创建时自动创建死信队列**\"；\n- 延时消息：\"支持自定义毫秒级延迟，延迟时长最长为 3 天或消息保留时长的 3 倍（两者取较小值）\"。\n\n\"重复投递如何做幂等、慢消费者如何隔离\"素材明确标为【推】，\n所以下面的规则是**本题设定的契约**。\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL` / `EVALSHA` / `SCRIPT` / `FCALL` / `KEYS` / `FLUSHDB` /\n`CONFIG` / `DEBUG` / `SORT` / `OBJECT` / `SELECT`（判题器直接拒）。\n\n## 判题方式\n\n与常规一致：摆好初始状态 ⇒ 顺序执行你提交的脚本 ⇒ 逐条读回校验最终状态。\n**不模拟并发、不让时间流逝。** 本场景 `now = 10000`，幂等窗口 3600 ⇒ 窗口左边界 6400。\n\n## 初始状态\n\n```\nHSET mq:g1:retry m-200 2                     -- m-200 已重试 2 次，上限是 3\nZADD mq:g1:slow 7000 clientA / 6100 clientB   -- 每个消费者的水位（已提交位点）\nSET  mq:g1:dlq 0                              -- 死信条数计数\nZADD mq:g1:idem 5000 m-001                      -- 幂等窗口（member=msgId，score=到达时刻）\n                                             -- 里面留一条已经超出保留期的 msgId，E1 必须清掉它\nmq:g1:paused:clientB 不存在\n```\n\n## 八个事件\n\n| 事件 | 情况 | 必须 | 绝对不许 |\n| --- | --- | --- | --- |\n| E1 | 窗口里有一条 `m-001`（到达 5000）已超出保留期 | 回收它 | 让它继续占位 |\n| E2 | 首次消费 `m-100`（到达 8000） | 记入窗口 | 覆盖已有成员 |\n| E3 | **`m-100` 被重复投递**，时间戳是 8100 | 变成 no-op | 把窗口边界推后 |\n| E4 | 首次消费 `m-150`（到达 9000） | 记入窗口 | — |\n| E5 | `m-200` 第三次失败 ⇒ 达到重试上限 | 计数加到 3，并让死信计数加 1 | 停在 2 |\n| E6 | `clientA` 提交新水位 9500 | 更新（它必须还在集合里） | 给它重建水位 |\n| E7 | `clientB` 水位 6100，落在窗口左边界之外 ⇒ 判定为慢消费者 | 落下暂停标记 | 动 clientA |\n| E8 | — | — | 不许 `DEL` 幂等窗口或水位表 |\n\n要求最终状态：`mq:g1:idem` 恰好两个成员 `m-100`(score **8000**) 与 `m-150`(9000)；\n`HGET mq:g1:retry m-200` 为 `3`；`mq:g1:dlq` 为 `1`；\n`mq:g1:slow` 仍是两个成员且 `clientA` 水位为 `9500`、`clientB` 为 `6100`；\n`mq:g1:paused:clientB` 为 `1`；`clientA` 没有被暂停。\n\n## 这题真正考的东西\n\n1. **幂等窗口必须是\"有界的集合\"，不是\"永久的集合\"。**\n   没有 E1 的回收，这个 ZSET 会随消息量单调增长 —— 于是\"防重复投递\"\n   这个机制本身变成了一次内存泄漏。**任何去重方案的第一问都是\"窗口边界在哪\"。**\n2. **E3 的 `NX`**：重复投递带的到达时刻比首次**更晚**。\n   不带 NX ⇒ `m-100` 的 score 变成 8100 ⇒ 它在窗口里**多留 100 个时间单位**，\n   于是\"窗口\"对每一条消息都不是同一个长度。\n   而下游是否重复处理，取决于**这一次消费有没有真正执行**（脚本管不了），\n   但至少窗口不能因为重放而漂移。\n3. **E6 必须用 `XX`**：水位表是消费者的**存在性证明**。\n   用无条件 `ZADD` 会让一个早已掉线、水位被清理过的客户端\n   被一个迟到的提交**重建**出来 ⇒ 它重新进入 rebalance，\n   而它其实已经不在了。**这和直播题的\"僵尸租约\"是同一个故障家族。**\n4. **慢消费者只能被标记，不能被删除**（E7/E8）：\n   `ZREM mq:g1:slow clientB` 看起来\"解决了\"，实际毁掉了三样东西 ——\n   它的续传位点（恢复后要从头重放）、堆积统计的分母、\n   以及\"这个消费者到底慢在哪\"的证据。\n   官方把位点定义成 `ConsumerOffset`【源 S19】，正因为**它是事实，不是缓存**。\n\n只交一段命令脚本。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "message-idempotency",
+    "bounded-window",
+    "dead-letter-count",
+    "consumer-lag",
+    "no-lua-constraint",
+    "modern:streaming-reliability"
+  ],
+  "cases": [
+    {
+      "name": "重放不许把窗口边界推后：m-100 的 score 仍是首次的 8000",
+      "input": [
+        "ZSCORE mq:g1:idem m-100"
+      ],
+      "expected": "8000",
+      "note": "不带 NX 会把它改成 8100 ⇒ 窗口长度对每条消息都不一样了",
+      "visible": true
+    },
+    {
+      "name": "窗口里恰好两条：m-100 与 m-150（初值那条 m-001 必须已被回收）",
+      "input": [
+        "ZCARD mq:g1:idem"
+      ],
+      "expected": 2,
+      "visible": true
+    },
+    {
+      "name": "边界：窗口左边界之外不许留任何成员（score 小于等于 6400 的数量是 0）",
+      "input": [
+        "ZCOUNT mq:g1:idem -inf 6400"
+      ],
+      "expected": 0,
+      "note": "没有 E1 的回收，这个集合会随消息量单调增长 ⇒ 去重变成内存泄漏",
+      "visible": true
+    },
+    {
+      "name": "达到重试上限的那条要留痕（retry 计数是 3）",
+      "input": [
+        "HGET mq:g1:retry m-200"
+      ],
+      "expected": "3",
+      "visible": true
+    },
+    {
+      "name": "死信计数加一",
+      "input": [
+        "GET mq:g1:dlq"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "正常消费者的水位要推进",
+      "input": [
+        "ZSCORE mq:g1:slow clientA"
+      ],
+      "expected": "9500",
+      "visible": true
+    },
+    {
+      "name": "慢消费者不许被从水位表里删掉（它是事实，不是缓存）",
+      "input": [
+        "ZSCORE mq:g1:slow clientB"
+      ],
+      "expected": "6100",
+      "visible": true
+    },
+    {
+      "name": "水位表仍是两个成员",
+      "input": [
+        "ZCARD mq:g1:slow"
+      ],
+      "expected": 2,
+      "visible": true
+    },
+    {
+      "name": "慢消费者要被标记",
+      "input": [
+        "GET mq:g1:paused:clientB"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "边界：不许把正常消费者一起暂停",
+      "input": [
+        "EXISTS mq:g1:paused:clientA"
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "幂等窗口本身不许消失",
+      "input": [
+        "EXISTS mq:g1:idem"
+      ],
+      "expected": 1,
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nZREMRANGEBYSCORE mq:g1:idem -inf 6400\nZADD mq:g1:idem NX 8000 m-100\nZADD mq:g1:idem NX 8100 m-100      # 重复投递 ⇒ no-op，score 保持 8000\nZADD mq:g1:idem 9000 m-150\nHINCRBY mq:g1:retry m-200 1\nINCR mq:g1:dlq\nZADD mq:g1:slow XX 9500 clientA\nSET mq:g1:paused:clientB 1\n```\n\n**为什么 E1 的回收边界是 6400 而不是 10000**：\n窗口长度 3600 ⇒ 只保留 `(now - 3600, now] = (6400, 10000]` 内到达的消息。\n`m-100` 的 8000 与 `m-150` 的 9000 都在窗口内。\n本题初值里故意留了一条已过保留期的 `m-001`(5000) ⇒ 漏写 E1 会当场被 「窗口里恰好两条：m-100 与 m-150」抓到（ZCARD 会是 3）。\n**这条初值存在的唯一理由，是让\"忘了写 E1\"变成可判分的** —— 第一版这里是个空窗口，漏写回收的脚本照样全绿，而它上线之后就是只增不减的内存泄漏。\n**判题器测的是\"最终状态对不对\"，你要写的是\"线上每周都在跑的那段代码\"；\n两者之间差的永远是数据形状 —— 数据不给力，闸门就只是装饰。**\n\n**`HINCRBY` 而不是 `HSET ... 3`**：\n重试计数是多实例并发推进的，写死\"3\"会把别的实例已经记到的数覆盖掉\n（和上一题的 `reject` 同理）。**\"我知道最终应该是几\"不是写成常量的理由 ——\n脚本此刻看到的值才是唯一事实。**\n\n**`INCR mq:g1:dlq` 与\"死信队列\"是两件事**：\n官方说死信队列在**订阅关系创建时自动创建**【源 S19】，\n所以这里记的不是\"我建了个队列\"，而是\"我这边观测到多少条落进了死信\"。\n它必须是**计数器而不是 0/1 标记** —— 死信条数是重试风暴与\n\"某个消费者的某段逻辑坏了\"的量表，标量只够做告警、不够做趋势。\n\n**朴素解为什么挂得彻底**：它 `DEL` 掉幂等窗口与水位表（两个 EXISTS/ZCARD 校验直接失败）、\n`HDEL` 掉重试计数（`HGET` 返回 nil 而不是 3）、还暂停错了人\n（`clientA` 被暂停、`clientB` 没有 ⇒ 最后两条校验同时反向）。\n**这五条一起挂，说明判题器确实在按用例粒度报失败** ——\n如果只挂一条，反倒要怀疑用例写得不够分。\n\n**工程延伸（面试追问点）**\n\n1. 为什么幂等键是 `msgId` 而不是业务键？（`msgId` 防的是**投递层重放**，\n   业务键防的是**同一业务动作被提交两次**。两者是不同的故障：\n   网络重试会让同一个 msgId 到两次；而用户双击会让两个不同 msgId 承载同一个业务动作。\n   真实系统两层都要 —— 投递层用这里的 ZSET，业务层用唯一索引 + 幂等键。）\n2. 窗口要多长？（它必须 **≥ 最大重放跨度**。RocketMQ 的延时消息上限是\n   \"3 天或保留时长的 3 倍取小\"【源 S19】，所以任何 > 3 天的重放都不可能发生 ⇒\n   窗口按\"保留期 + 最大重试跨度\"取，而不是拍一个 3600。\n   本题用 3600 只是为了让边界算得动。）\n3. 慢消费者判定与恢复？（判定要看**水位与 MaxOffset 的差 + 增速**，\n   只看水位会把\"刚接进来的新消费者\"误判成慢的；\n   恢复要看它是否追上过某个滞回线，否则会在边界上反复暂停/恢复 ——\n   和熔断器的半开是同一个问题形状。）\n4. 广播消费下这套数据结构怎么改？（key 里必须带 **消费者实例 ID** 而不是消费组：\n   广播语义下每条消息会被消费多次【源 S19】，\n   用组级窗口会把\"每个实例都该收一次\"错判成重复投递。\n   **这是本题最值钱的一句答：数据结构的粒度必须等于语义的粒度。**）",
+  "runner": {
+    "setup": [
+      "DEL mq:g1:idem",
+      "DEL mq:g1:paused",
+      "ZADD mq:g1:idem 5000 m-001",
+      "HSET mq:g1:retry m-200 2",
+      "ZADD mq:g1:slow 7000 clientA",
+      "ZADD mq:g1:slow 6100 clientB",
+      "SET mq:g1:dlq 0"
+    ],
+    "entry": "function",
+    "timeoutMs": 10000,
+    "referenceSolution": "# 观测时刻 now = 10000，幂等窗口 3600 ⇒ 窗口左边界 6400\n# E1 把窗口外的 msgId 清掉（必须最先做，否则窗口只增不减）\nZREMRANGEBYSCORE mq:g1:idem -inf 6400\n# E2 首次消费 m-100（到达时刻 8000）：记进幂等窗口\nZADD mq:g1:idem NX 8000 m-100\n# E3 同一消息被**重复投递**（广播语义下每条消息会被消费多次），时间戳变成 8100\n#    ⇒ 必须 NX：不带上就会把窗口边界往后推，且这条消息被下游处理两遍\nZADD mq:g1:idem NX 8100 m-100\n# E4 消费 m-150（到达时刻 9000）⇒ 正常记入\nZADD mq:g1:idem 9000 m-150\n# E5 m-200 第三次失败：重试计数从 2 加到 3 ⇒ 达到最大重试次数，落死信\nHINCRBY mq:g1:retry m-200 1\nINCR mq:g1:dlq\n# E6 慢消费者水位：clientA 推进到 9500\nZADD mq:g1:slow XX 9500 clientA\n# E7 clientB 落在窗口左边界之外（水位 6100 < 6400）⇒ 暂停它，别让它拖住整组\nSET mq:g1:paused:clientB 1",
+    "naiveSolution": "# \"消费就完事\"版：不去重、不记重试、发现慢消费者直接把整组水位清空。\nDEL mq:g1:idem\nDEL mq:g1:slow\nHDEL mq:g1:retry m-200\nINCR mq:g1:dlq\nSET mq:g1:paused:clientA 1"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "ByteDance",
+    "role": "服务端研发（消息队列与数据链路方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-backend-and-infrastructure.md#4 考点 11（消息投递语义与扇出可观测：素材建议 judgeKind=redis\"按 (msgId, consumerGroup) 做有界窗口幂等 + 死信计数 + 慢消费者水位\"；集群/广播语义、三类位点、死信定义均为【源 S19】，窗口边界与 XX/NX 的推导按【推】写成题面契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:58:14.904Z"
+  }
+}

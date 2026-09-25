@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0011",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "备份系统 inode 去重的等价类归并",
+  "statement": "## 背景\n\n备份系统扫描到 `n` 个 inode，以及 m 条\"同一份内容\"的证据（`evidenceA[k]` 与 `evidenceB[k]` 指向的两个 inode 属于同一等价类）。要把等价类压成组，并且**每个组的代表元固定为组内最小 id**——因为备份清单要落盘，代表元不稳定会让\"同一份数据在不同机器上算出不同指纹\"，从而产生重复备份。\n\n## 入口\n\n```java\npublic static int[] snapshotGroups(int n, int[] evidenceA, int[] evidenceB)\n```\n\n- 返回长度 `n` 的 `int[]`：`out[i]` = inode i 所在组的**最小 id**；\n- `n == 0` → 返回 `int[0]`；`evidenceA.length == evidenceB.length`，否则抛 `IllegalArgumentException`；\n- 证据端点必须落在 `[0, n)`，越界抛 `IllegalArgumentException`（宁可整批失败，也不能悄悄合并出错误分组）。\n\n## 不变式与硬约束\n\n1. 用**并查集**：按大小组并（union by size）+ **迭代式** `find` + 路径压缩（路径减半或两趟压缩均可）。递归 `find` 在链式证据上会 `StackOverflowError`——证据链长可达 n。\n2. 代表元语义：合并后组根必须是**组内最小 id**（不能靠\"谁先被 attach\"决定），否则同一批证据换个输入顺序就会给出不同答案。判分用\"证据顺序颠倒\"用例专门杀这一点。\n3. `parent[]`/`size[]` 用 `int[]`，禁止 `Integer[]`/`Map<Integer,Integer>` 装箱。\n4. 自证据（`a == b`）与重复证据必须幂等，不得改变结果。\n5. 复杂度：近似 O((n + m) · α(n))；判分规模 n ≤ 2e5、m ≤ 5e5。\n\n## 输出契约\n\n返回 `int[]`，长度恰好为 `n`，`out[i]` 是组内最小 id（因此 `out[out[i]] == out[i]` 恒成立，这是自查不变式）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "union-find",
+    "path-compression",
+    "iterative-find",
+    "determinism",
+    "modern:dedup-snapshot"
+  ],
+  "cases": [
+    {
+      "name": "零 inode 的空快照",
+      "input": [
+        0,
+        [],
+        []
+      ],
+      "expected": []
+    },
+    {
+      "name": "零证据时每个 inode 自成一组",
+      "input": [
+        3,
+        [],
+        []
+      ],
+      "expected": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "name": "单条证据合并两组",
+      "input": [
+        2,
+        [
+          0
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "退化链式证据全部并入同组",
+      "input": [
+        5,
+        [
+          0,
+          1,
+          2,
+          3
+        ],
+        [
+          1,
+          2,
+          3,
+          4
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "重复证据必须幂等",
+      "input": [
+        2,
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "证据顺序颠倒仍取组内最小 id",
+      "input": [
+        6,
+        [
+          3,
+          1,
+          5
+        ],
+        [
+          2,
+          3,
+          4
+        ]
+      ],
+      "expected": [
+        0,
+        1,
+        1,
+        1,
+        4,
+        4
+      ]
+    },
+    {
+      "name": "只给出一条反向证据",
+      "input": [
+        2,
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [
+        0,
+        0
+      ]
+    },
+    {
+      "name": "自证据不得改变任何分组",
+      "input": [
+        2,
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        1
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] snapshotGroups(int n, int[] evidenceA, int[] evidenceB)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 并查集：按大小组并 + 迭代 find + 路径压缩（两趟：先找根，再把路径挂到根）。\n   * 组根恒为\"组内最小 id\"，所以合并时显式比较两个根，取小者当根 —— 结果与输入顺序无关。\n   */\n  public static int[] snapshotGroups(int n, int[] evidenceA, int[] evidenceB) {\n    if (evidenceA.length != evidenceB.length) {\n      throw new IllegalArgumentException(\"evidence arrays must be parallel\");\n    }\n    int[] parent = new int[n];\n    int[] size = new int[n];\n    for (int v = 0; v < n; v++) {\n      parent[v] = v;\n      size[v] = 1;\n    }\n    for (int k = 0; k < evidenceA.length; k++) {\n      int a = evidenceA[k];\n      int b = evidenceB[k];\n      if (a < 0 || a >= n || b < 0 || b >= n) {\n        throw new IllegalArgumentException(\"evidence endpoint out of range\");\n      }\n      int ra = find(parent, a);\n      int rb = find(parent, b);\n      if (ra == rb) continue;                    // 重复/自证据：幂等\n      int keep = Math.min(ra, rb);               // 代表元 = 组内最小 id\n      int drop = Math.max(ra, rb);\n      parent[drop] = keep;\n      size[keep] += size[drop];\n    }\n    int[] out = new int[n];\n    for (int v = 0; v < n; v++) out[v] = find(parent, v);\n    return out;\n  }\n\n  /** 迭代 find：链式证据下递归会 StackOverflowError（栈深度 = 链长）。 */\n  static int find(int[] parent, int x) {\n    int root = x;\n    while (parent[root] != root) root = parent[root];\n    while (parent[x] != root) {\n      int next = parent[x];\n      parent[x] = root;\n      x = next;\n    }\n    return root;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：不做按秩/按最小合并，永远把 b 的根挂到 a 的根下，find 也不压缩。\n  // 代表元由\"证据出现的顺序\"决定 -> 反向证据给出不同的组根，落盘指纹不稳定。\n  public static int[] snapshotGroups(int n, int[] evidenceA, int[] evidenceB) {\n    if (evidenceA.length != evidenceB.length) {\n      throw new IllegalArgumentException(\"evidence arrays must be parallel\");\n    }\n    int[] parent = new int[n];\n    for (int v = 0; v < n; v++) parent[v] = v;\n    for (int k = 0; k < evidenceA.length; k++) {\n      int a = evidenceA[k];\n      int b = evidenceB[k];\n      if (a < 0 || a >= n || b < 0 || b >= n) {\n        throw new IllegalArgumentException(\"evidence endpoint out of range\");\n      }\n      int ra = find(parent, a);\n      int rb = find(parent, b);\n      if (ra != rb) parent[rb] = ra;             // 只看证据方向\n    }\n    int[] out = new int[n];\n    for (int v = 0; v < n; v++) out[v] = find(parent, v);\n    return out;\n  }\n\n  static int find(int[] parent, int x) {\n    while (parent[x] != x) x = parent[x];\n    return x;\n  }\n}\n"
+  },
+  "answer": "**思路**：并查集，但**代表元语义**才是本题的重点：合并时显式取 `min(ra, rb)` 当根，使\"组根 = 组内最小 id\"成为与输入顺序无关的不变式；`out[out[i]] == out[i]` 可以直接当自查断言。\n\n**朴素解错在哪**：`parent[rb] = ra` 让根由\"证据方向\"决定 —— `[1],[0]` 与 `[0],[1]` 给出不同代表元，两次扫描同一份数据算出两套备份清单，就是生产上的重复备份/清单抖动。这类\"结果依赖输入顺序\"的 bug 在单机小样本上永远复现不了，必须靠\"顺序颠倒\"用例。\n\n**为什么必须迭代 find**：链式证据（`0-1, 1-2, ...`）在没有压缩时树高可达 n；递归 find 的栈深度 = 树高，n=2e5 直接 `StackOverflowError`。迭代两趟压缩（或路径减半 `parent[x] = parent[parent[x]]` 单趟）都是标准解。\n\n**注意\"按最小合并\"与\"按秩合并\"的关系**：两者不冲突但只能选一个作为根的选择规则。取最小 id 时树高上界退化为\"最坏 O(n)\"吗？不会破坏 α(n) 摊还吗？——严格按秩的界不再成立（我们改的是 attach 规则），但路径压缩单独就能给出摊还 O((n+m) log(n/m))（Tarjan 的压缩-only 界），实践上与按秩合并无差别。能把这句话说清是 principal 信号。\n\n**复杂度**：时间近似 O((n+m)·α(n))，空间 O(n)（两个 `int[]`，n=2e5 时 1.6MB；`Map<Integer,Integer>` 版本是这个量级的 20 倍以上）。\n\n**面试追问**：\n1. 什么时候不该用 `record` 承载并查集节点？（需要可变累加：record 每步新建对象 → 分配洪水 + 逃逸分析失效；`record` 也不能声明实例字段。）\n2. 若要\"组内元素个数最大值\"？（`size[]` 只在根上有效，输出时 `size[find(i)]`；别忘了合并时同步更新，否则统计偏小。）\n3. 如何比较两次快照的连通性等价？（`Arrays.mismatch(rootA, rootB)` 一次 intrinsic 调用即可判定\"分组是否完全一致\"，比手写循环更快也更好读。）\n4. 证据是流式且要求在线查询？（并查集天然支持在线合并与查询，但\"最小 id 当根\"会让某次合并改变整组代表元 → 对外暴露的代表元不稳定。生产做法：另建 `root→stableGroupId` 映射，只在组内容变化时分配新 id，把\"内部结构\"与\"对外身份\"解耦。）",
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-graph-dp-adversarial.md#3-常见错误答案",
+    "addedBy": "content-agent-alg"
+  }
+}

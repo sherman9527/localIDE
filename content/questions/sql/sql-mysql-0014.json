@@ -1,0 +1,181 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0014",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "Price grid 总价重算：退房日不计价、清洁费不摊、税基只有房费、先舍后加",
+  "statement": "## 基线\n\nMySQL 8.0（判题容器 8.0.x，默认 `ONLY_FULL_GROUP_BY`）。\n\n```\nnightly_price(listing_id INT, stay_date DATE, price DECIMAL(10,2))   -- 每晚价，同一房源每天可不同\nlisting_fee  (listing_id INT PRIMARY KEY, cleaning_fee DECIMAL(10,2),\n              service_rate DECIMAL(6,4), tax_rate DECIMAL(6,4))\nreservation  (listing_id INT PRIMARY KEY, check_in DATE, check_out DATE)  -- 待报价的那一单\n```\n\n## 任务\n\n为 `reservation` 里的这一单**重算总价**（这就是\"price grid 必须重算，不能拿展示起价乘晚数\"的那件事）。\n输出一行，列名与顺序必须是：\n\n```\nnights, lodging_subtotal, cleaning_fee, service_fee, occupancy_tax, total\n```\n\n判题会按 `DECIMAL` 逐列比对（`570.49` 与 `570.490` 等价，但 `570.5` 不等价）。\n\n## 口径（这些是判分点，不是建议）\n\n1. **住宿占用的日期是 `[check_in, check_out)`**：入住当晚计价，**退房那一晚不计价**。\n   `check_out - check_in` 天就是 `nights`。\n2. `lodging_subtotal` = 被占用各晚价格**逐晚相加**（每晚价格可能不同）。\n3. `cleaning_fee` = 房源固定清洁费，**不随晚数摊**。\n4. `service_fee` = `ROUND((lodging_subtotal + cleaning_fee) * service_rate, 2)`。\n5. `occupancy_tax` = `ROUND(lodging_subtotal * tax_rate, 2)` —— 住宿税**只对房费征**，\n   不对清洁费与服务费征。\n6. **舍入时机**：先按上面每一项各自 `ROUND(...,2)`，再把已舍入的四项相加得 `total`。\n   先把未舍入的值加起来再舍，会出现 1 分钱的差异 —— 而账单必须逐项相加等于总额。\n7. 只要被占用的某一晚在 `nightly_price` 里**缺价**，这一单就**不输出行**\n   （不许用 `COALESCE(price, 0)` 补一个看起来合理的低价）。\n8. `nights <= 0`（退房不晚于入住）同样不输出行。\n\n只提交一条 `SELECT` / `WITH` 查询。日期从 `reservation` 表里取，不要写死。\n\n## 这题真正考的东西\n\n- **`MIN(price) × nights` 或\"起价 × 晚数\"是产品上最贵的一种错**：它正是\n  \"展示价与下单价差 40%\"投诉的算术来源。价格日历必须逐晚取。\n- **`BETWEEN check_in AND check_out` 会多算一晚**：闭区间把退房日也算进去了。\n  本题数据里退房日 `2026-06-14` 故意放了一个 `999.99` 的高价，谁算进去谁露馅。\n- **税基与服务费基数不是一回事**：住宿税只针对房费，服务费针对\"房费+清洁费\"。\n  把税算到总价上是多数实现的默认行为，也是合规问题。\n- **先舍后加 vs 先加后舍**：账单要能自证（分项相加等于总额），所以必须在分项处舍入。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "pricing",
+    "decimal-rounding",
+    "half-open-interval",
+    "tax-base",
+    "modern:marketplace-integrity"
+  ],
+  "cases": [
+    {
+      "name": "基线：四晚逐晚相加，退房日那晚的 999.99 不算进来",
+      "input": [],
+      "expected": {
+        "columns": [
+          "nights",
+          "lodging_subtotal",
+          "cleaning_fee",
+          "service_fee",
+          "occupancy_tax",
+          "total"
+        ],
+        "rows": [
+          [
+            4,
+            570.49,
+            85,
+            91.77,
+            71.31,
+            818.57
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "lodging 570.49 / service 91.77 / tax 71.31 / total 818.57"
+    },
+    {
+      "name": "两晚短住：清洁费仍只收一次",
+      "input": [
+        "UPDATE reservation SET check_in = DATE('2026-06-11'), check_out = DATE('2026-06-13') WHERE listing_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "nights",
+          "lodging_subtotal",
+          "cleaning_fee",
+          "service_fee",
+          "occupancy_tax",
+          "total"
+        ],
+        "rows": [
+          [
+            2,
+            220.49,
+            85,
+            42.77,
+            27.56,
+            375.82
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "lodging 220.49，清洁费不因晚数变化"
+    },
+    {
+      "name": "单晚：服务费的基数含清洁费",
+      "input": [
+        "UPDATE reservation SET check_in = DATE('2026-06-12'), check_out = DATE('2026-06-13') WHERE listing_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "nights",
+          "lodging_subtotal",
+          "cleaning_fee",
+          "service_fee",
+          "occupancy_tax",
+          "total"
+        ],
+        "rows": [
+          [
+            1,
+            99.99,
+            85,
+            25.9,
+            12.5,
+            223.39
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "缺价的一晚：整单不报价，而不是按 0 补上",
+      "input": [
+        "UPDATE reservation SET check_in = DATE('2026-06-13'), check_out = DATE('2026-06-16') WHERE listing_id = 7",
+        "DELETE FROM nightly_price WHERE stay_date = DATE('2026-06-15')"
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "06-15 被删 ⇒ 占用区间缺价 ⇒ 0 行；LEFT JOIN+COALESCE 会给出偏低总价"
+    },
+    {
+      "name": "退房日不晚于入住：不输出行",
+      "input": [
+        "UPDATE reservation SET check_in = DATE('2026-06-14'), check_out = DATE('2026-06-14') WHERE listing_id = 7"
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "费率改成 0：只剩房费与清洁费",
+      "input": [
+        "UPDATE listing_fee SET service_rate = 0.0000, tax_rate = 0.0000 WHERE listing_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "nights",
+          "lodging_subtotal",
+          "cleaning_fee",
+          "service_fee",
+          "occupancy_tax",
+          "total"
+        ],
+        "rows": [
+          [
+            4,
+            570.49,
+            85,
+            0,
+            0,
+            655.49
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "service 与 tax 都归 0，total = 570.49 + 85.00 = 655.49"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n```sql\nWITH booking AS (SELECT r.*, DATEDIFF(check_out, check_in) AS nights, f.* \n                 FROM reservation r JOIN listing_fee f USING (listing_id)),\n     lodging AS (SELECT b.*, COUNT(p.stay_date) AS priced_nights, SUM(p.price) AS lodging_subtotal\n                 FROM booking b JOIN nightly_price p\n                   ON p.stay_date >= b.check_in AND p.stay_date < b.check_out   -- 半开区间\n                 GROUP BY ...)\nSELECT nights, lodging_subtotal, cleaning_fee,\n       ROUND((lodging_subtotal + cleaning_fee) * service_rate, 2) AS service_fee,\n       ROUND(lodging_subtotal * tax_rate, 2) AS occupancy_tax,\n       ROUND(lodging_subtotal + cleaning_fee\n             + ROUND((lodging_subtotal + cleaning_fee) * service_rate, 2)\n             + ROUND(lodging_subtotal * tax_rate, 2), 2) AS total\nFROM lodging WHERE nights > 0 AND priced_nights = nights;\n```\n\n**基线手算一遍（用来核对 expected 是不是真的对）**：占用 06-10..06-13 四晚\n⇒ `lodging = 100.00 + 120.50 + 99.99 + 250.00 = 570.49`；\n`service = (570.49 + 85.00) × 0.14 = 91.7686 → 91.77`；\n`tax = 570.49 × 0.125 = 71.31125 → 71.31`；\n`total = 570.49 + 85.00 + 91.77 + 71.31 = 818.57`。\n退房日 `06-14` 的 `999.99` 没被算进来 —— 一旦用 `BETWEEN` 就变成 `1570.48` 起跳。\n\n**四个判分点各自的错法**\n\n1. **`MIN(price) × nights`**：这是\"起价 × 晚数\"式报价，与逐晚真实和差多少完全随机\n   （本题差 `570.49 − 399.96 = 170.53`）。它也是监管点名的\"展示价 ≠ 下单价\"来源。\n2. **闭区间**：退房日那一晚在真实数据里几乎总是有价的（下一位客人要住），\n   所以这个错**不会**在测试数据上暴露成\"缺行\"，只会暴露成\"多收一晚\"。\n3. **清洁费按晚摊**：住 4 晚收 4 次清洁费，是报价里最容易看漏的放大器。\n4. **`priced_nights = nights` 这个守卫**：用 `LEFT JOIN + COALESCE(price,0)` 的实现\n   会在缺价时给出一个\"看起来对但偏低\"的总价 —— 而报价偏低在下单时才会被发现，\n   那时已经变成客诉。缺价必须**不出价**，让上游去补数据。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"先舍后加\"？（账单要能自证：分项相加必须等于总额。先加后舍会让\n   `total ≠ Σ 分项`，对账系统每天报差异，最后只能靠容差掩盖真问题。）\n2. 折扣/长住优惠/币种怎么进来？（都是\"定价管线\"的一环：先算逐晚价 → 应用规则 → 再算费用与税。\n   关键是**舍入只发生在管线末端一次**，中间步骤保持高精度，否则误差会随规则数累积。）\n3. 缓存这个结果吗？（Airbnb 的报价缓存必须把\"价格日历版本 + 费率版本\"一起做成缓存键，\n   否则费率变更后旧报价继续被复用 —— 这正是 sys-design 那道报价缓存题的落点。）\n4. 多房源/多房型？（`nightly_price` 加 `room_type_id`，但\"退房日不计价\"与税基口径不变；\n   口径类规则一定要收在一处实现，双边市场最怕的是房东端与房客端各算一遍。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS nightly_price",
+      "DROP TABLE IF EXISTS listing_fee",
+      "DROP TABLE IF EXISTS reservation",
+      "CREATE TABLE nightly_price (listing_id INT NOT NULL, stay_date DATE NOT NULL, price DECIMAL(10,2) NOT NULL, PRIMARY KEY (listing_id, stay_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+      "CREATE TABLE listing_fee (listing_id INT PRIMARY KEY, cleaning_fee DECIMAL(10,2) NOT NULL, service_rate DECIMAL(6,4) NOT NULL, tax_rate DECIMAL(6,4) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE reservation (listing_id INT PRIMARY KEY, check_in DATE NOT NULL, check_out DATE NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO nightly_price (listing_id, stay_date, price) VALUES (7, DATE('2026-06-10'), 100.00), (7, DATE('2026-06-11'), 120.50), (7, DATE('2026-06-12'), 99.99), (7, DATE('2026-06-13'), 250.00), (7, DATE('2026-06-14'), 999.99), (7, DATE('2026-06-15'), 180.00)",
+      "INSERT INTO listing_fee VALUES (7, 85.00, 0.1400, 0.1250)",
+      "INSERT INTO reservation VALUES (7, DATE('2026-06-10'), DATE('2026-06-14'))"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH booking AS (\n  SELECT r.listing_id, r.check_in, r.check_out,\n         DATEDIFF(r.check_out, r.check_in) AS nights,\n         f.cleaning_fee, f.service_rate, f.tax_rate\n  FROM reservation r\n  JOIN listing_fee f ON f.listing_id = r.listing_id\n  WHERE r.listing_id = 7\n), lodging AS (\n  SELECT b.listing_id,\n         b.nights,\n         b.cleaning_fee,\n         b.service_rate,\n         b.tax_rate,\n         COUNT(p.stay_date) AS priced_nights,\n         SUM(p.price)       AS lodging_subtotal\n  FROM booking b\n  JOIN nightly_price p ON p.listing_id = b.listing_id\n    AND p.stay_date >= b.check_in\n    AND p.stay_date <  b.check_out        -- [check_in, check_out)：退房日不计价\n  GROUP BY b.listing_id, b.nights, b.cleaning_fee, b.service_rate, b.tax_rate\n)\nSELECT nights,\n       lodging_subtotal,\n       cleaning_fee,\n       ROUND((lodging_subtotal + cleaning_fee) * service_rate, 2) AS service_fee,\n       ROUND(lodging_subtotal * tax_rate, 2)                      AS occupancy_tax,\n       ROUND(lodging_subtotal + cleaning_fee\n             + ROUND((lodging_subtotal + cleaning_fee) * service_rate, 2)\n             + ROUND(lodging_subtotal * tax_rate, 2), 2)          AS total\nFROM lodging\nWHERE nights > 0\n  AND priced_nights = nights            -- 有任意一晚缺价 ⇒ 整单不报价（不是按 0 计）",
+    "naiveSolution": "SELECT DATEDIFF(r.check_out, r.check_in)              AS nights,\n       MIN(p.price) * DATEDIFF(r.check_out, r.check_in) AS lodging_subtotal,\n       f.cleaning_fee * DATEDIFF(r.check_out, r.check_in) AS cleaning_fee,\n       ROUND(MIN(p.price) * DATEDIFF(r.check_out, r.check_in) * f.service_rate, 2) AS service_fee,\n       ROUND(MIN(p.price) * DATEDIFF(r.check_out, r.check_in) * f.tax_rate, 2)     AS occupancy_tax,\n       ROUND(MIN(p.price) * DATEDIFF(r.check_out, r.check_in) * (1 + f.service_rate + f.tax_rate)\n             + f.cleaning_fee * DATEDIFF(r.check_out, r.check_in), 2)              AS total\nFROM reservation r\nJOIN nightly_price p ON p.listing_id = r.listing_id\n  AND p.stay_date BETWEEN r.check_in AND r.check_out\nJOIN listing_fee f ON f.listing_id = r.listing_id\nWHERE r.listing_id = 7\nGROUP BY r.check_out, r.check_in, f.cleaning_fee, f.service_rate, f.tax_rate"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "Airbnb",
+    "role": "房东体验 / 定价与可用性 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-marketplace-booking.md §1.2 展示价链条（\"总价必须等于逐晚之和\"）；素材只描述了链路，未做成可判分口径",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:11:47.828Z"
+  }
+}

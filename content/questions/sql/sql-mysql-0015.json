@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0015",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "搜索转化率的两种口径：分子按会话去重、分母不许被 JOIN 吃掉",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。一个搜索会话可以有很多次点击、零到多笔预订：\n\n```\nsearch_session(session_id INT PRIMARY KEY, user_id INT, started_at DATETIME, query_cat VARCHAR(20))\nsearch_click (click_id INT PRIMARY KEY, session_id INT, listing_id INT,\n              clicked_at DATETIME, position INT)      -- position = 结果页上的位次\nbooking      (booking_id INT PRIMARY KEY, session_id INT, listing_id INT,\n              booked_at DATETIME, gmv DECIMAL(10,2))  -- session_id = 成交**所在**的会话\n```\n\n## 任务\n\n按 `query_cat` 输出**两种口径**的搜索→预订转化率，三列且列名顺序必须是：\n\n```\nquery_cat, conv_click_any, conv_last_viewed\n```\n\n两列都是 `[0,1]` 的小数，`ROUND(..., 4)`，按 `query_cat` 升序。只交一条 `SELECT` / `WITH` 查询。\n\n## 口径（这些是判分点，不是建议）\n\n1. **分母永远是该类别的会话数**，含那些\"没有点击\"和\"没有预订\"的会话。\n2. **口径 A `conv_click_any`**：该会话内**至少一次点击** 且 该会话内**至少一笔预订**\n   ⇒ 这个会话计 **1**（不是计预订数、也不是计点击数）。\n3. **口径 B `conv_last_viewed`**：该会话**最后一次点击**的那个 `listing_id`\n   出现在该会话的预订里 ⇒ 计 1。\n   这是 KDD'18 那个 \"book the last viewed listing\" 的代理目标，用来区分\n   \"搜索把用户送到了对的那一家\" 与 \"用户随便看了几家最后订了其中一家\"。\n4. **\"最后一次点击\"的定义**：`clicked_at` 最大；**若同一秒点了多个不同 listing，\n   取 `position` 最小（排得更靠前）的那一条**。同一条 listing 被点多次不算并列。\n5. 归因一律以 `booking.session_id` 为准（成交所在会话）。\n   用户在会话 X 里点了 listing，在会话 Y 里下单 ⇒ 对 X 的两个口径都不算。\n\n## 这题真正考的东西\n\n- **`JOIN` 出来的不是会话**：`session ⟶ click ⟶ booking` 一连就产生**笛卡尔扇出**\n  （一次会话 3 击 1 订 = 3 行）。直接 `SUM(CASE WHEN ... THEN 1 ELSE 0)` 或\n  `COUNT(booking_id)` 的分子会把会话数放大成\"点击×预订配对数\"。\n- **分母必须从会话表出发**：用 `INNER JOIN search_click` 求分母，\n  \"有预订但没点击\"的会话会整体消失 —— 分子分母同时少，看起来\"没问题\"，\n  而某个本来零转化的类别会**整行不见了**而不是显示 0。\n- **\"订的不是最后点的\"这一类必须存在**：A 与 B 的差值才是这题的输出，\n  两个口径写成同一个表达式实现对判题是透明的、对业务是灾难。\n- **并列破法必须确定**：不打破 ties 的实现，`MAX(clicked_at)` 之后随手取一条，\n  结果依赖存储顺序 —— 同一份数据两次跑可能给不同的 B。\n\n不许用窗口函数之外的方言特性；`PERCENTILE_CONT` 之类不存在。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "metric-definition",
+    "join-fanout",
+    "attribution",
+    "tie-break",
+    "modern:marketplace-integrity"
+  ],
+  "cases": [
+    {
+      "name": "基线：三类别两种口径，A 与 B 的差值就是这题的输出",
+      "input": [],
+      "expected": {
+        "columns": [
+          "query_cat",
+          "conv_click_any",
+          "conv_last_viewed"
+        ],
+        "rows": [
+          [
+            "beach",
+            0.6667,
+            0.6667
+          ],
+          [
+            "city",
+            0.8,
+            0.4
+          ],
+          [
+            "new",
+            0.5,
+            0.5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "city A 0.8 / B 0.4；beach 0.6667/0.6667；new 0.5/0.5"
+    },
+    {
+      "name": "同一会话两笔预订：分子仍然只算 1 个会话",
+      "input": [
+        "DELETE FROM booking WHERE booking_id = 4"
+      ],
+      "expected": {
+        "columns": [
+          "query_cat",
+          "conv_click_any",
+          "conv_last_viewed"
+        ],
+        "rows": [
+          [
+            "beach",
+            0.6667,
+            0.6667
+          ],
+          [
+            "city",
+            0.8,
+            0.4
+          ],
+          [
+            "new",
+            0.5,
+            0.5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "删掉会话 3 的第二笔预订 ⇒ 期望与基线完全相同；按预订数计分子的实现这里会动"
+    },
+    {
+      "name": "补上\"无点击会话\"的第一次点击：city 两列同时上跳",
+      "input": [
+        "INSERT INTO search_click (click_id, session_id, listing_id, clicked_at, position) VALUES (16, 4, 404, '2026-07-01 13:10:00', 1)"
+      ],
+      "expected": {
+        "columns": [
+          "query_cat",
+          "conv_click_any",
+          "conv_last_viewed"
+        ],
+        "rows": [
+          [
+            "beach",
+            0.6667,
+            0.6667
+          ],
+          [
+            "city",
+            1,
+            0.6
+          ],
+          [
+            "new",
+            0.5,
+            0.5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "会话 4 从\"有订无击\"变成\"订的就是最后点的\" ⇒ A 1.0、B 0.6"
+    },
+    {
+      "name": "并列被打破：501 点得更晚，beach 的 B 掉一档而 A 不动",
+      "input": [
+        "UPDATE search_click SET clicked_at = '2026-07-01 10:32:00' WHERE click_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "query_cat",
+          "conv_click_any",
+          "conv_last_viewed"
+        ],
+        "rows": [
+          [
+            "beach",
+            0.6667,
+            0.3333
+          ],
+          [
+            "city",
+            0.8,
+            0.4
+          ],
+          [
+            "new",
+            0.5,
+            0.5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "把两列写成同一个表达式的实现在这条上必露馅"
+    },
+    {
+      "name": "新增一个只有点击、没有预订的类别：该行必须出现且为 0",
+      "input": [
+        "INSERT INTO search_session (session_id, user_id, started_at, query_cat) VALUES (11, 11, '2026-07-01 08:00:00', 'cabin')",
+        "INSERT INTO search_click (click_id, session_id, listing_id, clicked_at, position) VALUES (17, 11, 1101, '2026-07-01 08:05:00', 1)"
+      ],
+      "expected": {
+        "columns": [
+          "query_cat",
+          "conv_click_any",
+          "conv_last_viewed"
+        ],
+        "rows": [
+          [
+            "beach",
+            0.6667,
+            0.6667
+          ],
+          [
+            "cabin",
+            0,
+            0
+          ],
+          [
+            "city",
+            0.8,
+            0.4
+          ],
+          [
+            "new",
+            0.5,
+            0.5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "INNER JOIN search_click 会让 cabin 整行消失，而不是给出 0.0000"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步：① 以**会话表为骨架**算出每个会话的 `click_cnt` / `booking_cnt`（标量子查询，\n不参与 JOIN，所以不会扇出）；② 用 `NOT EXISTS` 找\"最后一次点击\"，把并列按 `position`\n最小破掉；③ 按 `query_cat` 聚合，分子是 `SUM(0/1)`、分母是 `COUNT(*)` —— 两边都是会话粒度。\n\n**基线手算一遍（用来核对 expected 真的对）**：\n- `city` 5 个会话：1(3击1订,订的是最后点的)、2(2击1订,订的是第一次点的)、\n  3(1击2订)、4(**无点击**有订)、10(3击1订,订的是中间那次点的)\n  ⇒ A = 4/5 = **0.8000**（4 排除，因为它没有点击），\n  B = 2/5 = **0.4000**（只有 1 和 3 订的是最后点的）。\n  会话 3 有**两笔**预订但只能记 1 —— 这就是 A 与\"预订数/会话数\"的分岔点。\n- `beach` 3 个会话：5(同秒点了 501@pos2 与 502@pos1，订的是 502)、6(同一家点两次,订它)、\n  7(点了没订) ⇒ A = B = 2/3 = **0.6667**。\n  会话 5 靠并列破法才落在 502 上：位次小的排得靠前，\"最后看的是页面上更靠前的那一家\"。\n- `new` 2 个会话：8(**有订无击**)、9 ⇒ A = B = 1/2 = **0.5000**。\n\n**扇出为什么是最贵的一种错**（用例「同一会话两笔预订：分子仍然只算 1 个会话」）：\n`session JOIN click JOIN booking` 之后，会话 3 变成 1击×2订 = 2 行，会话 1 变成 3击×1订 = 3 行。\n\"分子 = 配对数、分母 = JOIN 后行数\"两边同时被放大，比值看起来还在 `[0,1]` 里 ——\n它不会触发任何\"指标越界\"的告警，只会让城市之间的相对排序发生变化，\n然后被拿去做供给决策。**转化率这种比值指标最危险的不是算错，而是算错了还像对的。**\n\n**分母必须从会话表出发**（用例「新增一个只有点击、没有预订的类别：该行必须出现且为 0」）：\n`INNER JOIN search_click` 把\"没有点击的会话\"从分母里抹掉了 —— 于是\n`city` 的分母从 5 变 4，A 从 0.8000 变 1.0000（会话 4 有预订，但它没点击，\n它那一行整个不见了，分子里却还留着它的预订配对）。\n一个数字同时错在两个方向上，这正是\"一个指标三种答案\"的成因。\n\n**A 与 B 必须真的不同**（用例「并列被打破：501 点得更晚，beach 的 B 掉一档」）：\n把会话 5 的 501 改成 10:32 之后，最后点的是 501、订的是 502 ⇒ B 掉到 1/3 = 0.3333，\nA 不动（仍是 0.6667）。这条用例存在的意义就是：**把两列写成同一个表达式的实现必须当场露馅。**\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"按用户数\"再要一列？（会话级转化率会被\"重度比较型用户\"拉低：\n   他们本来就要开 5 个会话才订。用户级口径的分母是 `COUNT(DISTINCT user_id)`，\n   分子要定义成\"该用户在窗口内是否订过\"，与\"哪次搜索带来的\"就脱钩了 ——\n   所以它是**另一个问题**的答案，不是同一个指标的更好版本。）\n2. 跨设备/跨会话归因怎么办？（`booking.session_id` 是\"成交所在会话\"，\n   这本身就是一个归因假设。真实系统要同时留\"最后一击所在会话\"和\"首次发现所在会话\"，\n   两个口径都算，再按业务选 —— 关键是**这个假设要写在指标定义里**，不能藏在 SQL 的 JOIN 方向里。）\n3. `position` 与位次偏差怎么一起看？（B 隐含\"用户订的是他看到的第一家\"，\n   而位次本身就是排序策略的产物 —— 所以 B 提升可能只是\"把结果 1 做得更像会被订的那家\"，\n   而不是相关性变好。这也是这题要单独算\"位次 1 的点击占比 / 曝光占比\"的原因。）\n4. 这两个口径谁该上仪表盘？（A 适合做**漏斗**（搜索有没有把人带到下单动作），\n   B 适合做**排序质量代理**（带得准不准）。放一起看才有意义：\n   A 涨 B 跌 = 用更激进的标题/图片换来了不相关的成交。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS booking",
+      "DROP TABLE IF EXISTS search_click",
+      "DROP TABLE IF EXISTS search_session",
+      "CREATE TABLE search_session (session_id INT PRIMARY KEY, user_id INT NOT NULL, started_at DATETIME NOT NULL, query_cat VARCHAR(20) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE search_click (click_id INT PRIMARY KEY, session_id INT NOT NULL, listing_id INT NOT NULL, clicked_at DATETIME NOT NULL, position INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE booking (booking_id INT PRIMARY KEY, session_id INT NOT NULL, listing_id INT NOT NULL, booked_at DATETIME NOT NULL, gmv DECIMAL(10,2) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO search_session (session_id, user_id, started_at, query_cat) VALUES (1, 1, '2026-07-01 10:00:00', 'city'), (2, 2, '2026-07-01 11:00:00', 'city'), (3, 3, '2026-07-01 12:00:00', 'city'), (4, 4, '2026-07-01 13:00:00', 'city'), (10, 10, '2026-07-01 14:00:00', 'city'), (5, 5, '2026-07-01 10:00:00', 'beach'), (6, 6, '2026-07-01 10:00:00', 'beach'), (7, 7, '2026-07-01 11:00:00', 'beach'), (8, 8, '2026-07-01 09:00:00', 'new'), (9, 9, '2026-07-01 09:00:00', 'new')",
+      "INSERT INTO search_click (click_id, session_id, listing_id, clicked_at, position) VALUES (1, 1, 101, '2026-07-01 10:01:00', 3), (2, 1, 102, '2026-07-01 10:02:00', 1), (3, 1, 103, '2026-07-01 10:05:00', 2), (4, 2, 201, '2026-07-01 11:01:00', 5), (5, 2, 202, '2026-07-01 11:03:00', 2), (6, 3, 301, '2026-07-01 12:01:00', 1), (7, 5, 501, '2026-07-01 10:31:00', 2), (8, 5, 502, '2026-07-01 10:31:00', 1), (9, 6, 601, '2026-07-01 10:35:00', 4), (10, 6, 601, '2026-07-01 10:36:00', 4), (11, 7, 701, '2026-07-01 11:01:00', 1), (12, 9, 901, '2026-07-01 09:31:00', 2), (13, 10, 1001, '2026-07-01 14:01:00', 1), (14, 10, 1002, '2026-07-01 14:02:00', 2), (15, 10, 1001, '2026-07-01 14:03:00', 1)",
+      "INSERT INTO booking (booking_id, session_id, listing_id, booked_at, gmv) VALUES (1, 1, 103, '2026-07-01 10:10:00', 200.00), (2, 2, 201, '2026-07-01 11:10:00', 150.00), (3, 3, 301, '2026-07-01 12:05:00', 99.00), (4, 3, 301, '2026-07-01 12:06:00', 99.00), (5, 4, 404, '2026-07-01 13:20:00', 300.00), (6, 5, 502, '2026-07-01 10:40:00', 120.00), (7, 6, 601, '2026-07-01 10:50:00', 80.00), (8, 8, 701, '2026-07-01 09:40:00', 60.00), (9, 9, 901, '2026-07-01 09:35:00', 45.00), (10, 10, 1002, '2026-07-01 14:10:00', 500.00)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH per_session AS (\n  SELECT s.session_id,\n         s.query_cat,\n         (SELECT COUNT(*) FROM search_click c WHERE c.session_id = s.session_id) AS click_cnt,\n         (SELECT COUNT(*) FROM booking b WHERE b.session_id = s.session_id)       AS booking_cnt\n  FROM search_session s\n), last_view AS (\n  -- 最后一次点击：时刻最大；同刻并列时位次最小（必须确定，否则 B 依赖存储顺序）\n  SELECT c.session_id, c.listing_id\n  FROM search_click c\n  WHERE NOT EXISTS (\n    SELECT 1 FROM search_click x\n    WHERE x.session_id = c.session_id\n      AND (x.clicked_at > c.clicked_at\n           OR (x.clicked_at = c.clicked_at AND x.position < c.position))\n  )\n), scored AS (\n  SELECT ps.query_cat,\n         CASE WHEN ps.click_cnt > 0 AND ps.booking_cnt > 0 THEN 1 ELSE 0 END AS in_any,\n         CASE WHEN ps.click_cnt > 0 AND ps.booking_cnt > 0\n                   AND EXISTS (\n                        SELECT 1 FROM last_view lv\n                        JOIN booking b ON b.session_id = lv.session_id\n                                      AND b.listing_id = lv.listing_id\n                        WHERE lv.session_id = ps.session_id\n                      )\n              THEN 1 ELSE 0 END AS in_last\n  FROM per_session ps            -- 从会话表出发：INNER JOIN 会让零转化的类别整行消失\n)\nSELECT query_cat,\n       ROUND(SUM(in_any) / COUNT(*), 4)  AS conv_click_any,\n       ROUND(SUM(in_last) / COUNT(*), 4) AS conv_last_viewed\nFROM scored\nGROUP BY query_cat\nORDER BY query_cat",
+    "naiveSolution": "-- 上线第一版：分子数的是\"点击×预订的配对数\"，分母数的是\"参与过 JOIN 的行\"\nSELECT s.query_cat,\n       ROUND(SUM(CASE WHEN b.booking_id IS NOT NULL THEN 1 ELSE 0 END) / COUNT(*), 4)\n         AS conv_click_any,\n       ROUND(SUM(CASE WHEN c.listing_id = b.listing_id THEN 1 ELSE 0 END) / COUNT(*), 4)\n         AS conv_last_viewed\nFROM search_session s\nJOIN search_click c ON c.session_id = s.session_id          -- INNER：没点击的会话直接消失\nLEFT JOIN booking b ON b.session_id = s.session_id\nGROUP BY s.query_cat\nORDER BY s.query_cat"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Airbnb",
+    "role": "搜索与发现 / 数据平台 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-search-ranking.md §4 题面草稿 B（素材给了\"一个数字三种答案\"的判分意图，未给可判分的口径与并列破法）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:53:27.352Z"
+  }
+}

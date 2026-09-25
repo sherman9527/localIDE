@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0001",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "每个城市 Top-3 房东（并列名次要跳号，不能只取三行）",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 sql_mode 含 ONLY_FULL_GROUP_BY，判题库排序规则 utf8mb4_0900_ai_ci）。\n\n表 host_sales 是「房东 × 自然月」的成交额明细（同一个 host_id 在一个城市里可能有多个月的行）：\n  city VARCHAR(32)、host_id INT、stat_month DATE、gmv DECIMAL(12,2)。\n\n业务口径（必须严格按此实现）：\n1) 先按 (city, host_id) 汇总季度总成交额；\n2) 在每个 city 内部按成交额降序给出**竞赛名次**：成交额相同的房东名次相同，且**并列会占用后续名次**（两人并列第 1，下一个是第 3，不是第 2）；\n3) 输出名次 <= 3 的所有行——因此并列在第 3 名的房东必须**全部**出现在结果里（结果行数可能大于 3）；\n4) 输出列顺序与别名必须是 city, host_id, gmv, city_rank（gmv 为该房东的季度汇总额）。\n\n约束：只提交**一条** SELECT 或 WITH 查询（可以多行、可以带一个前置 SET SESSION；出现第二条查询语句会被直接拒）。判题按行序**敏感**比对，所以你必须自己写全序 ORDER BY：按 city 升序、city_rank 升序、host_id 升序。行数或任一字段不符即判负。\n\n这是 Airbnb「城市榜 Top-N」的真实形态：产品说的是「前 3 名」，数据口径说的是「前 3 个名次」。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "window-functions",
+    "top-n-per-group",
+    "rank-vs-row-number",
+    "analytics",
+    "modern:mysql8-window-functions"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：第 1 名并列 + 第 3 名并列",
+      "input": [],
+      "expected": {
+        "columns": ["city", "host_id", "gmv", "city_rank"],
+        "orderSensitive": true,
+        "rows": [
+          ["LA", 301, 100, 1],
+          ["NYC", 201, 500, 1],
+          ["NYC", 202, 400, 2],
+          ["NYC", 203, 400, 2],
+          ["NYC", 204, 400, 2],
+          ["SF", 102, 300, 1],
+          ["SF", 103, 300, 1],
+          ["SF", 104, 200, 3],
+          ["SF", 105, 200, 3]
+        ]
+      },
+      "note": "SF 的 101（汇总 150）名次是 5 而不是 4，因为 102/103 并列第 1 跳掉了第 2 名。"
+    },
+    {
+      "name": "并列边界：新数据把三人推成并列第 1",
+      "input": ["INSERT INTO host_sales VALUES ('SF',101,'2026-03-31',150.00)"],
+      "expected": {
+        "columns": ["city", "host_id", "gmv", "city_rank"],
+        "orderSensitive": true,
+        "rows": [
+          ["LA", 301, 100, 1],
+          ["NYC", 201, 500, 1],
+          ["NYC", 202, 400, 2],
+          ["NYC", 203, 400, 2],
+          ["NYC", 204, 400, 2],
+          ["SF", 101, 300, 1],
+          ["SF", 102, 300, 1],
+          ["SF", 103, 300, 1]
+        ]
+      },
+      "note": "101 补上 3 月的 150 后与 102/103 并列 300，三人都是第 1 名；200 的两人变成第 4 名，被排除。"
+    },
+    {
+      "name": "RANK 与 DENSE_RANK 的分歧边界",
+      "input": [
+        "DELETE FROM host_sales",
+        "INSERT INTO host_sales VALUES ('TX',901,'2026-01-31',500.00),('TX',902,'2026-01-31',500.00),('TX',903,'2026-02-28',400.00),('TX',904,'2026-02-28',300.00),('TX',905,'2026-03-31',300.00),('TX',906,'2026-03-31',100.00)"
+      ],
+      "expected": {
+        "columns": ["city", "host_id", "gmv", "city_rank"],
+        "orderSensitive": true,
+        "rows": [
+          ["TX", 901, 500, 1],
+          ["TX", 902, 500, 1],
+          ["TX", 903, 400, 3]
+        ]
+      },
+      "note": "用 DENSE_RANK 会多返回 904/905（他们按密集名次是第 3）。本题口径是竞赛名次。"
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM host_sales"],
+      "expected": []
+    },
+    {
+      "name": "只剩单一房东的退化场景",
+      "input": ["DELETE FROM host_sales WHERE host_id <> 301"],
+      "expected": {
+        "columns": ["city", "host_id", "gmv", "city_rank"],
+        "orderSensitive": true,
+        "rows": [["LA", 301, 100, 1]]
+      }
+    }
+  ],
+  "answer": "要点：\n```sql\nSELECT city, host_id, gmv, city_rank\nFROM (\n  SELECT city, host_id, SUM(gmv) AS gmv,\n         RANK() OVER (PARTITION BY city ORDER BY SUM(gmv) DESC) AS city_rank\n  FROM host_sales\n  GROUP BY city, host_id\n) t\nWHERE city_rank <= 3\nORDER BY city, city_rank, host_id;\n```\n1) 窗口函数可以直接跑在 GROUP BY 的结果上（`ORDER BY SUM(gmv)`），不需要再套一层派生表——写不出这一层的通常是在应用层二次聚合的。\n2) 竞赛名次 = `RANK()`；`ROW_NUMBER()` 会静默丢并列（每人只剩 3 行），`DENSE_RANK()` 会把第 4 名塞进第 3 名（本例第 3 用例）。\n3) 窗口函数不能出现在 WHERE/HAVING（ERROR 3593），必须包一层再过滤。\n4) 判题行序敏感 → 必须自带全序 ORDER BY，并列时补 host_id。\n\n面试追问：\n- 表有 5000 万行、只要 30 个城市 each Top-3，怎么避免全量排序？→ `LATERAL`（8.0.14）+ `(city, host_id)` 聚合后按 city 驱动，或预聚合物化视图/汇总表；窗口版必然一次全量排序。\n- 为什么不用 `MAX(gmv)` 子查询自连接？→ 组内第 3 大要 `DISTINCT gmv` + `LIMIT/OFFSET` 相关子查询，写法 N 层且对并列语义更差。\n- 跨月口径变更（把 stat_month 换成滚动 90 天）怎么改？→ `RANGE BETWEEN INTERVAL 90 DAY PRECEDING` 需要按日期型的单一 ORDER BY 列，且 `SUM(gmv) OVER (PARTITION BY host_id ORDER BY stat_month RANGE ...)` 不能与 GROUP BY 混在同一层，要先按天预聚合。\n- gmv 用 DECIMAL 而不用 DOUBLE 的理由（金额累加不满足结合律）要能说出来。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS host_sales",
+      "CREATE TABLE host_sales (city VARCHAR(32) NOT NULL, host_id INT NOT NULL, stat_month DATE NOT NULL, gmv DECIMAL(12,2) NOT NULL, KEY idx_city_host (city, host_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO host_sales VALUES ('SF',101,'2026-01-31',100.00),('SF',101,'2026-02-28',50.00),('SF',102,'2026-01-31',300.00),('SF',103,'2026-02-28',300.00),('SF',104,'2026-01-31',200.00),('SF',105,'2026-02-28',200.00),('SF',106,'2026-03-31',10.00),('NYC',201,'2026-01-31',500.00),('NYC',202,'2026-01-31',400.00),('NYC',203,'2026-02-28',400.00),('NYC',204,'2026-03-31',400.00),('NYC',205,'2026-03-31',300.00),('LA',301,'2026-01-31',100.00)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "SELECT city, host_id, gmv, city_rank\nFROM (\n  SELECT city,\n         host_id,\n         SUM(gmv) AS gmv,\n         RANK() OVER (PARTITION BY city ORDER BY SUM(gmv) DESC) AS city_rank\n  FROM host_sales\n  GROUP BY city, host_id\n) ranked\nWHERE city_rank <= 3\nORDER BY city, city_rank, host_id",
+    "naiveSolution": "SELECT city, host_id, gmv, city_rank\nFROM (\n  SELECT city,\n         host_id,\n         SUM(gmv) AS gmv,\n         ROW_NUMBER() OVER (PARTITION BY city ORDER BY SUM(gmv) DESC, host_id) AS city_rank\n  FROM host_sales\n  GROUP BY city, host_id\n) ranked\nWHERE city_rank <= 3\nORDER BY city, city_rank, host_id"
+  },
+  "estimatedMinutes": 12,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#13-四类必考查询模式",
+    "addedBy": "content-agent-sql"
+  }
+}

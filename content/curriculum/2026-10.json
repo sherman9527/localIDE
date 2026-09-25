@@ -1,0 +1,591 @@
+{
+  "version": 1,
+  "month": "2026-10",
+  "generatedAt": "2026-09-25T06:30:53.109Z",
+  "policy": {
+    "days": 30,
+    "mainCodeQuota": 2,
+    "sideRubricQuota": 1,
+    "minCodeForMain": 6,
+    "relaxed": false,
+    "pickAlgorithm": "@arena/shared pickForDay(date|category 确定性洗牌)",
+    "weighting": "主栈按可判分代码题数、副栈按主观题数做最大余数分配"
+  },
+  "bankSnapshot": {
+    "frontend": {
+      "total": 23,
+      "solvableCode": 23,
+      "rubric": 0,
+      "code": 23,
+      "kinds": {
+        "react-vitest": 23
+      },
+      "mainEligible": true,
+      "sideEligible": false
+    },
+    "algorithms": {
+      "total": 59,
+      "solvableCode": 59,
+      "rubric": 0,
+      "code": 59,
+      "kinds": {
+        "java-junit": 59
+      },
+      "mainEligible": true,
+      "sideEligible": false
+    },
+    "sql": {
+      "total": 50,
+      "solvableCode": 50,
+      "rubric": 0,
+      "code": 50,
+      "kinds": {
+        "mysql": 36,
+        "redis": 14
+      },
+      "mainEligible": true,
+      "sideEligible": false
+    },
+    "system-design": {
+      "total": 36,
+      "solvableCode": 0,
+      "rubric": 36,
+      "code": 0,
+      "kinds": {
+        "llm-rubric": 36
+      },
+      "mainEligible": false,
+      "sideEligible": true
+    },
+    "big-data": {
+      "total": 34,
+      "solvableCode": 26,
+      "rubric": 8,
+      "code": 26,
+      "kinds": {
+        "pyspark": 24,
+        "llm-rubric": 8,
+        "spark-scala": 2
+      },
+      "mainEligible": true,
+      "sideEligible": true
+    },
+    "agent-design": {
+      "total": 27,
+      "solvableCode": 0,
+      "rubric": 27,
+      "code": 0,
+      "kinds": {
+        "llm-rubric": 27
+      },
+      "mainEligible": false,
+      "sideEligible": true
+    },
+    "hot-interviews": {
+      "total": 25,
+      "solvableCode": 0,
+      "rubric": 25,
+      "code": 0,
+      "kinds": {
+        "llm-rubric": 25
+      },
+      "mainEligible": false,
+      "sideEligible": true
+    }
+  },
+  "weights": {
+    "main": {
+      "frontend": 23,
+      "algorithms": 59,
+      "sql": 50,
+      "big-data": 26
+    },
+    "side": {
+      "system-design": 36,
+      "big-data": 8,
+      "agent-design": 27,
+      "hot-interviews": 25
+    }
+  },
+  "days": [
+    {
+      "date": "2026-10-01",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0015",
+        "alg-java-0013"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0007"
+      ],
+      "minutes": 95,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-02",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-mysql-0027",
+        "sql-redis-0005"
+      ],
+      "sidePicks": [
+        "hot-rubric-0006"
+      ],
+      "minutes": 79,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-03",
+      "main": "big-data",
+      "side": "agent-design",
+      "mainPicks": [
+        "bd-rubric-0001",
+        "bd-pyspark-0019"
+      ],
+      "sidePicks": [
+        "ag-rubric-0008"
+      ],
+      "minutes": 109,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-04",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0021",
+        "alg-java-0016"
+      ],
+      "sidePicks": [
+        "sys-rubric-0007"
+      ],
+      "minutes": 83,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-05",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-redis-0013",
+        "sql-mysql-0012"
+      ],
+      "sidePicks": [
+        "hot-rubric-0001"
+      ],
+      "minutes": 75,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-06",
+      "main": "big-data",
+      "side": "agent-design",
+      "mainPicks": [
+        "bd-pyspark-0015",
+        "bd-pyspark-0012"
+      ],
+      "sidePicks": [
+        "ag-rubric-0011"
+      ],
+      "minutes": 95,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-07",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0029",
+        "alg-java-0039"
+      ],
+      "sidePicks": [
+        "sys-rubric-0002"
+      ],
+      "minutes": 84,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-08",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-mysql-0008",
+        "sql-redis-0007"
+      ],
+      "sidePicks": [
+        "hot-rubric-0002"
+      ],
+      "minutes": 73,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-09",
+      "main": "frontend",
+      "side": "agent-design",
+      "mainPicks": [
+        "fe-react-0004",
+        "fe-react-0006"
+      ],
+      "sidePicks": [
+        "ag-rubric-0017"
+      ],
+      "minutes": 77,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-10",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0052",
+        "alg-java-0056"
+      ],
+      "sidePicks": [
+        "sys-rubric-0003"
+      ],
+      "minutes": 98,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-11",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-redis-0002",
+        "sql-mysql-0003"
+      ],
+      "sidePicks": [
+        "hot-rubric-0015"
+      ],
+      "minutes": 56,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-12",
+      "main": "big-data",
+      "side": "agent-design",
+      "mainPicks": [
+        "bd-pyspark-0003",
+        "bd-rubric-0004"
+      ],
+      "sidePicks": [
+        "ag-design-rubric-0002"
+      ],
+      "minutes": 100,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-13",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0008",
+        "alg-java-0013"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0002"
+      ],
+      "minutes": 105,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-14",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-redis-0006",
+        "sql-redis-0008"
+      ],
+      "sidePicks": [
+        "hot-rubric-0011"
+      ],
+      "minutes": 46,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-15",
+      "main": "frontend",
+      "side": "agent-design",
+      "mainPicks": [
+        "fe-react-0007",
+        "fe-react-0018"
+      ],
+      "sidePicks": [
+        "ag-design-rubric-0007"
+      ],
+      "minutes": 93,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-16",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0011",
+        "alg-java-0056"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0011"
+      ],
+      "minutes": 93,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-17",
+      "main": "sql",
+      "side": "big-data",
+      "mainPicks": [
+        "sql-mysql-0005",
+        "sql-mysql-0035"
+      ],
+      "sidePicks": [
+        "bd-pyspark-0011"
+      ],
+      "minutes": 78,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-18",
+      "main": "big-data",
+      "side": "agent-design",
+      "mainPicks": [
+        "bd-pyspark-0003",
+        "bd-pyspark-0020"
+      ],
+      "sidePicks": [
+        "ag-design-rubric-0009"
+      ],
+      "minutes": 75,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-19",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0035",
+        "alg-java-0057"
+      ],
+      "sidePicks": [
+        "sys-rubric-0013"
+      ],
+      "minutes": 92,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-20",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-mysql-0001",
+        "sql-mysql-0032"
+      ],
+      "sidePicks": [
+        "hot-rubric-0005"
+      ],
+      "minutes": 87,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-21",
+      "main": "frontend",
+      "side": "agent-design",
+      "mainPicks": [
+        "fe-react-0018",
+        "fe-react-0009"
+      ],
+      "sidePicks": [
+        "ag-design-rubric-0009"
+      ],
+      "minutes": 73,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-22",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0008",
+        "alg-java-0045"
+      ],
+      "sidePicks": [
+        "sys-rubric-0015"
+      ],
+      "minutes": 85,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-23",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-mysql-0016",
+        "sql-mysql-0035"
+      ],
+      "sidePicks": [
+        "hot-rubric-0016"
+      ],
+      "minutes": 84,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-24",
+      "main": "big-data",
+      "side": "system-design",
+      "mainPicks": [
+        "bd-pyspark-0001",
+        "bd-pyspark-0013"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0004"
+      ],
+      "minutes": 96,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-25",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0055",
+        "alg-java-0049"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0001"
+      ],
+      "minutes": 98,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-26",
+      "main": "sql",
+      "side": "agent-design",
+      "mainPicks": [
+        "sql-redis-0005",
+        "sql-mysql-0008"
+      ],
+      "sidePicks": [
+        "ag-rubric-0002"
+      ],
+      "minutes": 67,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-27",
+      "main": "frontend",
+      "side": "big-data",
+      "mainPicks": [
+        "fe-react-0022",
+        "fe-react-0005"
+      ],
+      "sidePicks": [
+        "bd-pyspark-0015"
+      ],
+      "minutes": 100,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-28",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0012",
+        "alg-java-0044"
+      ],
+      "sidePicks": [
+        "sys-rubric-0022"
+      ],
+      "minutes": 101,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-29",
+      "main": "sql",
+      "side": "hot-interviews",
+      "mainPicks": [
+        "sql-mysql-0006",
+        "sql-mysql-0004"
+      ],
+      "sidePicks": [
+        "hot-rubric-0006"
+      ],
+      "minutes": 77,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    },
+    {
+      "date": "2026-10-30",
+      "main": "algorithms",
+      "side": "system-design",
+      "mainPicks": [
+        "alg-java-0048",
+        "alg-java-0015"
+      ],
+      "sidePicks": [
+        "sys-design-rubric-0005"
+      ],
+      "minutes": 95,
+      "mainShortfall": 0,
+      "sideShortfall": 0
+    }
+  ],
+  "stats": {
+    "mainByCategory": {
+      "algorithms": 11,
+      "sql": 10,
+      "big-data": 5,
+      "frontend": 4
+    },
+    "sideByCategory": {
+      "system-design": 12,
+      "hot-interviews": 8,
+      "agent-design": 8,
+      "big-data": 2
+    },
+    "daysWithFullMain": 30,
+    "daysWithSide": 30,
+    "coveredCategories": [
+      "agent-design",
+      "algorithms",
+      "big-data",
+      "frontend",
+      "hot-interviews",
+      "sql",
+      "system-design"
+    ],
+    "uncoveredCategories": [],
+    "totalMinutes": 2569
+  },
+  "gaps": [],
+  "warnings": []
+}

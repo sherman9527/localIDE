@@ -1,0 +1,333 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0029",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "埋点血缘闭包：直接/间接引用分开数，下线判定要在整个闭包上看热度",
+  "statement": "## 背景\n\nDataFinder 的《一般事件》页里，\"血缘关系\"是**增值的埋点治理模块**，\n文档明确区分两种引用【源 S7】：\n\n> 图表 / 看板血缘 **区分\"直接引用\"与\"间接引用\"**；\n> 用户分群血缘额外带 **最新分群用户数** 与 **近 30 天的查询次数**。\n\n素材 §4 考点 4 的【推】结论是本题要落地的判据：\n**下线判据应当是\"间接闭包内消费为零 + 热度为零 + 保留期外\"，而不是\"没人认领\"；\n而且\"下游派生链上的'间接'往往是真正被消费的那个\"。**\n递归展开这件事官方文档没写 ⇒ 深度上限与优先级枚举都是本题设定的契约。\n\n## 表\n\n```\nlineage_node(name VARCHAR(32) PK, kind VARCHAR(16), queries_30d INT)\n   -- kind ∈ ('event','table','report','segment')；queries_30d = 该节点近 30 天被查询次数\nlineage_edge(id INT PK, from_node VARCHAR(32), to_node VARCHAR(32))\n   -- 方向：from 被 to 消费（to 是下游）\n```\n\n## 任务\n\n只交**一条查询**（允许以 `WITH RECURSIVE` 开头）。对**每个 `kind = 'event'` 的节点**输出\n\n```\nevent_name, direct_consumers, indirect_consumers, closure_nodes,\nmax_queries_30d, total_queries_30d, retire_priority\n```\n\n定义：\n\n- `direct_consumers` = `from_node = 该事件` 的**不同**下游数\n- `closure_nodes` = 从该事件出发沿边**反复走**能到达的**不同节点**数（不含自己），\n  **深度上限 6**（超过 6 层的链在本题里视为不存在）\n- `indirect_consumers` = `closure_nodes - direct_consumers`\n- `max_queries_30d` / `total_queries_30d` = 在**整个闭包**上取查询次数的最大值 / 求和\n  （闭包为空时两者都是 `0`，**不许是 NULL**）\n- `retire_priority` 按优先级从上到下：\n\n| # | 条件 | 值 |\n| --- | --- | --- |\n| 1 | `closure_nodes = 0` | `orphan` |\n| 2 | `total_queries_30d = 0` | `low-usage` |\n| 3 | `closure_nodes > direct_consumers`（存在间接链） | `deep-dependency` |\n| 4 | 其余 | `hot-direct` |\n\n按 `event_name` 升序。**图中保证无环**（不需要做环检测）。\n\n## 三条判据为什么长这样\n\n- **`low-usage` 排在 `deep-dependency` 之前。**\n  有间接链但整条链上**一次查询都没有** ⇒ 那条链是历史遗留，先按热度下线它；\n  反过来如果链上有热度，就**先断链再下线**。顺序反了会拔断活着的报表。\n- **热度要在整个闭包上求和，不是只对直接下游。**\n  只数直接下游会得出\"这张临时表 30 天被查 90 次 ⇒ 很热\"，\n  而它其实只是中间节点、真正在读的是它下游那个每天跑一次的定时报表。\n- **`closure_nodes` 必须是去重的节点数。**\n  多条链汇到同一个消费者时，用行数而不是去重数会把同一个消费者数两遍，\n  于是 `indirect_consumers` 凭空变大、`deep-dependency` 误报。\n\n## 陷阱提示\n\n递归 CTE 的**锚点**必须限定 `kind = 'event'`，否则中间表节点也会成为自己的根，\n结果里会冒出 `dwd_order` 这种根本不该出现的行。\n深度上限要写成显式 `WHERE depth < 6`（`cte_max_recursion_depth` 是会话变量，\n**考生提交里不许出现 `SET`**，所以递归必须自己收口）。\n\n只允许一条查询。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "data-lineage",
+    "recursive-cte",
+    "indirect-closure",
+    "retirement-decision",
+    "modern:metadata-workflow"
+  ],
+  "cases": [
+    {
+      "name": "基线：直接引用与间接引用分开数，闭包必须沿链走到底",
+      "input": [],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            5,
+            5,
+            "hot-direct"
+          ],
+          [
+            "ev_pay",
+            1,
+            3,
+            4,
+            400,
+            507,
+            "deep-dependency"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "ev_pay 只有 dwd_order 一个直接下游，但闭包有四个节点 ⇒ indirect=3；ev_click 两个直接下游、闭包也是两个 ⇒ 没有间接链",
+      "visible": true
+    },
+    {
+      "name": "边界：断开中间那一跳 ⇒ 深层报表从闭包里消失，节点数与热度同时缩水",
+      "input": [
+        "DELETE FROM lineage_edge WHERE id = 2"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            5,
+            5,
+            "hot-direct"
+          ],
+          [
+            "ev_pay",
+            1,
+            1,
+            2,
+            400,
+            412,
+            "deep-dependency"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "删掉 dwd_order→ads_gmv 之后 ads_gmv 与它下面的 ads_funnel 都从 ev_pay 的闭包里掉了出去 ⇒ 闭包从 4 个节点变 2 个、total_queries 从 507 变 412。判定仍是 deep-dependency（还剩 seg_vip 这一条间接链）",
+      "visible": true
+    },
+    {
+      "name": "关键：只清掉中间层的查询数 ⇒ 闭包热度仍由最深处那张报表撑着，不许提前判下线",
+      "input": [
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'ads_gmv'",
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'seg_vip'",
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'dwd_order'"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            5,
+            5,
+            "hot-direct"
+          ],
+          [
+            "ev_pay",
+            1,
+            3,
+            4,
+            5,
+            5,
+            "deep-dependency"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "ev_pay 的 total_queries 从 507 掉到 5，但那 5 次来自闭包最深处的 ads_funnel ⇒ 仍然不是 low-usage。这正是素材那句\"下游派生链上的间接往往是真正被消费的那个\"",
+      "visible": true
+    },
+    {
+      "name": "边界：整条闭包一次查询都没有 ⇒ 才允许判 low-usage（它排在 deep-dependency 之前）",
+      "input": [
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'ads_gmv'",
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'seg_vip'",
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'dwd_order'",
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'ads_funnel'"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            0,
+            0,
+            "low-usage"
+          ],
+          [
+            "ev_pay",
+            1,
+            3,
+            4,
+            0,
+            0,
+            "low-usage"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "ev_pay 有 3 个间接下游、闭包非空，但总热度为 0 ⇒ low-usage 而不是 deep-dependency。ev_click 同时变成 low-usage（它闭包里的 ads_funnel 与 tmp_debug 都归零了）⇒ 这一格抓的是\"第 2 条必须先判\"",
+      "visible": true
+    },
+    {
+      "name": "退化：一条边都没有 ⇒ 两个事件都是孤儿，热度列必须是 0 而不是 NULL",
+      "input": [
+        "DELETE FROM lineage_edge WHERE id = 1",
+        "DELETE FROM lineage_edge WHERE id = 2",
+        "DELETE FROM lineage_edge WHERE id = 3",
+        "DELETE FROM lineage_edge WHERE id = 4",
+        "DELETE FROM lineage_edge WHERE id = 5",
+        "DELETE FROM lineage_edge WHERE id = 6"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            0,
+            0,
+            0,
+            0,
+            0,
+            "orphan"
+          ],
+          [
+            "ev_pay",
+            0,
+            0,
+            0,
+            0,
+            0,
+            "orphan"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：中间节点自己就是最热的那个 ⇒ 通知要先发给它的所有者",
+      "input": [
+        "UPDATE lineage_node SET queries_30d = 5000 WHERE name = 'dwd_order'"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            5,
+            5,
+            "hot-direct"
+          ],
+          [
+            "ev_pay",
+            1,
+            3,
+            4,
+            5000,
+            5107,
+            "deep-dependency"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "max_queries_30d 从 400 变 5000：只看直接下游的热度会低估影响面，只看叶子会低估中间层的价值",
+      "visible": true
+    },
+    {
+      "name": "边界：把叶子报表查热、中间表查冷 ⇒ 排序变了但闭包形状没变",
+      "input": [
+        "UPDATE lineage_node SET queries_30d = 0 WHERE name = 'dwd_order'",
+        "UPDATE lineage_node SET queries_30d = 3000 WHERE name = 'ads_funnel'"
+      ],
+      "expected": {
+        "columns": [
+          "event_name",
+          "direct_consumers",
+          "indirect_consumers",
+          "closure_nodes",
+          "max_queries_30d",
+          "total_queries_30d",
+          "retire_priority"
+        ],
+        "rows": [
+          [
+            "ev_click",
+            2,
+            0,
+            2,
+            3000,
+            3000,
+            "hot-direct"
+          ],
+          [
+            "ev_pay",
+            1,
+            3,
+            4,
+            3000,
+            3102,
+            "deep-dependency"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n三段 CTE：`clo` 递归展开（锚点限定 `kind='event'`、`WHERE depth < 6` 收口）、\n`agg` 在闭包上聚合、`direct` 数一层下游；最后以 `lineage_node` 里的事件为主表左连回来。\n\n**基线两行：**\n\n| event | direct | indirect | closure | max_q | sum_q | priority |\n| --- | --- | --- | --- | --- | --- | --- |\n| ev_click | 2 | 0 | 2 | 5 | 5 | hot-direct |\n| ev_pay | 1 | 3 | 4 | 400 | 507 | deep-dependency |\n\n`ev_pay` 的闭包是 `dwd_order → {ads_gmv, seg_vip} → ads_funnel` 共 4 个节点，\n查询数分别是 400 / 90 / 12 / 5 ⇒ 求和 507、最大 400；其中只有 `dwd_order` 是直接下游\n⇒ `indirect_consumers = 3` ⇒ 落 `deep-dependency`。\n`ev_click` 的两个下游（`ads_funnel`、`tmp_debug`）都是直接的 ⇒\n`closure_nodes = direct_consumers` ⇒ 判据第 3 条不成立 ⇒ `hot-direct`。\n\n**这里藏着本题最值得说的一件事**：`ads_funnel` 既是 `ev_click` 的**直接**下游，\n又是 `ev_pay` 的**间接**下游（经 `dwd_order → ads_gmv`）。\n**同一个消费者在不同根的闭包里各出现一次，热度也各算一遍。**\n所以\"这张报表有没有人用\"与\"下线这张事件会不会打爆这张报表\"是两个问题 ——\n前者看节点，后者看闭包。\n\n**用例「断开中间那一跳」**删掉 `dwd_order → ads_gmv` 那条边 ⇒\n`ev_pay` 的闭包从 4 掉到 2（只剩 `dwd_order`、`seg_vip`）、`total_queries` 从 507 掉到 412。\n只查一层血缘的人会读成\"影响变小了\"，\n而真实情况是 **`ads_gmv` 从这张事件的下游里消失了** ——\n如果那条边只是**漏登记**，这个查询就会把\"登记缺失\"读成\"依赖消失\"。\n这是血缘系统特有的失效模式：**图不完整时，\"没有依赖\"和\"查不到依赖\"无法区分**。\n素材 §3 那条\"没有验收/变更历史/血缘三件套\"讲的正是这件事。\n\n**用例「关键：只清掉中间层的查询数」是本题最反直觉的一格。**\n把 `dwd_order`(400)、`ads_gmv`(90)、`seg_vip`(12) 全归零之后，\n`ev_pay` 的 `total_queries_30d` 从 507 掉到 **5** —— 但那 5 次来自闭包**最深处**的\n`ads_funnel`，所以它**仍然不是** `low-usage`，判定照旧是 `deep-dependency`。\n这就是素材那句话的可执行形式：*\"下游派生链上的'间接'往往是真正被消费的那个\"*。\n按\"直接下游热度\"做决策的人会在这张事件上签\"无人使用\"，\n而真正的消费者在两层之外、每天跑一次定时任务。\n\n**只有再把 `ads_funnel` 也归零（用例「整条闭包一次查询都没有」），`ev_pay` 才落到\n`low-usage`** —— 此时它的闭包依然是 4 个节点、依然有 3 个间接下游，\n第 3 条 `closure_nodes > direct_consumers` 完全成立。\n**如果第 2、3 条顺序写反，这一格会被判成 `deep-dependency`（\"先断链再下线\"），**\n于是这张已经没人用的事件在待办列表里被排到三个月之后 ——\n成本一分不省，还一直背着\"高风险变更\"的评审成本。\n这两条用例合起来就是\"优先级即结论\"的字面证明：**同一份图、同一组数字，\n只有换掉两条 `WHEN` 的先后，输出就完全不同。**\n\n**用例「中间节点自己就是最热的那个」**把 `dwd_order` 提到 5000：\n`max_queries` 从 400 变 5000、`total` 从 507 变 5107。\n只看叶子会低估中间层的价值（它每天被大量扫描），\n只看直接下游会低估影响面（真正在跑定时任务的是最深处那张报表）——\n**所以 `max` 与 `sum` 两列都要出**：`max` 回答\"最痛的一个是谁\"，\n`sum` 回答\"这次变更的总影响有多大\"。\n\n**`naiveSolution` 挂在哪**：它不递归 ⇒ `indirect_consumers` 恒为 0、\n`closure_nodes = direct_consumers`、`deep-dependency` 永不出现；\n热度只算直接下游（`ev_pay` 的 sum 会从 507 变成 400）；\n`ev_click` 恰好与正确答案同形（2/0/2/5/5/hot-direct）——\n**这就是\"只测基线会漏掉整个 bug 类\"的教科书例子**：\n要抓它必须有一条带间接链的用例，而基线里那条链是它唯一露馅的地方。\n\n**工程延伸（面试追问点）**\n\n1. 深度上限为什么不该是常量？（素材考点 4 的完整判据是\n   \"间接闭包内消费为零 + 热度为零 + **保留期外**\"，\n   所以真正的界是\"这条链还活不活\"，不是层数。\n   工程做法：展开到\"热度为 0 的叶子\"为止，并把深度本身作为**证据**输出 ——\n   一条 9 层深的链本身就是治理信号。）\n2. 有环怎么办？（MySQL 递归 CTE 遇到环会一路加到深度上限，\n   所以 `depth < 6` 顺带兜住了环。但更该做的是**登记时禁止成环**\n   （DAG 校验），而不是查询时容忍它 ——\n   有环的血缘图意味着\"上游是谁\"这个问题没有答案。）\n3. 字段级血缘呢？（本题只有节点级。真实事故的形态是\n   \"事件还在上报、某个属性没人写\" ⇒ 那需要 `event.attr → report.column` 级别的图。\n   递归查询的形状完全一样，只是边表换一张 ——\n   所以**把闭包查询写成可复用的视图**比写死在当前这张表上更有价值。）\n4. 这份排序怎么变成卡口？（素材 §1.4 给的是 DataLeap 的形状：\n   数据标准 + 字段元数据对标 + 标准监控统计【源 S6】。\n   落到本题就是：下线工单必须**自动附带**这条闭包查询的结果（节点清单 + 热度），\n   而不是让申请人手写\"经确认无人使用\"。）",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS `lineage_node`",
+      "DROP TABLE IF EXISTS `lineage_edge`",
+      "CREATE TABLE lineage_node (name VARCHAR(32) NOT NULL PRIMARY KEY, kind VARCHAR(16) NOT NULL, queries_30d INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE lineage_edge (id INT NOT NULL PRIMARY KEY, from_node VARCHAR(32) NOT NULL, to_node VARCHAR(32) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO lineage_node VALUES ('ev_pay', 'event', 0), ('ev_click', 'event', 0), ('dwd_order', 'table', 400), ('ads_gmv', 'report', 90), ('seg_vip', 'segment', 12), ('tmp_debug', 'table', 0), ('ads_funnel', 'report', 5)",
+      "INSERT INTO lineage_edge VALUES (1, 'ev_pay', 'dwd_order'), (2, 'dwd_order', 'ads_gmv'), (3, 'dwd_order', 'seg_vip'), (4, 'ev_click', 'ads_funnel'), (5, 'ev_click', 'tmp_debug'), (6, 'ads_gmv', 'ads_funnel')"
+    ],
+    "entry": "function",
+    "timeoutMs": 20000,
+    "referenceSolution": "WITH RECURSIVE clo(root, node, depth) AS (\n    SELECT e.from_node, e.to_node, 1\n      FROM lineage_edge e\n      JOIN lineage_node n ON n.name = e.from_node AND n.kind = 'event'\n    UNION ALL\n    SELECT c.root, e.to_node, c.depth + 1\n      FROM clo c\n      JOIN lineage_edge e ON e.from_node = c.node\n     WHERE c.depth < 6\n),\nagg AS (\n    SELECT c.root                                    AS event_name,\n           COUNT(DISTINCT c.node)                    AS closure_nodes,\n           MAX(COALESCE(q.queries_30d, 0))           AS max_queries_30d,\n           SUM(COALESCE(q.queries_30d, 0))           AS total_queries_30d\n    FROM clo c\n    LEFT JOIN lineage_node q ON q.name = c.node\n    GROUP BY c.root\n),\ndirect AS (\n    SELECT from_node AS event_name, COUNT(DISTINCT to_node) AS direct_consumers\n    FROM lineage_edge\n    GROUP BY from_node\n)\nSELECT n.name                                                  AS event_name,\n       COALESCE(d.direct_consumers, 0)                         AS direct_consumers,\n       COALESCE(a.closure_nodes, 0) - COALESCE(d.direct_consumers, 0) AS indirect_consumers,\n       COALESCE(a.closure_nodes, 0)                            AS closure_nodes,\n       COALESCE(a.max_queries_30d, 0)                          AS max_queries_30d,\n       COALESCE(a.total_queries_30d, 0)                        AS total_queries_30d,\n       CASE\n         WHEN COALESCE(a.closure_nodes, 0) = 0 THEN 'orphan'\n         WHEN COALESCE(a.total_queries_30d, 0) = 0 THEN 'low-usage'\n         WHEN COALESCE(a.closure_nodes, 0) > COALESCE(d.direct_consumers, 0)\n             THEN 'deep-dependency'\n         ELSE 'hot-direct'\n       END                                                     AS retire_priority\nFROM lineage_node n\nLEFT JOIN direct d ON d.event_name = n.name\nLEFT JOIN agg a ON a.event_name = n.name\nWHERE n.kind = 'event'\nORDER BY n.name",
+    "naiveSolution": "SELECT n.name                        AS event_name,\n       COUNT(e.to_node)                AS direct_consumers,\n       0                               AS indirect_consumers,\n       COUNT(e.to_node)                AS closure_nodes,\n       COALESCE(MAX(t.queries_30d), 0) AS max_queries_30d,\n       COALESCE(SUM(t.queries_30d), 0) AS total_queries_30d,\n       CASE WHEN COUNT(e.to_node) = 0 THEN 'orphan' ELSE 'hot-direct' END AS retire_priority\nFROM lineage_node n\nLEFT JOIN lineage_edge e ON e.from_node = n.name\nLEFT JOIN lineage_node t ON t.name = e.to_node\nWHERE n.kind = 'event'\nGROUP BY n.name\nORDER BY n.name"
+  },
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（埋点治理与元数据方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 4（埋点血缘与影响分析：官方\"图表/看板血缘区分直接引用与间接引用、分群血缘带最新分群用户数与近 30 天查询次数\"；素材建议 mysql 版\"递归 CTE 展开事件→报表/分群闭包并按热度输出下线优先级，题面注明直接/间接两种类型\"；判据框架按【推】写成题面契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:58:14.901Z"
+  }
+}

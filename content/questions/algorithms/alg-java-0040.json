@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0040",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "万分比流量分配必须落成整数桶：最大余数法 + 并列按下标定序，桶数之和不许偏",
+  "statement": "## 背景\n\n拼多多广告开放平台里有这么一对接口：\n\n- `pdd.ad.api.unit.creative.distribute.flow.rate`（设置智能创意**流量比例分配**）\n- `pdd.ad.api.unit.creative.query.flow.rate`（查询智能创意流量分配比例，**单位：万分比**）\n\n\"万分比\"这个精度单位本身就是事实：**分流桶数量级至少 10⁴**，\n而且实验分桶与报表分组必须**同构** —— 桶分不平，报表就没法对齐。\n\n于是有一个纯工程问题必须先解决：**给定的万分比要落成整数个桶，怎么落？**\n逐条四舍五入会让桶数之和 ≠ 总桶数（分母一变，所有比率全错）；\n直接向下取整会长期少分给小流量创意。正确解只有一个：**最大余数法**（Hamilton apportionment）。\n\n## 你要实现的入口\n\n```java\npublic static int[] allocateFlow(int[] ratePerTenThousand, int buckets)\n```\n\n返回每个创意分到的桶数，**长度与输入一致，且元素之和必须等于 `buckets`**。\n\n## 规则\n\n1. `ratePerTenThousand[i]` 是第 `i` 个创意的万分比，取值 `0 .. 10000`；**总和必须正好等于 10000**。\n2. 先给每行 `floor(rate[i] × buckets / 10000)` 个桶，记下余数 `rate[i] × buckets mod 10000`。\n3. 剩下的 `buckets − Σfloor` 个桶，按**余数从大到小**依次加一；\n   **余数相同时下标小的先拿**（tie-break 必须是下标，否则同一份输入两次跑出不同结果，\n   而分桶不稳定意味着同一个用户在不同批次里被分到不同实验组）。\n4. `buckets == 0` ⇒ 返回全 0（长度仍要等于输入长度）。\n5. 中间乘积 `rate[i] × buckets` 可能超出 `int`（见下面那条极大用例），**必须在 `long` 域里算**。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- `buckets < 0` ⇒ `negative buckets`\n- 某个万分比不在 `0..10000` 内 ⇒ `rate out of range`\n- 万分比之和 `!= 10000` ⇒ `flow rates must sum to 10000`\n\n校验顺序：先 `buckets`，再逐行的取值范围，最后才是总和。\n\n## 为什么不许用\"逐条四舍五入\"\n\n四舍五入的和不等于 `buckets`，于是**分母本身是错的**：\n所有基于\"桶数\"算出来的比率、置信区间、A/B 对照都会偏，\n而且偏多少取决于有多少条被进位 —— 没有任何一处会报错。\n这正是\"报表分层\"那道题里\"谁是一次真相\"的具体体现。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "apportionment",
+    "flow-bucketing",
+    "integer-overflow",
+    "experiment-integrity",
+    "modern:ad-billing"
+  ],
+  "cases": [
+    {
+      "name": "基线：整除的万分比 5000/3000/2000 对 1000 个桶",
+      "input": [
+        [
+          5000,
+          3000,
+          2000
+        ],
+        1000
+      ],
+      "expected": [
+        500,
+        300,
+        200
+      ],
+      "visible": true
+    },
+    {
+      "name": "需要最大余数法：3333/3333/3334 对 100 桶 ⇒ 33/33/34",
+      "input": [
+        [
+          3333,
+          3333,
+          3334
+        ],
+        100
+      ],
+      "expected": [
+        33,
+        33,
+        34
+      ],
+      "visible": true,
+      "note": "向下取整和只有 99，剩下 1 桶给余数最大的第三条；逐条四舍五入会给出和=99"
+    },
+    {
+      "name": "并列：余数相同时下标小的先拿（分桶必须可重放）",
+      "input": [
+        [
+          5000,
+          5000,
+          0
+        ],
+        3
+      ],
+      "expected": [
+        2,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "1/1/0 余 5000/5000/0 ⇒ 多出的 1 桶给下标 0；并列不定序就有两个正确答案"
+    },
+    {
+      "name": "边界：万分比为 0 的创意一个桶都拿不到",
+      "input": [
+        [
+          10000,
+          0
+        ],
+        7
+      ],
+      "expected": [
+        7,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：桶数为 0 ⇒ 返回全 0 但长度不变",
+      "input": [
+        [
+          2500,
+          7500
+        ],
+        0
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "极大：rate × buckets 超出 int，必须整体在 long 域里算",
+      "input": [
+        [
+          6667,
+          3333
+        ],
+        2000000
+      ],
+      "expected": [
+        1333400,
+        666600
+      ],
+      "visible": true,
+      "note": "6667 × 2000000 = 13334000000，int 直接绕成负数"
+    },
+    {
+      "name": "边界：单个创意拿走全部流量",
+      "input": [
+        [
+          10000
+        ],
+        5
+      ],
+      "expected": [
+        5
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：万分比之和不是 10000",
+      "input": [
+        [
+          5000,
+          4000
+        ],
+        10
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "flow rates must sum to 10000"
+    },
+    {
+      "name": "非法：单个万分比越界（12000 大于 10000）",
+      "input": [
+        [
+          12000,
+          -2000
+        ],
+        10
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "rate out of range"
+    },
+    {
+      "name": "非法：桶数为负",
+      "input": [
+        [
+          10000
+        ],
+        -1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative buckets"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步：向下取整 ⇒ 记余数 ⇒ 剩下的按余数从大到小补。\n`Σfloor` 与 `buckets` 的差一定小于行数，所以补桶的循环最多 `n-1` 次 ——\n这也是最大余数法比\"逐条四舍五入\"贵不了多少却**保证了和等于总桶数**的原因。\n\n**基线那组是整除的**（万分比 5000/3000/2000 × 1000 桶 ⇒ 500/300/200），\n整除的用例只能证明你没写错，证明不了你写对了 —— 判分点全在下面三条。\n\n**余数不为零时才需要最大余数法**（用例「需要最大余数法」）：\n万分比 3333/3333/3334 对 100 个桶，三条的乘积分别是 333300/333300/333400，\n向下取整都是 33（和为 99），余数分别 3300/3300/4000 ⇒ 剩下那 1 个桶给余数最大的第三条 ⇒ 33/33/34。\n逐条四舍五入在这里给 33/33/33（三条都舍），**和是 99 而不是 100** ——\n少的那个桶不会报错，只会让后面所有比率的分母偏 1%。\n\n**并列必须由下标定序**（用例「并列：余数相同时下标小的先拿」）：\n万分比 5000/5000/0 对 3 个桶 ⇒ 向下取整 1/1/0，余数 5000/5000/0，还剩 1 个桶。\n两条并列，规则说\"下标小的先拿\" ⇒ 2/1/0。\n如果 tie-break 用了排序的不稳定顺序、或者用了随机，同一份输入会给出 2/1/0 或 1/2/0 ——\n**分桶不可重放意味着实验数据作废**：A 组和 B 组的用户成员在两次运行里换了人，\n而这个变化在分析时完全看不出来。这是本题最贵的一条。\n\n**极大用例是这题唯一的溢出陷阱**（用例「极大」）：\n`rate × buckets` 达到 1.3×10¹⁰，`int` 会绕成负数，于是桶数直接错、和也不等于总桶数。\n朴素解写的是 `ratePerTenThousand[i] * buckets / 10000.0` —— 除法确实是浮点，\n但**乘法先发生在 int 域里**，所以它在\"极大\"用例上照样溢出；\n再加上逐条 `Math.round` 让和不等于 `buckets`，它在并列用例上给 `2/2/0`（和 4 ≠ 3）。\n参考解里 `ratePerTenThousand[i] * (long) buckets` 这个强转位置很关键 —— 先乘再转会先溢出。\n\n**工程延伸（面试追问点）**\n\n1. 为什么官方单位是万分比而不是百分比？（因为分流桶数量级至少 10⁴：\n   单位精度与桶空间同构，才能让\"设置值\"与\"实际桶数\"一一对应。\n   反过来说，**如果桶数小于 10⁴，万分比就有表达不出来的分配** —— 那才是真正的设计约束。）\n2. 桶数怎么定？（要同时满足：≥ 最大公共分母的精度需求、实验并行数、以及\n   \"一个实验最多能占多少桶\"的隔离要求。报表分组必须按同一套桶聚合，\n   否则小时报表与分天报表的分母不是同一批人 —— 那就是\"两套数对不上\"的根因之一。）\n3. 万一个数为奇数怎么办？（最大余数法天然处理：多出来的桶给余数最大的那条。\n   但要在**配置层**声明\"允许 ±1 桶的偏差\"，否则运营会以为设了 5000 万分比就是精确一半。）\n4. 要不要做\"连续两次分配之间尽量少改动\"的稳定分配？（要。桶的重排会打断进行中的实验。\n   标准做法是按 `hash(creativeId, bucketSeed) %% 10000 < rate` 做**阈值式**分桶，\n   这样调 rate 只影响边界附近的一小段桶，中间段完全不动 ——\n   那才是\"实验可长跑\"的前提。本题的枚举式分配是它的等价特例。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] allocateFlow(int[] ratePerTenThousand, int buckets)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.Arrays;\n\npublic class Solution {\n  public static int[] allocateFlow(int[] ratePerTenThousand, int buckets) {\n    if (buckets < 0) throw new IllegalArgumentException(\"negative buckets\");\n    long total = 0;\n    for (int r : ratePerTenThousand) {\n      if (r < 0 || r > 10000) throw new IllegalArgumentException(\"rate out of range\");\n      total += r;\n    }\n    if (total != 10000) throw new IllegalArgumentException(\"flow rates must sum to 10000\");\n\n    int n = ratePerTenThousand.length;\n    int[] out = new int[n];\n    long[] rem = new long[n];\n    Integer[] idx = new Integer[n];\n    long used = 0;\n    for (int i = 0; i < n; i++) {\n      // rate × buckets 可以大到 10^4 × 2×10^9 ⇒ 必须整体在 long 域里算\n      long product = ratePerTenThousand[i] * (long) buckets;\n      out[i] = (int) (product / 10000);\n      rem[i] = product % 10000;\n      used += out[i];\n      idx[i] = i;\n    }\n    long extra = buckets - used;                       // 一定 < n，最大余数法的性质\n    // 余数从大到小；并列时下标小的先拿（分桶必须可重放，不能有第二个答案）\n    Arrays.sort(idx, (a, b) -> rem[a] != rem[b] ? Long.compare(rem[b], rem[a]) : Integer.compare(a, b));\n    for (int k = 0; k < extra; k++) out[idx[k]]++;\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"逐条四舍五入就完事\"版：和不等于总桶数，于是所有比率的分母从第一步就是错的。\n  public static int[] allocateFlow(int[] ratePerTenThousand, int buckets) {\n    int[] out = new int[ratePerTenThousand.length];\n    for (int i = 0; i < out.length; i++) {\n      out[i] = (int) Math.round(ratePerTenThousand[i] * buckets / 10000.0);  // int 先乘，会溢出\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "PDD",
+    "role": "算法工程（广告/实验平台方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 8（`unit.creative.distribute.flow.rate` / `.query.flow.rate` 官方注释\"单位：万分比\"）＋ 考点 13「精度到万分比 ⇒ 桶数量级至少 10⁴、分流桶与报表分组必须同构」；素材给了事实未给可判分的分配算法",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.104Z"
+  }
+}

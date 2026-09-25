@@ -1,0 +1,553 @@
+{
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "分流均衡性检测：样本门槛优先、互斥违例与比例失衡分开报、偏离按相对值判",
+  "statement": "## 背景\n\n素材 §4 考点 10/11 的底座是官方《规划实验流量》那一页【源 S9】：\n\"**通过两次运算「哈希函数」使不同互斥域的流量之间呈正交关系**\"、\n\"**客户端实验只可添加客户端互斥域，服务端实验只可添加服务端互斥域**\"、\n\"如果一个互斥域中已有运行中实验，则其他运行中实验不能再加入该互斥域\"。\n\n而\"进组比例偏离预设多少就该判废\"（行业里叫 SRM，sample ratio mismatch）\n**在 DataTester 的公开文档里找不到**（素材 §7 第 4 条）。\n所以本题把阈值与判据写成**本题设定的契约**：\n答题时请顺带说明**你会把线画在哪、以及为什么是那里**。\n\n## 表\n\n```\nassignment(id INT PK, exp_id VARCHAR(16), layer_id VARCHAR(16),\n           group_name VARCHAR(16), user_id VARCHAR(16))     -- 进组流水\nexp_dict(exp_id VARCHAR(16) PK, expected_treat_bps INT)      -- 预设实验组比例（万分比）\n```\n\n## 任务\n\n只交**一条 SELECT**。按 `exp_id` 输出，列固定为\n\n```\nexp_id, exp_users, treat_users, actual_treat_bps, expected_treat_bps,\ndeviation_bps, multi_group_users, flag\n```\n\n- `exp_users` = 该实验**去重**用户数；`treat_users` = 其中 `group_name = 'treat'` 的去重用户数\n- `actual_treat_bps` = `FLOOR(treat_users * 10000 / exp_users)`\n- `expected_treat_bps` = 字典里的预设比例；**字典缺这个实验时输出 `0`**\n- `deviation_bps` = `ABS(actual_treat_bps - expected_treat_bps)`\n- `multi_group_users` = 该实验中**被记进两个及以上不同组**的去重用户数（互斥违例的人数）\n- `flag` 按优先级从上到下：\n\n| # | 条件 | flag |\n| --- | --- | --- |\n| 1 | `exp_users < 200` | `LOW-SAMPLE` |\n| 2 | `multi_group_users > 0` | `MUTEX-VIOLATION` |\n| 3 | 字典里查不到该实验（`expected_treat_bps` 为 0） | `NO-EXPECTED-RATIO` |\n| 4 | `deviation_bps * 10000 >= 1000 * expected_treat_bps`（相对偏离 ≥ 10%） | `SRM_RISK` |\n| 5 | 其余 | `OK` |\n\n按 `exp_id` 升序。\n\n## 三条判据为什么长这样\n\n- **`LOW-SAMPLE` 必须排在 `SRM_RISK` 之前。**\n  50 个人的实验里 40/10 分组的偏离是 3000 万分比 —— 看着和 250 人时的同偏离一模一样，\n  但它只是几次抛硬币。**在小样本上判 SRM 会把随机波动读成系统性故障**，\n  然后派一组人去查一个没坏的分流服务。素材考点 13 那句\n  \"低基线指标不适合做主指标\"是同一个道理的另一种表述。\n- **偏离是相对预设值算的，不是与 5000 比。**\n  判据写成 `deviation * 10000 >= 1000 * expected` 就是为了这个：\n  预设 600 万分比（6%）的实验实际到 6000，绝对差 5400、相对偏离 900% —— 是事故；\n  预设 5000 的实际到 5100，绝对差 100，相对只有 2% —— 不是。\n  **绝对阈值给不出这个区分**：同样是 100 万分比的绝对偏离，\n  在预设 600 的实验上是 16.7% 的相对偏离（判据越线），\n  在预设 5000 的实验上只有 2%（不越线）—— 一个阈值要同时管住两种量级。\n- **`multi_group_users` 与 SRM 是两类问题，必须分开报。**\n  比例失衡可能是哈希不均（要查分流服务）；\n  同一用户进两个组则是**互斥关系被破坏**【源 S9】，\n  后果更狠：两组不再是互斥总体，任何检验的前提都不成立。\n  把它当成 SRM 的一种去查哈希，会漏掉真正要修的那段代码。\n\n## 陷阱提示\n\n- `treat_users` 要 `COUNT(DISTINCT CASE WHEN group_name = 'treat' THEN user_id END)`，\n  写成 `SUM(CASE WHEN ...)` 会被流水条数放大（判题数据里有重复进组流水）。\n- `exp_dict` 可能缺行 ⇒ 必须 `LEFT JOIN`，且**不许用 `COALESCE(expected, 5000)` 兜一个默认比例**\n  —— 那是拿猜出来的分母去判一个真实存在的实验。\n- 字典里出现的实验，`assignment` 里可能一行都没有（新建未开跑）⇒ 它**不该出现在结果里**\n  （以进组流水为主表）。\n\n只允许一条 `SELECT`。",
+  "judgeKind": "mysql",
+  "tags": [
+    "srm-check",
+    "mutual-exclusion-domain",
+    "relative-deviation",
+    "left-join-dict",
+    "modern:experimentation"
+  ],
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（实验平台方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 10/11/12/13（A/B 流量模型与父子实验：考点 11 建议 mysql 版\"两张进组表做交叉污染检测——同一用户在不同层命中组合的分布\"；考点 12 建议\"实现进组比例偏离预设 > x% 即标记 SRM 风险\"。SRM 本身素材 §7 第 4 条声明未找到官方能力描述 ⇒ 阈值写成【推】= 题面契约）",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:46:11.724Z"
+  },
+  "language": "sql",
+  "cases": [
+    {
+      "name": "基线：五种 flag 各命中一次（样本不足优先于一切）",
+      "input": [],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            5000,
+            1000,
+            0,
+            "SRM_RISK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            3,
+            "MUTEX-VIOLATION"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            200,
+            160,
+            8000,
+            5000,
+            3000,
+            0,
+            "SRM_RISK"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "EXP_A 6000 vs 5000 ⇒ SRM_RISK；EXP_B 干净 ⇒ OK；EXP_C 有 3 人被记进两个组 ⇒ MUTEX-VIOLATION；EXP_D 不在字典里 ⇒ NO-EXPECTED-RATIO；EXP_E 只有 50 人 ⇒ LOW-SAMPLE；EXP_F 恰好 200 人、8000 vs 5000 ⇒ SRM_RISK",
+      "visible": true
+    },
+    {
+      "name": "边界：样本数恰好 200 才有资格被判，掉到 199 就只许说\"样本不足\"",
+      "input": [
+        "DELETE FROM assignment WHERE id = 1173"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            5000,
+            1000,
+            0,
+            "SRM_RISK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            3,
+            "MUTEX-VIOLATION"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            199,
+            160,
+            8040,
+            5000,
+            3040,
+            0,
+            "LOW-SAMPLE"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "EXP_F 从 200 人变 199 人 ⇒ flag 从 SRM_RISK 退回 LOW-SAMPLE，而 actual_treat_bps 仍然高得吓人 —— 数字没变，判断变了",
+      "visible": true
+    },
+    {
+      "name": "先把预设比例核对清楚：字典改成 6000 之后 EXP_A 立刻从 SRM 变成 OK",
+      "input": [
+        "UPDATE exp_dict SET expected_treat_bps = 6000 WHERE exp_id = 'EXP_A'"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            6000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            3,
+            "MUTEX-VIOLATION"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            200,
+            160,
+            8000,
+            5000,
+            3000,
+            0,
+            "SRM_RISK"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "\"比例失衡\"有三个成因：分流坏了、预设比例记错了、分母域不同。排掉第二个只要一条 UPDATE，排第一个要一周",
+      "visible": true
+    },
+    {
+      "name": "消除互斥违例（把三条重复进组记录删掉）⇒ EXP_C 才轮到看比例",
+      "input": [
+        "DELETE FROM assignment WHERE id = 711",
+        "DELETE FROM assignment WHERE id = 712",
+        "DELETE FROM assignment WHERE id = 713"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            5000,
+            1000,
+            0,
+            "SRM_RISK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            200,
+            160,
+            8000,
+            5000,
+            3000,
+            0,
+            "SRM_RISK"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：字典里有这个实验、但一条进组流水都没有 ⇒ 它不许出现在结果里",
+      "input": [
+        "INSERT INTO exp_dict VALUES ('EXP_Z', 5000)"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            5000,
+            1000,
+            0,
+            "SRM_RISK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            3,
+            "MUTEX-VIOLATION"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            200,
+            160,
+            8000,
+            5000,
+            3000,
+            0,
+            "SRM_RISK"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "以流水为主表 ⇒ 结果仍是六行、EXP_Z 不出现。反过来（以字典为主表）会造出一行除零或 NULL 比例，把\"还没开跑\"显示成\"检测失败\"",
+      "visible": true
+    },
+    {
+      "name": "边界：预设比例是 6% 时，偏离达到预设的 9 倍 ⇒ 仍然要判 SRM",
+      "input": [
+        "UPDATE exp_dict SET expected_treat_bps = 8000 WHERE exp_id = 'EXP_F'",
+        "UPDATE exp_dict SET expected_treat_bps = 600 WHERE exp_id = 'EXP_A'"
+      ],
+      "expected": {
+        "columns": [
+          "exp_id",
+          "exp_users",
+          "treat_users",
+          "actual_treat_bps",
+          "expected_treat_bps",
+          "deviation_bps",
+          "multi_group_users",
+          "flag"
+        ],
+        "rows": [
+          [
+            "EXP_A",
+            250,
+            150,
+            6000,
+            600,
+            5400,
+            0,
+            "SRM_RISK"
+          ],
+          [
+            "EXP_B",
+            240,
+            120,
+            5000,
+            5000,
+            0,
+            0,
+            "OK"
+          ],
+          [
+            "EXP_C",
+            220,
+            110,
+            5000,
+            5000,
+            0,
+            3,
+            "MUTEX-VIOLATION"
+          ],
+          [
+            "EXP_D",
+            210,
+            105,
+            5000,
+            0,
+            5000,
+            0,
+            "NO-EXPECTED-RATIO"
+          ],
+          [
+            "EXP_E",
+            50,
+            40,
+            8000,
+            5000,
+            3000,
+            0,
+            "LOW-SAMPLE"
+          ],
+          [
+            "EXP_F",
+            200,
+            160,
+            8000,
+            8000,
+            0,
+            0,
+            "OK"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "EXP_A 实际 6000、预设 600 ⇒ 偏离 5400 万分比，相对判据 5400*10000 >= 1000*600 ⇒ SRM_RISK；同一份数据里 EXP_D 偏 5000、EXP_E 偏 3000 也都越过 naive 的绝对阈值 > 100，它们的真相却是\"字典没配\"与\"样本不够\"",
+      "visible": true
+    },
+    {
+      "name": "退化：一条进组记录都没有 ⇒ 空集",
+      "input": [
+        "DELETE FROM assignment"
+      ],
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS `assignment`",
+      "DROP TABLE IF EXISTS `exp_dict`",
+      "CREATE TABLE assignment (id INT NOT NULL PRIMARY KEY, exp_id VARCHAR(16) NOT NULL, layer_id VARCHAR(16) NOT NULL, group_name VARCHAR(16) NOT NULL, user_id VARCHAR(16) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE exp_dict (exp_id VARCHAR(16) NOT NULL PRIMARY KEY, expected_treat_bps INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO assignment VALUES (1, 'EXP_A', 'L1', 'treat', 'a000'), (2, 'EXP_A', 'L1', 'treat', 'a001'), (3, 'EXP_A', 'L1', 'treat', 'a002'), (4, 'EXP_A', 'L1', 'treat', 'a003'), (5, 'EXP_A', 'L1', 'treat', 'a004'), (6, 'EXP_A', 'L1', 'treat', 'a005'), (7, 'EXP_A', 'L1', 'treat', 'a006'), (8, 'EXP_A', 'L1', 'treat', 'a007'), (9, 'EXP_A', 'L1', 'treat', 'a008'), (10, 'EXP_A', 'L1', 'treat', 'a009'), (11, 'EXP_A', 'L1', 'treat', 'a010'), (12, 'EXP_A', 'L1', 'treat', 'a011'), (13, 'EXP_A', 'L1', 'treat', 'a012'), (14, 'EXP_A', 'L1', 'treat', 'a013'), (15, 'EXP_A', 'L1', 'treat', 'a014'), (16, 'EXP_A', 'L1', 'treat', 'a015'), (17, 'EXP_A', 'L1', 'treat', 'a016'), (18, 'EXP_A', 'L1', 'treat', 'a017'), (19, 'EXP_A', 'L1', 'treat', 'a018'), (20, 'EXP_A', 'L1', 'treat', 'a019'), (21, 'EXP_A', 'L1', 'treat', 'a020'), (22, 'EXP_A', 'L1', 'treat', 'a021'), (23, 'EXP_A', 'L1', 'treat', 'a022'), (24, 'EXP_A', 'L1', 'treat', 'a023'), (25, 'EXP_A', 'L1', 'treat', 'a024'), (26, 'EXP_A', 'L1', 'treat', 'a025'), (27, 'EXP_A', 'L1', 'treat', 'a026'), (28, 'EXP_A', 'L1', 'treat', 'a027'), (29, 'EXP_A', 'L1', 'treat', 'a028'), (30, 'EXP_A', 'L1', 'treat', 'a029'), (31, 'EXP_A', 'L1', 'treat', 'a030'), (32, 'EXP_A', 'L1', 'treat', 'a031'), (33, 'EXP_A', 'L1', 'treat', 'a032'), (34, 'EXP_A', 'L1', 'treat', 'a033'), (35, 'EXP_A', 'L1', 'treat', 'a034'), (36, 'EXP_A', 'L1', 'treat', 'a035'), (37, 'EXP_A', 'L1', 'treat', 'a036'), (38, 'EXP_A', 'L1', 'treat', 'a037'), (39, 'EXP_A', 'L1', 'treat', 'a038'), (40, 'EXP_A', 'L1', 'treat', 'a039'), (41, 'EXP_A', 'L1', 'treat', 'a040'), (42, 'EXP_A', 'L1', 'treat', 'a041'), (43, 'EXP_A', 'L1', 'treat', 'a042'), (44, 'EXP_A', 'L1', 'treat', 'a043'), (45, 'EXP_A', 'L1', 'treat', 'a044'), (46, 'EXP_A', 'L1', 'treat', 'a045'), (47, 'EXP_A', 'L1', 'treat', 'a046'), (48, 'EXP_A', 'L1', 'treat', 'a047'), (49, 'EXP_A', 'L1', 'treat', 'a048'), (50, 'EXP_A', 'L1', 'treat', 'a049'), (51, 'EXP_A', 'L1', 'treat', 'a050'), (52, 'EXP_A', 'L1', 'treat', 'a051'), (53, 'EXP_A', 'L1', 'treat', 'a052'), (54, 'EXP_A', 'L1', 'treat', 'a053'), (55, 'EXP_A', 'L1', 'treat', 'a054'), (56, 'EXP_A', 'L1', 'treat', 'a055'), (57, 'EXP_A', 'L1', 'treat', 'a056'), (58, 'EXP_A', 'L1', 'treat', 'a057'), (59, 'EXP_A', 'L1', 'treat', 'a058'), (60, 'EXP_A', 'L1', 'treat', 'a059'), (61, 'EXP_A', 'L1', 'treat', 'a060'), (62, 'EXP_A', 'L1', 'treat', 'a061'), (63, 'EXP_A', 'L1', 'treat', 'a062'), (64, 'EXP_A', 'L1', 'treat', 'a063'), (65, 'EXP_A', 'L1', 'treat', 'a064'), (66, 'EXP_A', 'L1', 'treat', 'a065'), (67, 'EXP_A', 'L1', 'treat', 'a066'), (68, 'EXP_A', 'L1', 'treat', 'a067'), (69, 'EXP_A', 'L1', 'treat', 'a068'), (70, 'EXP_A', 'L1', 'treat', 'a069'), (71, 'EXP_A', 'L1', 'treat', 'a070'), (72, 'EXP_A', 'L1', 'treat', 'a071'), (73, 'EXP_A', 'L1', 'treat', 'a072'), (74, 'EXP_A', 'L1', 'treat', 'a073'), (75, 'EXP_A', 'L1', 'treat', 'a074'), (76, 'EXP_A', 'L1', 'treat', 'a075'), (77, 'EXP_A', 'L1', 'treat', 'a076'), (78, 'EXP_A', 'L1', 'treat', 'a077'), (79, 'EXP_A', 'L1', 'treat', 'a078'), (80, 'EXP_A', 'L1', 'treat', 'a079'), (81, 'EXP_A', 'L1', 'treat', 'a080'), (82, 'EXP_A', 'L1', 'treat', 'a081'), (83, 'EXP_A', 'L1', 'treat', 'a082'), (84, 'EXP_A', 'L1', 'treat', 'a083'), (85, 'EXP_A', 'L1', 'treat', 'a084'), (86, 'EXP_A', 'L1', 'treat', 'a085'), (87, 'EXP_A', 'L1', 'treat', 'a086'), (88, 'EXP_A', 'L1', 'treat', 'a087'), (89, 'EXP_A', 'L1', 'treat', 'a088'), (90, 'EXP_A', 'L1', 'treat', 'a089'), (91, 'EXP_A', 'L1', 'treat', 'a090'), (92, 'EXP_A', 'L1', 'treat', 'a091'), (93, 'EXP_A', 'L1', 'treat', 'a092'), (94, 'EXP_A', 'L1', 'treat', 'a093'), (95, 'EXP_A', 'L1', 'treat', 'a094'), (96, 'EXP_A', 'L1', 'treat', 'a095'), (97, 'EXP_A', 'L1', 'treat', 'a096'), (98, 'EXP_A', 'L1', 'treat', 'a097'), (99, 'EXP_A', 'L1', 'treat', 'a098'), (100, 'EXP_A', 'L1', 'treat', 'a099'), (101, 'EXP_A', 'L1', 'treat', 'a100'), (102, 'EXP_A', 'L1', 'treat', 'a101'), (103, 'EXP_A', 'L1', 'treat', 'a102'), (104, 'EXP_A', 'L1', 'treat', 'a103'), (105, 'EXP_A', 'L1', 'treat', 'a104'), (106, 'EXP_A', 'L1', 'treat', 'a105'), (107, 'EXP_A', 'L1', 'treat', 'a106'), (108, 'EXP_A', 'L1', 'treat', 'a107'), (109, 'EXP_A', 'L1', 'treat', 'a108'), (110, 'EXP_A', 'L1', 'treat', 'a109'), (111, 'EXP_A', 'L1', 'treat', 'a110'), (112, 'EXP_A', 'L1', 'treat', 'a111'), (113, 'EXP_A', 'L1', 'treat', 'a112'), (114, 'EXP_A', 'L1', 'treat', 'a113'), (115, 'EXP_A', 'L1', 'treat', 'a114'), (116, 'EXP_A', 'L1', 'treat', 'a115'), (117, 'EXP_A', 'L1', 'treat', 'a116'), (118, 'EXP_A', 'L1', 'treat', 'a117'), (119, 'EXP_A', 'L1', 'treat', 'a118'), (120, 'EXP_A', 'L1', 'treat', 'a119'), (121, 'EXP_A', 'L1', 'treat', 'a120'), (122, 'EXP_A', 'L1', 'treat', 'a121'), (123, 'EXP_A', 'L1', 'treat', 'a122'), (124, 'EXP_A', 'L1', 'treat', 'a123'), (125, 'EXP_A', 'L1', 'treat', 'a124'), (126, 'EXP_A', 'L1', 'treat', 'a125'), (127, 'EXP_A', 'L1', 'treat', 'a126'), (128, 'EXP_A', 'L1', 'treat', 'a127'), (129, 'EXP_A', 'L1', 'treat', 'a128'), (130, 'EXP_A', 'L1', 'treat', 'a129'), (131, 'EXP_A', 'L1', 'treat', 'a130'), (132, 'EXP_A', 'L1', 'treat', 'a131'), (133, 'EXP_A', 'L1', 'treat', 'a132'), (134, 'EXP_A', 'L1', 'treat', 'a133'), (135, 'EXP_A', 'L1', 'treat', 'a134'), (136, 'EXP_A', 'L1', 'treat', 'a135'), (137, 'EXP_A', 'L1', 'treat', 'a136'), (138, 'EXP_A', 'L1', 'treat', 'a137'), (139, 'EXP_A', 'L1', 'treat', 'a138'), (140, 'EXP_A', 'L1', 'treat', 'a139'), (141, 'EXP_A', 'L1', 'treat', 'a140'), (142, 'EXP_A', 'L1', 'treat', 'a141'), (143, 'EXP_A', 'L1', 'treat', 'a142'), (144, 'EXP_A', 'L1', 'treat', 'a143'), (145, 'EXP_A', 'L1', 'treat', 'a144'), (146, 'EXP_A', 'L1', 'treat', 'a145'), (147, 'EXP_A', 'L1', 'treat', 'a146'), (148, 'EXP_A', 'L1', 'treat', 'a147'), (149, 'EXP_A', 'L1', 'treat', 'a148'), (150, 'EXP_A', 'L1', 'treat', 'a149'), (151, 'EXP_A', 'L1', 'ctrl', 'a150'), (152, 'EXP_A', 'L1', 'ctrl', 'a151'), (153, 'EXP_A', 'L1', 'ctrl', 'a152'), (154, 'EXP_A', 'L1', 'ctrl', 'a153'), (155, 'EXP_A', 'L1', 'ctrl', 'a154'), (156, 'EXP_A', 'L1', 'ctrl', 'a155'), (157, 'EXP_A', 'L1', 'ctrl', 'a156'), (158, 'EXP_A', 'L1', 'ctrl', 'a157'), (159, 'EXP_A', 'L1', 'ctrl', 'a158'), (160, 'EXP_A', 'L1', 'ctrl', 'a159'), (161, 'EXP_A', 'L1', 'ctrl', 'a160'), (162, 'EXP_A', 'L1', 'ctrl', 'a161'), (163, 'EXP_A', 'L1', 'ctrl', 'a162'), (164, 'EXP_A', 'L1', 'ctrl', 'a163'), (165, 'EXP_A', 'L1', 'ctrl', 'a164'), (166, 'EXP_A', 'L1', 'ctrl', 'a165'), (167, 'EXP_A', 'L1', 'ctrl', 'a166'), (168, 'EXP_A', 'L1', 'ctrl', 'a167'), (169, 'EXP_A', 'L1', 'ctrl', 'a168'), (170, 'EXP_A', 'L1', 'ctrl', 'a169'), (171, 'EXP_A', 'L1', 'ctrl', 'a170'), (172, 'EXP_A', 'L1', 'ctrl', 'a171'), (173, 'EXP_A', 'L1', 'ctrl', 'a172'), (174, 'EXP_A', 'L1', 'ctrl', 'a173'), (175, 'EXP_A', 'L1', 'ctrl', 'a174'), (176, 'EXP_A', 'L1', 'ctrl', 'a175'), (177, 'EXP_A', 'L1', 'ctrl', 'a176'), (178, 'EXP_A', 'L1', 'ctrl', 'a177'), (179, 'EXP_A', 'L1', 'ctrl', 'a178'), (180, 'EXP_A', 'L1', 'ctrl', 'a179'), (181, 'EXP_A', 'L1', 'ctrl', 'a180'), (182, 'EXP_A', 'L1', 'ctrl', 'a181'), (183, 'EXP_A', 'L1', 'ctrl', 'a182'), (184, 'EXP_A', 'L1', 'ctrl', 'a183'), (185, 'EXP_A', 'L1', 'ctrl', 'a184'), (186, 'EXP_A', 'L1', 'ctrl', 'a185'), (187, 'EXP_A', 'L1', 'ctrl', 'a186'), (188, 'EXP_A', 'L1', 'ctrl', 'a187'), (189, 'EXP_A', 'L1', 'ctrl', 'a188'), (190, 'EXP_A', 'L1', 'ctrl', 'a189'), (191, 'EXP_A', 'L1', 'ctrl', 'a190'), (192, 'EXP_A', 'L1', 'ctrl', 'a191'), (193, 'EXP_A', 'L1', 'ctrl', 'a192'), (194, 'EXP_A', 'L1', 'ctrl', 'a193'), (195, 'EXP_A', 'L1', 'ctrl', 'a194'), (196, 'EXP_A', 'L1', 'ctrl', 'a195'), (197, 'EXP_A', 'L1', 'ctrl', 'a196'), (198, 'EXP_A', 'L1', 'ctrl', 'a197'), (199, 'EXP_A', 'L1', 'ctrl', 'a198'), (200, 'EXP_A', 'L1', 'ctrl', 'a199'), (201, 'EXP_A', 'L1', 'ctrl', 'a200'), (202, 'EXP_A', 'L1', 'ctrl', 'a201'), (203, 'EXP_A', 'L1', 'ctrl', 'a202'), (204, 'EXP_A', 'L1', 'ctrl', 'a203'), (205, 'EXP_A', 'L1', 'ctrl', 'a204'), (206, 'EXP_A', 'L1', 'ctrl', 'a205'), (207, 'EXP_A', 'L1', 'ctrl', 'a206'), (208, 'EXP_A', 'L1', 'ctrl', 'a207'), (209, 'EXP_A', 'L1', 'ctrl', 'a208'), (210, 'EXP_A', 'L1', 'ctrl', 'a209'), (211, 'EXP_A', 'L1', 'ctrl', 'a210'), (212, 'EXP_A', 'L1', 'ctrl', 'a211'), (213, 'EXP_A', 'L1', 'ctrl', 'a212'), (214, 'EXP_A', 'L1', 'ctrl', 'a213'), (215, 'EXP_A', 'L1', 'ctrl', 'a214'), (216, 'EXP_A', 'L1', 'ctrl', 'a215'), (217, 'EXP_A', 'L1', 'ctrl', 'a216'), (218, 'EXP_A', 'L1', 'ctrl', 'a217'), (219, 'EXP_A', 'L1', 'ctrl', 'a218'), (220, 'EXP_A', 'L1', 'ctrl', 'a219'), (221, 'EXP_A', 'L1', 'ctrl', 'a220'), (222, 'EXP_A', 'L1', 'ctrl', 'a221'), (223, 'EXP_A', 'L1', 'ctrl', 'a222'), (224, 'EXP_A', 'L1', 'ctrl', 'a223'), (225, 'EXP_A', 'L1', 'ctrl', 'a224'), (226, 'EXP_A', 'L1', 'ctrl', 'a225'), (227, 'EXP_A', 'L1', 'ctrl', 'a226'), (228, 'EXP_A', 'L1', 'ctrl', 'a227'), (229, 'EXP_A', 'L1', 'ctrl', 'a228'), (230, 'EXP_A', 'L1', 'ctrl', 'a229'), (231, 'EXP_A', 'L1', 'ctrl', 'a230'), (232, 'EXP_A', 'L1', 'ctrl', 'a231'), (233, 'EXP_A', 'L1', 'ctrl', 'a232'), (234, 'EXP_A', 'L1', 'ctrl', 'a233'), (235, 'EXP_A', 'L1', 'ctrl', 'a234'), (236, 'EXP_A', 'L1', 'ctrl', 'a235'), (237, 'EXP_A', 'L1', 'ctrl', 'a236'), (238, 'EXP_A', 'L1', 'ctrl', 'a237'), (239, 'EXP_A', 'L1', 'ctrl', 'a238'), (240, 'EXP_A', 'L1', 'ctrl', 'a239'), (241, 'EXP_A', 'L1', 'ctrl', 'a240'), (242, 'EXP_A', 'L1', 'ctrl', 'a241'), (243, 'EXP_A', 'L1', 'ctrl', 'a242'), (244, 'EXP_A', 'L1', 'ctrl', 'a243'), (245, 'EXP_A', 'L1', 'ctrl', 'a244'), (246, 'EXP_A', 'L1', 'ctrl', 'a245'), (247, 'EXP_A', 'L1', 'ctrl', 'a246'), (248, 'EXP_A', 'L1', 'ctrl', 'a247'), (249, 'EXP_A', 'L1', 'ctrl', 'a248'), (250, 'EXP_A', 'L1', 'ctrl', 'a249'), (251, 'EXP_B', 'L1', 'treat', 'b000'), (252, 'EXP_B', 'L1', 'treat', 'b001'), (253, 'EXP_B', 'L1', 'treat', 'b002'), (254, 'EXP_B', 'L1', 'treat', 'b003'), (255, 'EXP_B', 'L1', 'treat', 'b004'), (256, 'EXP_B', 'L1', 'treat', 'b005'), (257, 'EXP_B', 'L1', 'treat', 'b006'), (258, 'EXP_B', 'L1', 'treat', 'b007'), (259, 'EXP_B', 'L1', 'treat', 'b008'), (260, 'EXP_B', 'L1', 'treat', 'b009'), (261, 'EXP_B', 'L1', 'treat', 'b010'), (262, 'EXP_B', 'L1', 'treat', 'b011'), (263, 'EXP_B', 'L1', 'treat', 'b012'), (264, 'EXP_B', 'L1', 'treat', 'b013'), (265, 'EXP_B', 'L1', 'treat', 'b014'), (266, 'EXP_B', 'L1', 'treat', 'b015'), (267, 'EXP_B', 'L1', 'treat', 'b016'), (268, 'EXP_B', 'L1', 'treat', 'b017'), (269, 'EXP_B', 'L1', 'treat', 'b018'), (270, 'EXP_B', 'L1', 'treat', 'b019'), (271, 'EXP_B', 'L1', 'treat', 'b020'), (272, 'EXP_B', 'L1', 'treat', 'b021'), (273, 'EXP_B', 'L1', 'treat', 'b022'), (274, 'EXP_B', 'L1', 'treat', 'b023'), (275, 'EXP_B', 'L1', 'treat', 'b024'), (276, 'EXP_B', 'L1', 'treat', 'b025'), (277, 'EXP_B', 'L1', 'treat', 'b026'), (278, 'EXP_B', 'L1', 'treat', 'b027'), (279, 'EXP_B', 'L1', 'treat', 'b028'), (280, 'EXP_B', 'L1', 'treat', 'b029'), (281, 'EXP_B', 'L1', 'treat', 'b030'), (282, 'EXP_B', 'L1', 'treat', 'b031'), (283, 'EXP_B', 'L1', 'treat', 'b032'), (284, 'EXP_B', 'L1', 'treat', 'b033'), (285, 'EXP_B', 'L1', 'treat', 'b034'), (286, 'EXP_B', 'L1', 'treat', 'b035'), (287, 'EXP_B', 'L1', 'treat', 'b036'), (288, 'EXP_B', 'L1', 'treat', 'b037'), (289, 'EXP_B', 'L1', 'treat', 'b038'), (290, 'EXP_B', 'L1', 'treat', 'b039'), (291, 'EXP_B', 'L1', 'treat', 'b040'), (292, 'EXP_B', 'L1', 'treat', 'b041'), (293, 'EXP_B', 'L1', 'treat', 'b042'), (294, 'EXP_B', 'L1', 'treat', 'b043'), (295, 'EXP_B', 'L1', 'treat', 'b044'), (296, 'EXP_B', 'L1', 'treat', 'b045'), (297, 'EXP_B', 'L1', 'treat', 'b046'), (298, 'EXP_B', 'L1', 'treat', 'b047'), (299, 'EXP_B', 'L1', 'treat', 'b048'), (300, 'EXP_B', 'L1', 'treat', 'b049'), (301, 'EXP_B', 'L1', 'treat', 'b050'), (302, 'EXP_B', 'L1', 'treat', 'b051'), (303, 'EXP_B', 'L1', 'treat', 'b052'), (304, 'EXP_B', 'L1', 'treat', 'b053'), (305, 'EXP_B', 'L1', 'treat', 'b054'), (306, 'EXP_B', 'L1', 'treat', 'b055'), (307, 'EXP_B', 'L1', 'treat', 'b056'), (308, 'EXP_B', 'L1', 'treat', 'b057'), (309, 'EXP_B', 'L1', 'treat', 'b058'), (310, 'EXP_B', 'L1', 'treat', 'b059'), (311, 'EXP_B', 'L1', 'treat', 'b060'), (312, 'EXP_B', 'L1', 'treat', 'b061'), (313, 'EXP_B', 'L1', 'treat', 'b062'), (314, 'EXP_B', 'L1', 'treat', 'b063'), (315, 'EXP_B', 'L1', 'treat', 'b064'), (316, 'EXP_B', 'L1', 'treat', 'b065'), (317, 'EXP_B', 'L1', 'treat', 'b066'), (318, 'EXP_B', 'L1', 'treat', 'b067'), (319, 'EXP_B', 'L1', 'treat', 'b068'), (320, 'EXP_B', 'L1', 'treat', 'b069'), (321, 'EXP_B', 'L1', 'treat', 'b070'), (322, 'EXP_B', 'L1', 'treat', 'b071'), (323, 'EXP_B', 'L1', 'treat', 'b072'), (324, 'EXP_B', 'L1', 'treat', 'b073'), (325, 'EXP_B', 'L1', 'treat', 'b074'), (326, 'EXP_B', 'L1', 'treat', 'b075'), (327, 'EXP_B', 'L1', 'treat', 'b076'), (328, 'EXP_B', 'L1', 'treat', 'b077'), (329, 'EXP_B', 'L1', 'treat', 'b078'), (330, 'EXP_B', 'L1', 'treat', 'b079'), (331, 'EXP_B', 'L1', 'treat', 'b080'), (332, 'EXP_B', 'L1', 'treat', 'b081'), (333, 'EXP_B', 'L1', 'treat', 'b082'), (334, 'EXP_B', 'L1', 'treat', 'b083'), (335, 'EXP_B', 'L1', 'treat', 'b084'), (336, 'EXP_B', 'L1', 'treat', 'b085'), (337, 'EXP_B', 'L1', 'treat', 'b086'), (338, 'EXP_B', 'L1', 'treat', 'b087'), (339, 'EXP_B', 'L1', 'treat', 'b088'), (340, 'EXP_B', 'L1', 'treat', 'b089'), (341, 'EXP_B', 'L1', 'treat', 'b090'), (342, 'EXP_B', 'L1', 'treat', 'b091'), (343, 'EXP_B', 'L1', 'treat', 'b092'), (344, 'EXP_B', 'L1', 'treat', 'b093'), (345, 'EXP_B', 'L1', 'treat', 'b094'), (346, 'EXP_B', 'L1', 'treat', 'b095'), (347, 'EXP_B', 'L1', 'treat', 'b096'), (348, 'EXP_B', 'L1', 'treat', 'b097'), (349, 'EXP_B', 'L1', 'treat', 'b098'), (350, 'EXP_B', 'L1', 'treat', 'b099'), (351, 'EXP_B', 'L1', 'treat', 'b100'), (352, 'EXP_B', 'L1', 'treat', 'b101'), (353, 'EXP_B', 'L1', 'treat', 'b102'), (354, 'EXP_B', 'L1', 'treat', 'b103'), (355, 'EXP_B', 'L1', 'treat', 'b104'), (356, 'EXP_B', 'L1', 'treat', 'b105'), (357, 'EXP_B', 'L1', 'treat', 'b106'), (358, 'EXP_B', 'L1', 'treat', 'b107'), (359, 'EXP_B', 'L1', 'treat', 'b108'), (360, 'EXP_B', 'L1', 'treat', 'b109'), (361, 'EXP_B', 'L1', 'treat', 'b110'), (362, 'EXP_B', 'L1', 'treat', 'b111'), (363, 'EXP_B', 'L1', 'treat', 'b112'), (364, 'EXP_B', 'L1', 'treat', 'b113'), (365, 'EXP_B', 'L1', 'treat', 'b114'), (366, 'EXP_B', 'L1', 'treat', 'b115'), (367, 'EXP_B', 'L1', 'treat', 'b116'), (368, 'EXP_B', 'L1', 'treat', 'b117'), (369, 'EXP_B', 'L1', 'treat', 'b118'), (370, 'EXP_B', 'L1', 'treat', 'b119'), (371, 'EXP_B', 'L1', 'ctrl', 'b120'), (372, 'EXP_B', 'L1', 'ctrl', 'b121'), (373, 'EXP_B', 'L1', 'ctrl', 'b122'), (374, 'EXP_B', 'L1', 'ctrl', 'b123'), (375, 'EXP_B', 'L1', 'ctrl', 'b124'), (376, 'EXP_B', 'L1', 'ctrl', 'b125'), (377, 'EXP_B', 'L1', 'ctrl', 'b126'), (378, 'EXP_B', 'L1', 'ctrl', 'b127'), (379, 'EXP_B', 'L1', 'ctrl', 'b128'), (380, 'EXP_B', 'L1', 'ctrl', 'b129'), (381, 'EXP_B', 'L1', 'ctrl', 'b130'), (382, 'EXP_B', 'L1', 'ctrl', 'b131'), (383, 'EXP_B', 'L1', 'ctrl', 'b132'), (384, 'EXP_B', 'L1', 'ctrl', 'b133'), (385, 'EXP_B', 'L1', 'ctrl', 'b134'), (386, 'EXP_B', 'L1', 'ctrl', 'b135'), (387, 'EXP_B', 'L1', 'ctrl', 'b136'), (388, 'EXP_B', 'L1', 'ctrl', 'b137'), (389, 'EXP_B', 'L1', 'ctrl', 'b138'), (390, 'EXP_B', 'L1', 'ctrl', 'b139'), (391, 'EXP_B', 'L1', 'ctrl', 'b140'), (392, 'EXP_B', 'L1', 'ctrl', 'b141'), (393, 'EXP_B', 'L1', 'ctrl', 'b142'), (394, 'EXP_B', 'L1', 'ctrl', 'b143'), (395, 'EXP_B', 'L1', 'ctrl', 'b144'), (396, 'EXP_B', 'L1', 'ctrl', 'b145'), (397, 'EXP_B', 'L1', 'ctrl', 'b146'), (398, 'EXP_B', 'L1', 'ctrl', 'b147'), (399, 'EXP_B', 'L1', 'ctrl', 'b148'), (400, 'EXP_B', 'L1', 'ctrl', 'b149'), (401, 'EXP_B', 'L1', 'ctrl', 'b150'), (402, 'EXP_B', 'L1', 'ctrl', 'b151'), (403, 'EXP_B', 'L1', 'ctrl', 'b152'), (404, 'EXP_B', 'L1', 'ctrl', 'b153'), (405, 'EXP_B', 'L1', 'ctrl', 'b154'), (406, 'EXP_B', 'L1', 'ctrl', 'b155'), (407, 'EXP_B', 'L1', 'ctrl', 'b156'), (408, 'EXP_B', 'L1', 'ctrl', 'b157'), (409, 'EXP_B', 'L1', 'ctrl', 'b158'), (410, 'EXP_B', 'L1', 'ctrl', 'b159'), (411, 'EXP_B', 'L1', 'ctrl', 'b160'), (412, 'EXP_B', 'L1', 'ctrl', 'b161'), (413, 'EXP_B', 'L1', 'ctrl', 'b162'), (414, 'EXP_B', 'L1', 'ctrl', 'b163'), (415, 'EXP_B', 'L1', 'ctrl', 'b164'), (416, 'EXP_B', 'L1', 'ctrl', 'b165'), (417, 'EXP_B', 'L1', 'ctrl', 'b166'), (418, 'EXP_B', 'L1', 'ctrl', 'b167'), (419, 'EXP_B', 'L1', 'ctrl', 'b168'), (420, 'EXP_B', 'L1', 'ctrl', 'b169'), (421, 'EXP_B', 'L1', 'ctrl', 'b170'), (422, 'EXP_B', 'L1', 'ctrl', 'b171'), (423, 'EXP_B', 'L1', 'ctrl', 'b172'), (424, 'EXP_B', 'L1', 'ctrl', 'b173'), (425, 'EXP_B', 'L1', 'ctrl', 'b174'), (426, 'EXP_B', 'L1', 'ctrl', 'b175'), (427, 'EXP_B', 'L1', 'ctrl', 'b176'), (428, 'EXP_B', 'L1', 'ctrl', 'b177'), (429, 'EXP_B', 'L1', 'ctrl', 'b178'), (430, 'EXP_B', 'L1', 'ctrl', 'b179'), (431, 'EXP_B', 'L1', 'ctrl', 'b180'), (432, 'EXP_B', 'L1', 'ctrl', 'b181'), (433, 'EXP_B', 'L1', 'ctrl', 'b182'), (434, 'EXP_B', 'L1', 'ctrl', 'b183'), (435, 'EXP_B', 'L1', 'ctrl', 'b184'), (436, 'EXP_B', 'L1', 'ctrl', 'b185'), (437, 'EXP_B', 'L1', 'ctrl', 'b186'), (438, 'EXP_B', 'L1', 'ctrl', 'b187'), (439, 'EXP_B', 'L1', 'ctrl', 'b188'), (440, 'EXP_B', 'L1', 'ctrl', 'b189'), (441, 'EXP_B', 'L1', 'ctrl', 'b190'), (442, 'EXP_B', 'L1', 'ctrl', 'b191'), (443, 'EXP_B', 'L1', 'ctrl', 'b192'), (444, 'EXP_B', 'L1', 'ctrl', 'b193'), (445, 'EXP_B', 'L1', 'ctrl', 'b194'), (446, 'EXP_B', 'L1', 'ctrl', 'b195'), (447, 'EXP_B', 'L1', 'ctrl', 'b196'), (448, 'EXP_B', 'L1', 'ctrl', 'b197'), (449, 'EXP_B', 'L1', 'ctrl', 'b198'), (450, 'EXP_B', 'L1', 'ctrl', 'b199'), (451, 'EXP_B', 'L1', 'ctrl', 'b200'), (452, 'EXP_B', 'L1', 'ctrl', 'b201'), (453, 'EXP_B', 'L1', 'ctrl', 'b202'), (454, 'EXP_B', 'L1', 'ctrl', 'b203'), (455, 'EXP_B', 'L1', 'ctrl', 'b204'), (456, 'EXP_B', 'L1', 'ctrl', 'b205'), (457, 'EXP_B', 'L1', 'ctrl', 'b206'), (458, 'EXP_B', 'L1', 'ctrl', 'b207'), (459, 'EXP_B', 'L1', 'ctrl', 'b208'), (460, 'EXP_B', 'L1', 'ctrl', 'b209'), (461, 'EXP_B', 'L1', 'ctrl', 'b210'), (462, 'EXP_B', 'L1', 'ctrl', 'b211'), (463, 'EXP_B', 'L1', 'ctrl', 'b212'), (464, 'EXP_B', 'L1', 'ctrl', 'b213'), (465, 'EXP_B', 'L1', 'ctrl', 'b214'), (466, 'EXP_B', 'L1', 'ctrl', 'b215'), (467, 'EXP_B', 'L1', 'ctrl', 'b216'), (468, 'EXP_B', 'L1', 'ctrl', 'b217'), (469, 'EXP_B', 'L1', 'ctrl', 'b218'), (470, 'EXP_B', 'L1', 'ctrl', 'b219'), (471, 'EXP_B', 'L1', 'ctrl', 'b220'), (472, 'EXP_B', 'L1', 'ctrl', 'b221'), (473, 'EXP_B', 'L1', 'ctrl', 'b222'), (474, 'EXP_B', 'L1', 'ctrl', 'b223'), (475, 'EXP_B', 'L1', 'ctrl', 'b224'), (476, 'EXP_B', 'L1', 'ctrl', 'b225'), (477, 'EXP_B', 'L1', 'ctrl', 'b226'), (478, 'EXP_B', 'L1', 'ctrl', 'b227'), (479, 'EXP_B', 'L1', 'ctrl', 'b228'), (480, 'EXP_B', 'L1', 'ctrl', 'b229'), (481, 'EXP_B', 'L1', 'ctrl', 'b230'), (482, 'EXP_B', 'L1', 'ctrl', 'b231'), (483, 'EXP_B', 'L1', 'ctrl', 'b232'), (484, 'EXP_B', 'L1', 'ctrl', 'b233'), (485, 'EXP_B', 'L1', 'ctrl', 'b234'), (486, 'EXP_B', 'L1', 'ctrl', 'b235'), (487, 'EXP_B', 'L1', 'ctrl', 'b236'), (488, 'EXP_B', 'L1', 'ctrl', 'b237'), (489, 'EXP_B', 'L1', 'ctrl', 'b238'), (490, 'EXP_B', 'L1', 'ctrl', 'b239'), (491, 'EXP_C', 'L2', 'treat', 'c000'), (492, 'EXP_C', 'L2', 'treat', 'c001'), (493, 'EXP_C', 'L2', 'treat', 'c002'), (494, 'EXP_C', 'L2', 'treat', 'c003'), (495, 'EXP_C', 'L2', 'treat', 'c004'), (496, 'EXP_C', 'L2', 'treat', 'c005'), (497, 'EXP_C', 'L2', 'treat', 'c006'), (498, 'EXP_C', 'L2', 'treat', 'c007'), (499, 'EXP_C', 'L2', 'treat', 'c008'), (500, 'EXP_C', 'L2', 'treat', 'c009'), (501, 'EXP_C', 'L2', 'treat', 'c010'), (502, 'EXP_C', 'L2', 'treat', 'c011'), (503, 'EXP_C', 'L2', 'treat', 'c012'), (504, 'EXP_C', 'L2', 'treat', 'c013'), (505, 'EXP_C', 'L2', 'treat', 'c014'), (506, 'EXP_C', 'L2', 'treat', 'c015'), (507, 'EXP_C', 'L2', 'treat', 'c016'), (508, 'EXP_C', 'L2', 'treat', 'c017'), (509, 'EXP_C', 'L2', 'treat', 'c018'), (510, 'EXP_C', 'L2', 'treat', 'c019'), (511, 'EXP_C', 'L2', 'treat', 'c020'), (512, 'EXP_C', 'L2', 'treat', 'c021'), (513, 'EXP_C', 'L2', 'treat', 'c022'), (514, 'EXP_C', 'L2', 'treat', 'c023'), (515, 'EXP_C', 'L2', 'treat', 'c024'), (516, 'EXP_C', 'L2', 'treat', 'c025'), (517, 'EXP_C', 'L2', 'treat', 'c026'), (518, 'EXP_C', 'L2', 'treat', 'c027'), (519, 'EXP_C', 'L2', 'treat', 'c028'), (520, 'EXP_C', 'L2', 'treat', 'c029'), (521, 'EXP_C', 'L2', 'treat', 'c030'), (522, 'EXP_C', 'L2', 'treat', 'c031'), (523, 'EXP_C', 'L2', 'treat', 'c032'), (524, 'EXP_C', 'L2', 'treat', 'c033'), (525, 'EXP_C', 'L2', 'treat', 'c034'), (526, 'EXP_C', 'L2', 'treat', 'c035'), (527, 'EXP_C', 'L2', 'treat', 'c036'), (528, 'EXP_C', 'L2', 'treat', 'c037'), (529, 'EXP_C', 'L2', 'treat', 'c038'), (530, 'EXP_C', 'L2', 'treat', 'c039'), (531, 'EXP_C', 'L2', 'treat', 'c040'), (532, 'EXP_C', 'L2', 'treat', 'c041'), (533, 'EXP_C', 'L2', 'treat', 'c042'), (534, 'EXP_C', 'L2', 'treat', 'c043'), (535, 'EXP_C', 'L2', 'treat', 'c044'), (536, 'EXP_C', 'L2', 'treat', 'c045'), (537, 'EXP_C', 'L2', 'treat', 'c046'), (538, 'EXP_C', 'L2', 'treat', 'c047'), (539, 'EXP_C', 'L2', 'treat', 'c048'), (540, 'EXP_C', 'L2', 'treat', 'c049'), (541, 'EXP_C', 'L2', 'treat', 'c050'), (542, 'EXP_C', 'L2', 'treat', 'c051'), (543, 'EXP_C', 'L2', 'treat', 'c052'), (544, 'EXP_C', 'L2', 'treat', 'c053'), (545, 'EXP_C', 'L2', 'treat', 'c054'), (546, 'EXP_C', 'L2', 'treat', 'c055'), (547, 'EXP_C', 'L2', 'treat', 'c056'), (548, 'EXP_C', 'L2', 'treat', 'c057'), (549, 'EXP_C', 'L2', 'treat', 'c058'), (550, 'EXP_C', 'L2', 'treat', 'c059'), (551, 'EXP_C', 'L2', 'treat', 'c060'), (552, 'EXP_C', 'L2', 'treat', 'c061'), (553, 'EXP_C', 'L2', 'treat', 'c062'), (554, 'EXP_C', 'L2', 'treat', 'c063'), (555, 'EXP_C', 'L2', 'treat', 'c064'), (556, 'EXP_C', 'L2', 'treat', 'c065'), (557, 'EXP_C', 'L2', 'treat', 'c066'), (558, 'EXP_C', 'L2', 'treat', 'c067'), (559, 'EXP_C', 'L2', 'treat', 'c068'), (560, 'EXP_C', 'L2', 'treat', 'c069'), (561, 'EXP_C', 'L2', 'treat', 'c070'), (562, 'EXP_C', 'L2', 'treat', 'c071'), (563, 'EXP_C', 'L2', 'treat', 'c072'), (564, 'EXP_C', 'L2', 'treat', 'c073'), (565, 'EXP_C', 'L2', 'treat', 'c074'), (566, 'EXP_C', 'L2', 'treat', 'c075'), (567, 'EXP_C', 'L2', 'treat', 'c076'), (568, 'EXP_C', 'L2', 'treat', 'c077'), (569, 'EXP_C', 'L2', 'treat', 'c078'), (570, 'EXP_C', 'L2', 'treat', 'c079'), (571, 'EXP_C', 'L2', 'treat', 'c080'), (572, 'EXP_C', 'L2', 'treat', 'c081'), (573, 'EXP_C', 'L2', 'treat', 'c082'), (574, 'EXP_C', 'L2', 'treat', 'c083'), (575, 'EXP_C', 'L2', 'treat', 'c084'), (576, 'EXP_C', 'L2', 'treat', 'c085'), (577, 'EXP_C', 'L2', 'treat', 'c086'), (578, 'EXP_C', 'L2', 'treat', 'c087'), (579, 'EXP_C', 'L2', 'treat', 'c088'), (580, 'EXP_C', 'L2', 'treat', 'c089'), (581, 'EXP_C', 'L2', 'treat', 'c090'), (582, 'EXP_C', 'L2', 'treat', 'c091'), (583, 'EXP_C', 'L2', 'treat', 'c092'), (584, 'EXP_C', 'L2', 'treat', 'c093'), (585, 'EXP_C', 'L2', 'treat', 'c094'), (586, 'EXP_C', 'L2', 'treat', 'c095'), (587, 'EXP_C', 'L2', 'treat', 'c096'), (588, 'EXP_C', 'L2', 'treat', 'c097'), (589, 'EXP_C', 'L2', 'treat', 'c098'), (590, 'EXP_C', 'L2', 'treat', 'c099'), (591, 'EXP_C', 'L2', 'treat', 'c100'), (592, 'EXP_C', 'L2', 'treat', 'c101'), (593, 'EXP_C', 'L2', 'treat', 'c102'), (594, 'EXP_C', 'L2', 'treat', 'c103'), (595, 'EXP_C', 'L2', 'treat', 'c104'), (596, 'EXP_C', 'L2', 'treat', 'c105'), (597, 'EXP_C', 'L2', 'treat', 'c106'), (598, 'EXP_C', 'L2', 'treat', 'c107'), (599, 'EXP_C', 'L2', 'treat', 'c108'), (600, 'EXP_C', 'L2', 'treat', 'c109'), (601, 'EXP_C', 'L2', 'ctrl', 'c110'), (602, 'EXP_C', 'L2', 'ctrl', 'c111'), (603, 'EXP_C', 'L2', 'ctrl', 'c112'), (604, 'EXP_C', 'L2', 'ctrl', 'c113'), (605, 'EXP_C', 'L2', 'ctrl', 'c114'), (606, 'EXP_C', 'L2', 'ctrl', 'c115'), (607, 'EXP_C', 'L2', 'ctrl', 'c116'), (608, 'EXP_C', 'L2', 'ctrl', 'c117'), (609, 'EXP_C', 'L2', 'ctrl', 'c118'), (610, 'EXP_C', 'L2', 'ctrl', 'c119'), (611, 'EXP_C', 'L2', 'ctrl', 'c120'), (612, 'EXP_C', 'L2', 'ctrl', 'c121'), (613, 'EXP_C', 'L2', 'ctrl', 'c122'), (614, 'EXP_C', 'L2', 'ctrl', 'c123'), (615, 'EXP_C', 'L2', 'ctrl', 'c124'), (616, 'EXP_C', 'L2', 'ctrl', 'c125'), (617, 'EXP_C', 'L2', 'ctrl', 'c126'), (618, 'EXP_C', 'L2', 'ctrl', 'c127'), (619, 'EXP_C', 'L2', 'ctrl', 'c128'), (620, 'EXP_C', 'L2', 'ctrl', 'c129'), (621, 'EXP_C', 'L2', 'ctrl', 'c130'), (622, 'EXP_C', 'L2', 'ctrl', 'c131'), (623, 'EXP_C', 'L2', 'ctrl', 'c132'), (624, 'EXP_C', 'L2', 'ctrl', 'c133'), (625, 'EXP_C', 'L2', 'ctrl', 'c134'), (626, 'EXP_C', 'L2', 'ctrl', 'c135'), (627, 'EXP_C', 'L2', 'ctrl', 'c136'), (628, 'EXP_C', 'L2', 'ctrl', 'c137'), (629, 'EXP_C', 'L2', 'ctrl', 'c138'), (630, 'EXP_C', 'L2', 'ctrl', 'c139'), (631, 'EXP_C', 'L2', 'ctrl', 'c140'), (632, 'EXP_C', 'L2', 'ctrl', 'c141'), (633, 'EXP_C', 'L2', 'ctrl', 'c142'), (634, 'EXP_C', 'L2', 'ctrl', 'c143'), (635, 'EXP_C', 'L2', 'ctrl', 'c144'), (636, 'EXP_C', 'L2', 'ctrl', 'c145'), (637, 'EXP_C', 'L2', 'ctrl', 'c146'), (638, 'EXP_C', 'L2', 'ctrl', 'c147'), (639, 'EXP_C', 'L2', 'ctrl', 'c148'), (640, 'EXP_C', 'L2', 'ctrl', 'c149'), (641, 'EXP_C', 'L2', 'ctrl', 'c150'), (642, 'EXP_C', 'L2', 'ctrl', 'c151'), (643, 'EXP_C', 'L2', 'ctrl', 'c152'), (644, 'EXP_C', 'L2', 'ctrl', 'c153'), (645, 'EXP_C', 'L2', 'ctrl', 'c154'), (646, 'EXP_C', 'L2', 'ctrl', 'c155'), (647, 'EXP_C', 'L2', 'ctrl', 'c156'), (648, 'EXP_C', 'L2', 'ctrl', 'c157'), (649, 'EXP_C', 'L2', 'ctrl', 'c158'), (650, 'EXP_C', 'L2', 'ctrl', 'c159'), (651, 'EXP_C', 'L2', 'ctrl', 'c160'), (652, 'EXP_C', 'L2', 'ctrl', 'c161'), (653, 'EXP_C', 'L2', 'ctrl', 'c162'), (654, 'EXP_C', 'L2', 'ctrl', 'c163'), (655, 'EXP_C', 'L2', 'ctrl', 'c164'), (656, 'EXP_C', 'L2', 'ctrl', 'c165'), (657, 'EXP_C', 'L2', 'ctrl', 'c166'), (658, 'EXP_C', 'L2', 'ctrl', 'c167'), (659, 'EXP_C', 'L2', 'ctrl', 'c168'), (660, 'EXP_C', 'L2', 'ctrl', 'c169'), (661, 'EXP_C', 'L2', 'ctrl', 'c170'), (662, 'EXP_C', 'L2', 'ctrl', 'c171'), (663, 'EXP_C', 'L2', 'ctrl', 'c172'), (664, 'EXP_C', 'L2', 'ctrl', 'c173'), (665, 'EXP_C', 'L2', 'ctrl', 'c174'), (666, 'EXP_C', 'L2', 'ctrl', 'c175'), (667, 'EXP_C', 'L2', 'ctrl', 'c176'), (668, 'EXP_C', 'L2', 'ctrl', 'c177'), (669, 'EXP_C', 'L2', 'ctrl', 'c178'), (670, 'EXP_C', 'L2', 'ctrl', 'c179'), (671, 'EXP_C', 'L2', 'ctrl', 'c180'), (672, 'EXP_C', 'L2', 'ctrl', 'c181'), (673, 'EXP_C', 'L2', 'ctrl', 'c182'), (674, 'EXP_C', 'L2', 'ctrl', 'c183'), (675, 'EXP_C', 'L2', 'ctrl', 'c184'), (676, 'EXP_C', 'L2', 'ctrl', 'c185'), (677, 'EXP_C', 'L2', 'ctrl', 'c186'), (678, 'EXP_C', 'L2', 'ctrl', 'c187'), (679, 'EXP_C', 'L2', 'ctrl', 'c188'), (680, 'EXP_C', 'L2', 'ctrl', 'c189'), (681, 'EXP_C', 'L2', 'ctrl', 'c190'), (682, 'EXP_C', 'L2', 'ctrl', 'c191'), (683, 'EXP_C', 'L2', 'ctrl', 'c192'), (684, 'EXP_C', 'L2', 'ctrl', 'c193'), (685, 'EXP_C', 'L2', 'ctrl', 'c194'), (686, 'EXP_C', 'L2', 'ctrl', 'c195'), (687, 'EXP_C', 'L2', 'ctrl', 'c196'), (688, 'EXP_C', 'L2', 'ctrl', 'c197'), (689, 'EXP_C', 'L2', 'ctrl', 'c198'), (690, 'EXP_C', 'L2', 'ctrl', 'c199'), (691, 'EXP_C', 'L2', 'ctrl', 'c200'), (692, 'EXP_C', 'L2', 'ctrl', 'c201'), (693, 'EXP_C', 'L2', 'ctrl', 'c202'), (694, 'EXP_C', 'L2', 'ctrl', 'c203'), (695, 'EXP_C', 'L2', 'ctrl', 'c204'), (696, 'EXP_C', 'L2', 'ctrl', 'c205'), (697, 'EXP_C', 'L2', 'ctrl', 'c206'), (698, 'EXP_C', 'L2', 'ctrl', 'c207'), (699, 'EXP_C', 'L2', 'ctrl', 'c208'), (700, 'EXP_C', 'L2', 'ctrl', 'c209'), (701, 'EXP_C', 'L2', 'ctrl', 'c210'), (702, 'EXP_C', 'L2', 'ctrl', 'c211'), (703, 'EXP_C', 'L2', 'ctrl', 'c212'), (704, 'EXP_C', 'L2', 'ctrl', 'c213'), (705, 'EXP_C', 'L2', 'ctrl', 'c214'), (706, 'EXP_C', 'L2', 'ctrl', 'c215'), (707, 'EXP_C', 'L2', 'ctrl', 'c216'), (708, 'EXP_C', 'L2', 'ctrl', 'c217'), (709, 'EXP_C', 'L2', 'ctrl', 'c218'), (710, 'EXP_C', 'L2', 'ctrl', 'c219'), (711, 'EXP_C', 'L2', 'ctrl', 'c000'), (712, 'EXP_C', 'L2', 'ctrl', 'c001'), (713, 'EXP_C', 'L2', 'ctrl', 'c002'), (714, 'EXP_D', 'L3', 'treat', 'd000'), (715, 'EXP_D', 'L3', 'treat', 'd001'), (716, 'EXP_D', 'L3', 'treat', 'd002'), (717, 'EXP_D', 'L3', 'treat', 'd003'), (718, 'EXP_D', 'L3', 'treat', 'd004'), (719, 'EXP_D', 'L3', 'treat', 'd005'), (720, 'EXP_D', 'L3', 'treat', 'd006'), (721, 'EXP_D', 'L3', 'treat', 'd007'), (722, 'EXP_D', 'L3', 'treat', 'd008'), (723, 'EXP_D', 'L3', 'treat', 'd009'), (724, 'EXP_D', 'L3', 'treat', 'd010'), (725, 'EXP_D', 'L3', 'treat', 'd011'), (726, 'EXP_D', 'L3', 'treat', 'd012'), (727, 'EXP_D', 'L3', 'treat', 'd013'), (728, 'EXP_D', 'L3', 'treat', 'd014'), (729, 'EXP_D', 'L3', 'treat', 'd015'), (730, 'EXP_D', 'L3', 'treat', 'd016'), (731, 'EXP_D', 'L3', 'treat', 'd017'), (732, 'EXP_D', 'L3', 'treat', 'd018'), (733, 'EXP_D', 'L3', 'treat', 'd019'), (734, 'EXP_D', 'L3', 'treat', 'd020'), (735, 'EXP_D', 'L3', 'treat', 'd021'), (736, 'EXP_D', 'L3', 'treat', 'd022'), (737, 'EXP_D', 'L3', 'treat', 'd023'), (738, 'EXP_D', 'L3', 'treat', 'd024'), (739, 'EXP_D', 'L3', 'treat', 'd025'), (740, 'EXP_D', 'L3', 'treat', 'd026'), (741, 'EXP_D', 'L3', 'treat', 'd027'), (742, 'EXP_D', 'L3', 'treat', 'd028'), (743, 'EXP_D', 'L3', 'treat', 'd029'), (744, 'EXP_D', 'L3', 'treat', 'd030'), (745, 'EXP_D', 'L3', 'treat', 'd031'), (746, 'EXP_D', 'L3', 'treat', 'd032'), (747, 'EXP_D', 'L3', 'treat', 'd033'), (748, 'EXP_D', 'L3', 'treat', 'd034'), (749, 'EXP_D', 'L3', 'treat', 'd035'), (750, 'EXP_D', 'L3', 'treat', 'd036'), (751, 'EXP_D', 'L3', 'treat', 'd037'), (752, 'EXP_D', 'L3', 'treat', 'd038'), (753, 'EXP_D', 'L3', 'treat', 'd039'), (754, 'EXP_D', 'L3', 'treat', 'd040'), (755, 'EXP_D', 'L3', 'treat', 'd041'), (756, 'EXP_D', 'L3', 'treat', 'd042'), (757, 'EXP_D', 'L3', 'treat', 'd043'), (758, 'EXP_D', 'L3', 'treat', 'd044'), (759, 'EXP_D', 'L3', 'treat', 'd045'), (760, 'EXP_D', 'L3', 'treat', 'd046'), (761, 'EXP_D', 'L3', 'treat', 'd047'), (762, 'EXP_D', 'L3', 'treat', 'd048'), (763, 'EXP_D', 'L3', 'treat', 'd049'), (764, 'EXP_D', 'L3', 'treat', 'd050'), (765, 'EXP_D', 'L3', 'treat', 'd051'), (766, 'EXP_D', 'L3', 'treat', 'd052'), (767, 'EXP_D', 'L3', 'treat', 'd053'), (768, 'EXP_D', 'L3', 'treat', 'd054'), (769, 'EXP_D', 'L3', 'treat', 'd055'), (770, 'EXP_D', 'L3', 'treat', 'd056'), (771, 'EXP_D', 'L3', 'treat', 'd057'), (772, 'EXP_D', 'L3', 'treat', 'd058'), (773, 'EXP_D', 'L3', 'treat', 'd059'), (774, 'EXP_D', 'L3', 'treat', 'd060'), (775, 'EXP_D', 'L3', 'treat', 'd061'), (776, 'EXP_D', 'L3', 'treat', 'd062'), (777, 'EXP_D', 'L3', 'treat', 'd063'), (778, 'EXP_D', 'L3', 'treat', 'd064'), (779, 'EXP_D', 'L3', 'treat', 'd065'), (780, 'EXP_D', 'L3', 'treat', 'd066'), (781, 'EXP_D', 'L3', 'treat', 'd067'), (782, 'EXP_D', 'L3', 'treat', 'd068'), (783, 'EXP_D', 'L3', 'treat', 'd069'), (784, 'EXP_D', 'L3', 'treat', 'd070'), (785, 'EXP_D', 'L3', 'treat', 'd071'), (786, 'EXP_D', 'L3', 'treat', 'd072'), (787, 'EXP_D', 'L3', 'treat', 'd073'), (788, 'EXP_D', 'L3', 'treat', 'd074'), (789, 'EXP_D', 'L3', 'treat', 'd075'), (790, 'EXP_D', 'L3', 'treat', 'd076'), (791, 'EXP_D', 'L3', 'treat', 'd077'), (792, 'EXP_D', 'L3', 'treat', 'd078'), (793, 'EXP_D', 'L3', 'treat', 'd079'), (794, 'EXP_D', 'L3', 'treat', 'd080'), (795, 'EXP_D', 'L3', 'treat', 'd081'), (796, 'EXP_D', 'L3', 'treat', 'd082'), (797, 'EXP_D', 'L3', 'treat', 'd083'), (798, 'EXP_D', 'L3', 'treat', 'd084'), (799, 'EXP_D', 'L3', 'treat', 'd085'), (800, 'EXP_D', 'L3', 'treat', 'd086'), (801, 'EXP_D', 'L3', 'treat', 'd087'), (802, 'EXP_D', 'L3', 'treat', 'd088'), (803, 'EXP_D', 'L3', 'treat', 'd089'), (804, 'EXP_D', 'L3', 'treat', 'd090'), (805, 'EXP_D', 'L3', 'treat', 'd091'), (806, 'EXP_D', 'L3', 'treat', 'd092'), (807, 'EXP_D', 'L3', 'treat', 'd093'), (808, 'EXP_D', 'L3', 'treat', 'd094'), (809, 'EXP_D', 'L3', 'treat', 'd095'), (810, 'EXP_D', 'L3', 'treat', 'd096'), (811, 'EXP_D', 'L3', 'treat', 'd097'), (812, 'EXP_D', 'L3', 'treat', 'd098'), (813, 'EXP_D', 'L3', 'treat', 'd099'), (814, 'EXP_D', 'L3', 'treat', 'd100'), (815, 'EXP_D', 'L3', 'treat', 'd101'), (816, 'EXP_D', 'L3', 'treat', 'd102'), (817, 'EXP_D', 'L3', 'treat', 'd103'), (818, 'EXP_D', 'L3', 'treat', 'd104'), (819, 'EXP_D', 'L3', 'ctrl', 'd105'), (820, 'EXP_D', 'L3', 'ctrl', 'd106'), (821, 'EXP_D', 'L3', 'ctrl', 'd107'), (822, 'EXP_D', 'L3', 'ctrl', 'd108'), (823, 'EXP_D', 'L3', 'ctrl', 'd109'), (824, 'EXP_D', 'L3', 'ctrl', 'd110'), (825, 'EXP_D', 'L3', 'ctrl', 'd111'), (826, 'EXP_D', 'L3', 'ctrl', 'd112'), (827, 'EXP_D', 'L3', 'ctrl', 'd113'), (828, 'EXP_D', 'L3', 'ctrl', 'd114'), (829, 'EXP_D', 'L3', 'ctrl', 'd115'), (830, 'EXP_D', 'L3', 'ctrl', 'd116'), (831, 'EXP_D', 'L3', 'ctrl', 'd117'), (832, 'EXP_D', 'L3', 'ctrl', 'd118'), (833, 'EXP_D', 'L3', 'ctrl', 'd119'), (834, 'EXP_D', 'L3', 'ctrl', 'd120'), (835, 'EXP_D', 'L3', 'ctrl', 'd121'), (836, 'EXP_D', 'L3', 'ctrl', 'd122'), (837, 'EXP_D', 'L3', 'ctrl', 'd123'), (838, 'EXP_D', 'L3', 'ctrl', 'd124'), (839, 'EXP_D', 'L3', 'ctrl', 'd125'), (840, 'EXP_D', 'L3', 'ctrl', 'd126'), (841, 'EXP_D', 'L3', 'ctrl', 'd127'), (842, 'EXP_D', 'L3', 'ctrl', 'd128'), (843, 'EXP_D', 'L3', 'ctrl', 'd129'), (844, 'EXP_D', 'L3', 'ctrl', 'd130'), (845, 'EXP_D', 'L3', 'ctrl', 'd131'), (846, 'EXP_D', 'L3', 'ctrl', 'd132'), (847, 'EXP_D', 'L3', 'ctrl', 'd133'), (848, 'EXP_D', 'L3', 'ctrl', 'd134'), (849, 'EXP_D', 'L3', 'ctrl', 'd135'), (850, 'EXP_D', 'L3', 'ctrl', 'd136'), (851, 'EXP_D', 'L3', 'ctrl', 'd137'), (852, 'EXP_D', 'L3', 'ctrl', 'd138'), (853, 'EXP_D', 'L3', 'ctrl', 'd139'), (854, 'EXP_D', 'L3', 'ctrl', 'd140'), (855, 'EXP_D', 'L3', 'ctrl', 'd141'), (856, 'EXP_D', 'L3', 'ctrl', 'd142'), (857, 'EXP_D', 'L3', 'ctrl', 'd143'), (858, 'EXP_D', 'L3', 'ctrl', 'd144'), (859, 'EXP_D', 'L3', 'ctrl', 'd145'), (860, 'EXP_D', 'L3', 'ctrl', 'd146'), (861, 'EXP_D', 'L3', 'ctrl', 'd147'), (862, 'EXP_D', 'L3', 'ctrl', 'd148'), (863, 'EXP_D', 'L3', 'ctrl', 'd149'), (864, 'EXP_D', 'L3', 'ctrl', 'd150'), (865, 'EXP_D', 'L3', 'ctrl', 'd151'), (866, 'EXP_D', 'L3', 'ctrl', 'd152'), (867, 'EXP_D', 'L3', 'ctrl', 'd153'), (868, 'EXP_D', 'L3', 'ctrl', 'd154'), (869, 'EXP_D', 'L3', 'ctrl', 'd155'), (870, 'EXP_D', 'L3', 'ctrl', 'd156'), (871, 'EXP_D', 'L3', 'ctrl', 'd157'), (872, 'EXP_D', 'L3', 'ctrl', 'd158'), (873, 'EXP_D', 'L3', 'ctrl', 'd159'), (874, 'EXP_D', 'L3', 'ctrl', 'd160'), (875, 'EXP_D', 'L3', 'ctrl', 'd161'), (876, 'EXP_D', 'L3', 'ctrl', 'd162'), (877, 'EXP_D', 'L3', 'ctrl', 'd163'), (878, 'EXP_D', 'L3', 'ctrl', 'd164'), (879, 'EXP_D', 'L3', 'ctrl', 'd165'), (880, 'EXP_D', 'L3', 'ctrl', 'd166'), (881, 'EXP_D', 'L3', 'ctrl', 'd167'), (882, 'EXP_D', 'L3', 'ctrl', 'd168'), (883, 'EXP_D', 'L3', 'ctrl', 'd169'), (884, 'EXP_D', 'L3', 'ctrl', 'd170'), (885, 'EXP_D', 'L3', 'ctrl', 'd171'), (886, 'EXP_D', 'L3', 'ctrl', 'd172'), (887, 'EXP_D', 'L3', 'ctrl', 'd173'), (888, 'EXP_D', 'L3', 'ctrl', 'd174'), (889, 'EXP_D', 'L3', 'ctrl', 'd175'), (890, 'EXP_D', 'L3', 'ctrl', 'd176'), (891, 'EXP_D', 'L3', 'ctrl', 'd177'), (892, 'EXP_D', 'L3', 'ctrl', 'd178'), (893, 'EXP_D', 'L3', 'ctrl', 'd179'), (894, 'EXP_D', 'L3', 'ctrl', 'd180'), (895, 'EXP_D', 'L3', 'ctrl', 'd181'), (896, 'EXP_D', 'L3', 'ctrl', 'd182'), (897, 'EXP_D', 'L3', 'ctrl', 'd183'), (898, 'EXP_D', 'L3', 'ctrl', 'd184'), (899, 'EXP_D', 'L3', 'ctrl', 'd185'), (900, 'EXP_D', 'L3', 'ctrl', 'd186'), (901, 'EXP_D', 'L3', 'ctrl', 'd187'), (902, 'EXP_D', 'L3', 'ctrl', 'd188'), (903, 'EXP_D', 'L3', 'ctrl', 'd189'), (904, 'EXP_D', 'L3', 'ctrl', 'd190'), (905, 'EXP_D', 'L3', 'ctrl', 'd191'), (906, 'EXP_D', 'L3', 'ctrl', 'd192'), (907, 'EXP_D', 'L3', 'ctrl', 'd193'), (908, 'EXP_D', 'L3', 'ctrl', 'd194'), (909, 'EXP_D', 'L3', 'ctrl', 'd195'), (910, 'EXP_D', 'L3', 'ctrl', 'd196'), (911, 'EXP_D', 'L3', 'ctrl', 'd197'), (912, 'EXP_D', 'L3', 'ctrl', 'd198'), (913, 'EXP_D', 'L3', 'ctrl', 'd199'), (914, 'EXP_D', 'L3', 'ctrl', 'd200'), (915, 'EXP_D', 'L3', 'ctrl', 'd201'), (916, 'EXP_D', 'L3', 'ctrl', 'd202'), (917, 'EXP_D', 'L3', 'ctrl', 'd203'), (918, 'EXP_D', 'L3', 'ctrl', 'd204'), (919, 'EXP_D', 'L3', 'ctrl', 'd205'), (920, 'EXP_D', 'L3', 'ctrl', 'd206'), (921, 'EXP_D', 'L3', 'ctrl', 'd207'), (922, 'EXP_D', 'L3', 'ctrl', 'd208'), (923, 'EXP_D', 'L3', 'ctrl', 'd209'), (924, 'EXP_E', 'L2', 'treat', 'e000'), (925, 'EXP_E', 'L2', 'treat', 'e001'), (926, 'EXP_E', 'L2', 'treat', 'e002'), (927, 'EXP_E', 'L2', 'treat', 'e003'), (928, 'EXP_E', 'L2', 'treat', 'e004'), (929, 'EXP_E', 'L2', 'treat', 'e005'), (930, 'EXP_E', 'L2', 'treat', 'e006'), (931, 'EXP_E', 'L2', 'treat', 'e007'), (932, 'EXP_E', 'L2', 'treat', 'e008'), (933, 'EXP_E', 'L2', 'treat', 'e009'), (934, 'EXP_E', 'L2', 'treat', 'e010'), (935, 'EXP_E', 'L2', 'treat', 'e011'), (936, 'EXP_E', 'L2', 'treat', 'e012'), (937, 'EXP_E', 'L2', 'treat', 'e013'), (938, 'EXP_E', 'L2', 'treat', 'e014'), (939, 'EXP_E', 'L2', 'treat', 'e015'), (940, 'EXP_E', 'L2', 'treat', 'e016'), (941, 'EXP_E', 'L2', 'treat', 'e017'), (942, 'EXP_E', 'L2', 'treat', 'e018'), (943, 'EXP_E', 'L2', 'treat', 'e019'), (944, 'EXP_E', 'L2', 'treat', 'e020'), (945, 'EXP_E', 'L2', 'treat', 'e021'), (946, 'EXP_E', 'L2', 'treat', 'e022'), (947, 'EXP_E', 'L2', 'treat', 'e023'), (948, 'EXP_E', 'L2', 'treat', 'e024'), (949, 'EXP_E', 'L2', 'treat', 'e025'), (950, 'EXP_E', 'L2', 'treat', 'e026'), (951, 'EXP_E', 'L2', 'treat', 'e027'), (952, 'EXP_E', 'L2', 'treat', 'e028'), (953, 'EXP_E', 'L2', 'treat', 'e029'), (954, 'EXP_E', 'L2', 'treat', 'e030'), (955, 'EXP_E', 'L2', 'treat', 'e031'), (956, 'EXP_E', 'L2', 'treat', 'e032'), (957, 'EXP_E', 'L2', 'treat', 'e033'), (958, 'EXP_E', 'L2', 'treat', 'e034'), (959, 'EXP_E', 'L2', 'treat', 'e035'), (960, 'EXP_E', 'L2', 'treat', 'e036'), (961, 'EXP_E', 'L2', 'treat', 'e037'), (962, 'EXP_E', 'L2', 'treat', 'e038'), (963, 'EXP_E', 'L2', 'treat', 'e039'), (964, 'EXP_E', 'L2', 'ctrl', 'e040'), (965, 'EXP_E', 'L2', 'ctrl', 'e041'), (966, 'EXP_E', 'L2', 'ctrl', 'e042'), (967, 'EXP_E', 'L2', 'ctrl', 'e043'), (968, 'EXP_E', 'L2', 'ctrl', 'e044'), (969, 'EXP_E', 'L2', 'ctrl', 'e045'), (970, 'EXP_E', 'L2', 'ctrl', 'e046'), (971, 'EXP_E', 'L2', 'ctrl', 'e047'), (972, 'EXP_E', 'L2', 'ctrl', 'e048'), (973, 'EXP_E', 'L2', 'ctrl', 'e049'), (974, 'EXP_F', 'L3', 'treat', 'f000'), (975, 'EXP_F', 'L3', 'treat', 'f001'), (976, 'EXP_F', 'L3', 'treat', 'f002'), (977, 'EXP_F', 'L3', 'treat', 'f003'), (978, 'EXP_F', 'L3', 'treat', 'f004'), (979, 'EXP_F', 'L3', 'treat', 'f005'), (980, 'EXP_F', 'L3', 'treat', 'f006'), (981, 'EXP_F', 'L3', 'treat', 'f007'), (982, 'EXP_F', 'L3', 'treat', 'f008'), (983, 'EXP_F', 'L3', 'treat', 'f009'), (984, 'EXP_F', 'L3', 'treat', 'f010'), (985, 'EXP_F', 'L3', 'treat', 'f011'), (986, 'EXP_F', 'L3', 'treat', 'f012'), (987, 'EXP_F', 'L3', 'treat', 'f013'), (988, 'EXP_F', 'L3', 'treat', 'f014'), (989, 'EXP_F', 'L3', 'treat', 'f015'), (990, 'EXP_F', 'L3', 'treat', 'f016'), (991, 'EXP_F', 'L3', 'treat', 'f017'), (992, 'EXP_F', 'L3', 'treat', 'f018'), (993, 'EXP_F', 'L3', 'treat', 'f019'), (994, 'EXP_F', 'L3', 'treat', 'f020'), (995, 'EXP_F', 'L3', 'treat', 'f021'), (996, 'EXP_F', 'L3', 'treat', 'f022'), (997, 'EXP_F', 'L3', 'treat', 'f023'), (998, 'EXP_F', 'L3', 'treat', 'f024'), (999, 'EXP_F', 'L3', 'treat', 'f025'), (1000, 'EXP_F', 'L3', 'treat', 'f026'), (1001, 'EXP_F', 'L3', 'treat', 'f027'), (1002, 'EXP_F', 'L3', 'treat', 'f028'), (1003, 'EXP_F', 'L3', 'treat', 'f029'), (1004, 'EXP_F', 'L3', 'treat', 'f030'), (1005, 'EXP_F', 'L3', 'treat', 'f031'), (1006, 'EXP_F', 'L3', 'treat', 'f032'), (1007, 'EXP_F', 'L3', 'treat', 'f033'), (1008, 'EXP_F', 'L3', 'treat', 'f034'), (1009, 'EXP_F', 'L3', 'treat', 'f035'), (1010, 'EXP_F', 'L3', 'treat', 'f036'), (1011, 'EXP_F', 'L3', 'treat', 'f037'), (1012, 'EXP_F', 'L3', 'treat', 'f038'), (1013, 'EXP_F', 'L3', 'treat', 'f039'), (1014, 'EXP_F', 'L3', 'treat', 'f040'), (1015, 'EXP_F', 'L3', 'treat', 'f041'), (1016, 'EXP_F', 'L3', 'treat', 'f042'), (1017, 'EXP_F', 'L3', 'treat', 'f043'), (1018, 'EXP_F', 'L3', 'treat', 'f044'), (1019, 'EXP_F', 'L3', 'treat', 'f045'), (1020, 'EXP_F', 'L3', 'treat', 'f046'), (1021, 'EXP_F', 'L3', 'treat', 'f047'), (1022, 'EXP_F', 'L3', 'treat', 'f048'), (1023, 'EXP_F', 'L3', 'treat', 'f049'), (1024, 'EXP_F', 'L3', 'treat', 'f050'), (1025, 'EXP_F', 'L3', 'treat', 'f051'), (1026, 'EXP_F', 'L3', 'treat', 'f052'), (1027, 'EXP_F', 'L3', 'treat', 'f053'), (1028, 'EXP_F', 'L3', 'treat', 'f054'), (1029, 'EXP_F', 'L3', 'treat', 'f055'), (1030, 'EXP_F', 'L3', 'treat', 'f056'), (1031, 'EXP_F', 'L3', 'treat', 'f057'), (1032, 'EXP_F', 'L3', 'treat', 'f058'), (1033, 'EXP_F', 'L3', 'treat', 'f059'), (1034, 'EXP_F', 'L3', 'treat', 'f060'), (1035, 'EXP_F', 'L3', 'treat', 'f061'), (1036, 'EXP_F', 'L3', 'treat', 'f062'), (1037, 'EXP_F', 'L3', 'treat', 'f063'), (1038, 'EXP_F', 'L3', 'treat', 'f064'), (1039, 'EXP_F', 'L3', 'treat', 'f065'), (1040, 'EXP_F', 'L3', 'treat', 'f066'), (1041, 'EXP_F', 'L3', 'treat', 'f067'), (1042, 'EXP_F', 'L3', 'treat', 'f068'), (1043, 'EXP_F', 'L3', 'treat', 'f069'), (1044, 'EXP_F', 'L3', 'treat', 'f070'), (1045, 'EXP_F', 'L3', 'treat', 'f071'), (1046, 'EXP_F', 'L3', 'treat', 'f072'), (1047, 'EXP_F', 'L3', 'treat', 'f073'), (1048, 'EXP_F', 'L3', 'treat', 'f074'), (1049, 'EXP_F', 'L3', 'treat', 'f075'), (1050, 'EXP_F', 'L3', 'treat', 'f076'), (1051, 'EXP_F', 'L3', 'treat', 'f077'), (1052, 'EXP_F', 'L3', 'treat', 'f078'), (1053, 'EXP_F', 'L3', 'treat', 'f079'), (1054, 'EXP_F', 'L3', 'treat', 'f080'), (1055, 'EXP_F', 'L3', 'treat', 'f081'), (1056, 'EXP_F', 'L3', 'treat', 'f082'), (1057, 'EXP_F', 'L3', 'treat', 'f083'), (1058, 'EXP_F', 'L3', 'treat', 'f084'), (1059, 'EXP_F', 'L3', 'treat', 'f085'), (1060, 'EXP_F', 'L3', 'treat', 'f086'), (1061, 'EXP_F', 'L3', 'treat', 'f087'), (1062, 'EXP_F', 'L3', 'treat', 'f088'), (1063, 'EXP_F', 'L3', 'treat', 'f089'), (1064, 'EXP_F', 'L3', 'treat', 'f090'), (1065, 'EXP_F', 'L3', 'treat', 'f091'), (1066, 'EXP_F', 'L3', 'treat', 'f092'), (1067, 'EXP_F', 'L3', 'treat', 'f093'), (1068, 'EXP_F', 'L3', 'treat', 'f094'), (1069, 'EXP_F', 'L3', 'treat', 'f095'), (1070, 'EXP_F', 'L3', 'treat', 'f096'), (1071, 'EXP_F', 'L3', 'treat', 'f097'), (1072, 'EXP_F', 'L3', 'treat', 'f098'), (1073, 'EXP_F', 'L3', 'treat', 'f099'), (1074, 'EXP_F', 'L3', 'treat', 'f100'), (1075, 'EXP_F', 'L3', 'treat', 'f101'), (1076, 'EXP_F', 'L3', 'treat', 'f102'), (1077, 'EXP_F', 'L3', 'treat', 'f103'), (1078, 'EXP_F', 'L3', 'treat', 'f104'), (1079, 'EXP_F', 'L3', 'treat', 'f105'), (1080, 'EXP_F', 'L3', 'treat', 'f106'), (1081, 'EXP_F', 'L3', 'treat', 'f107'), (1082, 'EXP_F', 'L3', 'treat', 'f108'), (1083, 'EXP_F', 'L3', 'treat', 'f109'), (1084, 'EXP_F', 'L3', 'treat', 'f110'), (1085, 'EXP_F', 'L3', 'treat', 'f111'), (1086, 'EXP_F', 'L3', 'treat', 'f112'), (1087, 'EXP_F', 'L3', 'treat', 'f113'), (1088, 'EXP_F', 'L3', 'treat', 'f114'), (1089, 'EXP_F', 'L3', 'treat', 'f115'), (1090, 'EXP_F', 'L3', 'treat', 'f116'), (1091, 'EXP_F', 'L3', 'treat', 'f117'), (1092, 'EXP_F', 'L3', 'treat', 'f118'), (1093, 'EXP_F', 'L3', 'treat', 'f119'), (1094, 'EXP_F', 'L3', 'treat', 'f120'), (1095, 'EXP_F', 'L3', 'treat', 'f121'), (1096, 'EXP_F', 'L3', 'treat', 'f122'), (1097, 'EXP_F', 'L3', 'treat', 'f123'), (1098, 'EXP_F', 'L3', 'treat', 'f124'), (1099, 'EXP_F', 'L3', 'treat', 'f125'), (1100, 'EXP_F', 'L3', 'treat', 'f126'), (1101, 'EXP_F', 'L3', 'treat', 'f127'), (1102, 'EXP_F', 'L3', 'treat', 'f128'), (1103, 'EXP_F', 'L3', 'treat', 'f129'), (1104, 'EXP_F', 'L3', 'treat', 'f130'), (1105, 'EXP_F', 'L3', 'treat', 'f131'), (1106, 'EXP_F', 'L3', 'treat', 'f132'), (1107, 'EXP_F', 'L3', 'treat', 'f133'), (1108, 'EXP_F', 'L3', 'treat', 'f134'), (1109, 'EXP_F', 'L3', 'treat', 'f135'), (1110, 'EXP_F', 'L3', 'treat', 'f136'), (1111, 'EXP_F', 'L3', 'treat', 'f137'), (1112, 'EXP_F', 'L3', 'treat', 'f138'), (1113, 'EXP_F', 'L3', 'treat', 'f139'), (1114, 'EXP_F', 'L3', 'treat', 'f140'), (1115, 'EXP_F', 'L3', 'treat', 'f141'), (1116, 'EXP_F', 'L3', 'treat', 'f142'), (1117, 'EXP_F', 'L3', 'treat', 'f143'), (1118, 'EXP_F', 'L3', 'treat', 'f144'), (1119, 'EXP_F', 'L3', 'treat', 'f145'), (1120, 'EXP_F', 'L3', 'treat', 'f146'), (1121, 'EXP_F', 'L3', 'treat', 'f147'), (1122, 'EXP_F', 'L3', 'treat', 'f148'), (1123, 'EXP_F', 'L3', 'treat', 'f149'), (1124, 'EXP_F', 'L3', 'treat', 'f150'), (1125, 'EXP_F', 'L3', 'treat', 'f151'), (1126, 'EXP_F', 'L3', 'treat', 'f152'), (1127, 'EXP_F', 'L3', 'treat', 'f153'), (1128, 'EXP_F', 'L3', 'treat', 'f154'), (1129, 'EXP_F', 'L3', 'treat', 'f155'), (1130, 'EXP_F', 'L3', 'treat', 'f156'), (1131, 'EXP_F', 'L3', 'treat', 'f157'), (1132, 'EXP_F', 'L3', 'treat', 'f158'), (1133, 'EXP_F', 'L3', 'treat', 'f159'), (1134, 'EXP_F', 'L3', 'ctrl', 'f160'), (1135, 'EXP_F', 'L3', 'ctrl', 'f161'), (1136, 'EXP_F', 'L3', 'ctrl', 'f162'), (1137, 'EXP_F', 'L3', 'ctrl', 'f163'), (1138, 'EXP_F', 'L3', 'ctrl', 'f164'), (1139, 'EXP_F', 'L3', 'ctrl', 'f165'), (1140, 'EXP_F', 'L3', 'ctrl', 'f166'), (1141, 'EXP_F', 'L3', 'ctrl', 'f167'), (1142, 'EXP_F', 'L3', 'ctrl', 'f168'), (1143, 'EXP_F', 'L3', 'ctrl', 'f169'), (1144, 'EXP_F', 'L3', 'ctrl', 'f170'), (1145, 'EXP_F', 'L3', 'ctrl', 'f171'), (1146, 'EXP_F', 'L3', 'ctrl', 'f172'), (1147, 'EXP_F', 'L3', 'ctrl', 'f173'), (1148, 'EXP_F', 'L3', 'ctrl', 'f174'), (1149, 'EXP_F', 'L3', 'ctrl', 'f175'), (1150, 'EXP_F', 'L3', 'ctrl', 'f176'), (1151, 'EXP_F', 'L3', 'ctrl', 'f177'), (1152, 'EXP_F', 'L3', 'ctrl', 'f178'), (1153, 'EXP_F', 'L3', 'ctrl', 'f179'), (1154, 'EXP_F', 'L3', 'ctrl', 'f180'), (1155, 'EXP_F', 'L3', 'ctrl', 'f181'), (1156, 'EXP_F', 'L3', 'ctrl', 'f182'), (1157, 'EXP_F', 'L3', 'ctrl', 'f183'), (1158, 'EXP_F', 'L3', 'ctrl', 'f184'), (1159, 'EXP_F', 'L3', 'ctrl', 'f185'), (1160, 'EXP_F', 'L3', 'ctrl', 'f186'), (1161, 'EXP_F', 'L3', 'ctrl', 'f187'), (1162, 'EXP_F', 'L3', 'ctrl', 'f188'), (1163, 'EXP_F', 'L3', 'ctrl', 'f189'), (1164, 'EXP_F', 'L3', 'ctrl', 'f190'), (1165, 'EXP_F', 'L3', 'ctrl', 'f191'), (1166, 'EXP_F', 'L3', 'ctrl', 'f192'), (1167, 'EXP_F', 'L3', 'ctrl', 'f193'), (1168, 'EXP_F', 'L3', 'ctrl', 'f194'), (1169, 'EXP_F', 'L3', 'ctrl', 'f195'), (1170, 'EXP_F', 'L3', 'ctrl', 'f196'), (1171, 'EXP_F', 'L3', 'ctrl', 'f197'), (1172, 'EXP_F', 'L3', 'ctrl', 'f198'), (1173, 'EXP_F', 'L3', 'ctrl', 'f199')",
+      "INSERT INTO exp_dict VALUES ('EXP_A', 5000), ('EXP_B', 5000), ('EXP_C', 5000), ('EXP_E', 5000), ('EXP_F', 5000)"
+    ],
+    "entry": "function",
+    "timeoutMs": 20000,
+    "referenceSolution": "SELECT d.exp_id                                                  AS exp_id,\n       d.exp_users                                                 AS exp_users,\n       d.treat_users                                               AS treat_users,\n       FLOOR(d.treat_users * 10000 / d.exp_users)                  AS actual_treat_bps,\n       COALESCE(x.expected_treat_bps, 0)                           AS expected_treat_bps,\n       ABS(FLOOR(d.treat_users * 10000 / d.exp_users)\n           - COALESCE(x.expected_treat_bps, 0))                    AS deviation_bps,\n       d.multi_group_users                                         AS multi_group_users,\n       CASE\n         WHEN d.exp_users < 200 THEN 'LOW-SAMPLE'\n         WHEN d.multi_group_users > 0 THEN 'MUTEX-VIOLATION'\n         WHEN COALESCE(x.expected_treat_bps, 0) <= 0 THEN 'NO-EXPECTED-RATIO'\n         WHEN ABS(FLOOR(d.treat_users * 10000 / d.exp_users) - x.expected_treat_bps) * 10000\n              >= 1000 * x.expected_treat_bps THEN 'SRM_RISK'\n         ELSE 'OK'\n       END                                                         AS flag\nFROM (SELECT a.exp_id                                          AS exp_id,\n             COUNT(DISTINCT a.user_id)                         AS exp_users,\n             COUNT(DISTINCT CASE WHEN a.group_name = 'treat' THEN a.user_id END) AS treat_users,\n             (SELECT COUNT(*)\n                FROM (SELECT a2.user_id\n                        FROM assignment a2\n                       WHERE a2.exp_id = a.exp_id\n                       GROUP BY a2.user_id\n                      HAVING COUNT(DISTINCT a2.group_name) > 1) z) AS multi_group_users\n      FROM assignment a\n      GROUP BY a.exp_id) d\nLEFT JOIN exp_dict x ON x.exp_id = d.exp_id\nORDER BY d.exp_id",
+    "naiveSolution": "SELECT a.exp_id                                       AS exp_id,\n       COUNT(*)                                         AS exp_users,\n       SUM(CASE WHEN a.group_name = 'treat' THEN 1 ELSE 0 END) AS treat_users,\n       FLOOR(SUM(CASE WHEN a.group_name = 'treat' THEN 1 ELSE 0 END) * 10000 / COUNT(*))\n                                                        AS actual_treat_bps,\n       x.expected_treat_bps                             AS expected_treat_bps,\n       ABS(FLOOR(SUM(CASE WHEN a.group_name = 'treat' THEN 1 ELSE 0 END) * 10000 / COUNT(*))\n           - x.expected_treat_bps)                      AS deviation_bps,\n       0                                                AS multi_group_users,\n       CASE WHEN ABS(FLOOR(SUM(CASE WHEN a.group_name = 'treat' THEN 1 ELSE 0 END) * 10000 / COUNT(*))\n                     - x.expected_treat_bps) > 100\n            THEN 'SRM_RISK' ELSE 'OK' END               AS flag\nFROM assignment a\nJOIN exp_dict x ON x.exp_id = a.exp_id\nGROUP BY a.exp_id, x.expected_treat_bps\nORDER BY a.exp_id",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 30,
+  "answer": "## 参考答案\n\n内层子查询按 `exp_id` 聚合去重人数；`multi_group_users` 用一条**相关子查询**\n（按用户 `GROUP BY` + `HAVING COUNT(DISTINCT group_name) > 1`）数出违例人数；\n外层再 `LEFT JOIN exp_dict` 打 flag。\n\n**基线六行：**\n\n| exp | users | treat | actual | expected | dev | multi | flag |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| EXP_A | 250 | 150 | 6000 | 5000 | 1000 | 0 | SRM_RISK |\n| EXP_B | 240 | 120 | 5000 | 5000 | 0 | 0 | OK |\n| EXP_C | 220 | 110 | 5000 | 5000 | 0 | 3 | MUTEX-VIOLATION |\n| EXP_D | 210 | 105 | 5000 | 0 | 5000 | 0 | NO-EXPECTED-RATIO |\n| EXP_E | 50 | 40 | 8000 | 5000 | 3000 | 0 | LOW-SAMPLE |\n| EXP_F | 200 | 160 | 8000 | 5000 | 3000 | 0 | SRM_RISK |\n\nEXP_A 的偏离正好是 1000 万分比 ⇒ 判据 `deviation * 10000 >= 1000 * expected`\n即 `1000*10000 >= 1000*5000` 成立 ⇒ `SRM_RISK`。**这里必须写 `>=`**：\n写成 `>` 会让\"恰好偏 10%\"这一类整片漏网，而现实里的哈希不均常常就卡在那附近。\n\n**EXP_E 与 EXP_F 是这题的核心对照：两者的 `actual_treat_bps` 都是 8000、\n`deviation_bps` 都是 3000，唯一差别是 50 人 vs 200 人。**\n一个 `LOW-SAMPLE`、一个 `SRM_RISK`。\n把 `exp_users < 200` 这条删掉，EXP_E 会立刻冒出一条看起来同样严重的告警 ——\n而它只是 50 次抛硬币里出了 40 次正面（二项分布下这并不罕见）。\n**\"数字一样大就一样严重\"是治理指标最常见的设计错误。**\n\n用例「边界：样本数恰好 200 才有资格被判」删掉 EXP_F 的一条流水 ⇒\n去重人数从 200 掉到 199、`treat_users` 仍是 160 ⇒ `actual` 反而**升到 8040**，\n但 flag 退回 `LOW-SAMPLE`。**数字更极端了，判断却更保守了** ——\n这才是优先级该有的样子。（`treat_users` 不变是因为被删掉的那条是 ctrl 流水。）\n\n**EXP_D 的 `expected_treat_bps` 是 0、`deviation_bps` 是 5000。**\n它既不是\"OK\"也不是\"SRM_RISK\"，而是单独一档 `NO-EXPECTED-RATIO`。\n如果实现用 `COALESCE(x.expected, 5000)` 兜底，这一行会变成 `OK`（实际恰好 5000）——\n**那就是用一个猜出来的分母，给一个真实的实验签了\"没问题\"。**\n反过来如果直接 `deviation > 阈值` 而不拦 0，它会变成 `SRM_RISK` —— 同样是假告警。\n\n**用例「边界：预设比例是 6% 时，偏离达到预设的 9 倍 ⇒ 仍然要判 SRM」把 EXP_A 的字典改成 600 万分比**：\n`deviation = |6000 - 600| = 5400`，偏离是预设值的 9 倍（900%）⇒ `SRM_RISK` 仍然成立。\n而 naive 那条绝对阈值 `> 100` 在**同一份数据**里还会把 EXP_D（偏 5000）与 EXP_E（偏 3000）\n一起报成 SRM —— 那两行的真相是\"字典没配\"和\"样本不够\"，不是分流坏了。\n**展示用绝对值（读者看得懂）、判定用相对值（不会被预设比例绑架），两件事都要有。**\n\n**工程延伸（面试追问点）**\n\n1. 200 这个门槛怎么定？（它不是统计意义上的最小样本量，而是\"最小可判 SRM 的样本量\"。\n   正解是给一个二项检验：`P(偏离 ≥ 观测值 | 预设比例) < 0.001` 才报警 ——\n   阈值小是故意的，SRM 报警处理的是**系统性**故障，不是尾部抖动。）\n2. 为什么没用到 `layer_id`？（本题按 `exp_id` 出结论。`layer_id` 属于另一问：\n   \"同层多实验抢占同一批人\"，判据是**两个实验的用户集合交集不为空**，\n   需要自连接，是另一条查询 —— 素材题面草稿 A 第 3 条后半句。\n   **别把\"同层抢占\"和\"同实验内进两组\"混成一档**：前者是流量规划问题，\n   后者是分流实现 bug。）\n3. 客户端/服务端实验怎么在同一张表里区分？（加 `unit` 列（device/user）并纳入 `exp_dict`；\n   官方约束是\"客户端实验只可添加客户端互斥域\"【源 S9】，\n   所以真正的检测是\"同一个互斥域里出现两种 unit\" —— 那是字典层的检查，不是数据层的。）",
+  "schemaVersion": 1,
+  "id": "sql-mysql-0026"
+}

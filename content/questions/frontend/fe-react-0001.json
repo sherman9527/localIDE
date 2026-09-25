@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0001",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实现可取消、可去重、抗竞态的 useResource",
+  "statement": "## 场景\n\n你在做一个内部工具（详情面板 + 左侧列表）：选中哪条记录，右侧就换 `key` 去拉详情。线上三次事故都出在这一个 hook 上：\n\n1. 用户快速连点两条记录，**先发后到的旧请求覆盖了新数据**，界面出现\"id 是 u/2、姓名是 u/1 的人\"；\n2. 组件卸载后请求才回来，`setState` 落在已卸载的子树上；\n3. 用户按取消，产品看到的却是红色错误提示。\n\n## 契约（实现写在 `Solution.tsx`）\n\n```tsx\nexport type ResourceState<T> =\n  | { status: 'idle'; promise: null }\n  | { status: 'loading'; promise: Promise<T> }\n  | { status: 'ready'; promise: Promise<T>; data: T }\n  | { status: 'error'; promise: Promise<T>; error: unknown };\n\nexport function useResource<T>(\n  key: string | null,\n  fetchImpl: (key: string, signal: AbortSignal) => Promise<T>,\n): ResourceState<T>;\n```\n\n要求（判题按 `resource.test.tsx` 的运行时断言逐用例打分）：\n\n1. `key` 为空串或 `null`：**不发请求**，返回 `{ status: 'idle', promise: null }`。空串不是合法缓存键。\n2. 同一挂载周期内 `key` 不变时，即使父级反复 rerender、即使 `fetchImpl` 是每次 render 新建的箭头函数，也只能**请求一次**；`loading` 态携带的 `promise` 必须是**同一实例**（React 19 里它会被 `use(state.promise)` 消费，身份不稳定就会反复挂起）。\n3. `key` 变化时：上一代请求的 `signal.aborted` 必须为 `true`，且旧响应即使晚到也不得写入状态、不得污染新数据。\n4. 卸载时同样要取消；晚到的 resolve/reject 不得再触发状态更新（用例用 `console.error` spy 断言没有任何 React 告警泄漏）。\n5. 错误分类：只有真实失败才进 `error`，并且 `error` 要**原样保留那个 `unknown`**（不许 `String(e)` 糊掉、不许假设它是 `Error` 实例）；被取消（错误对象 `name === 'AbortError'` 或该请求 signal 已 aborted）→ 回落 `idle`，`error` 为 `undefined`。\n\n## 不许做什么\n\n- 不许在渲染函数体内写 `ref.current = ...`（并发渲染与重放下不可靠，也是 Rules of React 违规）；要读最新的 `fetchImpl` 就用 Effect 同步的 ref。\n- 不许依赖 `AbortSignal.any` / `structuredClone` / `ResizeObserver`：判题容器是 jsdom，这些全局**不存在**，用了会直接 `error`。\n- 不许用墙钟时间猜时序（`setTimeout(..., 300)`）：用例把 resolve 时机交给你，异步收敛一律按 `await act(async () => {})` 的语义写测试侧。\n- 不许在 `ready` 之后再插一帧 `loading`（闪烁帧），也不许把 `fetchImpl` 放进依赖数组导致重复请求。\n\n## 判分与环境\n\n`judgeKind: react-vitest`：沙箱复用镜像内的 `react@19.3` + `@testing-library/react@16` + `vitest@2` + jsdom，真跑题目自带的 `*.test.tsx`，按用例粒度回报 expected/actual；不会 `npm install`，也不会跑 `tsc`（类型层给人工复核与面试追问，运行时行为才是判分依据）。7 个用例需全过。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:abortcontroller",
+    "data-fetching",
+    "race-condition",
+    "cancellation",
+    "react-hooks"
+  ],
+  "cases": [
+    {
+      "name": "单次请求不重复发起并进入 loading",
+      "input": {
+        "key": "u/1",
+        "rerenders": 2
+      },
+      "expected": "status='ready'、calls=1、两次 loading 的 promise 为同一实例、data.name='Ada'",
+      "note": "同一 key 只允许一次调用，promise 身份要稳定"
+    },
+    {
+      "name": "空 key 不发请求保持 idle",
+      "input": {
+        "key": ""
+      },
+      "expected": "calls=0、status=idle、promise=null",
+      "note": "空串不能当合法缓存键"
+    },
+    {
+      "name": "切换 key 时取消上一个请求",
+      "input": {
+        "key": "u/1 -> u/2"
+      },
+      "expected": "calls=2、第 1 个 signal.aborted=true、第 2 个 false、status=loading"
+    },
+    {
+      "name": "并发乱序返回时旧响应晚到不污染新数据",
+      "input": {
+        "order": "u/2 先返回，u/1 后返回"
+      },
+      "expected": "data.name 始终是 'Grace'",
+      "note": "核心竞态用例"
+    },
+    {
+      "name": "卸载后取消请求且晚到响应不再写状态",
+      "input": {
+        "unmount": true
+      },
+      "expected": "signal.aborted=true 且 console.error 期望 [] 实际 []"
+    },
+    {
+      "name": "AbortError 取消回落 idle 不进失败态",
+      "input": {
+        "reject": "AbortError"
+      },
+      "expected": "status='idle'、error=undefined",
+      "note": "取消不是失败"
+    },
+    {
+      "name": "真实失败进入 error 并原样保留 unknown 原因",
+      "input": {
+        "reject": "'boom'"
+      },
+      "expected": "status='error'、error='boom'"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "resource.test.tsx",
+        "content": "import { act, renderHook } from '@testing-library/react';\nimport { afterEach, expect, it, vi } from 'vitest';\nimport { useResource } from './Solution';\n\n/**\n * 沙箱不跑 tsc，判分只看运行时行为；但契约里的判别联合仍要写对：\n * status 是唯一判别式，promise 在 idle 时为 null。\n */\ninterface Call {\n  key: string;\n  signal: AbortSignal;\n  resolve: (v: { name: string }) => void;\n  reject: (e: unknown) => void;\n}\n\ninterface State {\n  status: string;\n  data?: { name: string };\n  error?: unknown;\n  promise: unknown;\n}\n\nconst stateOf = (s: unknown): State => s as State;\n\n/** 受控 fetch 替身：把\"何时返回\"的决定权交给用例，所以不需要假计时器。 */\nfunction makeFetch() {\n  const calls: Call[] = [];\n  const impl = (key: string, signal: AbortSignal) => {\n    let resolve: (v: { name: string }) => void = () => undefined;\n    let reject: (e: unknown) => void = () => undefined;\n    const p = new Promise((res, rej) => {\n      resolve = res;\n      reject = rej;\n    });\n    // 被丢弃的响应不允许变成 unhandled rejection 干扰判题\n    p.catch(() => undefined);\n    calls.push({ key, signal, resolve: (v) => resolve(v), reject: (e) => reject(e) });\n    return p;\n  };\n  return { calls, impl };\n}\n\nfunction abortError() {\n  const e = new Error('The user aborted a request.');\n  e.name = 'AbortError';\n  return e;\n}\n\nafterEach(() => {\n  vi.restoreAllMocks();\n});\n\nit('单次请求不重复发起并进入 loading', async () => {\n  const f = makeFetch();\n  const { result, rerender } = renderHook(({ k }: { k: string | null }) => useResource(k, f.impl), {\n    initialProps: { k: 'u/1' as string | null },\n  });\n  expect(stateOf(result.current).status).toBe('loading');\n  expect(f.calls.length).toBe(1);\n  const first = stateOf(result.current).promise;\n  rerender({ k: 'u/1' });\n  rerender({ k: 'u/1' });\n  expect(f.calls.length).toBe(1);\n  expect(stateOf(result.current).promise).toBe(first);\n  await act(async () => {\n    f.calls[0].resolve({ name: 'Ada' });\n  });\n  expect(stateOf(result.current).status).toBe('ready');\n  expect(stateOf(result.current).data?.name).toBe('Ada');\n});\n\nit('空 key 不发请求保持 idle', () => {\n  const f = makeFetch();\n  const { result } = renderHook(() => useResource('', f.impl));\n  expect(f.calls.length).toBe(0);\n  expect(stateOf(result.current).status).toBe('idle');\n  expect(stateOf(result.current).promise).toBe(null);\n});\n\nit('切换 key 时取消上一个请求', () => {\n  const f = makeFetch();\n  const { result, rerender } = renderHook(({ k }: { k: string | null }) => useResource(k, f.impl), {\n    initialProps: { k: 'u/1' as string | null },\n  });\n  rerender({ k: 'u/2' });\n  expect(f.calls.length).toBe(2);\n  expect(f.calls[0].signal.aborted).toBe(true);\n  expect(f.calls[1].signal.aborted).toBe(false);\n  expect(stateOf(result.current).status).toBe('loading');\n});\n\nit('并发乱序返回时旧响应晚到不污染新数据', async () => {\n  const f = makeFetch();\n  const { result, rerender } = renderHook(({ k }: { k: string | null }) => useResource(k, f.impl), {\n    initialProps: { k: 'u/1' as string | null },\n  });\n  rerender({ k: 'u/2' });\n  await act(async () => {\n    f.calls[1].resolve({ name: 'Grace' });\n  });\n  expect(stateOf(result.current).status).toBe('ready');\n  await act(async () => {\n    f.calls[0].resolve({ name: 'Ada' });\n  });\n  expect(stateOf(result.current).status).toBe('ready');\n  expect(stateOf(result.current).data?.name).toBe('Grace');\n});\n\nit('卸载后取消请求且晚到响应不再写状态', async () => {\n  const noise: string[] = [];\n  vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {\n    noise.push(args.map(String).join(' '));\n  });\n  const f = makeFetch();\n  const { unmount } = renderHook(() => useResource('u/1', f.impl));\n  unmount();\n  expect(f.calls[0].signal.aborted).toBe(true);\n  await act(async () => {\n    f.calls[0].resolve({ name: 'Ada' });\n  });\n  expect(noise).toEqual([]);\n});\n\nit('AbortError 取消回落 idle 不进失败态', async () => {\n  const f = makeFetch();\n  const { result } = renderHook(() => useResource('u/1', f.impl));\n  await act(async () => {\n    f.calls[0].reject(abortError());\n  });\n  expect(stateOf(result.current).status).toBe('idle');\n  expect(stateOf(result.current).error).toBeUndefined();\n});\n\nit('真实失败进入 error 并原样保留 unknown 原因', async () => {\n  const f = makeFetch();\n  const { result } = renderHook(() => useResource('u/1', f.impl));\n  await act(async () => {\n    f.calls[0].reject('boom');\n  });\n  expect(stateOf(result.current).status).toBe('error');\n  expect(stateOf(result.current).error).toBe('boom');\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { useEffect, useRef, useState } from 'react';\n\nexport type ResourceState<T> =\n  | { status: 'idle'; promise: null }\n  | { status: 'loading'; promise: Promise<T> }\n  | { status: 'ready'; promise: Promise<T>; data: T }\n  | { status: 'error'; promise: Promise<T>; error: unknown };\n\n/** 取消不是失败：DOMException/Error 的 name 为 AbortError 时走独立分支。 */\nfunction isCancellation(error: unknown): boolean {\n  if (typeof error !== 'object' || error === null) return false;\n  return (error as { name?: unknown }).name === 'AbortError';\n}\n\nexport function useResource<T>(\n  key: string | null,\n  fetchImpl: (key: string, signal: AbortSignal) => Promise<T>,\n): ResourceState<T> {\n  const [state, setState] = useState<ResourceState<T>>({ status: 'idle', promise: null });\n  /** 代数令牌：只有最新那代能写状态，晚到的旧响应直接丢弃。 */\n  const generation = useRef(0);\n  const implRef = useRef(fetchImpl);\n  useEffect(() => {\n    implRef.current = fetchImpl;\n  });\n\n  useEffect(() => {\n    if (!key) {\n      generation.current += 1;\n      setState({ status: 'idle', promise: null });\n      return;\n    }\n    const controller = new AbortController();\n    const token = (generation.current += 1);\n    const promise = implRef.current(key, controller.signal);\n    if (generation.current === token) setState({ status: 'loading', promise });\n    promise.then(\n      (data) => {\n        if (generation.current !== token) return;\n        setState({ status: 'ready', promise, data });\n      },\n      (error: unknown) => {\n        if (generation.current !== token) return;\n        if (isCancellation(error) || controller.signal.aborted) {\n          setState({ status: 'idle', promise: null });\n          return;\n        }\n        setState({ status: 'error', promise, error });\n      },\n    );\n    return () => {\n      generation.current += 1;\n      controller.abort();\n    };\n  }, [key]);\n\n  return state;\n}\n",
+    "naiveSolution": "import { useEffect, useState } from 'react';\n\nexport function useResource(\n  key: string | null,\n  fetchImpl: (key: string, signal: AbortSignal) => Promise<unknown>,\n) {\n  const [state, setState] = useState<unknown>({ status: 'idle', promise: null });\n  useEffect(() => {\n    if (!key) {\n      setState({ status: 'idle', promise: null });\n      return;\n    }\n    const controller = new AbortController();\n    const promise = fetchImpl(key, controller.signal);\n    setState({ status: 'loading', promise });\n    promise.then(\n      (data) => setState({ status: 'ready', promise, data }),\n      (error: unknown) => setState({ status: 'error', promise, error }),\n    );\n  }, [key, fetchImpl]);\n  return state;\n}\n"
+  },
+  "answer": "参考要点：\n- 三个机制各管一件事：`AbortController` 把取消传到 transport 层（省流量、省上游日志噪声）、**代数令牌** `generation` 挡住\"晚到的旧响应\"（即使漏了 abort 也不会脏写）、`useRef` 同步最新 `fetchImpl` 把函数身份从依赖里摘出去（否则每次 rerender 重发）。\n- promise 身份稳定是 React 19 的硬要求：`use(state.promise)` 每次读到新实例就会重新挂起 → 闪烁 + 重复请求。\n- 取消与失败必须分类：`AbortError`/`signal.aborted` 是 cancelled，不能出错误 UI；真实失败要原样保留 `unknown`，因为业务侧可能要读 `error.status`。\n- cleanup 里 abort 而不是\"忽略结果\"：忽略会留下真实连接继续跑完。\n- 若同一 key 被多个订阅者共享，单个订阅者不得持有 abort 权（需要缓存层引用计数），否则一人卸载打死所有人。\n\n面试追问：\n1. `fetchImpl` 内部再发 3 个并行子请求时取消如何传递？没有 `AbortSignal.any` 的环境怎么手写链接？\n2. 只用\"比对当前 key\"能否替代代数令牌？（A→B→A 快速回切会互相认账，令牌才能区分代）\n3. 为什么渲染期不能写 ref？（并发渲染可能被丢弃/重放，Refs 不是渲染期状态容器；React Compiler 会判违规）\n4. 加了 staleTime 后 `ready` 要不要继续显示旧数据？（SWR：需要 isStale 而不是打回 loading）",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/data-fetching-and-errors.md#11-请求生命周期的四个正确性关口",
+    "addedBy": "content-agent-fe"
+  }
+}

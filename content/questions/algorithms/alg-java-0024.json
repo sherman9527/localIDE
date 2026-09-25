@@ -1,0 +1,318 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0024",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "前缀缓存的复用长度：块对齐、链式 key，尾块永远省不下来",
+  "statement": "## 背景\n\n多轮对话与 Agent 流量里，成千上万条请求共享同一段 system prompt / 工具描述。推理引擎用\n**prefix caching（前缀缓存）** 省掉重复 prefill：KV 按固定大小的 block 存放，**一个 block 写满才\n进缓存池**，key 是「从第 0 个 token 起、到这一块为止的整条前缀链」，而不是这一块的内容。\n\n现在给你一批按到达顺序**串行**执行的请求，算这一批总共要真的跑多少 token 的 prefill。\n\n## 规则（照这些算，不要照你脑子里的\"近似版\"）\n\n- `prompts[i]` 是第 i 个请求的 token 序列，`blockSize` 是每个 block 的 token 数；缓存初始为空。\n- 每个请求处理完，把它自己的**所有完整块**写入缓存（尾块不满一块，不写）。\n- 一个请求可复用的长度 = 从第 0 块起**连续命中**的整块数 × `blockSize`（中途断一次就不再往后认）。\n- 该请求的成本 = `prompt 长度 − 可复用长度`；尾块的零头永远要重算。\n- 返回所有请求的成本之和。\n\n## 这题真正考的东西\n\n三步就能错：\n\n1. **拿最长公共前缀当可复用长度**，不做块对齐：`blockSize=4` 时长度 3 的 prompt 一个整块都凑不出，\n   可复用是 0、成本是 3 —— 不是 0。\n2. **用\"块内容集合\"判命中**：块 `[5,6,7,8]` 在第 2 个位置出现过（前面是 `[1,2,3,4]`），\n   不代表它作为第 1 个位置时也算命中 —— 链式 key 存在的意义就是禁止这种跨位置串味。\n3. **把不完整的尾块也当已缓存**：下个请求的前缀正好落在这半块里，看着省了 token，\n   实际显存里根本没有这份 KV，真跑起来就是 cache miss。\n\n## 你要实现的入口\n\n```java\npublic static int prefillCost(int[][] prompts, int blockSize)\n```\n\n- 返回值：这一批需要真正计算（无法复用）的 token 总数；\n- `prompts` 为空数组时返回 `0`，**不抛异常**（空批次是网关的常态）；\n- `blockSize <= 0`、`prompts[i]` 为 `null`、token 为负数 —— 抛 `IllegalArgumentException`。\n  负 token id 说明上游 tokenizer 或哈希被写坏了，宽容处理会把它算成一次正常命中，\n  把\"缓存里凭空多出一块\"这种问题留到线上去。\n\n## 复杂度要求\n\n`O(总 token 数)` 时间：`n` 条请求时**不许**两两比较前缀（`O(n² · len)` 在千级并发下会先把网关打死）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "prefix-cache",
+    "llm-inference",
+    "kv-cache",
+    "hash-chain",
+    "modern:inference-gateway"
+  ],
+  "cases": [
+    {
+      "name": "同 system prompt 三连发：省下来的是整块，不是全部前缀",
+      "input": [
+        [
+          [
+            10,
+            11,
+            12,
+            13,
+            100,
+            101
+          ],
+          [
+            10,
+            11,
+            12,
+            13,
+            200,
+            201,
+            202,
+            203
+          ],
+          [
+            10,
+            11,
+            12,
+            13,
+            300
+          ]
+        ],
+        4
+      ],
+      "expected": 11,
+      "visible": true,
+      "note": "R1 全算 6；R2 命中首块省 4 → 4；R3 命中首块省 4 → 1。合计 11"
+    },
+    {
+      "name": "零头不落盘：长度 3 的请求凑不出一个整块，复用为 0",
+      "input": [
+        [
+          [
+            7,
+            8,
+            9,
+            10,
+            11,
+            12,
+            13,
+            14
+          ],
+          [
+            7,
+            8,
+            9
+          ]
+        ],
+        4
+      ],
+      "expected": 11,
+      "visible": true,
+      "note": "朴素 LCP 会说第二条省 3（成本 8）—— 显存里根本没有那份 KV"
+    },
+    {
+      "name": "分叉在第二块：公共前缀之后各走各的",
+      "input": [
+        [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          [
+            1,
+            2,
+            3,
+            4,
+            9,
+            9,
+            9,
+            9
+          ],
+          [
+            1,
+            2,
+            3,
+            4,
+            9,
+            9,
+            9,
+            9
+          ]
+        ],
+        4
+      ],
+      "expected": 12,
+      "visible": true,
+      "note": "R2 只省首块（4），R3 与前一条完全同链（0）→ 8 + 4 + 0"
+    },
+    {
+      "name": "完全重复的请求成本为 0",
+      "input": [
+        [
+          [
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            1,
+            2,
+            3,
+            4
+          ],
+          [
+            1,
+            2,
+            3,
+            4
+          ]
+        ],
+        4
+      ],
+      "expected": 4,
+      "visible": true
+    },
+    {
+      "name": "块内容相同但位置不同不算命中（链式 key）",
+      "input": [
+        [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          [
+            5,
+            6,
+            7,
+            8
+          ]
+        ],
+        4
+      ],
+      "expected": 12,
+      "visible": true,
+      "note": "\"块集合\"实现会把 R2 判成全命中（成本 8）；真实前缀链不同，必须整条重算"
+    },
+    {
+      "name": "blockSize 为 1：每一块都可复用，包括最后一个 token",
+      "input": [
+        [
+          [
+            5,
+            6,
+            7
+          ],
+          [
+            5,
+            6,
+            7,
+            8
+          ]
+        ],
+        1
+      ],
+      "expected": 4,
+      "visible": true,
+      "note": "R2 省 3、算 1 —— 块大小为 1 时不存在尾块浪费"
+    },
+    {
+      "name": "退化：空批次返回 0",
+      "input": [
+        [],
+        4
+      ],
+      "expected": 0,
+      "visible": true
+    },
+    {
+      "name": "退化：空 prompt 既不产生成本也不产生缓存",
+      "input": [
+        [
+          [],
+          [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          [],
+          [
+            1,
+            2,
+            3,
+            4
+          ]
+        ],
+        4
+      ],
+      "expected": 5,
+      "visible": true,
+      "note": "长度 5 全算（5），随后长度 4 命中首块（0）"
+    },
+    {
+      "name": "长尾不齐：两条长度 7 的请求，第二条只省 4",
+      "input": [
+        [
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ],
+          [
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7
+          ]
+        ],
+        4
+      ],
+      "expected": 10,
+      "visible": true,
+      "note": "7 − 4 = 3：最后 3 个 token 落在没写盘的尾块里"
+    },
+    {
+      "name": "脏 token 必须显式失败",
+      "input": [
+        [
+          [
+            1,
+            2,
+            -3,
+            4
+          ]
+        ],
+        4
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "宽容处理会把脏数据算成一次正常命中"
+    },
+    {
+      "name": "blockSize 非法必须显式失败",
+      "input": [
+        [
+          [
+            1,
+            2
+          ]
+        ],
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "**思路**：把缓存建成「前缀链 → 是否存在」的集合。逐块走链式 key（第 b 块的 key = 前 b+1 块的\n全部 token），从头连续查，遇到第一次 miss 就停；请求处理完把自己**所有完整块**的链 key 写回集合。\n`O(总 token)` 时间、`O(缓存块数)` 空间。\n\n**三个判分点各自对应什么真实事故**：\n1. 块对齐：长度 3、`blockSize=4` 时复用 0。按 LCP 算会把\"省 3 个 token\"写进监控，\n   而引擎实际一次都没命中 —— 命中率指标从此不可信。用例「零头不落盘」与「长尾不齐」各打一处。\n2. 链式 key：块内容 `[5,6,7,8]` 在位置 2 出现过，不等于在位置 1 可复用。\n   用例「块内容相同但位置不同不算命中」专打\"块内容集合\"式实现（LCP 式朴素解在这条上反而对，\n   所以两种错法都得留用例）。这也是 vLLM/SGLang 用 `hash(prefix_blocks + block_content)`\n   而不是 `hash(block_content)` 的原因 —— 同一个内容在不同上下文里对应完全不同的 KV。\n3. 尾块不落盘：只写满块，所以任何 prompt 的最后一个不完整块都要重算。\n   「长尾不齐」里两条长度 7 的请求，第二条只能省 4、不能省 7。\n\n**朴素解错在哪**（`Σ` 视角换成 LCP 视角）：LCP 与\"块对齐的可复用长度\"最多差 `blockSize-1`，\n单条看不出来，但**命中率统计会系统性偏高**，容量规划就按错的余量走。\n\n**工程延伸（面试追问点）**：\n1. 链式 key 用什么算？（对前缀链做增量哈希：`h_b = mix(h_{b-1}, block_b)`，O(1) 递推；\n   真实现里还要带 model / LoRA / 量化位宽 —— 同一段 token 换个模型权重完全不同，\n   不加进 key 就是跨模型串缓存。）\n2. 缓存淘汰怎么做？（前缀树 + LRU-T 按叶子向上回收：先逐出没有任何子孙引用的叶子块，父块只有在\n   子块全没了才可能成为叶子 —— 逐出中间块会让整条子树作废，实际省不了多少。）\n3. 命中了就一定更快吗？（不。命中省的是 prefill 算力，代价是一次显存查表 + 引用计数原子操作；\n   短 prompt 上开销可能盖过收益。所以生产实现会给\"最少命中多少 token 才值得复用\"留阈值。）\n4. 多机部署下前缀缓存怎么共享？（要么按前缀哈希做一致性路由（同一前缀落同一实例），要么把 KV\n   下沉到远端池化存储 —— 前者省网络但会造成热点，后者省热点但把 TTFT 押在网络代际上。）\n5. 为什么本题按串行算？（并发请求可能同时 miss 同一段前缀、各算一遍再都写缓存 —— 这叫\n   cache thundering herd，需要\"同前缀 single-flight\"，是另一道题。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int prefillCost(int[][] prompts, int blockSize)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  public static int prefillCost(int[][] prompts, int blockSize) {\n    if (blockSize <= 0) throw new IllegalArgumentException(\"bad block size\");\n    Set<String> cached = new HashSet<>();   // key = 整条前缀链，不是单块内容\n    int total = 0;\n    for (int[] prompt : prompts) {\n      if (prompt == null) throw new IllegalArgumentException(\"null prompt\");\n      for (int token : prompt) {\n        if (token < 0) throw new IllegalArgumentException(\"dirty token id: \" + token);\n      }\n      int fullBlocks = prompt.length / blockSize;   // 尾块直接丢掉：不满一块不进缓存\n      StringBuilder chain = new StringBuilder();\n      int reuseBlocks = 0;\n      for (int b = 0; b < fullBlocks; b++) {\n        appendBlock(chain, prompt, b, blockSize);\n        if (cached.contains(chain.toString())) {\n          reuseBlocks = b + 1;          // 只有从头连续命中才算复用\n        } else {\n          break;                        // 断了不能跳过再接着认：KV 是逐层依赖前缀的\n        }\n      }\n      total += prompt.length - reuseBlocks * blockSize;\n      StringBuilder write = new StringBuilder();\n      for (int b = 0; b < fullBlocks; b++) {\n        appendBlock(write, prompt, b, blockSize);\n        cached.add(write.toString());   // 无论命没命中，算过的块都落进缓存\n      }\n    }\n    return total;\n  }\n\n  private static void appendBlock(StringBuilder chain, int[] prompt, int blockIndex, int blockSize) {\n    for (int i = blockIndex * blockSize; i < (blockIndex + 1) * blockSize; i++) {\n      chain.append(prompt[i]).append(',');   // 每个 token 后都加分隔符，\"1,2,\" 不会和 \"12,\" 撞\n    }\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 常见错法：把\"和之前某条请求的最长公共前缀\"当成可复用长度\n  // —— 既不做块对齐，也不看这块是否真的写满过、落在第几个位置\n  public static int prefillCost(int[][] prompts, int blockSize) {\n    if (blockSize <= 0) throw new IllegalArgumentException(\"bad block size\");\n    for (int[] prompt : prompts) {\n      if (prompt == null) throw new IllegalArgumentException(\"null prompt\");\n      for (int token : prompt) {\n        if (token < 0) throw new IllegalArgumentException(\"dirty token id: \" + token);\n      }\n    }\n    int total = 0;\n    for (int i = 0; i < prompts.length; i++) {\n      int best = 0;\n      for (int j = 0; j < i; j++) {\n        best = Math.max(best, commonPrefix(prompts[j], prompts[i]));\n      }\n      total += prompts[i].length - best;\n    }\n    return total;\n  }\n\n  private static int commonPrefix(int[] a, int[] b) {\n    int n = Math.min(a.length, b.length);\n    int i = 0;\n    while (i < n && a[i] == b[i]) i++;\n    return i;\n  }\n}"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理引擎 / 显存调度 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#33,#32（原文只说\"公共前缀的 KV 可以复用\"，未把块对齐与链式 key 做成判分点）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-21T13:45:48.201Z"
+  }
+}

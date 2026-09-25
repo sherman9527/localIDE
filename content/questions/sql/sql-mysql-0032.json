@@ -1,0 +1,369 @@
+{
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "库存扣减审计：超卖与台账不平分开报、重复扣减按次数判、PAID 单被释放必须点名",
+  "statement": "## 背景\n\n素材 §5 题面草稿 A 把库存扣减写成\"扣减 + 幂等 + 对账\"三段式（考点 4，\n锚在 PolarDB 热点行与 Inventory Hint【源 S8/S9】）。本仓库的 `mysql` 判题器\n**只能提交一条查询**（`docs/JUDGING.md`：跨语句的 `ROW_COUNT()`、锁状态、\n事务回滚都断言不了），所以\"原子扣减三态\"那半归到主观题，\n**这题专做草稿 A 的第 2、4、5 段：事后审计**。\n\n草稿 A 里两条必须原样落实的纪律：\n\n- **\"重复扣减必须按'次数 ≠ 1'判定，不是'有没有'\"**（第 4 段）；\n- **\"去重记录必须与扣减在同一事务内\"**（第 2 段）⇒\n  同一 `biz_key` 出现两行不是\"幂等生效\"，而是**幂等被绕过**；\n- **回滚对称**（第 5 段）：释放必须与扣减一一对应，且**只有取消单才有释放**。\n\n## 表\n\n```\nstock(sku_id INT PK, kucun0 INT, kucun INT)                -- 窗口开始 / 当前账面库存\norder_txn(order_id BIGINT PK, sku_id INT, qty INT, status VARCHAR(12))   -- INIT|PAID|CANCELLED\ndeduct_log(deduct_id INT PK, biz_key VARCHAR(64), order_id BIGINT, sku_id INT, qty INT)\nrelease_log(release_id INT PK, biz_key VARCHAR(64), order_id BIGINT, sku_id INT, qty INT)\n```\n\n## 任务\n\n只交**一条 SELECT**，输出异常清单，列固定 `anomaly, sku_id, order_id, cnt`，\n按这四列升序。**SKU 维度的异常用 `order_id = 0` 占位**（不要输出 NULL）。\n\n| `anomaly` | 判据 | `cnt` |\n| --- | --- | --- |\n| `over-sold` | 某 SKU 的 `净扣减 = Σdeduct − Σrelease > kucun0` | 超出的件数 |\n| `ledger-mismatch` | `kucun <> kucun0 − 净扣减` | 账面差额（`kucun0 − 净扣减 − kucun`，可正可负） |\n| `duplicate-deduct` | 同一 `order_id` 在 `deduct_log` 里 **次数 > 1** | 次数 |\n| `double-release` | 同一 `order_id` 在 `release_log` 里次数 > 1 | 次数 |\n| `paid-without-deduct` | `status = 'PAID'` 且没有任何扣减记录 | `0` |\n| `cancelled-without-release` | `status = 'CANCELLED'` 且没有任何释放记录 | `0` |\n| `released-but-not-cancelled` | 有释放记录但订单**不是** `CANCELLED` | 释放次数 |\n| `orphan-deduct` | 扣减记录指向的 `order_id` 在订单表里不存在 | 该订单的扣减次数 |\n| `wrong-sku-deduct` | 扣减记录的 `sku_id` 与订单的 `sku_id` 不一致 | 该笔扣减件数 |\n\n## 三条口径纪律\n\n- **`over-sold` 与 `ledger-mismatch` 是两个独立检查，可能同时命中同一个 SKU**：\n  前者说\"卖多了\"，后者说\"账对不上\"。它们的**处置路径不同** ——\n  超卖要赔付/砍单，台账不平要查扣减代码。合成一列就会只修一个。\n- **`duplicate-deduct` 按 `order_id` 聚合，不按 `biz_key`**：\n  重试时重新生成一个 `biz_key` 恰恰是最严重的形态（幂等键失效），\n  按 `biz_key` 分组会认为\"每次都是新请求\"，**一行都不报**。\n- **`released-but-not-cancelled` 要求从订单侧出发**：\n  PAID 订单被释放 = 货被凭空退回库存。以 `release_log` 为主体也能报，\n  但 `cnt` 必须是**该订单的释放次数**（不是释放件数），\n  否则会与 `double-release` 的口径打架。\n\n只允许一条 `SELECT`（可用子查询）。",
+  "judgeKind": "mysql",
+  "tags": [
+    "inventory-deduction",
+    "over-selling",
+    "idempotency-key",
+    "reconciliation",
+    "release-symmetry",
+    "modern:transaction-integrity"
+  ],
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（交易与库存链路方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 4（库存扣减与热点行【源 S8/S9/S10/S11】）＋ §5 题面草稿 A \"扣减 + 幂等 + 对账\"三段式：幂等防重扣必须与扣减同事务、\"重复扣减必须按次数 != 1 判定，不是有没有\"、释放与扣减幂等对称、\"已扣库存但订单未进终态 / 订单 PAID 但无扣减记录\"两类差异。九类异常的枚举与 cnt 口径是【推】，题面已写成契约；原子扣减三态（成功/库存不足/无此行）因 mysql 判题器只能提交一条查询而归给主观题",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T14:59:13.090Z"
+  },
+  "language": "sql",
+  "cases": [
+    {
+      "name": "基线：超卖、台账不平、重扣、非法释放、孤儿扣减各命中一次",
+      "input": [],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "duplicate-deduct",
+            2004,
+            1004,
+            2
+          ],
+          [
+            "ledger-mismatch",
+            2002,
+            0,
+            -4
+          ],
+          [
+            "orphan-deduct",
+            2002,
+            9009,
+            1
+          ],
+          [
+            "over-sold",
+            2003,
+            0,
+            3
+          ],
+          [
+            "released-but-not-cancelled",
+            2001,
+            1006,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "2003 net=8 > kucun0=5 ⇒ over-sold 3；2004 被扣两次(20)但只释放 10 ⇒ 台账不平 0？不是：kucun=40、kucun0-net=50-(20-10)=40 ⇒ 平了，报的是 duplicate-deduct；1006 是 PAID 却被释放；9009 是孤儿扣减",
+      "visible": true
+    },
+    {
+      "name": "边界：净扣减恰好等于初始库存 ⇒ 不算超卖（判据用 >，归零是合法终态）",
+      "input": [
+        "UPDATE stock SET kucun0 = 8, kucun = 0 WHERE sku_id = 2003"
+      ],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "duplicate-deduct",
+            2004,
+            1004,
+            2
+          ],
+          [
+            "ledger-mismatch",
+            2002,
+            0,
+            -4
+          ],
+          [
+            "orphan-deduct",
+            2002,
+            9009,
+            1
+          ],
+          [
+            "released-but-not-cancelled",
+            2001,
+            1006,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：把二次扣减的幂等键改成同一个 ⇒ 重复扣减仍按\"次数 != 1\"报",
+      "input": [
+        "UPDATE deduct_log SET biz_key = 'pay-1004' WHERE deduct_id = 5"
+      ],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "duplicate-deduct",
+            2004,
+            1004,
+            2
+          ],
+          [
+            "ledger-mismatch",
+            2002,
+            0,
+            -4
+          ],
+          [
+            "orphan-deduct",
+            2002,
+            9009,
+            1
+          ],
+          [
+            "over-sold",
+            2003,
+            0,
+            3
+          ],
+          [
+            "released-but-not-cancelled",
+            2001,
+            1006,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "素材草稿 A 第 4 条：重复扣减必须按\"次数 != 1\"判定，不是\"有没有\"。两行同 biz_key 在真实系统里意味着去重表被绕过（同事务没做）",
+      "visible": true
+    },
+    {
+      "name": "退化：扣减与释放全部清空 ⇒ 多出四行\"已付款没扣减\"、一行\"已取消没释放\"、四个 SKU 全部台账不平",
+      "input": [
+        "DELETE FROM deduct_log",
+        "DELETE FROM release_log"
+      ],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "cancelled-without-release",
+            2004,
+            1004,
+            0
+          ],
+          [
+            "ledger-mismatch",
+            2001,
+            0,
+            10
+          ],
+          [
+            "ledger-mismatch",
+            2002,
+            0,
+            3
+          ],
+          [
+            "ledger-mismatch",
+            2003,
+            0,
+            8
+          ],
+          [
+            "ledger-mismatch",
+            2004,
+            0,
+            10
+          ],
+          [
+            "paid-without-deduct",
+            2001,
+            1001,
+            0
+          ],
+          [
+            "paid-without-deduct",
+            2001,
+            1006,
+            0
+          ],
+          [
+            "paid-without-deduct",
+            2002,
+            1002,
+            0
+          ],
+          [
+            "paid-without-deduct",
+            2003,
+            1003,
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "2001 清空流水后净扣减按 0 算：100 - 0 - 90 = 10 ⇒ ledger-mismatch 仍报，因为清空流水不会让库存账自动变对",
+      "visible": true
+    },
+    {
+      "name": "退化：库存表清空 ⇒ SKU 维度两列都不出行（不许凭空造一个\"零库存 SKU\"）",
+      "input": [
+        "DELETE FROM stock"
+      ],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "duplicate-deduct",
+            2004,
+            1004,
+            2
+          ],
+          [
+            "orphan-deduct",
+            2002,
+            9009,
+            1
+          ],
+          [
+            "released-but-not-cancelled",
+            2001,
+            1006,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "非法形态：把一笔扣减记到另一个 SKU 上 ⇒ 订单与扣减的 sku_id 不一致",
+      "input": [
+        "UPDATE deduct_log SET sku_id = 2002 WHERE deduct_id = 6"
+      ],
+      "expected": {
+        "columns": [
+          "anomaly",
+          "sku_id",
+          "order_id",
+          "cnt"
+        ],
+        "rows": [
+          [
+            "duplicate-deduct",
+            2004,
+            1004,
+            2
+          ],
+          [
+            "ledger-mismatch",
+            2001,
+            0,
+            5
+          ],
+          [
+            "ledger-mismatch",
+            2002,
+            0,
+            -9
+          ],
+          [
+            "orphan-deduct",
+            2002,
+            9009,
+            1
+          ],
+          [
+            "over-sold",
+            2002,
+            0,
+            2
+          ],
+          [
+            "over-sold",
+            2003,
+            0,
+            3
+          ],
+          [
+            "released-but-not-cancelled",
+            2001,
+            1006,
+            1
+          ],
+          [
+            "wrong-sku-deduct",
+            2002,
+            1006,
+            5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "wrong-sku-deduct 命中 1006；同时 2001/2002 的台账各错一笔 —— 扣错货这种事故在单表自检里是看不见的，只有跨表比 sku 才露出来",
+      "visible": true
+    }
+  ],
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS `stock`",
+      "DROP TABLE IF EXISTS `order_txn`",
+      "DROP TABLE IF EXISTS `deduct_log`",
+      "DROP TABLE IF EXISTS `release_log`",
+      "CREATE TABLE stock (sku_id INT NOT NULL PRIMARY KEY, kucun0 INT NOT NULL, kucun INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE order_txn (order_id BIGINT NOT NULL PRIMARY KEY, sku_id INT NOT NULL, qty INT NOT NULL, status VARCHAR(12) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE deduct_log (deduct_id INT NOT NULL PRIMARY KEY, biz_key VARCHAR(64) NOT NULL, order_id BIGINT NOT NULL, sku_id INT NOT NULL, qty INT NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE release_log (release_id INT NOT NULL PRIMARY KEY, biz_key VARCHAR(64) NOT NULL, order_id BIGINT NOT NULL, sku_id INT NOT NULL, qty INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO stock VALUES (2001, 100, 90), (2002, 10, 7), (2003, 5, -3), (2004, 50, 40), (2005, 7, 7)",
+      "INSERT INTO order_txn VALUES (1001, 2001, 10, 'PAID'), (1002, 2002, 3, 'PAID'), (1003, 2003, 8, 'PAID'), (1004, 2004, 10, 'CANCELLED'), (1005, 2005, 2, 'INIT'), (1006, 2001, 5, 'PAID')",
+      "INSERT INTO deduct_log VALUES (1, 'pay-1001', 1001, 2001, 10), (2, 'pay-1002', 1002, 2002, 3), (3, 'pay-1003', 1003, 2003, 8), (4, 'pay-1004', 1004, 2004, 10), (5, 'retry-1004', 1004, 2004, 10), (6, 'pay-1006', 1006, 2001, 5), (7, 'pay-9009', 9009, 2002, 4)",
+      "INSERT INTO release_log VALUES (1, 'cancel-1004', 1004, 2004, 10), (2, 'cancel-1006', 1006, 2001, 5)"
+    ],
+    "entry": "function",
+    "timeoutMs": 25000,
+    "referenceSolution": "SELECT anomaly, sku_id, order_id, cnt FROM (\n  SELECT 'over-sold' AS anomaly, s.sku_id, 0 AS order_id,\n         (SELECT COALESCE(SUM(d.qty), 0) FROM deduct_log d WHERE d.sku_id = s.sku_id)\n       - (SELECT COALESCE(SUM(r.qty), 0) FROM release_log r WHERE r.sku_id = s.sku_id)\n       - s.kucun0 AS cnt\n  FROM stock s\n  WHERE (SELECT COALESCE(SUM(d.qty), 0) FROM deduct_log d WHERE d.sku_id = s.sku_id)\n      - (SELECT COALESCE(SUM(r.qty), 0) FROM release_log r WHERE r.sku_id = s.sku_id) > s.kucun0\n\n  UNION ALL\n  SELECT 'ledger-mismatch', s.sku_id, 0,\n         s.kucun0\n       - ((SELECT COALESCE(SUM(d.qty), 0) FROM deduct_log d WHERE d.sku_id = s.sku_id)\n        - (SELECT COALESCE(SUM(r.qty), 0) FROM release_log r WHERE r.sku_id = s.sku_id))\n       - s.kucun\n  FROM stock s\n  WHERE s.kucun <> s.kucun0\n        - ((SELECT COALESCE(SUM(d.qty), 0) FROM deduct_log d WHERE d.sku_id = s.sku_id)\n         - (SELECT COALESCE(SUM(r.qty), 0) FROM release_log r WHERE r.sku_id = s.sku_id))\n\n  UNION ALL\n  SELECT 'duplicate-deduct', d.sku_id, d.order_id, COUNT(*)\n  FROM deduct_log d GROUP BY d.sku_id, d.order_id HAVING COUNT(*) > 1\n\n  UNION ALL\n  SELECT 'double-release', r.sku_id, r.order_id, COUNT(*)\n  FROM release_log r GROUP BY r.sku_id, r.order_id HAVING COUNT(*) > 1\n\n  UNION ALL\n  SELECT 'paid-without-deduct', o.sku_id, o.order_id, 0\n  FROM order_txn o LEFT JOIN deduct_log d ON d.order_id = o.order_id\n  WHERE o.status = 'PAID' AND d.deduct_id IS NULL\n\n  UNION ALL\n  SELECT 'cancelled-without-release', o.sku_id, o.order_id, 0\n  FROM order_txn o LEFT JOIN release_log r ON r.order_id = o.order_id\n  WHERE o.status = 'CANCELLED' AND r.release_id IS NULL\n\n  UNION ALL\n  SELECT 'released-but-not-cancelled', o.sku_id, o.order_id,\n         (SELECT COUNT(*) FROM release_log r2 WHERE r2.order_id = o.order_id)\n  FROM order_txn o JOIN release_log r ON r.order_id = o.order_id\n  WHERE o.status <> 'CANCELLED'\n  GROUP BY o.sku_id, o.order_id\n\n  UNION ALL\n  SELECT 'orphan-deduct', d.sku_id, d.order_id, COUNT(*)\n  FROM deduct_log d LEFT JOIN order_txn o ON o.order_id = d.order_id\n  WHERE o.order_id IS NULL GROUP BY d.sku_id, d.order_id\n\n  UNION ALL\n  SELECT 'wrong-sku-deduct', d.sku_id, d.order_id, d.qty\n  FROM deduct_log d JOIN order_txn o ON o.order_id = d.order_id\n  WHERE d.sku_id <> o.sku_id\n) x\nORDER BY anomaly, sku_id, order_id, cnt",
+    "naiveSolution": "SELECT 'over-sold' AS anomaly, s.sku_id, 0 AS order_id, s.kucun AS cnt\nFROM stock s WHERE s.kucun < 0\nUNION ALL\nSELECT 'duplicate-deduct', d.sku_id, d.order_id, COUNT(*)\nFROM deduct_log d GROUP BY d.sku_id, d.order_id, d.biz_key HAVING COUNT(*) > 1\nUNION ALL\nSELECT 'paid-without-deduct', o.sku_id, o.order_id, 0\nFROM order_txn o JOIN deduct_log d ON d.order_id = o.order_id\nWHERE o.status = 'PAID'\nGROUP BY o.sku_id, o.order_id",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 30,
+  "answer": "## 参考答案\n\n九段 `UNION ALL`，每段一件事。**难点不是写法，是九件事互相不重叠**。\n\n**基线五行**（按 `anomaly` 升序，下面写成 `anomaly/sku_id/order_id/cnt`）：\n`duplicate-deduct/2004/1004/2`、`ledger-mismatch/2002/0/-4`、\n`orphan-deduct/2002/9009/1`、`over-sold/2003/0/3`、\n`released-but-not-cancelled/2001/1006/1`。\n两行是 SKU 维度（`order_id` 用 0 占位），三行是订单/流水维度。\n`double-release` 基线里是空的 —— 没有任何订单被释放两次，它是题面表格里留着的判据，\n不为它硬造用例。SKU 那两行要对着下面这张表读：\n\n| SKU | Σdeduct | Σrelease | 净扣减 | kucun0 | kucun | 结论 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 2001 | 15 | 5 | 10 | 100 | 90 | 平 ⇒ 无 SKU 级异常 |\n| 2002 | 7 | 0 | 7 | 10 | 7 | `10 − 7 = 3 ≠ 7` ⇒ ledger-mismatch **−4** |\n| 2003 | 8 | 0 | 8 | 5 | −3 | `8 > 5` ⇒ over-sold **3**；且 `5 − 8 = −3 = kucun` ⇒ 台账平 |\n| 2004 | 20 | 10 | 10 | 50 | 40 | `50 − 10 = 40 = kucun` ⇒ 台账平（重扣 10 件被释放抵掉了） |\n| 2005 | 0 | 0 | 0 | 7 | 7 | 平 |\n\n`cancelled-without-release` 基线里也是空的：1004 是唯一 CANCELLED 单，而它有释放记录\n⇒ 它要等用例「扣减与释放全部清空」才浮出来（那一行同时把四个 SKU 的台账全部打不平）。\n\n**2002 的 `ledger-mismatch` 是基线里最容易被读错的一行**：\n它的净扣减是 `3 + 4 = 7`，其中那笔 4 件来自**订单表里根本不存在的 9009**。\n所以这一行与 `orphan-deduct/2002/9009/1` 是**同一个根因的两个症状**：\n账面对不上（少了 4 件），而流水里有一笔找不到主人。\n**两列都要报**：只报孤儿会让人以为库存是对的，只报台账不平会让人去改账面数字。\n\n**`over-sold` 用 `>` 而不是 `>=`**：用例「净扣减恰好等于初始库存」把 2003 改成\n`kucun0=8, kucun=0` ⇒ 净扣减 8 恰好等于初始库存 ⇒ **不报超卖**（卖光是合法终态），\n而台账 `8 − 8 = 0 = kucun` 也平 ⇒ 这个 SKU 一行都不出。\n判 `>=` 的实现会在**每一件售罄的商品**上都报一次超卖 ——\n那是超卖告警最常见的沉默原因（响太多，所以没人看）。\n\n**用例「把二次扣减的幂等键改成同一个」是本题的核心断言**：\n`deduct_id=5` 的 `biz_key` 从 `retry-1004` 改成 `pay-1004` 之后，\n`duplicate-deduct` **仍然必须报 1004 两次**。\n按 `biz_key` 分组的实现（朴素解就是这么写的）在这里给出**零行**：\n两行的 `biz_key` 相同 ⇒ 每组一行 ⇒ `HAVING COUNT(*) > 1` 永不成立。\n而真实语义是\"**去重记录没和扣减写在同一事务里**\"——\n素材草稿 A 第 2 条要求断言\"扣减回滚后去重表不得残留记录\"，\n本题从审计侧盯同一件事：**同键两行 = 幂等表被绕过**。\n\n**朴素解挂三处，每处都是一个方向的错**：\n1. `over-sold` 写成 `kucun < 0` ⇒ 只看见 2003，看不见 2002 那种\n   \"账面还是正数但已经卖超了\"（`kucun0=10`、净扣 7 却记成 7 ⇒ 若真实净扣是 12\n   而账面留 0，朴素解也不报）；而它把 2003 的 `cnt` 写成 `kucun`（−3），\n   **件数口径直接错**（应该是超出的 3 件）；\n2. `duplicate-deduct` 按 `biz_key` 分组 ⇒ 漏掉基线里那条重扣；\n3. `paid-without-deduct` 用 `JOIN` ⇒ 它实际报的是\"**有**扣减记录的 PAID 单\"，\n   方向完全反了（报出 1001/1002/1003/1006 四条正常记录）。\n\n**工程延伸（面试追问点）**\n\n1. 三态（成功 / 库存不足 / 该行不存在）为什么不在这里考？（一条查询判不了：\n   需要跨语句的 `ROW_COUNT()` 与事务回滚断言。素材草稿 A 第 1 条里\n   `TARGET_AFFECT_ROW 1` 的语义（PolarDB Inventory Hint【源 S9】）归主观题。）\n2. 开了热点行优化之后对账要注意什么？（官方：开启后\"**仅依赖 `ON UPDATE\n   CURRENT_TIMESTAMP` 属性自动更新的列会失效****\"【源 S8】——\n   而那正是审计表 `updated_at` 的来源。所以流水要显式写时间列，\n   否则\"最后一次修改时间\"这一列在热点行上是假的，`ledger-mismatch` 无从归因。）\n3. 为什么释放要独立一张表？（释放与扣减的幂等键、重试节奏都不同；\n   放进同一张表用正负数量表示，会让\"次数 ≠ 1\"这条判据失去意义 ——\n   扣两次 + 释放一次 = 净 1 件，看着像对的。）",
+  "schemaVersion": 1,
+  "id": "sql-mysql-0032"
+}

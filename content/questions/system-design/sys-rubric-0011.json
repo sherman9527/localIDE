@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "id": "sys-rubric-0011",
+  "category": "system-design",
+  "difficulty": "senior",
+  "title": "同一张券在账务上有三种落点：把出资方与义务性质做成批次的一等属性",
+  "statement": "## 角色\n\n拼多多 服务端研发 / 技术财务交叉方向 Senior，35 分钟。\n\n## 可核查事实\n\n- 2025 年报：\"We currently rely on commercial banks and third-party payment service\n  providers for **payment processing and escrow services**\"，并承认业务依赖这些机构的\n  billing / payment / escrow 系统来 \"**maintain accurate records of payments of sales\n  proceeds**\"；自列风险包含 \"**failure to manage funds accurately or loss of funds**,\n  whether due to employee fraud, security breaches, technical errors or otherwise\"。\n- 负债量级（2026-03-31，官方财报）：应付商家款 ≈ RMB 1091.5 亿、\n  商家保证金 ≈ 179.1 亿、客户预付与递延收入 ≈ 35.2 亿。\n- 官方收入确认段：平台自费给消费者的 incentives 包括\n  \"coupons, credits and **other subsidies that may or may not be specific to any merchant**\"，\n  可用于低价购买 \"**or to redeem for cash from us**\"；\n  入账方式取决于是否存在\"替商家履行的明示或默示义务\"——\n  有 ⇒ 记作 **reductions of revenues**（或代商家承担的负债），无 ⇒ 记作 **marketing expenses**；\n  并且\"**Variable consideration is estimated** and included in the transaction price\n  to the extent that it is probable that a significant revenue reversal will not occur\"。\n- 官方订单字段：`pay_amount = 商品金额 − 折扣金额 + 邮费 + 服务费`；\n  `discount_amount = 平台优惠 + 商家优惠 + 团长免单优惠金额`；\n  `promotion_type = 30`（以旧换新）注释明确\"**优惠金额已包含平台优惠金额里**\"；\n  `trade_in_national_subsidy_amount_type`：`1 支付优惠 / 2 商家优惠`；\n  另有 `duo_duo_pay_reduction`（多多支付立减，钱由支付渠道出）。\n- 外部对账通道是**商家货款日账单文件**（不是实时接口）。\n\n## 题目\n\n请设计\"券 / 补贴 / 结算\"这条链的工程形态，回答：\n\n1. 为什么\"出资方 + 义务性质\"必须是**券批次的一等属性**，而不是财务事后调账？\n   给出你的字段建模（至少四个属性）与它如何落到 `platform_discount` / `seller_discount`。\n2. **可提现红包**与**下单抵扣券**为什么必须分属两套资产账户？混用会开出什么通道？\n3. 三个\"已包含\"陷阱怎么防：`promotion_type=30`、国补 `type=2`、`duo_duo_pay_reduction`。\n   给出可机器判的恒等式与它应挂在链路的哪一层。\n4. 可变对价要**预估并事后冲正** —— 这对数据平台提出什么要求？\n   （提示：只存终值会怎样？）\n5. 以日账单为一次真相的结算体系里，差异如何分类、谁承担、止付条件是什么。\n6. 你会拒绝做的一件事是什么？说明理由。\n\n题面里的金额量级是官方披露值；任何你没看到的比例、账期天数、容差都必须标注为假设。",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "subsidy-accounting",
+    "asset-account-separation",
+    "settlement-recon",
+    "variable-consideration",
+    "modern:finance-consistency"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "出资方一等属性建模",
+        "weight": 3,
+        "criteria": "必须给出批次维度的属性（出资主体、义务性质、是否可提现、账期/归属期），并说明它如何决定 platform_discount 与 seller_discount 的归属；只答\"加个字段标记一下\"不算"
+      },
+      {
+        "label": "两套资产账户",
+        "weight": 2,
+        "criteria": "要说清可提现与下单抵扣混用直接开出套现通道（低价买入→核销→提现），并给出账户层的隔离与限额；答到\"资金账户与权益账户分离\"更好"
+      },
+      {
+        "label": "三处双计的防法",
+        "weight": 2,
+        "criteria": "promotion_type=30 已含在平台优惠、国补 type=2 已含在商家优惠、支付立减由渠道出 ⇒ 各自的可机器判恒等式，并说明为什么校验挂结算而不是挂下单"
+      },
+      {
+        "label": "可变对价的可复算性",
+        "weight": 1,
+        "criteria": "必须答到\"存预估时点快照 + 冲正记录\"，否则历史永远无法复算、审计追溯断裂"
+      },
+      {
+        "label": "差异分类与止付",
+        "weight": 1,
+        "criteria": "账期未到 / 退款冲销 / 风控审核中 / 金额不符 / 真差异；只有真差异要人做事；止付要有明确触发条件而不是\"看起来不对就停\""
+      },
+      {
+        "label": "主动拒绝的一件事",
+        "weight": 1,
+        "criteria": "例如拒绝把三种落点合成一个\"补贴率\"对外报，理由要落在口径不可逆地丢失上"
+      }
+    ],
+    "notes": "这一题的区分度在于候选人是否承认\"同一张券有三个账务落点\"。把补贴当成一个数（补贴率）来设计的，最多拿到 4 分。"
+  },
+  "answer": "## 参考要点\n\n**1. 为什么必须是一等属性。** 官方收入确认段给的判据是\"是否存在**替商家履行**的\n明示或默示义务\"，这决定了同一张券记作收入抵减、代商家负债、还是市场费用。\n事后调账的代价有两个方向：账务已经出了、口径已经对外说了，改不动；\n以及商家账单里的 `platform_discount` / `seller_discount` 分不干净 ⇒ 结算争议。\n所以批次建模至少四个属性：`funding_party`（平台 / 商家 / 支付渠道 / 品牌方）、\n`obligation_nature`（是否替商家）、`redeemable_to_cash`（可否提现）、\n`attribution_period`（归属期，决定进哪一期报表）。\n`promotion_type=30` 这类\"已包含\"关系要作为**批次的约束**存下来，而不是靠字段注释。\n\n**2. 两套资产账户。** 可提现的是**现金等价物**，下单抵扣的是**权益**。\n混在一套里就出现\"用权益买入账 → 转成可提现 → 提现\"的通道，\n而这类通道的症状是补贴成本持续高于预算、但每一笔核销都合法。\n工程上要求：两套账户 + 各自限额 + 提现侧有独立的资金来源约束（只能由平台预算账户注入）。\n\n**3. 三处双计与恒等式。** 可机器判的三条：\n`pay_amount = goods_amount − discount_amount + post_amount + service_fee`；\n`discount_amount = platform_discount + seller_discount + capital_free_discount`；\n`platform_subsidy = platform_discount + Σ(promotion_amount WHERE promotion_type != 30)`。\n第三条最关键：它明确把 `type=30` 排除在\"再加一次\"之外。\n**校验挂在结算而不是下单**，因为改价、赔付、分摊回冲都会**临时**破坏恒等式，\n写入时强校验会挡正常业务；而结算必须看到\"坏了几单、涉及多少钱\"。\n\n**4. 可变对价。** 官方明确\"预估并计入交易价格，事后冲正\"。\n数据平台如果只存终值，历史报表在每次冲正后都变了 ⇒ 同一天的数两个版本，\n审计问\"你上月报的那个数怎么来的\"无人能答。\n要求：每次预估落一个**带预估时点的快照**，冲正落成一条**可追溯到原预估**的调整记录。\n（素材里\"prior reporting periods 的调整不重大\"这句正是这种机制的产物 —— 能报出来说明有留痕。）\n\n**5. 差异分类与止付。** 只有\"真差异\"要人去做事；\n风控审核中是**延迟理由不是免单理由**（解除之后同一行必须变成真差异，\n否则那笔钱永久沉没，这就是 loss of funds 的日常形态）。\n止付触发要具体：同一商家真差异金额超阈值、或真差异条数环比突变，\n而不是\"对账不一致就停\"（不一致是常态，会立刻滥停）。\n\n**6. 可以拒绝的事。** 典型好答案：拒绝把三种账务落点合并成一个\"补贴率\"对外报。\n理由：合并不可逆 —— 一旦业务按\"补贴率\"做决策，\n再拆开就需要重建出资认定，而历史数据里的出资方信息如果没有在批次上落成一等属性，\n就**永远拆不回来了**。这与\"只存终值不存预估快照\"是同一类错误。\n\n**不足信号**：把补贴当一个数设计；说\"财务事后调账\"；\n认为对账靠实时接口；把 `platform_discount` 当\"平台掏的钱\"而不看\"已包含\"关系；\n答不出预估快照。",
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（营销与结算方向） / 技术财务交叉 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#4 考点 14 与 DATA 考点 14（20-F 收入确认段原文：reductions of revenues / marketing expenses / redeem for cash、可变对价预估、escrow 与 loss of funds 自列风险）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.127Z"
+  }
+}

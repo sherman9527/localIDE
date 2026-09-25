@@ -1,0 +1,275 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0016",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "SRM 审计：按首次分配归因、按去重用户计数，不许被重度用户带偏",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n```\nexperiment  (experiment_id INT PRIMARY KEY, name VARCHAR(40), control_share DECIMAL(5,4))\nassignment  (assign_id INT PRIMARY KEY, experiment_id INT, user_id INT,\n             variant VARCHAR(10), assigned_at DATETIME)   -- variant ∈ control|treatment\nexposure    (exposure_id INT PRIMARY KEY, experiment_id INT, user_id INT,\n             day DATE, impressions INT)\n```\n\n## 任务\n\nSRM（sample ratio mismatch）是实验平台的\"结论可信吗\"开关：\n**实际进组比例偏离设计比例**，说明分流系统或数据采集有 bug，此时任何指标差异都不可信。\n按 `experiment_id` 升序输出一行审计结果，列名与顺序必须是：\n\n```\nexperiment_id, control_users, treatment_users, total_users, control_share, srm_flag\n```\n\n## 口径（逐条都是判分点）\n\n1. **统计对象是\"真正进了实验的人\"= 有曝光记录的去重用户**，\n   不是被分配的人，更不是曝光行数或 `SUM(impressions)`。\n2. **分组按\"首次分配\"归因**：同一 `(experiment_id, user_id)` 可能有多条 `assignment`\n   （分流系统改过桶）。只取 `assigned_at` 最早的那条的 `variant`；\n   并列最早时取 `assign_id` 最小的。\n   按\"最新分组\"归因会把\"改桶 bug\"本身洗掉 —— 而它恰恰是 SRM 最常见的原因。\n3. 分母 `total_users` = `control_users + treatment_users`（**有分配记录**的去重曝光用户）。\n   有曝光但没有任何分配记录的用户，两个桶都不进、也不进分母。\n4. `control_share` = `ROUND(control_users / total_users, 4)`。\n5. `srm_flag` = 1 当 `|control_share - experiment.control_share| > 0.0050`，否则 0。\n   严格大于：正好等于 0.0050 不算失配。\n6. `total_users = 0` 的实验**不输出行**。\n\n只提交一条 `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- **`COUNT(*)` vs `COUNT(DISTINCT user_id)`**：重度用户一天能刷 999 次曝光，\n  按行数或按 `SUM(impressions)` 加权时，一个用户就能把整个比例带偏 ——\n  而 SRM 检出的正是\"比例带偏\"，用带偏的口径去检带偏，等于自欺。\n- **首次 vs 最新归因**决定了同一个 bug 是被检出还是被掩盖。\n- **孤儿曝光**（有曝光无分配）是采集侧最常见的坏数据；\n  把它算进分母会让 `control_share` 偏向任何一边，取决于它落在哪个桶（它没有桶）。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "experimentation",
+    "srm",
+    "count-distinct",
+    "attribution",
+    "data-quality",
+    "modern:marketplace-integrity"
+  ],
+  "cases": [
+    {
+      "name": "基线：实验 1 因改桶用户被检出，实验 4 零曝光不输出行",
+      "input": [],
+      "expected": {
+        "columns": [
+          "experiment_id",
+          "control_users",
+          "treatment_users",
+          "total_users",
+          "control_share",
+          "srm_flag"
+        ],
+        "rows": [
+          [
+            1,
+            4,
+            2,
+            6,
+            0.6667,
+            1
+          ],
+          [
+            2,
+            2,
+            2,
+            4,
+            0.5,
+            0
+          ],
+          [
+            3,
+            1,
+            2,
+            3,
+            0.3333,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "exp1 4/2 share 0.6667 flag1；exp2 2/2 flag0；exp3 1/2 flag1；exp4 无行"
+    },
+    {
+      "name": "删掉首次分配：归因跟着换到新桶，实验 1 的 flag 归 0",
+      "input": [
+        "DELETE FROM assignment WHERE assign_id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "experiment_id",
+          "control_users",
+          "treatment_users",
+          "total_users",
+          "control_share",
+          "srm_flag"
+        ],
+        "rows": [
+          [
+            1,
+            3,
+            3,
+            6,
+            0.5,
+            0
+          ],
+          [
+            2,
+            2,
+            2,
+            4,
+            0.5,
+            0
+          ],
+          [
+            3,
+            1,
+            2,
+            3,
+            0.3333,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "101 变成 treatment ⇒ exp1 3/3 share 0.5 flag0 —— 证明\"首次\"这个口径真的在判分"
+    },
+    {
+      "name": "删掉无分配用户的曝光：三个桶计数都不动",
+      "input": [
+        "DELETE FROM exposure WHERE exposure_id = 14"
+      ],
+      "expected": {
+        "columns": [
+          "experiment_id",
+          "control_users",
+          "treatment_users",
+          "total_users",
+          "control_share",
+          "srm_flag"
+        ],
+        "rows": [
+          [
+            1,
+            4,
+            2,
+            6,
+            0.6667,
+            1
+          ],
+          [
+            2,
+            2,
+            2,
+            4,
+            0.5,
+            0
+          ],
+          [
+            3,
+            1,
+            2,
+            3,
+            0.3333,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "孤儿曝光不进分母；把它算进去的实现这里会把 exp1 的 share 从 0.6667 变 0.5714"
+    },
+    {
+      "name": "删掉 999 次曝光的那个人的全部曝光：只算 1 个用户",
+      "input": [
+        "DELETE FROM exposure WHERE exposure_id = 5"
+      ],
+      "expected": {
+        "columns": [
+          "experiment_id",
+          "control_users",
+          "treatment_users",
+          "total_users",
+          "control_share",
+          "srm_flag"
+        ],
+        "rows": [
+          [
+            1,
+            4,
+            1,
+            5,
+            0.8,
+            1
+          ],
+          [
+            2,
+            2,
+            2,
+            4,
+            0.5,
+            0
+          ],
+          [
+            3,
+            1,
+            2,
+            3,
+            0.3333,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "按人去重 ⇒ 删掉 105 只让分母从 6 变 5、treatment 从 2 变 1（share 0.8）。按行或按 impressions 加权的实现这里会一次掉几百，且各列互相对不上"
+    },
+    {
+      "name": "删掉实验 2 唯一的 treatment 曝光：share 变 1.0 并触发失配",
+      "input": [
+        "DELETE FROM exposure WHERE exposure_id = 9",
+        "DELETE FROM exposure WHERE exposure_id = 10"
+      ],
+      "expected": {
+        "columns": [
+          "experiment_id",
+          "control_users",
+          "treatment_users",
+          "total_users",
+          "control_share",
+          "srm_flag"
+        ],
+        "rows": [
+          [
+            1,
+            4,
+            2,
+            6,
+            0.6667,
+            1
+          ],
+          [
+            2,
+            2,
+            0,
+            2,
+            1,
+            1
+          ],
+          [
+            3,
+            1,
+            2,
+            3,
+            0.3333,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "exp2 只剩 201/202 两个 control ⇒ 1/0 share 1.0 flag1"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步 CTE：① `first_assign` 用 `(experiment_id, user_id)` 上的 `MIN(assigned_at)`\n锁定首次分配，再用 `MIN(assign_id)` 破并列；② `exposed` 是 `DISTINCT` 的曝光用户；\n③ 两者 JOIN 之后用 `COUNT(DISTINCT CASE WHEN ... THEN user_id END)` 分桶计数。\n零曝光的实验因为在 `counted` 里没有行而自然消失，不需要额外过滤。\n\n**基线手算一遍（用来核对 expected 是不是真的对）**：\n- 实验 1：曝光用户 101/102/103/104/105/106 六个都有分配，\n  其中 101 首次是 `control`（08-01），第二次被改成 `treatment`（08-03）⇒ 按首次算 control。\n  ⇒ control = {101,102,104,106} = 4，treatment = {103,105} = 2，total 6，share 0.6667，\n  设计 0.5 ⇒ 差 0.1667 > 0.005 ⇒ **flag=1**。\n  用户 109 有曝光无分配 ⇒ 不进任何桶也不进分母（按 `SUM(impressions)` 加权的话\n  它 6 次曝光会把分母撑到 12）。\n- 实验 2：201/202/203/204 有曝光（205 没有），control 2 / treatment 2 ⇒ share 0.5 ⇒ **flag=0**。\n- 实验 3：只有 301、302、303 有曝光 ⇒ control 1 / treatment 2，share 0.3333，\n  设计 0.2 ⇒ 差 0.1333 ⇒ **flag=1**。\n- 实验 4：没有任何曝光 ⇒ **不输出行**（不是输出 0 或 NULL）。\n\n**按行加权的实现错得有多离谱**（用例「删掉 999 次曝光的那个人的全部曝光：只算 1 个用户」）：\n朴素版里 `exposure JOIN assignment` 会为\"同一用户的多次曝光 × 多条分配记录\"再次扇出。\n实验 1 的 101 有 2 条分配（control + treatment），它这一次曝光就被数成\n\"一个 control 加一个 treatment\" —— 于是**换组 bug 从\"检出\"变成\"自我抵消\"**，\nflag 直接归 0。这不是精度问题，是同一份坏数据在两种口径下一边报警一边闭嘴。\n\n**首次 vs 最新的差别只在有改桶记录时出现**（用例「删掉首次分配：归因跟着换到新桶」）：\n把 101 的首次 `control` 删掉，它的首次就变成 08-03 的 `treatment` ⇒\n实验 1 变 control 3 / treatment 3，share 0.5 ⇒ **flag 从 1 变 0**。\n一条 DELETE 让结论翻转，正好证明这个字段真的在判分里起作用。\n\n**孤儿曝光**（用例「删掉无分配用户的曝光：三个桶计数都不动」）：\n109 没有分配记录，删不删它的曝光，实验 1 的三个数字都不变。\n把它写进分母的实现（`COUNT(*)` 来自 `exposure`）会给出 total 7 ⇒ share 0.5714。\n\n**工程延伸（面试追问点）**\n\n1. 为什么阈值是\"绝对差 > 0.005\"而不是卡方检验？（0.005 是**工程护栏**，简单可解释；\n   真正的平台会按样本量做卡方/二项检验 —— 小实验上 0.005 可能是噪声，\n   大实验上 0.001 都该停线。这题选绝对阈值是为了可判分，答的时候要说清它随样本量失真。）\n2. 检出 SRM 之后该做什么？（**停线，不是修正**。指标差异在有偏分流下不可解释，\n   任何\"加权纠偏\"都假设了偏移机制已知，而 SRM 的含义正是\"我们不知道机制\"。\n   要做的动作是回溯：分流日志是否丢、是否有用户跨设备被认成两个人、缓存是否把旧桶发出去。）\n3. 为什么按曝光而不是按分配统计？（\"被分到 treatment 但从未打开过 App\"的用户\n   对指标没有贡献，把他们算进分母会稀释效应、也会让\"上游只对活跃用户生效\"的分流 bug 隐形。\n   代价是引入**选择偏差** —— 所以两者都要看：分配数是 ITT 口径，曝光数是实际触达口径。）\n4. 用户跨设备怎么办？（按 `user_id` 去重是对的，但前提是分流键与去重键一致。\n   如果分流按 device、统计按 user，同一用户会同时出现在两个桶里 ——\n   这是 SRM 的经典成因之一，也是\"分流单元必须与实验单元一致\"这条规范的来源。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS exposure",
+      "DROP TABLE IF EXISTS assignment",
+      "DROP TABLE IF EXISTS experiment",
+      "CREATE TABLE experiment (experiment_id INT PRIMARY KEY, name VARCHAR(40) NOT NULL, control_share DECIMAL(5,4) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE assignment (assign_id INT PRIMARY KEY, experiment_id INT NOT NULL, user_id INT NOT NULL, variant VARCHAR(10) NOT NULL, assigned_at DATETIME NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE exposure (exposure_id INT PRIMARY KEY, experiment_id INT NOT NULL, user_id INT NOT NULL, day DATE NOT NULL, impressions INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO experiment VALUES (1, 'price-display', 0.5), (2, 'rank-blending', 0.5), (3, 'new-supply-boost', 0.2), (4, 'unused-lab', 0.5)",
+      "INSERT INTO assignment VALUES (1, 1, 101, 'control', '2026-08-01 08:00:00'), (2, 1, 101, 'treatment', '2026-08-03 09:00:00'), (3, 1, 102, 'control', '2026-08-01 08:00:00'), (4, 1, 103, 'treatment', '2026-08-01 08:00:00'), (5, 1, 104, 'control', '2026-08-01 08:00:00'), (6, 1, 105, 'treatment', '2026-08-01 08:00:00'), (7, 1, 106, 'control', '2026-08-01 08:00:00'), (8, 2, 201, 'control', '2026-08-02 10:00:00'), (9, 2, 202, 'control', '2026-08-02 10:00:00'), (10, 2, 203, 'treatment', '2026-08-02 10:00:00'), (11, 2, 204, 'treatment', '2026-08-02 10:00:00'), (12, 2, 205, 'control', '2026-08-02 10:00:00'), (13, 3, 301, 'control', '2026-08-05 06:00:00'), (14, 3, 302, 'treatment', '2026-08-05 06:00:00'), (15, 3, 303, 'treatment', '2026-08-05 06:00:00'), (16, 3, 304, 'treatment', '2026-08-05 06:00:00'), (17, 3, 305, 'treatment', '2026-08-05 06:00:00'), (18, 3, 306, 'treatment', '2026-08-05 06:00:00')",
+      "INSERT INTO exposure VALUES (1, 1, 101, '2026-08-02', 30), (2, 1, 102, '2026-08-02', 40), (3, 1, 103, '2026-08-02', 10), (4, 1, 104, '2026-08-02', 20), (5, 1, 105, '2026-08-02', 999), (6, 1, 106, '2026-08-03', 5), (7, 2, 201, '2026-08-03', 12), (8, 2, 202, '2026-08-03', 7), (9, 2, 203, '2026-08-03', 3), (10, 2, 204, '2026-08-03', 5), (11, 3, 301, '2026-08-06', 8), (12, 3, 302, '2026-08-06', 8), (13, 3, 303, '2026-08-06', 8), (14, 1, 109, '2026-08-04', 6)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH first_assign AS (\n  SELECT a.experiment_id, a.user_id, MIN(a.assign_id) AS pick_id\n  FROM assignment a\n  JOIN (SELECT experiment_id, user_id, MIN(assigned_at) AS first_at\n        FROM assignment GROUP BY experiment_id, user_id) f\n    ON f.experiment_id = a.experiment_id\n   AND f.user_id = a.user_id\n   AND f.first_at = a.assigned_at\n  GROUP BY a.experiment_id, a.user_id\n), attributed AS (\n  SELECT fa.experiment_id, fa.user_id, a.variant\n  FROM first_assign fa\n  JOIN assignment a ON a.assign_id = fa.pick_id\n), exposed AS (\n  SELECT DISTINCT experiment_id, user_id FROM exposure\n), counted AS (\n  SELECT e.experiment_id,\n         COUNT(DISTINCT CASE WHEN t.variant = 'control' THEN e.user_id END)   AS control_users,\n         COUNT(DISTINCT CASE WHEN t.variant = 'treatment' THEN e.user_id END) AS treatment_users\n  FROM exposed e\n  JOIN attributed t ON t.experiment_id = e.experiment_id AND t.user_id = e.user_id\n  GROUP BY e.experiment_id\n)\nSELECT c.experiment_id,\n       c.control_users,\n       c.treatment_users,\n       c.control_users + c.treatment_users AS total_users,\n       ROUND(c.control_users / (c.control_users + c.treatment_users), 4) AS control_share,\n       CASE WHEN ABS(ROUND(c.control_users / (c.control_users + c.treatment_users), 4)\n                     - x.control_share) > 0.0050 THEN 1 ELSE 0 END        AS srm_flag\nFROM counted c\nJOIN experiment x ON x.experiment_id = c.experiment_id\nORDER BY c.experiment_id",
+    "naiveSolution": "-- \"看起来对\"版：按曝光行加权，并按最后一次分配归因\nSELECT e.experiment_id,\n       SUM(CASE WHEN a.variant = 'control' THEN 1 ELSE 0 END)   AS control_users,\n       SUM(CASE WHEN a.variant = 'treatment' THEN 1 ELSE 0 END) AS treatment_users,\n       COUNT(*)                                                 AS total_users,\n       ROUND(SUM(CASE WHEN a.variant = 'control' THEN 1 ELSE 0 END) / COUNT(*), 4) AS control_share,\n       CASE WHEN ABS(ROUND(SUM(CASE WHEN a.variant = 'control' THEN 1 ELSE 0 END) / COUNT(*), 4)\n                     - x.control_share) > 0.005 THEN 1 ELSE 0 END AS srm_flag\nFROM exposure e\nJOIN assignment a ON a.experiment_id = e.experiment_id AND a.user_id = e.user_id\nJOIN experiment x ON x.experiment_id = e.experiment_id\nGROUP BY e.experiment_id, x.control_share\nORDER BY e.experiment_id"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Airbnb",
+    "role": "实验与分析平台 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-search-ranking.md §1、§2.8（\"SRM 监控与自动停线\"只作为一句话出现，未给可判分的归因与计数口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:27:19.045Z"
+  }
+}

@@ -1,0 +1,55 @@
+# big-data 考点矩阵（PySpark / Spark 4.x / Flink 2.x / 湖仓 / OLAP / 数仓建模）
+
+> 出题前置输入。表格约定同 `system-design/README.md`：第 1 列格式 `中文考点名（`tag-id`）`，反引号内为题目 `tags` 用的 tag id。
+> `可出题形式` ∈ `code` / `rubric`；`建议 judgeKind` ∈ `java-junit` / `react-vitest` / `mysql` / `redis` / `pyspark` / `llm-rubric`。
+> **硬约束：Flink 与 Scala/Spark JVM 内部机制类题不做真跑判分，一律 `rubric + llm-rubric`。** 只有 PySpark 能在镜像内真跑的才允许 `code + pyspark`。
+>
+> 版本基线（2026-09 核实）：Spark 4.0.0（2025-05-23）、4.1.0（2025-12-16）、**4.2.0（2026-07-14）**，3.5.x 仍在维护（3.5.9，2026-07-16）；Flink 2.0（2025-03）→ 2.1 → 2.2.0（2025-12-04）→ **2.3.0（2026-06-25）**；Iceberg 1.10.0 引入 v3（row lineage、deletion vectors GA、default values），1.11.0（2026-05）；Paimon 文档当前为 **1.4**（2026-04 前后发布，另有 Paimon Rust 0.1.0），"多模态/BLOB/VECTOR/Global Index"属 1.4→2.0 方向（GA 状态**需核实**）；Kafka 4.2.0（2026-02-17，Queues for Kafka 正式可用）、4.3.0（2026-05-22，运维向）；OLAP：ClickHouse 26.x（26.8 为 LTS，2026-09）、Apache Doris 4.0.x（5.0 预览）、StarRocks 4.0（2026-08）、Apache Druid 37.0.0。
+
+## 考点矩阵
+
+| 考点 | senior 深度要点 | 2025-2026 新实践 | 可出题形式 | 建议 judgeKind | JD 能力项 |
+|---|---|---|---|---|---|
+| Shuffle 机理与 ESS（`spark-shuffle-internals`） | Sort-based shuffle 的写/读路径（memory map、`spark.reducer.maxSizeInFlight`、fetch 重试与 `spark.network.timeout`）；Magnet/pluggable shuffle service 与"shuffle 文件不随 executor 丢失"的价值；ESS 本地盘后端 4.0 起默认 RocksDB；shuffle spill 压缩默认转 ZSTD、4.1 起有基于校验和的 shuffle 重试 | 外置/远端 shuffle 服务化（Apple 开源过 Squab 这类 Swift 实现的外部 shuffle service，需核实细节）；K8s 上"动态 executor + shuffle 持久化"矛盾用 ESS sidecar 或 Celeborn 类远端服务；磁盘/网络双指标定位瓶颈 | code | pyspark | 大规模 ETL 性能与稳定性 |
+| AQE 能力边界（`spark-aqe`） | 三项能力各自的触发条件与失效场景：分区合并（`advisoryPartitionSizeInBytes`）、倾斜 join 拆分（阈值与 `skewedPartitionFactor`）、broadcast 阈值动态决定；Local Shuffle Reader 省一次 shuffle 读；AQE 看不到 UDF/外表统计导致的错判 | 4.1 起无状态流式支持 AQE；`spark.sql.adaptive.*` 与 `spark.sql.optimizer.runtime.*` 组合调优；用 Spark 4.x 的算子级 CPU profiling 与 plan metrics 驱动决策（而不是调经验值） | code | pyspark | 查询调优、成本效率 |
+| 数据倾斜（`data-skew`） | 先分类：key 分布倾斜 / join 一对多膨胀 / 写侧分区不均；两阶段聚合（partial agg + salt）、map-side（bucket/sort-merge）join、广播小表、`approxCountDistinct` 替代精确去重；skew 只治症状，口径改动才是根治 | 用 AQE 自动倾斜拆分为默认，人工仅在"膨胀型倾斜"上手写盐；把倾斜检测自动化（per-partition 字节/记录直方图 + 作业级告警） | code | pyspark | 生产作业稳定性 |
+| Join 策略与正确性（`join-strategy`） | SortMergeJoin 需要 shuffle + 排序；BroadcastHashJoin 的 `autoBroadcastJoinThreshold` 被统计缺失/UDF 破坏；Bucketed/Skyline join；外连接后 `where` 位置导致语义变化；`distinct` + join 造成膨胀；多对多 join 的行爆炸防线 | 4.2 新增 `NEAREST BY`（top-K 最近邻 join 原语）、`QUALIFY`、`INSERT ... WITH SCHEMA EVOLUTION`；DSv2 多操作原子提交 | code | pyspark | SQL 正确性、建模落地 |
+| 小文件与写优化（`small-files-write`） | 提交频率决定文件数（流式 micro-batch/checkpoint 间隔）、`mergeOutputFile`、bin-packing、写入前 `coalesce` vs `repartition`；分区表"分区过碎 + 动态分区生成"的元数据爆炸；O(1) 元数据 vs O(N) listing 的差别 | 湖仓 compaction 作业化（定时/触发式）、`rewrite_data_files` / Paimon 自动 compaction 与写放大权衡；对象存储 listing/请求计费进入成本模型；Iceberg v3 deletion vectors 让"点改"不再全文件重写 | rubric | llm-rubric | 湖仓运维、成本 |
+| PySpark UDF 与 Python 侧性能（`pyspark-python-perf`） | JVM↔Python 序列化是主要成本：优先内置函数/表达式；pandas UDF（Arrow）优于行级 UDF；避免在 UDF 里做 IO；broadcast 变量替代逐行查表；`withColumn` 链导致表达式膨胀 | 4.1 起 Arrow-native `@udf`/`@udtf`（免 pandas 转换、迭代器 API）、Python 数据源支持谓词下推、JVM↔Python 走 Unix Domain Socket；4.2 默认启用 Arrow 优化 Python UDF/IPC 与 PyCapsule（Arrow C 数据接口）互操作；pandas API on Spark 做算子级迁移路径 | code | pyspark | 工具链深度、吞吐优化 |
+| Spark Connect 与平台化（`spark-connect`） | Client→gRPC→Connect Server→Session 的隔离价值（版本解耦、进程崩溃隔离、细粒度限流）；RDD 兼容边界、UDF 需服务端可加载、结果集流式回传；多租户配额与审计 | 4.0 Connect 成为一等公民（轻量 `pyspark-client`、`spark.api.mode`），4.1 MLlib on Connect GA + JDBC driver，4.2 补 `zipWithIndex` 等 RDD/reader 兼容、History Server Connect tab；与 Kubernetes Operator 组合成"笔记本 + 批 + 作业"统一入口 | rubric | llm-rubric | 平台工程、多租户治理 |
+| Structured Streaming 语义与运维（`structured-streaming`） | Trigger 类型与端到端延迟/成本；watermark 决定状态清理与 late data 处理（含 join 与 multi-hop 传播）；state store 版本/快照恢复与 checkpoint 破坏；`restart` 与 schema 演进；乱序去重与幂等 sink | 4.1 引入 Real-Time Mode（无状态算子单任务毫秒级，先支持 Scala）且无状态流支持 AQE；4.2 RTM trigger 进 PySpark、stream-stream 非 outer join 支持 update mode、source/sink `.name()` 稳定标识避免 checkpoint break、state store 快照自愈与校验 | code | pyspark | 实时管道 |
+| Flink 状态、checkpoint 与反压（`flink-state-runtime`） | unaligned checkpoint 与 maxParallelism/barrier 对齐；增量 checkpoint + 状态后端（RocksDB/ForSt）；2.0 起分离式存算（disaggregated state，远端状态 + 本地缓存）改变 TM 内存与 IO 画像；反压定位看 per-operator busy/backpressure/记录速率、checkpoint 时长与对齐时间 | Flink 2.x 要求 Java 17、Scala 内部 API 收敛（升级 1.17→2.x 需重编译、savepoint 兼容需核实到具体小版本）；2.2 增强 AI/向量与异步 Python、自适应调度；2.3 新增 `FROM_CHANGELOG`、原生 S3、自适应分区（细节需核实）；Flink Agents（2026-02 0.2.0）把 agent 工作流挂到状态与 exactly-once 语义上 | rubric | llm-rubric | 流式平台、可靠性 |
+| Flink 时间、窗口与迟到数据（`flink-time-windows`） | 事件时间 vs 摄入时间；watermark 生成策略与 idle source；允许迟到（allowedLateness）与侧输出；窗口去重与累计触发（early fire）；session window 的状态合并成本 | `window_merge`/自定义 Trigger 的取舍；2.x 对 watermark 对齐与 idle 处理有行为变更（需核实小版本）；跨表 temporal join / lookup join 的时点正确性 | rubric | llm-rubric | 实时口径正确性 |
+| Flink CDC 与 schema 演进（`flink-cdc`） | 全量 + 增量无缝切换（无锁快照、chunk 拆分、切分时边界一致性）；DDL 传播策略（加列可、改类型/改名危险）；单槽位 pipeline vs 自研；upsert 主键与湖仓主键表配合；回放与幂等 | 2.x 生态（CDC connectors / pipeline 框架）把 YAML 管道与 schema evolution 策略内建，落地 Iceberg/Paimon 主键表；与 Kafka Share Group/队列语义配合做"可重试的下游 sink"；全量回填与增量并行时的对账 | rubric | llm-rubric | 数据集成、管道现代化 |
+| Iceberg 表格式内核与维护（`iceberg-internals`） | metadata 层级（catalog→table metadata→manifest list→manifest→files）与查询计划裁剪；乐观并发与冲突分类；schema/partition 演进规则（`update_partition_spec`）；维护四件套（snapshot 过期、orphan 清理、bin-pack、rewrite manifest）；delete 文件对读放大 | v3（1.10.0 起）：row lineage、deletion vectors GA、default values、新类型（含 variant/geo，需核实到发行说明）；catalog 之争（REST Catalog vs Hive vs Glue/Polaris/Lakekeeper）；多引擎（Spark/Flink/Trino/ClickHouse/Doris/StarRocks）读写兼容矩阵 | rubric | llm-rubric | 湖仓架构 |
+| Paimon 主键表与流式湖仓（`paimon-lsm`） | LSM 写放大/读放大与 `num-sorted-run` 反压；changelog producer（none/input/lookup/full-compaction）决定下游能否流式消费；lookup vs spillable 的内存/IO 取舍；tag/branch、partial-update、聚合合并引擎 | 1.x 起 global index / 向量索引 / 多模态（BLOB/VECTOR）方向（GA 与可用性**需核实**）；Flink 写 + Spark/StarRocks/Doris 读的混合；Paimon Rust / PyPaimon 客户端生态（新，需核实） | rubric | llm-rubric | 实时湖仓 |
+| 湖仓选型与多引擎读写（`lakehouse-selection`） | 选型维度：写侧并发与冲突、CDC/upsert 友好度、时间旅行/回滚、流读 changelog、引擎生态、运维复杂度、compaction 归属；为什么"格式统一 ≠ 口径统一" | Iceberg 作为默认 + Paimon 用于强实时主键场景；格式桥接（Iceberg/Paimon 互查、HMS→REST catalog 迁移）；同一份表被 OLAP 直读 vs 导入本地表的成本/新鲜度权衡；Spark 4.2 `CHANGES`/Auto CDC 与表格式 CDC 视图的分工 | rubric | llm-rubric | 技术选型、平台演进 |
+| 采集层与契约（`stream-ingest-contracts`） | Kafka + Schema Registry 兼容性级别选择（backward vs full）；字段号/tag 复用禁令；DLQ + quarantine；topic/分区与下游文件大小的耦合；连接器语义（at-least-once 默认，事务 sink 与"效果一次"差别） | 4.x 队列语义（share groups）让"事件总线 + 工作队列"合一；结构化元数据/键（KIP-1226 类）改进流算子互操作（需核实 KIP 号与 GA 状态）；契约测试（消费者驱动）进 CI | rubric | llm-rubric | 数据契约、可靠性 |
+| OLAP 引擎选型（`olap-selection`） | 五轴：并发 QPS、单查询扫描量、更新/删除模型、join 能力、半结构化与向量支持；聚合层 vs 明细层；冷热与 TTL；高基数与实时性冲突；BigQuery/Snowflake 托管 vs 自建的运维与 egress 账 | ClickHouse 26.x：Iceberg 读写与 S3 Tables/Puffin、QBit、文本索引含中日分词、pipelined SQL、后台查询；Doris 4.0（5.0 走向"统一多模态湖仓"，需核实）；StarRocks 4.0（2026-08，湖仓 + 向量 + PK 模型增强）；Druid 37（实时摄取 + 亚秒查询，类内 batch/compaction 演进） | rubric | llm-rubric | 分析平台选型、成本 |
+| OLAP 建模与索引（`olap-modeling`） | 排序键/分区键/分桶键三者职责；物化视图刷新与一致性（异步 MV 的"看起来更快但数据错了"）；join 策略（本地表 vs 字典 vs 广播 vs collocated bucket）；primary key / 去重模型的写入成本；基数与 pre-aggregate 取舍 | 半结构化（JSON/Object/变长）列式化与新索引；向量索引进 OLAP（ANN + 标量过滤混合检索）；查询级成本可观测（scan bytes、peak memory）驱动建模迭代 | rubric | llm-rubric | 查询性能、建模 |
+| 分析型 SQL 模式（`analytics-sql-patterns`） | 滚动/滑动窗口与帧边界；漏斗（连续事件 + 时限）；留存（D1/D7/D30 口径与分母定义）；gaps & islands；sessionization（30 分钟无活动切分）；占比/同比的除零与"新客定义"；窗函数替代自连接的规模差异 | 用 `QUALIFY`（Spark 4.2）与 `MATCH_RECOGNIZE`/`session_window` 表达更清晰；大表近似函数（`approx_count_distinct`、HLL sketch、t-digest）；物化/聚合层自动路由；"口径"在测试用例里钉死 | code | mysql | SQL 深度、指标落地 |
+| 维度建模与 SCD（`dimensional-modeling`） | 事实粒度声明先于一切；三类事实表（事务/周期快照/累积快照）；SCD2 的正确实现（开闭区间、当前标志、迟到记录、同键多版本）；退化维度、桥接表、多值维度；一致性维度与"总线矩阵" | SCD2 用 MERGE/主键表 upsert 表达；湖仓 deletion vectors / row lineage 让"修史"可追溯；宽表 vs 星型的成本差（列存压缩 vs 复制倍数）；以视图/物化视图替代手工汇总表 | code | mysql | 数据建模 |
+| 指标语义层与口径治理（`semantic-layer`） | 指标定义（实体、维度、过滤器、时间粒度）单点定义；派生指标与聚合可加性（比率/去重不可加）；"报表不一致"根因排查；口径变更治理（版本、生效时间、影响分析） | Headless BI / 指标即代码（Airbnb Minerva 风格、MetricFlow 类）；Spark 4.2 `CREATE VIEW ... WITH METRICS` 把语义建模推进到引擎层；语义层作为 LLM/agent 的 text-to-SQL 工具接口 | rubric | llm-rubric | 数据治理、跨团队一致 |
+| 数据质量与契约（`data-quality`） | 规则分层（schema/完整性/唯一性/值域/一致性/时效性）+ 阈值决策依据（业务分布而非拍 10%）；隔离（quarantine）而非阻塞的取舍；上游契约（字段语义、到达 SLA、backfill 协议）；异常检测误报治理 | 数据契约进 CI（变更即破坏构建）；列级血缘 + 影响分析自动化；DQC 与告警分级（P0 资金/合同指标 vs P3 探索报表）；用统计画像 + drift 检测替代固定阈值；agent 自动分诊（需核实成熟度） | rubric | llm-rubric | 数据可信度、运营 |
+| 回溯、补数与流批一致（`backfill-reprocessing`） | 补数三要素：幂等、时间窗口边界、与在线链路的双跑对账；迟到数据对窗口/快照的影响；"改口径要不要全历史重刷"的决策依据；版本化数据集与可重现运行（同一输入同一输出） | 用表格式快照 + row lineage 做时间点回溯；流批一体（同一 SQL 定义、批补流修）；Spark 4.2 `CHANGES` / Auto CDC 与声明式 pipelines（4.1 SDP）把"回填即声明"落地；对账作业与自动放行/回滚 | code | pyspark | 管道可靠性、可维护性 |
+| 调度、依赖与运维（`orchestration-scheduling`） | 依赖表达（数据就绪 vs 时间触发）；分区就绪传感器与竞态；重试与并发上限、优先级抢占；回填 DAG 与调度资源争抢；失败分级与值班手册 | 资产/数据集为一级对象（Dagster 风格）+ 与湖仓 snapshot 绑定；跨区/跨云调度与配额；SLA 驱动的错误预算与"作业 SLO"监控（完成时间分布而非仅成功） | rubric | llm-rubric | 平台运维 |
+| 成本与性能治理（`data-cost`） | 单位成本口径（$/TB 扫描、$/作业、$/查询）；识别"重复物化 + 冗余报表副本 + 小文件"三大浪费；shuffle/存储/计算三者互相省错的陷阱；把成本纳入需求评审 | 冷热分层 + 生命周期策略；compaction/统计维护的显式预算；查询级成本归因（按团队/表/作业）；BI/agent 侧缓存与并发限制；开源 OLAP 替代部分托管仓库的迁移评估 | rubric | llm-rubric | 成本归属、效率 |
+| 隐私与数据治理（`data-governance-privacy`） | 数据分级（PII/敏感）、最小化与去标识化（假名化、k-匿名、差分隐私的适用边界）；列级/行级权限与动态脱敏；访问审计与用途限制（Apple 式"数据最小化 + 端侧优先"） | 端侧聚合 + 上传加噪（DP）；属性基/关系型授权（Airlock 风格）与 catalog 层策略（Iceberg REST / Polaris 类）；PII 发现的自动化扫描；湖仓删除请求落地（crypto-shredding + 备份/湖内延迟删除承诺） | rubric | llm-rubric | 隐私工程、合规 |
+| 特征平台与时点正确性（`feature-store-pit`） | 训练-服务偏斜（不同代码路径）、point-in-time correctness（join 时用事件时间而非到达时间）、标签泄漏（用了未来信息）、离线/在线一致性校验、回填成本 | Airbnb 开源 Chronon 的窗口聚合/批次定义模型（offline batch + realtime 补差）、embedding 基座（如 Airbnb "Vibe" 类项目，2025，需核实细节）；把特征作为可版本化契约 + 在线缓存新鲜度 SLA；向量湖（Paimon/Iceberg 向量索引）承载 embedding | rubric | llm-rubric | ML/数据平台协同 |
+
+## 排课与出题建议
+
+- 30 天里每周保证：1 个 `code + pyspark`（真跑，用例区分度最高）、1 个 `code + mysql`（口径/建模）、1 个 `rubric + llm-rubric`（选型/架构）。
+- 专题文件：`spark-shuffle-tuning.md`、`pyspark-correctness-and-perf.md`、`streaming-lakehouse-flink-paimon-iceberg.md`、`olap-engine-selection.md`、`warehouse-modeling-quality-backfill.md`。
+- 所有 `pyspark` 判分题必须能在单机 Spark（`local[*]`）跑通：禁止依赖 HDFS/Kafka/Hive Metastore，必要时用内存表或临时目录 parquet；断言用行集 + 指标（如 shuffle 记录数）双验证。
+
+## 语料文件
+
+| 文件 | 讲什么 |
+| --- | --- |
+| [`olap-engine-selection.md`](./olap-engine-selection.md) | OLAP 引擎选型：ClickHouse / Doris / StarRocks / Druid / 托管仓库（BigQuery 类） |
+| [`pyspark-correctness-and-perf.md`](./pyspark-correctness-and-perf.md) | PySpark 正确性与性能：语义陷阱、4.x 新武器、可判分写法 |
+| [`spark-dataset-api.md`](./spark-dataset-api.md) | Scala Dataset API：什么时候该用 typed Dataset |
+| [`spark-shuffle-tuning.md`](./spark-shuffle-tuning.md) | Spark Shuffle 深水区：机理、ESS、AQE 与倾斜（PySpark 可判分） |
+| [`streaming-lakehouse-flink-paimon-iceberg.md`](./streaming-lakehouse-flink-paimon-iceberg.md) | 实时链路与湖仓：Flink 2.x + Iceberg v3 / Paimon + 流批一致 |
+| [`warehouse-modeling-quality-backfill.md`](./warehouse-modeling-quality-backfill.md) | 数仓建模、口径治理与回溯：让"数字一致"成为可验证的工程属性 |

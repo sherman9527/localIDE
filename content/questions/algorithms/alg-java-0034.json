@@ -1,0 +1,423 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0034",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "无结果松弛阶梯：带代价的最大覆盖，贪心与阶梯顺序都不是最优",
+  "statement": "## 背景\n\n搜索无结果率是 Airbnb 搜索侧的核心产品指标之一，而\"无结果\"多数不是没房，\n是**约束叠太狠**。标准处置是按**松弛阶梯**逐条放宽（先松\"立即入住\"，再松\"整套\"，\n最后才动价格带与位置），把 0 结果变成\"有替代方案\"。\n\n阶梯顺序是业务判断，但**它不等于最优解**：松一条昂贵的约束可能就够了，\n而按阶梯从上往下松会连着松掉三条。本题要求给出**代价最小的松弛方案**。\n\n## 你要实现的入口\n\n```java\npublic static int[] pickRelaxations(int[][] covers, int[] bucketSize, int[] cost, int minResults)\n```\n\n- 候选结果被分到若干**桶**：桶 `0` 是\"当前条件下就能查出来\"的基线桶，\n  桶 `1..` 各自对应一类被某条约束挡掉的结果。`bucketSize[b]` 是该桶的结果条数。\n- `covers[i]` 是**松开第 i 条约束能救回的桶编号列表**（一条约束可以救多个桶，\n  多条约束也可以救同一个桶 —— 所以**收益不可加**）。\n- `cost[i]` 是松开第 i 条约束的代价（越大越不该松）。\n- 返回被选中松弛的**下标升序数组**；`minResults` 是至少要凑出的结果条数。\n\n## 选择规则（判分点）\n\n1. 结果数 = `bucketSize[0] + Σ bucketSize[b]`，其中求和范围是**被选中松弛覆盖到的桶的并集**\n   （同一个桶被两条松弛覆盖只算一次）。\n2. 在满足\"结果数 ≥ `minResults`\"的所有子集里取**总代价最小**的。\n3. 代价并列时，取下标序列**字典序最小**的那一组（比较的是升序数组本身，不是长度）。\n4. `bucketSize[0] >= minResults` ⇒ 返回**空数组**：一条都不许松。\n5. 任何子集都凑不出 `minResults` ⇒ 返回 `[-1]`（**不是**空数组 —— 空数组是\"不用松\"，\n   `[-1]` 是\"松光了也没有\"，前端要给用户的话术完全不同）。\n6. 非法输入抛 `IllegalArgumentException`：`minResults <= 0`、`cost` 有负数、\n   `covers` 与 `cost` 长度不一致、`bucketSize` 为空、`covers` 里出现越界桶号\n   （含出现桶 `0`：基线桶不需要任何松弛就能查出来，把它写进 `covers` 说明建模错了）。\n\n约束条数 `covers.length <= 12`，所以**枚举全部子集是允许的**（也是本题推荐的写法）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "set-cover",
+    "search-quality",
+    "greedy-trap",
+    "empty-vs-none",
+    "modern:marketplace-rules"
+  ],
+  "cases": [
+    {
+      "name": "基线就够：一条都不松（返回空数组而不是 [-1]）",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          50,
+          10,
+          10
+        ],
+        [
+          1,
+          5
+        ],
+        30
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "bucketSize[0]=50 已达 minResults=30 ⇒ []"
+    },
+    {
+      "name": "单条就够：选够用的那一条",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          10,
+          4
+        ],
+        [
+          3,
+          8
+        ],
+        8
+      ],
+      "expected": [
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "两条便宜的不如一条中价的：贪心会多付",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ]
+        ],
+        [
+          0,
+          3,
+          4,
+          20
+        ],
+        [
+          1,
+          1,
+          2
+        ],
+        20
+      ],
+      "expected": [
+        2
+      ],
+      "visible": true,
+      "note": "A(1)+B(1) 只到 7 条，还得再取 C ⇒ 代价 4；单独 C 只要 2"
+    },
+    {
+      "name": "两条松弛救同一个桶：第二条不值",
+      "input": [
+        [
+          [
+            1,
+            2
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          10,
+          5
+        ],
+        [
+          1,
+          6
+        ],
+        15
+      ],
+      "expected": [
+        0
+      ],
+      "visible": true,
+      "note": "松 0 就到 15 ⇒ 只需 [0]；把独立收益相加的实现会连 1 也选上"
+    },
+    {
+      "name": "代价并列：取下标字典序更小的一组",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            1,
+            2
+          ]
+        ],
+        [
+          0,
+          5,
+          5,
+          10
+        ],
+        [
+          1,
+          1,
+          2
+        ],
+        10
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "单独 2 与 {0,1} 都是 10 条、代价都是 2 ⇒ 比字典序取 [0,1]（首位 0 < 2），不是取\"条数更少的那组\""
+    },
+    {
+      "name": "必须两条联合才够",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          3,
+          4
+        ],
+        [
+          5,
+          5
+        ],
+        7
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "单条最多 3 或 4 条 ⇒ 只能同时松两条"
+    },
+    {
+      "name": "松光了也不够：返回 [-1]",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          3,
+          4
+        ],
+        [
+          7,
+          9
+        ],
+        100
+      ],
+      "expected": [
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "零代价的松弛也要真的选上",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          7,
+          7
+        ],
+        [
+          0,
+          5
+        ],
+        7
+      ],
+      "expected": [
+        0
+      ],
+      "visible": true,
+      "note": "cost=0 那条必选；按\"性价比\"排序的实现这里会除零或把它排到最后"
+    },
+    {
+      "name": "退化：一条约束都没有",
+      "input": [
+        [],
+        [
+          3
+        ],
+        [],
+        5
+      ],
+      "expected": [
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：minResults 为 0",
+      "input": [
+        [
+          [
+            1
+          ]
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          1
+        ],
+        0
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：covers 与 cost 长度不一致",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        [
+          0,
+          5,
+          5
+        ],
+        [
+          1
+        ],
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：代价为负",
+      "input": [
+        [
+          [
+            1
+          ]
+        ],
+        [
+          0,
+          5
+        ],
+        [
+          -1
+        ],
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：桶号越界",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            7
+          ]
+        ],
+        [
+          0,
+          5,
+          5
+        ],
+        [
+          1,
+          1
+        ],
+        5
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：把基线桶写进 covers",
+      "input": [
+        [
+          [
+            0
+          ]
+        ],
+        [
+          4,
+          5
+        ],
+        [
+          1
+        ],
+        9
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "桶 0 不需要任何松弛就能查出来 —— 出现它说明建模错了"
+    },
+    {
+      "name": "非法：bucketSize 为空",
+      "input": [
+        [
+          [
+            1
+          ]
+        ],
+        [],
+        [
+          1
+        ],
+        1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n枚举全部子集（`covers.length <= 12` ⇒ 至多 4095 个），每个子集用一张 `used[]`\n求\"覆盖桶的并集\"再加基线，够数就参与比较；先按总代价、代价并列按下标字典序取胜者。\n两个实现细节：`total > bestCost` 的提前跳过是纯剪枝（不影响正确性），\n以及 `used[]` 必须**每个子集重置一次**（复用同一张表会让后一个子集白捡前一个的覆盖）。\n\n**为什么\"按代价贪心\"是错的**（用例「两条便宜的不如一条中价的」）：\n松弛 A 代价 1、只救 3 条；B 代价 1、只救 4 条；C 代价 2、一次救 20 条；\n需要凑到 20 条以上。贪心先取 A、再取 B（累计 7 条不够），最后还得取 C ⇒ 总代价 4；\n最优解是单独取 C ⇒ 代价 2。\n而**阶梯顺序**的写法（按业务优先级从前往后松）在这里更糟：它可能一路松到 C 之前\n已经把 A、B 都松了，把\"能松的都不该松\"变成默认行为。\n松弛问题本质是**带代价的最大覆盖**，贪心没有最优性保证 —— 它的近似比是 `1 - 1/e`，\n所以真实系统要么约束条数少到能枚举，要么接受\"至少差 37%\"。\n\n**收益不可加**（用例「两条松弛救同一个桶：第二条不值」）：\nA 救桶 1（10 条）与桶 2（5 条），B 也救桶 2（5 条）。松 A 已经到 15 条，\n再松 B 只多 0 条 —— 但把每条松弛的\"独立收益\"当成边际收益相加的实现会以为 B 值 5 条，\n于是多付一次代价，而且**统计出来的\"每条松弛的贡献\"永远大于真实贡献之和**。\n这正是线上\"松弛阶梯越做越长、无结果率却不动\"的机制。\n\n**`[]` 与 `[-1]` 必须是两个不同的答案**（用例「基线就够：一条都不松」与\n「松光了也不够：无解」）：\n前者对用户是\"这就是正常结果，别乱改排序\"，后者是\"这里真的没房，给替代方案\"。\n把它们都返回空数组的实现，会让无结果兜底逻辑**永远不触发** ——\n而这恰好是最需要它的时候。\n\n**工程延伸（面试追问点）**\n\n1. 约束条数变大怎么办？（整数规划或按\"性价比 = 新增结果数 / 代价\"排序的贪心 + 局部搜索；\n   但更重要的是**先减少条数**：真实系统里多数约束互斥或冗余，\n   把\"松了也不会新增结果\"的约束从阶梯里删掉，通常能砍掉一半。）\n2. 松弛之后怎么排序？（替代结果必须**标记松弛来源**并降权，否则用户看到\"完全不符合条件\"\n   的结果会以为是 bug。产品口径通常是\"以下是放宽了 X 的结果\"，把代价显式给用户。）\n3. 代价怎么定？（它不是拍的：用**转化损失**标定 —— 松掉\"整套\"之后成交率下降多少，\n   就把它换成多少代价。这样\"最小代价\"才真的是\"最小体验损失\"，而不是\"最少改动条数\"。）\n4. 为什么不用\"直接放一个更大的地理半径\"？（那是**另一条松弛**，而且通常是代价最高的那条；\n   阶梯的价值就在于它把\"从便宜到贵\"的顺序显式化并允许产品调，本题把它做成可计算的选择，\n   顺序退化为 `cost` 的一个特例。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] pickRelaxations(int[][] covers, int[] bucketSize, int[] cost, int minResults)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  public static int[] pickRelaxations(int[][] covers, int[] bucketSize, int[] cost, int minResults) {\n    if (bucketSize.length == 0) throw new IllegalArgumentException(\"no buckets\");\n    if (covers.length != cost.length) throw new IllegalArgumentException(\"cost and covers disagree\");\n    if (minResults <= 0) throw new IllegalArgumentException(\"minResults must be positive\");\n    for (int c : cost) {\n      if (c < 0) throw new IllegalArgumentException(\"cost must be >= 0\");\n    }\n    for (int[] groups : covers) {\n      for (int b : groups) {\n        if (b < 1 || b >= bucketSize.length) {\n          throw new IllegalArgumentException(\"bucket id out of range: \" + b);\n        }\n      }\n    }\n    int base = bucketSize[0];\n    if (base >= minResults) {\n      return new int[0];                      // 够了 ⇒ 一条都不松\n    }\n\n    int n = covers.length;\n    boolean[] used = new boolean[bucketSize.length];\n    int bestCost = Integer.MAX_VALUE;\n    List<Integer> best = null;\n    // 枚举全部子集。n <= 12 ⇒ 最多 4095 个组合，代价与正确性都清楚。\n    for (int mask = 1; mask < (1 << n); mask++) {\n      int total = 0;\n      List<Integer> picked = new ArrayList<>();\n      for (int i = 0; i < n; i++) {\n        if ((mask >> i & 1) == 1) {\n          total += cost[i];\n          picked.add(i);\n        }\n      }\n      if (total > bestCost) {\n        continue;                             // 剪枝：已经不比现有答案好\n      }\n      java.util.Arrays.fill(used, false);\n      int reached = base;\n      for (int i : picked) {\n        for (int b : covers[i]) {\n          if (!used[b]) {\n            used[b] = true;\n            reached += bucketSize[b];         // 并集才加 ⇒ 收益不可加\n          }\n        }\n      }\n      if (reached >= minResults) {\n        if (total < bestCost || (total == bestCost && lessThan(picked, best))) {\n          bestCost = total;\n          best = picked;\n        }\n      }\n    }\n    if (best == null) {\n      return new int[] {-1};\n    }\n    int[] out = new int[best.size()];\n    for (int i = 0; i < out.length; i++) {\n      out[i] = best.get(i);\n    }\n    return out;\n  }\n\n  /** 代价并列时按下标序列的字典序比：null 表示\"还没有答案\"，任何候选都优于它。 */\n  private static boolean lessThan(List<Integer> a, List<Integer> b) {\n    if (b == null) return true;\n    for (int i = 0; i < Math.min(a.size(), b.size()); i++) {\n      if (!a.get(i).equals(b.get(i))) return a.get(i) < b.get(i);\n    }\n    return a.size() < b.size();\n  }\n}",
+    "naiveSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  // 阶梯实现版：按代价从低到高贪心累加，够数就停\n  public static int[] pickRelaxations(int[][] covers, int[] bucketSize, int[] cost, int minResults) {\n    if (bucketSize.length == 0) throw new IllegalArgumentException(\"no buckets\");\n    if (covers.length != cost.length) throw new IllegalArgumentException(\"cost and covers disagree\");\n    if (minResults <= 0) throw new IllegalArgumentException(\"minResults must be positive\");\n    for (int c : cost) {\n      if (c < 0) throw new IllegalArgumentException(\"cost must be >= 0\");\n    }\n    for (int[] groups : covers) {\n      for (int b : groups) {\n        if (b < 1 || b >= bucketSize.length) {\n          throw new IllegalArgumentException(\"bucket id out of range: \" + b);\n        }\n      }\n    }\n    List<Integer> order = new ArrayList<>();\n    for (int i = 0; i < covers.length; i++) order.add(i);\n    order.sort(java.util.Comparator.comparingInt(i -> cost[i]));\n\n    boolean[] used = new boolean[bucketSize.length];\n    int reached = bucketSize[0];\n    List<Integer> picked = new ArrayList<>();\n    for (int i : order) {\n      if (reached >= minResults) break;\n      picked.add(i);\n      for (int b : covers[i]) {\n        if (!used[b]) {\n          used[b] = true;\n          reached += bucketSize[b];\n        }\n      }\n    }\n    if (reached < minResults) return new int[] {-1};\n    java.util.Collections.sort(picked);\n    int[] out = new int[picked.size()];\n    for (int i = 0; i < out.length; i++) out[i] = picked.get(i);\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Airbnb",
+    "role": "搜索与发现 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-search-ranking.md §2.4（\"约束松开的策略层级\"只作为答题要点出现，未做成可判分的最优选择问题）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:29:48.273Z"
+  }
+}

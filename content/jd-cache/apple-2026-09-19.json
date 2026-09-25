@@ -1,0 +1,213 @@
+{
+  "company": "Apple",
+  "adapter": "apple-web",
+  "generatedAt": "2026-09-19T05:36:10.208Z",
+  "count": 17,
+  "previousCount": 15,
+  "entries": [
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200672605/platform-data-engineer?team=SFTWR",
+      "title": "Platform & Data Engineer",
+      "location": "Cupertino",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "Imagine what you could do here. At Apple, new ideas have a way of becoming extraordinary products, services, and customer experiences very quickly. Bring passion and dedication to your job and there's no telling what you could accomplish.\n\nWe are looking for a Platform & Data Engineer to own the systems that thousands of internal engineers rely on every day. This is a rare, broad role: you will operate at the intersection of Kubernetes platform engineering and large-scale data engineering, owning both the compute platform our internal tools run on and the data layer that makes them useful. You will not just keep these systems healthy — you will build the products and interfaces that let other teams move faster. If you are excited by ambiguity, take real ownership, and want your work to be felt across the company, we'd love to talk.\nLocation: Cupertino",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-25T00:42:01.612Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200673278/staff-data-engineer?team=SFTWR",
+      "title": "Staff Data Engineer",
+      "location": "Austin",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "We are the Risk and Vulnerability Management (RVM) team in Apple Services Engineering (ASE) Security. We manage security risk for the infrastructure, platforms, and services behind iCloud, App Store, Apple Music, TV+, and Commerce. Findings reach us from scanners, red team engagements, design reviews, vendor advisories, threat intelligence, and bug bounty. Our job is to turn all of that into one prioritized backlog engineering teams can work from, and a posture picture leadership can trust.\n\nMost of that job is data work. Signal arrives from dozens of systems at different quality and age, and it rarely says which asset, which service, or who owns it, so someone pieces that together by hand before anyone can act on it. That manual step sets the ceiling on how fast we identify and triage risk, and on how fast our partners can fix it. We are consolidating this onto one security data platform: a system of record for findings, a graph for ownership and blast radius, and a lakehouse for posture metrics and analytics.\nLocation: Austin",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-14T02:41:35.675Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200674312/backend-engineer-g-a-solutions-engineering?team=SFTWR",
+      "title": "Backend Engineer - G&A Solutions Engineering",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:35:21.965Z",
+      "excerpt": "Do you want to help build some of the largest and most consequential enterprise and customer technology systems in the world? Join Apple’s Information Systems and Technology (IS&T) organization. IS&T is the engine behind everything Apple does for customers and for the people who build for them. It’s Apple’s central nervous system. Supporting 2.5 billion active Apple devices, processing billions of secure transactions, and keeping the technology that defines modern life running flawlessly, IS&T makes the impossible feel effortless.  Do you love building solutions to handle global complexity and immense scale? Imagine what you could do here.\n\nG&A Solutions Engineering (GSE) is IS&T's dedicated technology partner for Apple's general and administrative functions — including people, finance, facilities, legal, and security. The team builds and delivers integrated technology solutions that keep these functions running efficiently and securely at global scale. GSE also works closely with business teams to develop custom tools that improve productivity and bring greater automation and consistency to G&A operations across Apple.\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-07-28T09:25:22.953Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200674485/sr-data-engineer-services-special-projects?team=SFTWR",
+      "title": "Sr. Data Engineer - Services Special Projects",
+      "location": "Cupertino",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "At Apple, great ideas have a way of becoming phenomenal products, services, and customer experiences very quickly. Our team is building a massive, real-time platform that transforms continuous streams of multimodal data (including structured, image, and log data) into an intelligent, searchable foundation. \n\nBy enriching this data with language and embedding models, we power critical experiences for billions of Apple customers across multiple downstream applications.\n\nLocation: Cupertino",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-09-15T20:22:36.226Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200674729/software-engineering-applications?team=CORSV",
+      "title": "Software Engineering Applications",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:36:08.089Z",
+      "excerpt": "Imagine what you could do here. At Apple, new ideas have a way of becoming great products, services, and customer experiences very quickly. Bring passion and dedication to your job and there's no telling what you could accomplish. The Product Marketing Customer Analytics team is seeking a data engineer to support customer analytics with advanced, scalable and robust architecture, tools, data products, and critical data pipelines that are optimized for rapid business intelligence, data analysis, and data science.\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-07-29T12:56:46.331Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200676311/data-engineer-is-t-ai-data-platforms?team=SFTWR",
+      "title": "Data Engineer, IS&T Ai & Data Platforms",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:35:15.325Z",
+      "excerpt": "AI & Data Platforms (AiDP) is IS&T's engine for AI-powered innovation. The team brings together data, application development, and machine learning — including generative AI — along with data services and customer success functions, to help IS&T build solutions more efficiently and streamline the adoption and embedding of generative AI across Apple.\n\nThis position is required for working on the data migration and ongoing support for data platform for Applied Machine Learning enterprise systems at Apple China. The main deliverables will be: \n• Work with SRE on setting up and testing/validating new cluster, pipelines, applications, frameworks, connectivity and privacy and governance \n• Identify China specific datasets, migrate the datasets to China cluster \n• Modify and enhance existing applications and frameworks for China cluster\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-12T11:33:56.352Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200676320/data-engineer-customer-analytics-is-t-ai-data-platforms?team=SFTWR",
+      "title": "Data Engineer (Customer Analytics), IS&T Ai & Data Platforms",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:36:08.089Z",
+      "excerpt": "AI & Data Platforms (AiDP) is IS&T's engine for AI-powered innovation. The team brings together data, application development, and machine learning — including generative AI — along with data services and customer success functions, to help IS&T build solutions more efficiently and streamline the adoption and embedding of generative AI across Apple.\n\nImagine what you could do here. At Apple, new ideas have a way of becoming extraordinary products, services, and customer experiences very quickly. Bring passion and dedication to your work, and there's no telling what you could accomplish.\n\nAI & Data Platforms (AiDP) is IS&T's engine for AI-powered innovation. The team brings together data, application development, and machine learning — including generative AI — along with data services and customer success functions, to help IS&T build solutions more efficiently and streamline the adoption and embedding of generative AI across Apple. As a Senior Data Engineer on the team, you'll design and build the data warehouses, pipelines, and analytics that power decisions across Apple, working closely with teams in the US and around the world.\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-10T18:48:03.164Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677292/java-backend-engineer?team=SFTWR",
+      "title": "Java Backend Engineer",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:35:21.965Z",
+      "excerpt": "Do you want to help build some of the largest and most consequential enterprise and customer technology systems in the world? Join Apple’s Information Systems and Technology (IS&T) organization. IS&T is the engine behind everything Apple does for customers and for the people who build for them. It’s Apple’s central nervous system. Supporting 2.5 billion active Apple devices, processing billions of secure transactions, and keeping the technology that defines modern life running flawlessly, IS&T makes the impossible feel effortless.\n\nDo you love building solutions to handle global complexity and immense scale? Imagine what you could do here.\n\nCustomer Systems is part of IS&T and drives the technology behind Apple's customer support experience — from contact center operations to the software powering the iconic Genius Bar. The team also builds and operates AppleCare's online support platform, which handles 6 billion visits per year, delivering seamless, high-quality support to Apple customers around the globe.\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-18T08:04:27.330Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677381/sr-data-engineer-icloud?team=SFTWR",
+      "title": "Sr. Data Engineer, iCloud",
+      "location": "Cupertino",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.370Z",
+      "excerpt": "Would you like to drive the future of Apple’s products, applications, and platform while having the unique opportunity to impact some of the most far-reaching software applications in the world? iCloud Data organization enables Apple to ship better products for iCloud users to access all their content across apps (Photos, Mail, Messages, FaceTime, Calendar etc) from all of their devices all the time by providing consistent, scalable, timely, accurate, complete and fully integrated data infrastructure and capabilities to accurately surface relevant information. If this excites you and you are energized by solving hard, high-leverage problems at scale, we'd love to hear from you! We’re looking for exceptional data engineers who have a strong background in distributed data processing, have great and demonstrable data intuition, and share our passion for continuously improving the ways we use data to make the Apple’s products, applications, and platform better.\nLocation: Cupertino",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-11T17:45:43.153Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677516/java-backend-engineer?team=CORSV",
+      "title": "Java Backend Engineer",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:35:21.965Z",
+      "excerpt": "Do you want to help build some of the largest and most consequential enterprise and customer technology systems in the world? Join Apple’s Information Systems and Technology (IS&T) organization. IS&T is the engine behind everything Apple does for customers and for the people who build for them. It’s Apple’s central nervous system. Supporting 2.5 billion active Apple devices, processing billions of secure transactions, and keeping the technology that defines modern life running flawlessly, IS&T makes the impossible feel effortless.  Do you love building solutions to handle global complexity and immense scale? Imagine what you could do here.\n\nRetail and Marcom Engineering, an IS&T team, builds and operates the systems and experiences that connect Apple's products with its customers. The team owns the technology behind both Apple's online and physical stores and drives the interactive marketing experiences and tools that keep creative operations moving. Together, those functions deliver the technology behind every product story Apple tells and every purchase a customer makes.\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-20T02:40:57.468Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677645/software-engineer-aidp-reliability-engineering-is-t-early-career-opportunities?team=SFTWR",
+      "title": "Software Engineer - AiDP Reliability Engineering, IS&T, Early Career Opportunities",
+      "location": "Austin",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.370Z",
+      "excerpt": "The Applied Machine Learning team in AI and Data Platform org has been at the forefront of accelerating digital transformation through machine learning across Apple's enterprise ecosystem. We build and operate ML, GenAI, Inference and Data Platforms and Services to provide a comprehensive suite of capabilities—serving business-critical needs across Apple’s enterprise. We work on interesting and hard challenges related to scale and performance across diverse set of open source and cutting edge technologies.\n\nWe are looking for a talented engineer to join our team and bring passion for building and operating large scale platform and distributed systems leveraging cutting edge open source technologies across hybrid cloud environments!\nLocation: Austin",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-12T17:34:10.753Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677759/applied-ai-data-engineer-business-education?team=SFTWR",
+      "title": "Applied AI & Data Engineer - Business & Education",
+      "location": "Seattle",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "Would you like to help shape how AI and modern data engineering & analytics come together to power Apple's Business and Education products, at a scale that touches millions of enterprises, schools, and the devices and services they depend on?\nLocation: Seattle",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-19T01:27:57.433Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200677823/senior-data-engineer-icloud?team=SFTWR",
+      "title": "Senior Data Engineer, iCloud",
+      "location": "Shanghai",
+      "locationScope": "shanghai",
+      "crawledAt": "2026-09-19T05:35:15.324Z",
+      "excerpt": "Would you like to drive the future of Apple’s products, applications, and platform while having the unique opportunity to impact some of the most far-reaching software applications in the world? \n\niCloud Data organization enables Apple to ship better products for iCloud users to access all their content across apps (Photos, Mail, Messages, FaceTime, Calendar, etc) from all of their devices all the time by providing consistent, scalable, timely, accurate, complete and fully integrated data infrastructure and capabilities to accurately surface relevant information. If this excites you and you are energized by solving hard, high-leverage problems at scale, we'd love to hear from you! \n\nLocation: Shanghai",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-08-13T15:35:33.342Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200679473/aiml-data-engineer?team=SFTWR",
+      "title": "AIML Data Engineer",
+      "location": "Austin",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "Are you passionate about building the data infrastructure that powers AI-driven customer experience measurement — and using that data to uncover the \"why\" behind the numbers? The AppleCare Customer Insights (ACCI) team is redefining how Apple measures and improves generative support experiences. Our AIML initiatives use large language models to evaluate support conversations across multiple quality dimensions, providing real-time signal to leadership on how our AI-powered support is performing. We are seeking an AIML Data Engineer to own the data pipelines, feature engineering, and telemetry infrastructure that underpin our AIML portfolio — while also serving as a hands-on analytics partner who conducts root cause analysis, targeted investigations, and data-driven deep dives that translate pipeline outputs into actionable insights for program managers and leadership.\nLocation: Austin",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-09-02T17:11:31.893Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200681997/data-engineer-apple-ads?team=SFTWR",
+      "title": "Data Engineer, Apple Ads",
+      "location": "Cupertino",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "At Apple, we focus deeply on our customers’ experience. Apple Ads brings this same approach to advertising, helping people find exactly what they’re looking for and helping advertisers grow their businesses.\n\nOur technology powers ads and sponsorships across Apple Services, including the App Store, Apple News, and MLS Season Pass. Everything we do is designed for trust, connection, and impact: We respect user privacy, integrate advertising thoughtfully into the experience, and deliver value for advertisers of all sizes—from small app developers to big, global brands. Because when advertising is done right, it benefits everyone.\nrmant, deployed at scale, and set new standards for enabling effective advertising while protecting user privacy.\nLocation: Cupertino",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-09-04T18:40:51.570Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200684319/data-engineer-data-products-apple-ads?team=SFTWR",
+      "title": "Data Engineer, (Data Products, Apple Ads)",
+      "location": "Cupertino",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "At Apple, we focus deeply on the customer experience. Apple Ads brings this same approach to advertising, helping people find exactly what they're looking for and helping advertisers grow their businesses. Our technology powers ads and sponsorships across Apple Services, including the App Store, Apple News, Apple Maps, MLS, and F1. Everything we do is designed for trust, connection, and impact: we respect user privacy, integrate advertising thoughtfully into the experience, and deliver value for advertisers of all sizes — from small app developers to big global brands. Because when advertising is done right, it benefits everyone.\n\nYou will join a team of world-class engineers with an appetite for applying leading-edge technologies to deliver extraordinary experiences to our customers, and collaborate closely with the business to deliver relevant data and insight that informs our strategy and decisions.\n\nYou should have 1-4 years of experience in software engineering roles, ideally within the ads or media space. You will have a strong understanding of scalable approaches and thrive working in Agile environments. The ability to be a good, standout colleague under tight deadline constraints is key to success. We will calibrate the level and scope to your experience.\n\nLocation: Cupertino",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-09-17T16:12:42.558Z"
+    },
+    {
+      "company": "Apple",
+      "url": "https://jobs.apple.com/en-us/details/200684577/software-engineer-data-solutions-ai-data-platforms-aidp?team=SFTWR",
+      "title": "Software Engineer (Data Solutions), AI & Data Platforms (AiDP)",
+      "location": "Austin",
+      "locationScope": "us",
+      "crawledAt": "2026-09-19T05:35:18.369Z",
+      "excerpt": "Do you want to help build some of the largest and most consequential enterprise and customer technology systems in the world? Join Apple’s Information Systems and Technology (IS&T) organization. IS&T is the engine behind everything Apple does for customers and for the people who build for them. It’s Apple’s central nervous system. Supporting 2.5 billion active Apple devices, processing billions of secure transactions, and keeping the technology that defines modern life running flawlessly, IS&T makes the impossible feel effortless. Do you love building solutions to handle global complexity and immense scale? Imagine what you could do here.\n\nAI & Data Platforms (AiDP) is IS&T's engine for AI-powered innovation. The team brings together data, application development, and machine learning — including generative AI — along with data services and customer success functions, to help IS&T build solutions more efficiently and streamline the adoption and embedding of generative AI across Apple.\nLocation: Austin",
+      "adapter": "apple-web",
+      "sourceType": "live-crawl",
+      "postedAt": "2026-09-18T17:57:30.132Z"
+    }
+  ]
+}

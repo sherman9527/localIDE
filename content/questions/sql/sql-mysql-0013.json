@@ -1,0 +1,263 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0013",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "每小时并发峰值：carry-in 探针、[start,end) 整点边界，和一个没有任何开始的桶",
+  "statement": "## 基线\n\nMySQL 8.0（判题容器 8.0.x，默认 `ONLY_FULL_GROUP_BY`）。\n\n连接表：\n\n```\nconnections (conn_id INT PRIMARY KEY, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL)\n```\n\n**区间语义是 `[started_at, ended_at)`**：在 t 结束的会话在 t 这一刻已经不活跃，\n不能和 t 开始的会话同时计入。\n\n## 要输出什么\n\n统计窗口固定为 `2026-05-01 00:00:00` 起的 **5 个整点小时桶**（00:00、01:00、02:00、03:00、04:00）。\n每个桶输出一行，列名与顺序必须是 `hour_bucket, max_conn`，按 `hour_bucket` 升序（判题按行序敏感比对）。\n\n- `hour_bucket` 是桶起点，类型 `DATETIME`（形如 `2026-05-01 02:00:00`）；\n- `max_conn` 是该桶**内**的最大并发活跃连接数。\n\n**5 个桶必须各有一行，即使那个小时一个会话都没开始**（此时 `max_conn` 是 0）。\n\n## 这题真正考的东西\n\n按 `GROUP BY DATE_FORMAT(started_at, '%Y-%m-%d %H:00:00')` 数\"每小时开始几个连接\"是最顺手的写法，\n它错在两个方向：\n\n1. **它数的是\"开始\"，不是\"活跃\"**。一个 00:30 开始、02:15 结束的会话，在 02 点这个桶里仍然活跃，\n   但它在 02 点**没有任何开始事件** —— 于是那个桶被算成 0，而真实峰值是 1。\n   跨桶的长会话越多，这个数错得越离谱（这正是\"平均时长变长\"时容量评估崩掉的原因）。\n2. **它会漏掉整个桶**。没有开始事件的小时不会出现在 `GROUP BY` 的结果里 ——\n   看板于是\"少了一格\"，而不是\"错了一格\"。少一格比错一格更难被发现。\n\n正确做法要有 **carry-in**：把每个桶起点本身也当成一个采样点，在该点上数一遍活跃连接。\n另一个必要洞察是**峰值只可能在\"开始事件\"或\"桶起点\"处取得** ——\n活跃数在两个事件之间是常数，且只有开始事件会把它推高，所以不必按分钟枚举。\n\n整点边界单独考一次：`ended_at` 恰好等于桶起点的会话**不算**进这个桶（`[start, end)`），\n写成 `ended_at >= t` 会把它算进来，峰值凭空多 1。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "interval-semantics",
+    "non-additive-metric",
+    "recursive-cte",
+    "time-bucketing",
+    "modern:capacity-metrics"
+  ],
+  "cases": [
+    {
+      "name": "基线：跨桶会话、整点边界与一个空桶各自落在哪",
+      "input": [],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            2
+          ],
+          [
+            "2026-05-01 01:00:00",
+            3
+          ],
+          [
+            "2026-05-01 02:00:00",
+            1
+          ],
+          [
+            "2026-05-01 03:00:00",
+            1
+          ],
+          [
+            "2026-05-01 04:00:00",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "02 点桶没有任何 started_at，只有 carry-in 能算出它是 1；04 点桶是 0 但仍要出行"
+    },
+    {
+      "name": "删掉那个跨 3 桶的会话：02 点桶从 1 变成 0",
+      "input": [
+        "DELETE FROM connections WHERE conn_id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            1
+          ],
+          [
+            "2026-05-01 01:00:00",
+            2
+          ],
+          [
+            "2026-05-01 02:00:00",
+            0
+          ],
+          [
+            "2026-05-01 03:00:00",
+            1
+          ],
+          [
+            "2026-05-01 04:00:00",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "carry-in 的直接反证：没有开始事件不等于没有活跃连接"
+    },
+    {
+      "name": "整点撞车：02:00 结束的会话不算进 02 点桶",
+      "input": [
+        "INSERT INTO connections (conn_id, started_at, ended_at)\nVALUES\n  (6, '2026-05-01 02:00:00', '2026-05-01 02:30:00')"
+      ],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            2
+          ],
+          [
+            "2026-05-01 01:00:00",
+            3
+          ],
+          [
+            "2026-05-01 02:00:00",
+            2
+          ],
+          [
+            "2026-05-01 03:00:00",
+            1
+          ],
+          [
+            "2026-05-01 04:00:00",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "该桶峰值是 2（c1 + c6）；把区间写成闭集会算成 3（多带上 01:00→02:00 的 c5）"
+    },
+    {
+      "name": "空表：5 个桶仍要各出一行，值全是 0",
+      "input": [
+        "DELETE FROM connections"
+      ],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            0
+          ],
+          [
+            "2026-05-01 01:00:00",
+            0
+          ],
+          [
+            "2026-05-01 02:00:00",
+            0
+          ],
+          [
+            "2026-05-01 03:00:00",
+            0
+          ],
+          [
+            "2026-05-01 04:00:00",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "脚手架必须由查询自己生成 —— 少一行和错一行的代价不同"
+    },
+    {
+      "name": "一个会话横跨整夜：每个桶都至少 1",
+      "input": [
+        "INSERT INTO connections (conn_id, started_at, ended_at)\nVALUES\n  (7, '2026-05-01 00:00:00', '2026-05-01 04:30:00')"
+      ],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            3
+          ],
+          [
+            "2026-05-01 01:00:00",
+            4
+          ],
+          [
+            "2026-05-01 02:00:00",
+            2
+          ],
+          [
+            "2026-05-01 03:00:00",
+            2
+          ],
+          [
+            "2026-05-01 04:00:00",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "同一分钟挤进 4 条：那个桶从 3 涨到 6，其余桶一点不动",
+      "input": [
+        "INSERT INTO connections (conn_id, started_at, ended_at)\nVALUES\n  (8, '2026-05-01 01:20:00', '2026-05-01 01:25:00'),\n  (9, '2026-05-01 01:20:00', '2026-05-01 01:25:00'),\n  (10, '2026-05-01 01:20:00', '2026-05-01 01:25:00'),\n  (11, '2026-05-01 01:20:00', '2026-05-01 01:25:00')"
+      ],
+      "expected": {
+        "columns": [
+          "hour_bucket",
+          "max_conn"
+        ],
+        "rows": [
+          [
+            "2026-05-01 00:00:00",
+            2
+          ],
+          [
+            "2026-05-01 01:00:00",
+            6
+          ],
+          [
+            "2026-05-01 02:00:00",
+            1
+          ],
+          [
+            "2026-05-01 03:00:00",
+            1
+          ],
+          [
+            "2026-05-01 04:00:00",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "峰值是局部量不是累计量 —— 01 点桶原有的 3 条仍在，加 4 条变 6"
+    }
+  ],
+  "answer": "## 参考答案\n\n```sql\nWITH RECURSIVE hours AS (\n  SELECT TIMESTAMP('2026-05-01 00:00:00') AS h\n  UNION ALL\n  SELECT h + INTERVAL 1 HOUR FROM hours WHERE h < TIMESTAMP('2026-05-01 04:00:00')\n), samples AS (\n  SELECT h AS bucket, h AS t FROM hours          -- carry-in：桶起点本身必须是一个采样点\n  UNION\n  SELECT h.h, c.started_at\n  FROM hours h JOIN connections c ON c.started_at >= h.h AND c.started_at < h.h + INTERVAL 1 HOUR\n), counted AS (\n  SELECT s.bucket, s.t,\n         (SELECT COUNT(*) FROM connections c\n           WHERE c.started_at <= s.t AND c.ended_at > s.t) AS active   -- [start,end)\n  FROM samples s\n)\nSELECT bucket AS hour_bucket, MAX(active) AS max_conn\nFROM counted GROUP BY bucket ORDER BY bucket;\n```\n\n**四个判分点**\n\n1. **carry-in**：`samples` 的第一支把桶起点自己放进去。少了它，02 点那个\"只有延续、没有开始\"的桶\n   会拿到 0（用例 2 直接打这个：删掉跨桶会话后该桶从 1 变 0）。\n2. **采样点为什么够**：活跃数是分段常数函数，只在事件时刻变化，且**只有开始事件会推高它**。\n   所以每桶只需在 `{桶起点} ∪ {本桶内的 started_at}` 上取样。\n   按分钟/秒枚举既慢又会在跨粒度时出错。\n3. **`UNION` 而不是 `UNION ALL`**：桶起点本身也可能是一个 `started_at`，两支会产出同一个采样点，\n   重复采样不影响 `MAX`，但会让 `counted` 白长一堆行；真实数据量下这一步决定要不要物化。\n4. **`ended_at > t` 而不是 `>=`**：整点结束的那条会话（c5：01:00→02:00）在 02:00 已不活跃。\n   用例 3 专门造了一个\"02:00 开始\"的会话与它撞在同一个整点 —— 闭区间实现会在这里多算 1。\n\n**递归 CTE 的终止条件**：`WHERE h < '2026-05-01 04:00:00'` 生成 00..04 共 5 行。\n写成 `<=` 会多一个 05:00 的桶（行数不符立刻暴露）；MySQL 默认 `cte_max_recursion_depth=1000`，\n窗口拉到 1000 小时以上要显式调，这是这类\"按时间脚手架\"查询的真实上限。\n\n**工程延伸（面试追问点）**\n\n1. 数据量到千万行还这么跑吗？（不。相关子查询是每采样点一次计数。\n   生产做法是把区间拆成 `+1/-1` 事件流，一次排序 + 窗口 `SUM() OVER (ORDER BY t)` 求前缀和，\n   再按桶取 `MAX` —— 那是 `O(n log n)` 一遍扫，也是本题参考解的思想版本。）\n2. 为什么\"峰值不可加\"？（各小时峰值相加会重复计入跨小时会话，得到比真实值大的数；\n   手册里 `maxConnectionCount` 属于非可加指标就是这个意思。可加的是\"活跃时长积分\"≈ 用量。）\n3. 空桶要不要出一行？（要，而且这是产品问题不是技术问题：报表少一格会被读成\"系统那小时挂了\"，\n   而 0 才是要表达的事实。脚手架必须由查询自己生成，不能指望前端补 —— 前端补不了导出/告警路径。）\n4. 时区怎么办？（`DATETIME` 不带时区，按\"桶\"聚合时先确认存的是 UTC 还是本地；\n   跨 DST 的那天会出现 23 或 25 个桶，硬编码 24 会漏。这是同一条管道上反复出过的错。）\n5. 如果还要 P99 并发而不是峰值？（同一套采样点上取分位数即可，但**分位数不可跨桶合并** ——\n   要合并就得留原始采样或直方图，这与\"排队 vs 推理耗时的 P99 不能相加\"是同一条约束。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS connections",
+      "CREATE TABLE connections (conn_id INT PRIMARY KEY, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL, KEY idx_started (started_at), KEY idx_ended (ended_at)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO connections (conn_id, started_at, ended_at)\nVALUES\n  (1, '2026-05-01 00:30:00', '2026-05-01 02:15:00'),\n  (2, '2026-05-01 01:45:00', '2026-05-01 01:50:00'),\n  (3, '2026-05-01 03:10:00', '2026-05-01 03:20:00'),\n  (4, '2026-05-01 00:00:00', '2026-05-01 01:00:00'),\n  (5, '2026-05-01 01:00:00', '2026-05-01 02:00:00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH RECURSIVE hours AS (\n  SELECT TIMESTAMP('2026-05-01 00:00:00') AS h\n  UNION ALL\n  SELECT h + INTERVAL 1 HOUR FROM hours WHERE h < TIMESTAMP('2026-05-01 04:00:00')\n), samples AS (\n  SELECT h AS bucket, h AS t FROM hours\n  UNION\n  SELECT h.h, c.started_at\n  FROM hours h JOIN connections c ON c.started_at >= h.h AND c.started_at < h.h + INTERVAL 1 HOUR\n), counted AS (\n  SELECT s.bucket, s.t,\n         (SELECT COUNT(*) FROM connections c\n           WHERE c.started_at <= s.t AND c.ended_at > s.t) AS active\n  FROM samples s\n)\nSELECT bucket AS hour_bucket, MAX(active) AS max_conn\nFROM counted\nGROUP BY bucket\nORDER BY bucket",
+    "naiveSolution": "SELECT DATE_FORMAT(started_at, '%Y-%m-%d %H:00:00') AS hour_bucket,\n       COUNT(*) AS max_conn\nFROM connections\nGROUP BY hour_bucket\nORDER BY hour_bucket"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 容量与指标口径 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §4.7（跨桶活跃连接需在每个桶边界放 carry-in 探针）+ §3.2/§12.2（maxConnectionCount 是非可加指标）；手册给了结论，未做成可判分查询",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T12:38:51.721Z"
+  }
+}

@@ -1,0 +1,31 @@
+schema: spec-driven
+
+context: |
+  # Daily Interview Arena — 本地每日刷题系统（senior/principal 向）
+
+  Tech stack: TypeScript(strict) + Node 24（容器内）+ Fastify + node:sqlite（内置模块，禁原生编译依赖）；
+  前端 React 19 + Vite + CodeMirror 6；测试 Vitest + Supertest + Playwright；
+  判题栈：OpenJDK 17 + JUnit5 standalone、PySpark 3.5、真 MySQL 8 + redis-server（全部装在**同一个** Docker 镜像内）。
+  运行时：单镜像 + docker compose，唯一对外端口 7788；项目自包含在 localLearning/ 目录内。
+
+  Conventions:
+  - conventional commits；一个 Task 一个 commit；TDD（先红后绿）；改前先读 rule.md。
+  - 依赖源优先级：国内镜像 → 官方源 → 源码编译。npm=registry.npmmirror.com，pip=pypi.tuna，apt=mirrors.aliyun，maven=maven.aliyun。
+  - Docker Hub 直连不通，所有 FROM 必须走 docker.m.daocloud.io 前缀。
+  - 题库系统(content/ + server/src/bank)与游戏系统(server/src/game + web)解耦，跨层只经 shared/ 契约。
+  - 题库 append-only（只增不减），"移除"=软删除写 content/hidden.json。
+  - 题目难度只对标 senior/principal，必须覆盖当年新实践，禁止纯八股。
+  - 判题结果导向：代码题只判用例结果，失败必须回传 通过数/失败数/失败用例名。
+  - 主观题评分走本地 CLI（qodercli → copilot → manual 降级），输出 10 分制 + 加分点 + 不足点。
+  - 每个里程碑把命令与结果摘要写进 memo.md；work item 状态由 HANDOVER.md 承载。
+
+rules:
+  proposal:
+    - 必须包含 Non-goals（明确不做什么）与风险表
+    - 每条需求标注对应的 requirement.txt 条目编号
+  specs:
+    - 每个 Requirement 至少一个 #### Scenario，Scenario 用 WHEN/THEN 列表
+    - 判题类 Requirement 必须同时给出"通过"与"失败"两个 Scenario
+  tasks:
+    - 每个任务组对应 docs/superpowers/plans/2026-09-19-daily-interview-arena.md 的一个 Task
+    - 任务粒度=一个可独立测试的交付物，末尾必须带验证命令

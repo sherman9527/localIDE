@@ -1,0 +1,264 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0012",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "聚合数据出境门禁：k-匿名之外还要挡互补攻击",
+  "statement": "## 基线\n\nMySQL 8.0（判题容器 8.0.x，默认 `ONLY_FULL_GROUP_BY`）。\n\n细粒度统计要**出境**（发到另一个司法管的分析集群）。原始明细不许出境，能出去的只有聚合单元，\n而聚合单元本身也会伤人 —— 所以有一道发布门禁。两张表：\n\n```\ncell_stats   (region VARCHAR, os_version VARCHAR, device_count INT)   -- 待发布的聚合单元\nregion_total (region VARCHAR, total_devices   INT)                    -- 该 region 的总数\"已经另行公开\"\n```\n\n## 发布规则（两条都要满足，这是判分点不是建议）\n\n设阈值 **k = 5**。\n\n- **① 单元自身够大**：`device_count >= k` 的单元才有资格发布。\n- **② 不许留下可反推的路径（互补攻击）**：如果某 region 的**总数已经公开**\n  （`region_total` 里有这一行），而该 region 里**恰好只有 1 个**单元被①挡下，\n  那么那一个单元的值 = `总计 − 其余已发行之和`，抑制它等于没抑制。\n  此时**该 region 的所有单元都不许发布** —— 注意是整组消失，不是只藏那一个小的。\n\n输出可发布单元，列名与顺序必须是 `region, os_version, device_count`，\n按 `region` 升序、再按 `os_version` 升序排列（判题按行序敏感比对）。\n没有可发布单元时返回 **0 行**。只提交一条 `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n只写 `WHERE device_count >= 5` 是最常见的实现，它在三种情形下都是错的：\n\n1. **只藏小的，不处理可推导性**：R2 有 `10` 和 `3` 两格，总计公开。把 `3` 藏掉之后，\n   任何人拿\"公开总计 − 10\"就还原出 3 —— 而被抑制的往往正是**最敏感的那一小撮人**（内部测试版、\n   罕见配置）。这一格的存在本身就是泄露。\n2. **不知道\"整组抑制\"**：②触发时 R2 的 `10` 也必须一起撤下，否则泄露路径还在。\n3. **把②当成无条件规则**：R6 也恰好只有 1 格被①挡下，但它的总计**没有**公开，\n   推导不出来 —— 那 `9` 就该发布。少判这个条件就会多抑制一个 region 的可用数据。\n\n反过来，R3 有两格（2 与 4）被挡，攻击者只知道\"这两格合计 8\"，拆不开具体谁是谁 ——\n所以 R3 的 `12` **可以**发布。**\"被抑制的格数 ≥ 2\"就是安全边界本身**，不是巧合。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "privacy",
+    "k-anonymity",
+    "aggregation-gate",
+    "window-function",
+    "modern:data-residency"
+  ],
+  "cases": [
+    {
+      "name": "基线：R1/R3/R5/R6 可发布，R2 与 R4 整组撤下",
+      "input": [],
+      "expected": {
+        "columns": [
+          "region",
+          "os_version",
+          "device_count"
+        ],
+        "rows": [
+          [
+            "R1",
+            "v26.0",
+            8
+          ],
+          [
+            "R1",
+            "v26.1",
+            10
+          ],
+          [
+            "R3",
+            "v26.1",
+            12
+          ],
+          [
+            "R5",
+            "v26.0",
+            5
+          ],
+          [
+            "R5",
+            "v26.1",
+            5
+          ],
+          [
+            "R6",
+            "v26.1",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "R2 只有 1 格被挡且总计公开 → 连 10 一起撤；R6 同样 1 格被挡但总计未公开 → 9 可发布"
+    },
+    {
+      "name": "给 R2 再补一个被挡的小格：互补路径断了，10 就能发",
+      "input": [
+        "INSERT INTO cell_stats (region, os_version, device_count)\nVALUES\n  ('R2', 'v25.4', 1)"
+      ],
+      "expected": {
+        "columns": [
+          "region",
+          "os_version",
+          "device_count"
+        ],
+        "rows": [
+          [
+            "R1",
+            "v26.0",
+            8
+          ],
+          [
+            "R1",
+            "v26.1",
+            10
+          ],
+          [
+            "R2",
+            "v26.1",
+            10
+          ],
+          [
+            "R3",
+            "v26.1",
+            12
+          ],
+          [
+            "R5",
+            "v26.0",
+            5
+          ],
+          [
+            "R5",
+            "v26.1",
+            5
+          ],
+          [
+            "R6",
+            "v26.1",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "被抑制格数从 1 变 2 → 攻击者只拿到和，拆不开单格"
+    },
+    {
+      "name": "把 R6 的总计公开：同一份数据立刻变成不可发布",
+      "input": [
+        "INSERT INTO region_total (region, total_devices)\nVALUES\n  ('R6', 100000)"
+      ],
+      "expected": {
+        "columns": [
+          "region",
+          "os_version",
+          "device_count"
+        ],
+        "rows": [
+          [
+            "R1",
+            "v26.0",
+            8
+          ],
+          [
+            "R1",
+            "v26.1",
+            10
+          ],
+          [
+            "R3",
+            "v26.1",
+            12
+          ],
+          [
+            "R5",
+            "v26.0",
+            5
+          ],
+          [
+            "R5",
+            "v26.1",
+            5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "与上一条相反 —— 判据必须来自 region_total，不能写死 region 名单"
+    },
+    {
+      "name": "把 R1 的一格降到阈值以下：整个 R1 消失（不是只藏那一格）",
+      "input": [
+        "DELETE FROM cell_stats WHERE region = 'R1'",
+        "INSERT INTO cell_stats (region, os_version, device_count)\nVALUES\n  ('R1', 'v26.1', 10),\n  ('R1', 'v26.0', 4)"
+      ],
+      "expected": {
+        "columns": [
+          "region",
+          "os_version",
+          "device_count"
+        ],
+        "rows": [
+          [
+            "R3",
+            "v26.1",
+            12
+          ],
+          [
+            "R5",
+            "v26.0",
+            5
+          ],
+          [
+            "R5",
+            "v26.1",
+            5
+          ],
+          [
+            "R6",
+            "v26.1",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "互补攻击的正例：只藏 4 的话，10 一发布，总计−10 就还原出 4"
+    },
+    {
+      "name": "边界：恰好等于 k 的两格都算够大",
+      "input": [
+        "DELETE FROM cell_stats WHERE region <> 'R5'"
+      ],
+      "expected": {
+        "columns": [
+          "region",
+          "os_version",
+          "device_count"
+        ],
+        "rows": [
+          [
+            "R5",
+            "v26.0",
+            5
+          ],
+          [
+            "R5",
+            "v26.1",
+            5
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "只剩 R5 时它的两格都是 5 → 都发布；用 `< k` 写成 `<= k` 会在这里翻车"
+    },
+    {
+      "name": "退化：一张格子都没有 → 0 行",
+      "input": [
+        "DELETE FROM cell_stats"
+      ],
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```sql\nWITH flagged AS (\n  SELECT c.region, c.os_version, c.device_count,\n         CASE WHEN c.device_count < 5 THEN 1 ELSE 0 END AS suppressed,\n         CASE WHEN t.region IS NULL THEN 0 ELSE 1 END   AS total_known\n  FROM cell_stats c\n  LEFT JOIN region_total t ON t.region = c.region\n), per_region AS (\n  SELECT region, SUM(suppressed) AS n_suppressed, MAX(total_known) AS total_known\n  FROM flagged GROUP BY region\n)\nSELECT f.region, f.os_version, f.device_count\nFROM flagged f JOIN per_region p ON p.region = f.region\nWHERE f.suppressed = 0\n  AND NOT (p.total_known = 1 AND p.n_suppressed = 1)\nORDER BY f.region, f.os_version;\n```\n\n**要点**\n\n1. **`LEFT JOIN` 而不是 `JOIN`**：总计未公开的 region 也要出现在统计里（R6 就是靠这条才发布 9）。\n   用 `JOIN` 会把没公开的 region 整体丢掉 —— 那是\"多抑制\"，症状是\"数据莫名变少\"，比少抑制更难被发现。\n2. **②的判定必须在 region 粒度上做**（`SUM(suppressed)` 分组），再回头决定整组是否发布。\n   常见的错法是把两个条件写在同一层 `WHERE` 里 —— 那样只能表达\"这一格小不小\"，\n   表达不了\"这一格的存在会不会让别的格变得可推导\"，因为后者是**组**的性质。\n3. **`NOT (total_known = 1 AND n_suppressed = 1)`** 就是互补攻击的判据本身。\n   `n_suppressed >= 2` 时攻击者只拿到一个和，拆不开单个单元（严格说拿到的是组合空间，\n   信息量按 `log(组合数)` 计，这也是为什么真实系统会要求\"被抑制单元数 ≥ 2 且总计不可拆\"）。\n4. 阈值 5 是**最小 k-匿名**。真实发布系统还要：层次化 rollup 的一致性\n   （细格被抑制时，包含它的粗格如果只由它构成，等于没抑制 —— 要向上递归抑制）、\n   互补集大小下限（complementarity）、以及跨发布周期的累计攻击防护\n   （同一份数据每周发布一次、每次抑制不同的格，累积起来仍能还原）。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"总计公开\"这件事要单独建表而不是写死？（总计是否公开是**外部事实**，\n   随发布流程变；把它做成数据而不是代码常量，门禁才能随发布状态自动收紧 —— 用例 3 就是改这张表。）\n2. 只发布 `>= k` 的格，攻击者知道\"有个格被抑制\"算泄露吗？（算元数据泄露。\n   严格实现要连\"被抑制格的数量\"都加噪或统一补齐到固定档，否则\"这次少了一格\"本身就是信号。）\n3. 多层 rollup 怎么办？（把 region 换成层级树，自底向上做：某层被抑制则其唯一父格也抑制；\n   这正是 differential privacy 之前工业界的主流方案，也是它被替代的原因 —— 组合多次发布没有累计保证。）\n4. 和 SKAN/差分隐私的关系？（SKAN 用\"众数匿名阈值\"处理同一类问题但换了个战场：\n   它限制的是**可区分值的基数**而不是单格计数；DP 则是给计数加噪，把\"是否 ≥ k\"变成概率命题。\n   三者都答得上来是 principal 的深度，能写对②是 senior 的底线。）\n5. 这条查询在亿级单元上怎么跑？（分组统计可以先物化成 `region` 粒度的小表；\n   真正的成本在\"总计是否公开\"的元数据一致性 —— 门禁判据必须和发布流水线同一份真相，\n   否则会出现\"门禁以为没公开、报表已经公开\"的窗口，那才是真正泄露发生的地方。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS cell_stats",
+      "DROP TABLE IF EXISTS region_total",
+      "CREATE TABLE cell_stats (region VARCHAR(8) NOT NULL, os_version VARCHAR(8) NOT NULL, device_count INT NOT NULL, PRIMARY KEY (region, os_version)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "CREATE TABLE region_total (region VARCHAR(8) PRIMARY KEY, total_devices INT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO cell_stats (region, os_version, device_count)\nVALUES\n  ('R1', 'v26.1', 10),\n  ('R1', 'v26.0', 8),\n  ('R2', 'v26.1', 10),\n  ('R2', 'v26.0', 3),\n  ('R3', 'v26.1', 12),\n  ('R3', 'v26.0', 2),\n  ('R3', 'v25.4', 4),\n  ('R4', 'v26.1', 2),\n  ('R4', 'v26.0', 3),\n  ('R5', 'v26.1', 5),\n  ('R5', 'v26.0', 5),\n  ('R6', 'v26.1', 9),\n  ('R6', 'v26.0', 1)",
+      "INSERT INTO region_total (region, total_devices)\nVALUES\n  ('R1', 100000),\n  ('R2', 100000),\n  ('R3', 100000),\n  ('R4', 100000),\n  ('R5', 100000)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH flagged AS (\n  SELECT c.region,\n         c.os_version,\n         c.device_count,\n         CASE WHEN c.device_count < 5 THEN 1 ELSE 0 END AS suppressed,\n         CASE WHEN t.region IS NULL THEN 0 ELSE 1 END   AS total_known\n  FROM cell_stats c\n  LEFT JOIN region_total t ON t.region = c.region\n), per_region AS (\n  SELECT region,\n         SUM(suppressed) AS n_suppressed,\n         MAX(total_known) AS total_known\n  FROM flagged\n  GROUP BY region\n)\nSELECT f.region, f.os_version, f.device_count\nFROM flagged f\nJOIN per_region p ON p.region = f.region\nWHERE f.suppressed = 0\n  AND NOT (p.total_known = 1 AND p.n_suppressed = 1)\nORDER BY f.region, f.os_version",
+    "naiveSolution": "SELECT region, os_version, device_count\nFROM cell_stats\nWHERE device_count >= 5\nORDER BY region, os_version"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 隐私工程 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §16.1③（抑制小于 k 的分组）+ §19.8.1（众数匿名阈值）；手册讲了\"要抑制\"，未把互补攻击做成可判分要求",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-21T16:21:00.528Z"
+  }
+}

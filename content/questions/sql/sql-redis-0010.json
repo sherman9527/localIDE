@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0010",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "库存投影要存版本化绝对值：乱序不覆盖当前值、重放天然幂等、历史不许删",
+  "statement": "## 背景\n\n平台侧不持有库存，商家随时可以通过开放平台接口改；同步通道走的是**调整单**语义\n（`pdd.stock.ware.move`：`move_direction` 有 `1 入库 / 2 出库 / 3 库存同步`，\n`business_type` 有 `… / 6 库存同步`，`move_order_sn` 天然唯一）。\n消息会**乱序**、会**重放**、单批还有大小上限。\n\n于是\"投影怎么落库\"就是一道真题：**用什么数据形状，才能让乱序与重放都无害？**\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL` / `EVALSHA` / `SCRIPT` / `KEYS` / `FLUSHDB` / `CONFIG` /\n`DEBUG` / `SORT` / `OBJECT` / `SELECT`（判题器直接拒）。\n\n## 判题方式（先读这段）\n\n判题**不模拟并发、也不让时间流逝**：摆好初始状态 ⇒ 按顺序执行你提交的一段命令脚本 ⇒\n逐条执行校验命令比对最终状态。\n脚本里没有分支，条件只能靠命令（`NX` / `XX`）或**数据形状**表达。\n\n## 初始状态\n\n```\nHSET stock:prio:SKU9 whA 1 whB 2          -- 多仓优先级由**商家**配置（pdd.stock.depot.priority.update）\nZADD stock:hist:SKU9:whA 18 18|50          -- 每个仓一条版本化历史：score = seq，member = \"seq|qty\"\n```\n\n## 按到达顺序执行的五条调整单\n\n| 事件 | seq | 仓 | 同步到的绝对值 | 备注 |\n| --- | --- | --- | --- | --- |\n| M1 | 30 | whA | 28 | 正常 |\n| M2 | **25** | whA | 40 | **乱序到达的旧消息**（网络重传），值已过时 |\n| M3 | 30 | whA | 28 | **重放 M1 同一张调整单**（`move_order_sn` 相同 ⇒ seq 与内容都相同） |\n| M4 | 31 | whB | 7 | 另一个仓 |\n| M5 | 32 | whA | 0 | 商家把 whA 改成 0 |\n\n## 要求（校验命令会读这些）\n\n- 每个仓一条 ZSET：`stock:hist:SKU9:<仓>`，`score = seq`，`member = \"<seq>|<qty>\"`。\n- **当前值 = 分数最大的那一条**（`ZREVRANGE key 0 0`），所以：\n  `whA` 当前是 `32|0`、`whB` 当前是 `31|7`；`25|40` 这条**必须留在历史里但不许当当前值**。\n- `whA` 的历史条数恰好是 4（`18|50`、`25|40`、`30|28`、`32|0`）——\n  **重放 M3 不许多出一条**。\n- `30|28` 这条的分数仍然是 30。\n- `stock:prio:SKU9` 的 `whA` 仍然是 `1`（**优先级由商家配置，同步通道不许改它**）。\n- 任何一条历史都不许被 `DEL` 掉（哪怕值是 0）—— 素材里\"一店一处罚\"要求逐单可复原。\n\n## 这题真正考的东西\n\n1. **\"最后写入赢\"与\"最新版本赢\"是两件事**。\n   `HSET` 按到达顺序决定当前值，于是重传的旧消息会把过时数值写成当前值 ——\n   它**不报任何错**，只是把投影拉回三天前。\n2. **绝对值 + 版本号**是这道题唯一的解形状：写路径不需要读、不需要比较、不需要分支，\n   因此乱序与重放都无害；而\"当前值\"是读路径上的一次 `max(score)`。\n3. **历史不是垃圾**：`ZADD` 让旧版本留在集合里是有意的 ——\n   它同时给出\"可逐单举证\"的审计链与\"投影准确率\"这个 SLI 的数据源。\n\n只交一段命令脚本，不需要写代码。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "inventory-projection",
+    "out-of-order-writes",
+    "idempotent-replay",
+    "audit-trail",
+    "modern:data-consistency"
+  ],
+  "cases": [
+    {
+      "name": "乱序旧消息不许成为当前值：whA 当前是 32|0",
+      "input": [
+        "ZREVRANGE stock:hist:SKU9:whA 0 0"
+      ],
+      "expected": [
+        "32|0"
+      ],
+      "visible": true,
+      "note": "最后写入赢的实现这里是 25|40 或 32|0 取决于顺序，总之不可信"
+    },
+    {
+      "name": "重放同一张调整单不许多出一条历史：whA 历史条数是 4",
+      "input": [
+        "ZCARD stock:hist:SKU9:whA"
+      ],
+      "expected": 4,
+      "visible": true,
+      "note": "18|50 / 25|40 / 30|28 / 32|0 —— M3 写的是同一个成员，所以还是 4"
+    },
+    {
+      "name": "被乱序重放写回去的那条，分数仍然是首次的 30",
+      "input": [
+        "ZSCORE stock:hist:SKU9:whA 30|28"
+      ],
+      "expected": "30",
+      "visible": true,
+      "note": "这条断的是\"重复写入没把它推到别的位置\"，也就是顺序信息还在"
+    },
+    {
+      "name": "另一个仓各自独立：whB 当前是 31|7",
+      "input": [
+        "ZREVRANGE stock:hist:SKU9:whB 0 0"
+      ],
+      "expected": [
+        "31|7"
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：归零之后历史仍在（不许 DEL，举证期没到）",
+      "input": [
+        "EXISTS stock:hist:SKU9:whA"
+      ],
+      "expected": 1,
+      "visible": true,
+      "note": "\"一店一处罚\"要求逐单可复原；30 天滚动日志在取证时等于没有"
+    },
+    {
+      "name": "同步通道不许改商家配的仓库优先级",
+      "input": [
+        "HGET stock:prio:SKU9 whA"
+      ],
+      "expected": "1",
+      "visible": true,
+      "note": "优先级与库存是两条独立写路径；合并成一个 key 就会越权"
+    },
+    {
+      "name": "退化：那条\"最后写入赢\"的影子表必须根本没被建出来",
+      "input": [
+        "EXISTS stock:proj:SKU9"
+      ],
+      "expected": 0,
+      "visible": true,
+      "note": "HSET 上去就永久留痕，而读路径一旦有两份真相就再也对不清"
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nZADD stock:hist:SKU9:whA 30 30|28\nZADD stock:hist:SKU9:whA 25 25|40     # 乱序旧消息：记录无害，读的是 max score\nZADD stock:hist:SKU9:whA 30 30|28     # 重放同一张调整单：同 member 同 score ⇒ no-op\nZADD stock:hist:SKU9:whB 31 31|7\nZADD stock:hist:SKU9:whA 32 32|0\n```\n\n**为什么重放天然幂等**：member 是 `\"<seq>|<qty>\"`，score 是 `seq`。\n同一张调整单（同一个 `move_order_sn`）必然带来同一个 seq 与同一个数量 ⇒\n`ZADD` 写进去的是**同一个成员**，集合基数不变。\n这就是\"幂等\"从流程问题变成数据建模问题的标准形态：\n不需要\"先查是否见过\"（那是竞态），也不需要 `SETNX` 记请求号（那要额外 TTL 治理）。\n校验里 `whA` 历史条数是 4 就是这一条的断言 —— 实现如果用 `HSET stock:proj:SKU9 whA <seq>`\n（只有版本没有值，或者反过来）都到不了 4。\n\n**乱序旧消息为什么必须\"记下来但不生效\"**：\n`25|40` 的 seq 比当前值 32 小 ⇒ `ZREVRANGE … 0 0` 永远不会选中它，\n而它留在历史里带来两件事：\n① 审计可以回答\"这条消息到过、它带的是什么值\"（素材里监管取证要的就是这种逐单可复原）；\n② 可以算**乱序率**这个 SLI（\"到达顺序 ≠ seq 顺序\"的比例），\n   它是同步通道健康度最直接的信号，而\"最后写入赢\"的实现**算不出这个数**\n   —— 因为它已经把顺序信息覆盖掉了。\n\n**为什么不许 `DEL`**：`whA` 变成 0 之后，最\"干净\"的写法是\n`ZREM`/`DEL` 掉这个仓的所有历史。这在成本上是对的，在合规上是错的：\n素材里\"一店一处罚\"\"6 万多个具体案件不能批量认定\"意味着\n**必须能按单还原任意时刻的状态**。删除历史等于把可举证期从\"数据保留期\"\n压缩成\"你还没删之前\"，而 30 天滚动日志在监管取证时等于没有。\n\n**多仓优先级为什么单独一张 HASH**：\n`pdd.stock.depot.priority.update` 说明**优先级是商家配的**，与库存同步是两条独立写路径。\n把它们塞进同一个 key（例如 member 写成 `prio|seq|qty`）会造成\n\"库存同步顺手改了优先级\"这种越权 —— 校验那条 `HGET stock:prio:SKU9 whA` 就是拦这个的。\n可用量在真实系统里 = 按优先级顺序对多仓求和（且受可达范围限制），\n那是**读路径**的事，绝不能在写路径上被合并掉。\n\n**工程延伸（面试追问点）**\n\n1. ZSET 会不会无限增长？（会，所以要\"按版本压缩\"而不是\"按时间删\"：\n   保留最新 N 条 + 全部**跨状态变化**的边界条（例如 0 ↔ 非 0），\n   并且压缩只往更老的版本压，当前值与举证期内的版本永不动。）\n2. 为什么 member 里要重复存 seq（score 已经是 seq）？\n   （为了 `ZSCORE key \"<seq>|<qty>\"` 这类**按内容定位**的查询：\n   审计给的是\"那张调整单同步了多少件\"，不是分数。\n   代价是同一份信息两处存，好处是历史可以被逐条举证而不需要反解分数。）\n3. 投影准确率怎么落成指标？（拿 `max(score)` 那条与商家侧查询接口\n   （`pdd.stock.ware.warehouse.query`）在某时刻的返回值比：\n   `|投影 − 商家值| / 商家值` 的分布就是投影准确率。\n   分母要用**同一时刻**，否则你测的是通道滞后而不是准确性。）\n4. 和算法题「库存是商家的镜像」是什么关系？（那题把滞后写成 `lag` 并算出假有货峰值；\n   这题是滞后的**来源**：乱序、重放、以及\"最后写入赢\"这三种实现。\n   面试题里能主动把两层接起来 —— 先建模滞后、再解释滞后从哪来 —— 才是做过这条链。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL stock:hist:SKU9:whA",
+      "DEL stock:hist:SKU9:whB",
+      "DEL stock:proj:SKU9",
+      "HSET stock:prio:SKU9 whA 1 whB 2",
+      "ZADD stock:hist:SKU9:whA 18 18|50"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# M1（seq 30）whA 同步为 28\nZADD stock:hist:SKU9:whA 30 30|28\n# M2（seq 25）一条**乱序到达的旧消息**：它带来的是过时的值 40\n#    记进历史无害 —— 读路径取 max score，所以它覆盖不了当前值\nZADD stock:hist:SKU9:whA 25 25|40\n# M3 重放 M1 那一张调整单（move_order_sn 相同 ⇒ 内容与 seq 都相同）\n#    同一个 member + 同一个 score ⇒ ZADD 是 no-op，历史不会多出一条\nZADD stock:hist:SKU9:whA 30 30|28\n# M4（seq 31）另一个仓 whB 同步为 7\nZADD stock:hist:SKU9:whB 31 31|7\n# M5（seq 32）商家把 whA 改成 0\nZADD stock:hist:SKU9:whA 32 32|0\n# 不许 HSET stock:proj:SKU9 …：那是\"最后写入赢\"，乱序消息会把 40 写回当前值\n# 也不许 DEL 任何历史：一店一处罚要求逐单可复原",
+    "naiveSolution": "# \"投影就是一个 HASH 字段\"版：谁后到谁赢。\n# 乱序重放的旧消息会把过时的 40 写成当前值 —— 而且没有任何痕迹。\nHSET stock:proj:SKU9 whA 40\nHSET stock:proj:SKU9 whA 28\nHSET stock:proj:SKU9 whB 7\nHSET stock:proj:SKU9 whA 0"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（库存与履约方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#4 考点 1（调整单语义：`move_direction=3 库存同步`、`business_type=6`、`move_order_sn` 天然幂等键、单批 ≤30）＋ `pdd.stock.depot.priority.update` 多仓优先级＋ 素材建议 judgeKind=redis「多仓优先级 + 同步乱序下的可用性判定与幂等调整单」",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.123Z"
+  }
+}

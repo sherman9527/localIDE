@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0007",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "容量评审用的滑动窗口峰值负载合计",
+  "statement": "## 背景\n\n容量评审的口径是 capacity-max 而不是 average：对每分钟的负载序列 `loads`，取长度为 `windowSize` 的**完整滑动窗口**，把每个窗口的峰值加起来作为\"最坏叠加\"的估计值。\n\n朴素做法是\"每个窗口重扫一遍\"，O(n·w)；在 n=2e5、w=1e5 的监控窗口上会直接跑不完。正解是**单调队列**（存下标，队尾弹掉\"更小且更早失效\"的元素），摊还 O(n)。\n\n## 入口\n\n```java\npublic static long slidingWindowMaxTotal(int[] loads, int windowSize)\n```\n\n- 返回所有完整窗口的最大值之和；窗口个数 = `loads.length - windowSize + 1`；\n- `windowSize <= 0` 或 `windowSize > loads.length`（含 `loads` 为空）→ 返回 `-1`（配置无意义或数据不足，这是业务失败，不抛异常）。\n\n## 不变式与硬约束\n\n1. `loads[i]` 取遍 `int`（含负值与 `Integer.MAX_VALUE`/`MIN_VALUE`）；求和必须用 `long`（窗口数 × 峰值可达 2e5 × 2e9 = 4e14）。\n2. 单调队列里存**下标**而不是值（否则无法判断队首是否已滑出窗口）；用 `int[]` + 头尾指针或 `ArrayDeque<Integer>`，**禁止 `java.util.Stack`**（遗留同步类）。\n3. 必须给出摊还论证：每个下标进出队各至多一次 → O(n)，而不是\"看起来是 O(n)\"。\n4. 不允许修改 `loads`。\n\n## 输出契约\n\n返回 `long`。哨兵 `-1` 与\"真实和恰为 -1\"不会冲突：所有 `loads[i] >= 0` 时和不可能为负；但本题允许负值，因此**判分会用不同的输入形状区分**——请严格遵守\"`windowSize > n` 才返回 -1\"的定义，不要在其它情况返回 -1。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "monotonic-queue",
+    "sliding-window",
+    "amortized-analysis",
+    "overflow-contract",
+    "classic"
+  ],
+  "cases": [
+    {
+      "name": "窗口长于样本数返回 -1",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        4
+      ],
+      "expected": -1
+    },
+    {
+      "name": "窗口等于样本长度（退化单窗口）",
+      "input": [
+        [
+          5,
+          1,
+          2
+        ],
+        3
+      ],
+      "expected": 5
+    },
+    {
+      "name": "单元素窗口等于全量求和",
+      "input": [
+        [
+          5,
+          1,
+          2
+        ],
+        1
+      ],
+      "expected": 8
+    },
+    {
+      "name": "全部重复值的退化输入",
+      "input": [
+        [
+          7,
+          7,
+          7,
+          7
+        ],
+        2
+      ],
+      "expected": 21
+    },
+    {
+      "name": "严格递减序列（队尾从不弹出）",
+      "input": [
+        [
+          9,
+          8,
+          7,
+          6
+        ],
+        3
+      ],
+      "expected": 17
+    },
+    {
+      "name": "峰值合计超出 int 需要 long",
+      "input": [
+        [
+          2000000000,
+          2000000000
+        ],
+        1
+      ],
+      "expected": 4000000000
+    },
+    {
+      "name": "含负值的混合序列",
+      "input": [
+        [
+          1,
+          3,
+          -1,
+          -3,
+          5,
+          3,
+          6,
+          7
+        ],
+        3
+      ],
+      "expected": 29
+    },
+    {
+      "name": "窗口为 0 属于非法配置",
+      "input": [
+        [
+          1,
+          2
+        ],
+        0
+      ],
+      "expected": -1
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "long slidingWindowMaxTotal(int[] loads, int windowSize)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 单调递减队列（存下标）：\n   *  1) 队首滑出窗口就弹；\n   *  2) 队尾所有 <= 新值的元素永不可能是窗口最大值，弹掉；\n   *  3) 窗口形成后累加队首。\n   * 每个下标进出队各至多一次 → 摊还 O(n)。求和在 long 域，避免 2e5 * 2e9 溢出。\n   */\n  public static long slidingWindowMaxTotal(int[] loads, int windowSize) {\n    if (loads == null || windowSize <= 0 || windowSize > loads.length) return -1;\n    int n = loads.length;\n    int[] deque = new int[n];\n    int head = 0;\n    int tail = 0;                 // 半开区间 [head, tail)\n    long total = 0L;\n    for (int r = 0; r < n; r++) {\n      if (head < tail && deque[head] <= r - windowSize) head++;      // 队首滑出窗口\n      while (head < tail && loads[deque[tail - 1]] <= loads[r]) tail--;  // 队尾支配弹除\n      deque[tail++] = r;\n      if (r >= windowSize - 1) total += loads[deque[head]];          // 完整窗口的最大值\n    }\n    return total;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：拿\"全局最大值 × 窗口个数\"当峰值合计。只有当所有窗口都恰好包含全局最大值时才对，\n  // 局部峰值被完全忽略 —— 这正是容量评审最危险的乐观估计。\n  public static long slidingWindowMaxTotal(int[] loads, int windowSize) {\n    if (loads == null || windowSize <= 0 || windowSize > loads.length) return -1;\n    int global = loads[0];\n    for (int v : loads) if (v > global) global = v;\n    return (long) global * (loads.length - windowSize + 1);\n  }\n}\n"
+  },
+  "answer": "**思路**：单调队列。队列里存下标、对应的值单调递减；新元素进入时把队尾所有 `<=` 它的元素弹掉（它们再也不可能是任何后续窗口的最大值），队首下标 `< r - windowSize + 1` 时弹掉；一旦 `r >= windowSize - 1`，队首就是当前窗口最大值。\n\n**摊还论证**（判分不查，追问必查）：每个下标恰好入队一次、至多出队一次（从队首或队尾），所以总弹除次数 ≤ n → O(n) 时间、O(n) 空间（队列数组）。写成\"每窗口重扫\"是 O(n·w)，n=2e5、w=1e5 时是 2e10 次操作，必然超时——这就是本题的复杂度对抗设计。\n\n**为什么弹除条件是 `<=` 而不是 `<`**：相等时保留更靠后的下标，能让旧下标更早滑出窗口，队列更短；两者结果都对，但 `<` 在\"全部重复值\"的退化输入上会把队列撑到窗口长度（内存与比较次数都变差）。\n\n**数值**：`total` 必须 long —— 窗口数 × 峰值可达 2e5 × 2e9 = 4e14；\"峰值合计超出 int\"用例专门杀 int 累加。\n\n**复杂度**：时间 O(n)，额外空间 O(n)（最坏窗口长度；用环形数组可写成 O(w)）。\n\n**面试追问**：\n1. 为什么不能存值？（无法判断队首是否已经滑出窗口——只能记\"值 + 下标\"，或维护\"过期计数\"。）\n2. 求\"窗口最小值\"要改哪里？（单调递增队列，弹除条件取反；同一套代码用比较器参数化即可复用。）\n3. 数据流式到达且窗口很大？（只能保留窗口内的候选，内存 O(w)；跨窗口聚合可分层：块内极值 + 块间归并，类似两阶段聚合，或用 `TreeMap` 维护多重集合 O(log w)。）\n4. 如果要求\"每个窗口的次大值之和\"？（单调队列不能直接给出次大；改成每窗口维护 top-2 的滑动结构，或 `TreeMap<Integer,Integer>` 多重集合，复杂度升为 O(n log w)——这是选型讨论点。）\n5. 生产监控里 capacity-max 口径为什么常导致过度采购？（窗口峰值不可加，跨窗口叠加会重复计入同一次突发；正解是按\"同时刻并发\"做扫描线求峰值，也就是本批 0002 那道题。）",
+  "estimatedMinutes": 16,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-collections-heaps.md#15-单调队列--双堆--迭代器契约",
+    "addedBy": "content-agent-alg"
+  }
+}

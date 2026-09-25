@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0016",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "迟到数据与窗口重算：窗口按事件时间重算，丢弃必须可见",
+  "statement": "## 输入\n\nPySpark 3.5（判题容器内）。工作区已注册一张表：\n\n```\nlate_records(\n  record_id INT, biz_key STRING,\n  event_time STRING,            -- 'yyyy-MM-dd HH:mm:ss'\n  value DOUBLE,\n  watermark_at_arrival STRING,  -- 该记录到达时系统的水位线时刻，同格式\n  window_start STRING)          -- **上游已经标好的** 15 分钟窗口起点，同格式\n```\n\n## 口径\n\n1. **窗口按 `event_time` 重算**：15 分钟滚动窗口，起点是分钟向下取整到 `:00 / :15 / :30 / :45`，\n   秒归零；`window_end = window_start + 15 分钟`。\n   **上游标的 `window_start` 不可信**（它正是\"标错窗口\"的来源），只用来核对差异。\n2. 迟到与丢弃判定（`wm` = `watermark_at_arrival`，`we` = 重算出的 `window_end`）：\n   - `wm <= we` ⇒ **准点**，计入 `accepted`；\n   - `we < wm <= we + 10 分钟` ⇒ **迟到但在允许窗口内**，计入 `accepted`，并计入 `late_accepted`；\n   - `wm > we + 10 分钟` ⇒ **超出允许迟到**，丢弃进 dead-letter，只计入 `dropped`。\n   注意 `late_accepted` 是 `accepted` 的**子集**（不是并列计数）——\n   它的作用是告诉下游\"这个窗口的结果已经发过一次、现在必须重发\"。\n3. `misbucketed` = 该组里 `window_start`（上游标的）与重算结果**不相等**的记录条数。\n\n## 输出\n\n按 `(biz_key, window_start)` 分组，列固定为：\n\n```\nbiz_key, window_start, window_end, accepted, dropped, late_accepted, misbucketed\n```\n\n`window_start / window_end` 输出 `'yyyy-MM-dd HH:mm:ss'` 字符串；四个计数列是整型。\n按 `biz_key` 升序、再按 `window_start` 升序。空输入返回 0 行。\n\n## 约束\n\n不许 `collect()` 到驱动侧再算；不许用 Python UDF 逐行遍历；只允许 DataFrame / Spark SQL 算子。\n\n## 这题真正考的东西\n\n- **判定迟到用的是\"窗口重算后的 end\"，不是上游标的那个**。\n  上游标错一条，那条就会拿着**别人的** `window_end` 去比水位线 ⇒ 该丢的没丢、该留的被丢。\n- **丢弃要有去处，指标要能看出丢了**。把超迟记录直接 `filter` 掉是最省事的写法，\n  代价是\"少了几条\"这件事永远无人知晓 —— 手册里那句\"迟到超阈值 → 侧输出 → T+1 批补偿\"\n  强调的正是**丢掉的数据要可追**。`dropped` 这一列就是补偿的输入。\n- **`late_accepted` 是重发信号**：窗口已经输出过一次，又有迟到记录被收进来，\n  结果必须重新发布，否则下游读到的永远是旧值。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "late-data",
+    "watermark",
+    "window-recompute",
+    "dead-letter",
+    "modern:data-ops"
+  ],
+  "cases": [
+    {
+      "name": "基线：上游标错窗口 + 窗口关闭后到达但仍在允许迟到内",
+      "input": {
+        "view": "late_records",
+        "schema": "record_id int, biz_key string, event_time string, value double, watermark_at_arrival string, window_start string",
+        "rows": [
+          {
+            "record_id": 1,
+            "biz_key": "storeA",
+            "event_time": "2026-05-01 10:05:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 10:06:00",
+            "window_start": "2026-05-01 10:00:00"
+          },
+          {
+            "record_id": 2,
+            "biz_key": "storeA",
+            "event_time": "2026-05-01 10:20:00",
+            "value": 2,
+            "watermark_at_arrival": "2026-05-01 10:35:00",
+            "window_start": "2026-05-01 10:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_key": "storeA",
+          "window_start": "2026-05-01 10:00:00",
+          "window_end": "2026-05-01 10:15:00",
+          "accepted": 1,
+          "dropped": 0,
+          "late_accepted": 0,
+          "misbucketed": 0
+        },
+        {
+          "biz_key": "storeA",
+          "window_start": "2026-05-01 10:15:00",
+          "window_end": "2026-05-01 10:30:00",
+          "accepted": 1,
+          "dropped": 0,
+          "late_accepted": 1,
+          "misbucketed": 1
+        }
+      ],
+      "visible": true,
+      "note": "rec2 重算进 [10:15,10:30)：wm 10:35 属迟到但在 10:40 之前 ⇒ 收；按上游标的 10:00 算会被判成超迟丢掉"
+    },
+    {
+      "name": "超出允许迟到：只进 dropped，别静默消失",
+      "input": {
+        "view": "late_records",
+        "schema": "record_id int, biz_key string, event_time string, value double, watermark_at_arrival string, window_start string",
+        "rows": [
+          {
+            "record_id": 1,
+            "biz_key": "storeB",
+            "event_time": "2026-05-01 11:02:00",
+            "value": 5,
+            "watermark_at_arrival": "2026-05-01 11:26:00",
+            "window_start": "2026-05-01 11:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_key": "storeB",
+          "window_start": "2026-05-01 11:00:00",
+          "window_end": "2026-05-01 11:15:00",
+          "accepted": 0,
+          "dropped": 1,
+          "late_accepted": 0,
+          "misbucketed": 0
+        }
+      ],
+      "visible": true,
+      "note": "we=11:15、截止 11:25，wm=11:26 刚好超 1 分钟 ⇒ dropped=1、accepted=0"
+    },
+    {
+      "name": "边界：wm 正好等于 we 算准点，正好等于 we+10min 算迟到可收",
+      "input": {
+        "view": "late_records",
+        "schema": "record_id int, biz_key string, event_time string, value double, watermark_at_arrival string, window_start string",
+        "rows": [
+          {
+            "record_id": 1,
+            "biz_key": "storeC",
+            "event_time": "2026-05-01 12:00:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 12:15:00",
+            "window_start": "2026-05-01 12:00:00"
+          },
+          {
+            "record_id": 2,
+            "biz_key": "storeC",
+            "event_time": "2026-05-01 12:50:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 13:10:00",
+            "window_start": "2026-05-01 12:45:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_key": "storeC",
+          "window_start": "2026-05-01 12:00:00",
+          "window_end": "2026-05-01 12:15:00",
+          "accepted": 1,
+          "dropped": 0,
+          "late_accepted": 0,
+          "misbucketed": 0
+        },
+        {
+          "biz_key": "storeC",
+          "window_start": "2026-05-01 12:45:00",
+          "window_end": "2026-05-01 13:00:00",
+          "accepted": 1,
+          "dropped": 0,
+          "late_accepted": 1,
+          "misbucketed": 0
+        }
+      ],
+      "visible": true,
+      "note": "rec1 窗口 [12:00,12:15)、wm==we ⇒ 准点（late_accepted 0）；rec2 窗口 [12:45,13:00)、wm==13:00+10min 正好卡在截止上 ⇒ 迟到可收"
+    },
+    {
+      "name": "同一个重算窗口的多条 + 一条被上游错标到别的窗口",
+      "input": {
+        "view": "late_records",
+        "schema": "record_id int, biz_key string, event_time string, value double, watermark_at_arrival string, window_start string",
+        "rows": [
+          {
+            "record_id": 1,
+            "biz_key": "storeD",
+            "event_time": "2026-05-01 14:16:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 14:17:00",
+            "window_start": "2026-05-01 14:15:00"
+          },
+          {
+            "record_id": 2,
+            "biz_key": "storeD",
+            "event_time": "2026-05-01 14:17:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 14:18:00",
+            "window_start": "2026-05-01 14:15:00"
+          },
+          {
+            "record_id": 3,
+            "biz_key": "storeD",
+            "event_time": "2026-05-01 14:29:00",
+            "value": 1,
+            "watermark_at_arrival": "2026-05-01 14:30:00",
+            "window_start": "2026-05-01 14:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "biz_key": "storeD",
+          "window_start": "2026-05-01 14:15:00",
+          "window_end": "2026-05-01 14:30:00",
+          "accepted": 3,
+          "dropped": 0,
+          "late_accepted": 0,
+          "misbucketed": 1
+        }
+      ],
+      "visible": true,
+      "note": "三条都落进 [14:15,14:30)；rec3 被标成 14:00 ⇒ misbucketed=1"
+    },
+    {
+      "name": "退化：没有任何记录",
+      "input": {
+        "view": "late_records",
+        "schema": "record_id int, biz_key string, event_time string, value double, watermark_at_arrival string, window_start string",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步：① 用 `floor(unix_timestamp(event_time) / 900) * 900` 重算窗口起点\n（epoch 是 900 的整数倍，所以这一步天然对齐 `:00/:15/:30/:45`）；\n② `groupBy(biz_key, ws)` 上做四个条件求和，注意 `accepted` 与 `dropped` 的分界是\n**`we + 10min`**（允许迟到的截止），不是 `we`；\n③ `misbucketed` 用\"上游标的 `window_start` ≠ 重算值\"计数。全程只有 shuffle 聚合，没有 collect。\n\n**基线那组数据的手算**（用来核对 expected 是不是真的对）：\n一条 `event_time = 10:20:00` ⇒ 重算窗口 `[10:15, 10:30)`；\n上游把它标成 `10:00`（标错 ⇒ `misbucketed=1`）。\n若 `watermark = 10:35`：按重算的 `we=10:30`，`10:30 < 10:35 <= 10:40` ⇒ **迟到但在允许内**\n⇒ `accepted=1, late_accepted=1`；\n按上游那个错窗口（`we=10:15`）算，`10:35 > 10:25` ⇒ 会被**丢掉**。\n同一条数据，两种实现给出\"收\"与\"丢\"的相反结论 —— 这就是\"必须重算窗口\"的全部理由。\n\n**丢弃可见**：把超迟记录直接 `filter` 掉，报表上只是\"少了几条\"，\n没有任何一列会因此变化。`dropped` 这一列是 T+1 批补偿的唯一输入 ——\n\"迟到超阈值 → 侧输出 → 批补偿\"这条链，缺了侧输出就变成静默少数。\n（少数是最难查的一类事故：所有断言都仍然成立，只是数字小了。）\n\n**`late_accepted` 为什么要单独出**：它等于\"这个窗口的结果已经发出去了，现在又变了\"。\n下游只读 `accepted` 是看不出需要重发的；不重发，下游就永远拿着旧值 ——\n症状是\"看板偶尔和补数后的结果差一点，刷新一下又对了\"。\n\n**为什么全程用 epoch 秒**：`floor(ev/900)*900` 就是\"对齐到 :00/:15/:30/:45\"，\n\"迟到截止\"是 `ws + 1500` 一次整数比较 —— 不涉及 timestamp 加减、日期格式化与会话时区切换。\n（`floor(epoch/900)*900` 与\"分钟向下取整\"等价的前提仍是时区偏移是 15 分钟的整数倍\n（现实常用偏移都满足，含 UTC+5:30 与 UTC+5:45。）\n换成 7 分钟这种不能整除 900 的窗口就必须显式在会话时区里算 —— 那是个\"看起来免费\"的简化，\n值得写在代码注释里而不是留给下一个人踩。\n\n**工程延伸（面试追问点）**\n\n1. 为什么水位线要随记录带进来而不是全局一个？（真实管道里水位线按分区/按 key 推进；\n   把\"到达时的水位线\"作为字段快照下来，才能**事后重放**同一个判定 ——\n   否则补数时会用今天的水位线判昨天的数据，全判成\"未迟到\"。）\n2. 允许迟到设多久？（它是**延迟与完整性的交换**：太小 ⇒ 少数，太大 ⇒ 结果长期不收敛。\n   判据来自业务：下游能接受多久之内的修正。可订价/结算类通常是小时级容忍，\n   实时告警类是分钟级。）\n3. `misbucketed` 高意味着什么？（上游的窗口实现与口径不一致 —— 这是**最该报警的一类**，\n   因为它说明有另一套代码在用不同规则算同一个东西；正确处置是把它接进 DQC 阻断，\n   而不是长期靠这里\"重算纠偏\"。）\n4. 超迟的数据最终去哪？（侧输出到隔离区 + 一个待补偿清单；T+1 批重算按\n   `(biz_key, window)` 幂等覆盖。关键是补偿要有**终点**（如只补 7 天），\n   否则一个三年前的迟到记录会重开一个早已归档的窗口。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\nWINDOW_SEC = 900      # 15 分钟\nALLOW_SEC = 600       # 允许迟到 10 分钟\nFMT = 'yyyy-MM-dd HH:mm:ss'\n\n\ndef solve(spark):\n    # 全程用 epoch 秒做整数算术：窗口边界 = floor(ev/900)*900，\n    # 允许迟到的截止 = 窗口起点 + 15 + 10 分钟 = ws_sec + 1500。\n    # 不碰 timestamp 加减与日期函数，就没有会话时区与格式解析的坑。\n    w = (spark.table('late_records')\n         .withColumn('ev', F.unix_timestamp('event_time'))\n         .withColumn('wm', F.unix_timestamp('watermark_at_arrival'))\n         .withColumn('ws_sec', (F.floor(F.col('ev') / WINDOW_SEC) * WINDOW_SEC).cast('long'))\n         .withColumn('accepted_flag', (F.col('wm') <= F.col('ws_sec') + WINDOW_SEC + ALLOW_SEC).cast('int'))\n         .withColumn('dropped_flag', (F.col('wm') > F.col('ws_sec') + WINDOW_SEC + ALLOW_SEC).cast('int'))\n         .withColumn('late_flag', ((F.col('wm') > F.col('ws_sec') + WINDOW_SEC)\n                                   & (F.col('wm') <= F.col('ws_sec') + WINDOW_SEC + ALLOW_SEC)).cast('int'))\n         .withColumn('ws_str', F.from_unixtime(F.col('ws_sec'), FMT)))\n\n    g = w.groupBy('biz_key', 'ws_str').agg(\n        (F.max('ws_sec') + WINDOW_SEC).alias('we_sec'),\n        F.sum('accepted_flag').cast('int').alias('accepted'),\n        F.sum('dropped_flag').cast('int').alias('dropped'),\n        F.sum('late_flag').cast('int').alias('late_accepted'),\n        F.sum((F.col('window_start') != F.col('ws_str')).cast('int')).cast('int').alias('misbucketed'),\n    )\n\n    return (g.select(F.col('biz_key'),\n                     F.col('ws_str').alias('window_start'),\n                     F.from_unixtime(F.col('we_sec'), FMT).alias('window_end'),\n                     'accepted', 'dropped', 'late_accepted', 'misbucketed')\n            .orderBy('biz_key', 'window_start'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('late_records')\n\n    # 相信上游标的窗口，并且\"超水位线就丢\" —— 两个方向都错\n    w = r.withColumn('wm', F.col('watermark_at_arrival').cast('timestamp'))          .withColumn('we', F.col('window_start').cast('timestamp') + F.expr(\"interval 15 minutes\"))\n\n    grouped = w.groupBy('biz_key', 'window_start').agg(\n        F.max('we').alias('we'),\n        F.sum(F.when(F.col('wm') <= F.col('we'), 1).otherwise(0)).cast('int').alias('accepted'),\n        F.sum(F.when(F.col('wm') > F.col('we'), 1).otherwise(0)).cast('int').alias('dropped'),\n        F.lit(0).cast('int').alias('late_accepted'),      # 不区分\"迟到但可收\"与\"超迟\"\n        F.lit(0).cast('int').alias('misbucketed'),        # 根本没核对上游标的窗口\n    )\n\n    return (grouped\n            .select('biz_key', 'window_start',\n                    F.date_format('we', 'yyyy-MM-dd HH:mm:ss').alias('window_end'),\n                    'accepted', 'dropped', 'late_accepted', 'misbucketed')\n            .orderBy('biz_key', 'window_start'))"
+  },
+  "estimatedMinutes": 34,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 实时管道 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §3.5 与 §一致性/迟到（\"乱序/迟到：event-time + watermark；迟到超阈值 → 侧输出(dead-letter) → T+1 批补偿\"；手册只给策略一句话，未给可判分的窗口重算与丢弃口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T00:56:25.227Z"
+  }
+}

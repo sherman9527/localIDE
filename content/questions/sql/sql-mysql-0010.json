@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0010",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "找出从未下过有效订单的会员：NOT IN 碰上 NULL 直接清零",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表：\n  member_app(membership_id INT 主键, email VARCHAR(100), canceled_at DATETIME NULL)\n  orders(order_id INT 主键, membership_id INT NULL, status VARCHAR(12) NULL, total DECIMAL(10,2) NOT NULL)\n\norders 是历史遗留表，**已知脏数据**：存在 `membership_id IS NULL` 的游客单，也存在 `status IS NULL` 的未知状态行。\n\n口径（必须逐条照做）：\n- 「有效订单」= `status = 'paid' OR status = 'refunded'`（`cancelled` 与 NULL 都不是有效订单）；\n- 目标人群 = **未注销**（`canceled_at IS NULL`）的会员中，**没有任何一张有效订单**的人；\n- 只输出列顺序与别名为 membership_id, email 的结果，判题按行序敏感比对，必须自带 ORDER BY membership_id。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。\n\n这题没有花哨语法，考的就是「你的反连接在脏数据上会不会整体返回空」——背过 `NOT IN` 与 `NOT EXISTS` 等价的人会在第一个用例上就翻车。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "anti-join",
+    "three-valued-logic",
+    "null-semantics",
+    "query-rewrite",
+    "modern:mysql8-semijoin-rewrite"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：orders 含 NULL 外键与 NULL 状态",
+      "input": [],
+      "expected": {
+        "columns": ["membership_id", "email"],
+        "orderSensitive": true,
+        "rows": [
+          [3, "carol@example.com"],
+          [4, "dave@example.com"],
+          [6, "frank@example.com"],
+          [7, "grace@example.com"]
+        ]
+      },
+      "note": "3 号只有 cancelled 单、4 号只有 status 为 NULL 的单、6 号从没下过单、7 号只有游客单能对上（对不上）。9 号已注销，不进结果。"
+    },
+    {
+      "name": "脏数据被清洗后 NOT IN 才可用（同结果边界）",
+      "input": ["UPDATE orders SET membership_id = 0 WHERE membership_id IS NULL"],
+      "expected": {
+        "columns": ["membership_id", "email"],
+        "orderSensitive": true,
+        "rows": [
+          [3, "carol@example.com"],
+          [4, "dave@example.com"],
+          [6, "frank@example.com"],
+          [7, "grace@example.com"]
+        ]
+      },
+      "note": "这个用例是专门给 NOT IN 写法「补考」的：测试环境没有 NULL 外键时它能过，生产上有一条游客单就整体返回空集。"
+    },
+    {
+      "name": "全部订单都是游客单的退化边界",
+      "input": [
+        "DELETE FROM orders",
+        "INSERT INTO orders VALUES (101,NULL,'paid',1.00),(102,NULL,'refunded',2.00)"
+      ],
+      "expected": {
+        "columns": ["membership_id", "email"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "alice@example.com"],
+          [2, "bob@example.com"],
+          [3, "carol@example.com"],
+          [4, "dave@example.com"],
+          [5, "erin@example.com"],
+          [6, "frank@example.com"],
+          [7, "grace@example.com"],
+          [8, "heidi@example.com"]
+        ]
+      }
+    },
+    {
+      "name": "订单表为空的边界",
+      "input": ["DELETE FROM orders"],
+      "expected": {
+        "columns": ["membership_id", "email"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "alice@example.com"],
+          [2, "bob@example.com"],
+          [3, "carol@example.com"],
+          [4, "dave@example.com"],
+          [5, "erin@example.com"],
+          [6, "frank@example.com"],
+          [7, "grace@example.com"],
+          [8, "heidi@example.com"]
+        ]
+      }
+    },
+    {
+      "name": "只剩单个会员且他有有效订单",
+      "input": [
+        "DELETE FROM member_app WHERE membership_id <> 1",
+        "DELETE FROM orders WHERE membership_id IS NOT NULL AND order_id <> 1"
+      ],
+      "expected": []
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM member_app", "DELETE FROM orders"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nSELECT m.membership_id, m.email\nFROM member_app m\nWHERE m.canceled_at IS NULL\n  AND NOT EXISTS (\n        SELECT 1 FROM orders o\n        WHERE o.membership_id = m.membership_id\n          AND (o.status = 'paid' OR o.status = 'refunded'))\nORDER BY m.membership_id;\n```\n或者等价的反连接写法：\n```sql\nSELECT m.membership_id, m.email\nFROM member_app m\nLEFT JOIN (SELECT DISTINCT membership_id FROM orders WHERE status IN ('paid','refunded')) o\n       ON o.membership_id = m.membership_id\nWHERE m.canceled_at IS NULL AND o.membership_id IS NULL\nORDER BY m.membership_id;\n```\n1) **`NOT IN (子查询)` 只要子查询里出现一个 NULL，整个谓词对任何行都不为 TRUE**：`x NOT IN (1, NULL)` = `x<>1 AND NULL<>NULL... ` → UNKNOWN → 结果为空集。这就是「一条游客单让召回名单变成 0 人」的经典事故；8.0 优化器不会替你规避它。\n2) `LEFT JOIN orders o ON ... WHERE o.status <> 'cancelled'` 会把外连接**降级成内连接**（WHERE 里的右表条件把 `o.* IS NULL` 的行全过滤掉），结果反化成「只有下过单的人」。右表条件必须放 `ON` 里，或者放进子查询先过滤再 JOIN（上面第二种写法的 `DISTINCT` 子查询就是这个作用，还能避免一个会员多单造成的重复行）。\n3) 状态口径要写成**白名单** `status IN ('paid','refunded')`，不要写 `status <> 'cancelled'`：后者对 `status IS NULL` 的脏数据行求值为 UNKNOWN（不入选），看似正确，但只要哪天出现第三种状态（比如 'pending'）就会被静默算成有效订单。口径变更要能编译进 SQL，而不是依赖「现在只有这两种值」。\n4) `canceled_at IS NULL` 是对**左表**的过滤，放 WHERE 是正确且必要的；这就是「左表条件放 WHERE、右表条件放 ON」这条规则的适用场景，能说清为什么才加分。\n5) 8.0 对 `NOT EXISTS`/`IN` 的去关联化会产生 FirstMatch / LooseScan / MaterializedScan / DuplicateWeedout 等半连接策略；反连接（NOT EXISTS）通常走 MaterializedLookup。想验证走没走对，用 `EXPLAIN FORMAT=TREE` 看有没有 `with status: not exists` 的物化反连接，而不是靠猜。\n\n面试追问：\n- orders 有 5 亿行、member_app 3000 万行，这条查询怎么写？→ 反连接前先在 orders 上按 `(membership_id, status)` 覆盖索引物化「有过有效订单的会员集合」（或维护一张增量汇总表），把 5 亿压到千万级；直接 NOT EXISTS 会变成全表扫 orders。\n- 为什么 `COUNT(DISTINCT ...) HAVING COUNT(...)=0` 那种「先 JOIN 再分组」的写法不推荐？→ JOIN 放大中间结果（一个会员 200 单就要过 200 行），且没有 NULL 陷阱但有性能陷阱。\n- 口径里「有效订单」若要排除测试账号（另一张黑名单表），SQL 结构与执行计划怎么变？→ 多一层反连接，注意 `NOT IN` 又会被黑名单里的 NULL 干掉；顺序无关，但索引要从 `(membership_id,status)` 变成覆盖两张表的驱动顺序。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS orders",
+      "DROP TABLE IF EXISTS member_app",
+      "CREATE TABLE member_app (membership_id INT PRIMARY KEY, email VARCHAR(100) NOT NULL, canceled_at DATETIME NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "CREATE TABLE orders (order_id INT PRIMARY KEY, membership_id INT NULL, status VARCHAR(12) NULL, total DECIMAL(10,2) NOT NULL, KEY idx_member_status (membership_id, status)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO member_app VALUES (1,'alice@example.com',NULL),(2,'bob@example.com',NULL),(3,'carol@example.com',NULL),(4,'dave@example.com',NULL),(5,'erin@example.com',NULL),(6,'frank@example.com',NULL),(7,'grace@example.com',NULL),(8,'heidi@example.com',NULL),(9,'ivan@example.com','2026-05-01 00:00:00')",
+      "INSERT INTO orders VALUES (1,1,'paid',10.00),(2,1,'cancelled',5.00),(3,2,'refunded',20.00),(4,NULL,'paid',30.00),(5,NULL,'cancelled',1.00),(6,3,'cancelled',8.00),(7,4,NULL,9.00),(8,5,'paid',4.00),(9,7,'cancelled',2.00),(10,8,'refunded',7.00),(11,9,'paid',3.00)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "SELECT m.membership_id, m.email\nFROM member_app m\nWHERE m.canceled_at IS NULL\n  AND NOT EXISTS (\n        SELECT 1\n        FROM orders o\n        WHERE o.membership_id = m.membership_id\n          AND o.status IN ('paid','refunded')\n  )\nORDER BY m.membership_id",
+    "naiveSolution": "SELECT m.membership_id, m.email\nFROM member_app m\nWHERE m.canceled_at IS NULL\n  AND m.membership_id NOT IN (\n        SELECT o.membership_id\n        FROM orders o\n        WHERE o.status <> 'cancelled'\n  )\nORDER BY m.membership_id"
+  },
+  "estimatedMinutes": 12,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql8-optimizer.md#3-常见错误答案",
+    "addedBy": "content-agent-sql"
+  }
+}

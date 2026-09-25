@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0005",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "游标分页：并列分数夹在中间时 OFFSET 会重复产出",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表 feed_item(video_id INT 主键, title VARCHAR(40), score INT, published_at DATETIME, region VARCHAR(8))。榜单排序口径（与线上完全一致，写死）：\n`score DESC, published_at DESC, video_id DESC`（video_id 是决定性兜底列，**不能省略**）。\n\n任务：实现「下一页」查询。客户端把**上一页最后一行**的三个游标值回传，本次给定游标：\n  cursor_score = 880，cursor_published_at = '2026-05-05 10:00:00'，cursor_video_id = 1208，页大小 3，只看 region = 'jp'。\n要求输出列顺序与别名必须是 video_id, score, published_at, remaining_rows：\n- 只返回游标**之后**的最多 3 行，顺序就是上面的排序口径；\n- remaining_rows = 满足「在游标之后」的总行数（**不受 LIMIT 影响**，含本次返回的这 3 行），让客户端知道还要不要继续翻页；\n- 不许使用 OFFSET（翻页成本必须与页深无关），也不许用 SQL_CALC_FOUND_ROWS（8.0 已弃用）；\n- 判题按行序**敏感**比对：你必须自己写与口径完全一致的 ORDER BY。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。注意：本题数据里有一组 score 与 published_at 都相同的行，游标正好落在这组里，所以三列比较一个都不能少。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "keyset-pagination",
+    "cursor",
+    "row-constructor",
+    "window-count",
+    "modern:mysql8-keyset-pagination"
+  ],
+  "cases": [
+    {
+      "name": "游标落在并列组内部（第三页）",
+      "input": [],
+      "expected": {
+        "columns": ["video_id", "score", "published_at", "remaining_rows"],
+        "orderSensitive": true,
+        "rows": [
+          [1207, 880, "2026-05-05 10:00:00", 6],
+          [1206, 880, "2026-05-05 10:00:00", 6],
+          [1209, 870, "2026-05-05 10:00:00", 6]
+        ]
+      },
+      "note": "游标行 1208 自己不能出现；1302 分数更低但属于 us 区，也必须被 region 挡掉。"
+    },
+    {
+      "name": "并列组里再插入新行后的稳定性（重复翻页边界）",
+      "input": ["INSERT INTO feed_item VALUES (1213,'New',880,'2026-05-05 10:00:00','jp')"],
+      "expected": {
+        "columns": ["video_id", "score", "published_at", "remaining_rows"],
+        "orderSensitive": true,
+        "rows": [
+          [1207, 880, "2026-05-05 10:00:00", 6],
+          [1206, 880, "2026-05-05 10:00:00", 6],
+          [1209, 870, "2026-05-05 10:00:00", 6]
+        ]
+      },
+      "note": "1213 的 video_id 比游标大，排序后落在游标**之前**，所以本页结果一字不变；OFFSET 版会整体后移，把已经看过的 1208 再吐一次。"
+    },
+    {
+      "name": "游标之后的行被并发删除的边界",
+      "input": ["DELETE FROM feed_item WHERE video_id IN (1209,1210,1211)"],
+      "expected": {
+        "columns": ["video_id", "score", "published_at", "remaining_rows"],
+        "orderSensitive": true,
+        "rows": [
+          [1207, 880, "2026-05-05 10:00:00", 3],
+          [1206, 880, "2026-05-05 10:00:00", 3],
+          [1212, 800, "2026-05-02 09:00:00", 3]
+        ]
+      }
+    },
+    {
+      "name": "只剩一条的尾部边界（游标行必须被排除）",
+      "input": [
+        "DELETE FROM feed_item WHERE region = 'jp' AND video_id NOT IN (1208,1212)"
+      ],
+      "expected": {
+        "columns": ["video_id", "score", "published_at", "remaining_rows"],
+        "orderSensitive": true,
+        "rows": [[1212, 800, "2026-05-02 09:00:00", 1]]
+      },
+      "note": "用 <= 或漏掉 video_id 这一列的实现会把游标行 1208 自己再返回一次（remaining_rows 变 2）。"
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM feed_item"],
+      "expected": [],
+      "note": "没有下一行时 COUNT(*) OVER() 也拿不到总数 —— 这正是「总数必须由客户端带上或另发一次计数」的原因。"
+    }
+  ],
+  "answer": "参考解（三列游标在本题里是常量，判题方只改数据不改查询）：\n```sql\nSELECT video_id, score, published_at, COUNT(*) OVER () AS remaining_rows\nFROM feed_item\nWHERE region = 'jp'\n  AND (score, published_at, video_id) < (880, '2026-05-05 10:00:00', 1208)\nORDER BY score DESC, published_at DESC, video_id DESC\nLIMIT 3;\n```\n要点：\n1) 行构造器 `(a,b,c) < (x,y,z)` 就是字典序比较，一行写完三列游标；展开写法是 `score < x OR (score = x AND (ts < y OR (ts = y AND id < z)))`。**注意两个坑**：行构造器比较在 MySQL 里无法用索引做 range 扫描的完整下推（8.0 对 `ROW(<,>)` 的 range 优化有限，必要时写展开版并对比 `EXPLAIN` 的 key/rows）；任一列可能为 NULL 时行构造器结果会是 NULL（游标列必须 NOT NULL）。\n2) 排序方向必须与比较方向一致：全部 DESC 才能用 `<`；如果口径是 `score DESC, published_at ASC`，混合方向就得手写 `score < x OR (score = x AND ts > y)`，这也是 8.0 才用「降序索引」把混合方向变成单一索引顺序的原因。\n3) `COUNT(*) OVER ()` 在 LIMIT 之前求值 → 拿到的是「游标之后的总行数」，这就是 8.0 里替代被弃用的 `SQL_CALC_FOUND_ROWS` 的标准写法。副作用：结果为空时一行都没有，总数也就拿不到 → 生产接口要把上一页的 total 缓存下来（或另发一次 count，或用 `UNION ALL` 兜一行 total）。\n4) OFFSET 的真实代价与错误：`LIMIT 3 OFFSET 6` 要先扫并丢弃前 6 行（深翻页是 O(页深)）；更要命的是**没有决定性排序列时并列行会漂移**，翻页出现重复/漏项。用例 2 就是打这个的：插入一条并列的新行，OFFSET 版整体后移。\n5) 索引设计：`(region, score DESC, published_at DESC, video_id DESC)` 才能让游标谓词 + ORDER BY 都用上索引、消除 filesort；8.0 支持降序索引（5.7 里的 `DESC` 只是被解析后被忽略）。\n\n面试追问：\n- 为什么游标不直接用 `LIMIT :n` + 「上一页最后一个 score」？→ 同分时会重复/漏项，必须带完整排序键元组（id 兜底）。\n- 要「跳到第 40 页」的产品需求怎么办？→ 游标分页本质做不到，只能给「上一页游标栈」或改成检索（ES 深分页 / 预计算物化排名表）。\n- 并发插入导致 total 与已翻页数不一致：口径是「快照一致」还是「最终一致」？→ 快照需要事务 + RR，但 RR 对分页没意义（每语句新建 ReadView 的是 RC），要说清代价。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS feed_item",
+      "CREATE TABLE feed_item (video_id INT PRIMARY KEY, title VARCHAR(40) NOT NULL, score INT NOT NULL, published_at DATETIME NOT NULL, region VARCHAR(8) NOT NULL, KEY idx_region_board (region, score, published_at, video_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO feed_item VALUES (1201,'A',900,'2026-05-08 00:00:00','jp'),(1202,'B',890,'2026-05-07 00:00:00','jp'),(1203,'C',880,'2026-05-06 00:00:00','jp'),(1204,'D',880,'2026-05-05 12:00:00','jp'),(1205,'E',880,'2026-05-05 11:00:00','jp'),(1206,'F',880,'2026-05-05 10:00:00','jp'),(1207,'G',880,'2026-05-05 10:00:00','jp'),(1208,'H',880,'2026-05-05 10:00:00','jp'),(1209,'I',870,'2026-05-05 10:00:00','jp'),(1210,'J',870,'2026-05-04 09:00:00','jp'),(1211,'K',850,'2026-05-03 09:00:00','jp'),(1212,'L',800,'2026-05-02 09:00:00','jp'),(1301,'M',999,'2026-05-09 00:00:00','us'),(1302,'N',700,'2026-05-01 00:00:00','us')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "SELECT video_id, score, published_at, COUNT(*) OVER () AS remaining_rows\nFROM feed_item\nWHERE region = 'jp'\n  AND (score, published_at, video_id) < (880, '2026-05-05 10:00:00', 1208)\nORDER BY score DESC, published_at DESC, video_id DESC\nLIMIT 3",
+    "naiveSolution": "SELECT video_id, score, published_at, COUNT(*) OVER () AS remaining_rows\nFROM feed_item\nWHERE region = 'jp'\nORDER BY score DESC\nLIMIT 3 OFFSET 6"
+  },
+  "estimatedMinutes": 16,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql8-optimizer.md#15-深分页与写路径",
+    "addedBy": "content-agent-sql"
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0019",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "请求链按阈值的稳定三段划分（指针复用，不许改值）",
+  "statement": "## 背景\n\n网关在限流决策后要把一条**按到达顺序串起来的请求链**重新排成三段，好让同一批审计窗口里的请求挨在一起：\n\n- 第一段：`cost < pivot`（放行段）；\n- 第二段：`cost == pivot`（配额临界段，要单独打点）；\n- 第三段：`cost > pivot`（降级段）。\n\n生产事故版本是「把节点值抄进数组、排完序再新建节点」——看着结果对了，但下游拿着 `node` 引用做的幂等键、埋点上下文全部失效。所以这里要的是**只改指针、复用原节点**的稳定划分。\n\n## 你要实现的入口\n\n```java\npublic static ListNode partitionList(ListNode head, int pivot)\n```\n\n- `ListNode` 由判题器提供（`int val` / `ListNode next`），**不要在自己代码里再定义一遍**；\n- 入参 `head` 是链头（可能为 `null`），`pivot` 是阈值；\n- 返回划分后的链头；`null` 用空数组 `[]` 表达。\n\n## 约定（不变式，必须遵守）\n\n1. **稳定**：三段内部必须保持原来的相对顺序（到达顺序就是审计顺序）。\n2. **复用节点**：只能改 `next` 指针，不允许新建承载业务数据的节点（用哨兵 dummy 是允许的，它不进结果链）。\n3. 不允许修改任何节点的 `val`。\n4. 输入可能是空链、单节点、或所有值都等于 `pivot`（退化成只有一段）。\n\n## 复杂度要求\n\n- 时间 `O(n)`、额外空间 `O(1)`（三个哨兵 + 若干指针）；\n- 只允许一次遍历收集 + 一次拼接，不许为了排序把节点倒进容器。\n\n## 输出契约\n\n返回 `ListNode`；判题按 `[v1,v2,...]` 的数组形式比较结果链。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": ["linked-list", "stable-partition", "pointer-reuse", "constant-space", "modern:audit-order"],
+  "cases": [
+    {
+      "name": "空链返回空",
+      "input": [[], 3],
+      "expected": [],
+      "note": "head 为 null 时不得抛异常，也不得返回哨兵节点"
+    },
+    {
+      "name": "全部小于枢轴时按原序返回",
+      "input": [[1, 2], 3],
+      "expected": [1, 2]
+    },
+    {
+      "name": "三段划分且段内保持到达顺序",
+      "input": [[3, 5, 2, 1, 4], 3],
+      "expected": [2, 1, 3, 5, 4],
+      "note": "头插实现会算出 [1,2,3,4,5]，在这条用例上挂"
+    },
+    {
+      "name": "重复值退化：全部等于枢轴",
+      "input": [[7, 7, 7], 7],
+      "expected": [7, 7, 7]
+    },
+    {
+      "name": "单节点边界",
+      "input": [[4], 4],
+      "expected": [4]
+    },
+    {
+      "name": "负值与零枢轴混排",
+      "input": [[-1, 0, 1, -2, 2], 0],
+      "expected": [-1, -2, 0, 1, 2]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "ListNode partitionList(ListNode head, int pivot)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 一次遍历把节点摘进三条带哨兵的子链（尾插保序），最后按 < / == / > 串起来。\n   * 全程只动 next：既复用原节点，也是 O(1) 额外空间。\n   */\n  public static ListNode partitionList(ListNode head, int pivot) {\n    ListNode loHead = new ListNode(0), loTail = loHead;\n    ListNode eqHead = new ListNode(0), eqTail = eqHead;\n    ListNode hiHead = new ListNode(0), hiTail = hiHead;\n    for (ListNode cur = head; cur != null; ) {\n      ListNode next = cur.next;\n      cur.next = null; // 先摘干净再接，否则残留指针会把两段接成环\n      if (cur.val < pivot) {\n        loTail.next = cur;\n        loTail = cur;\n      } else if (cur.val > pivot) {\n        hiTail.next = cur;\n        hiTail = cur;\n      } else {\n        eqTail.next = cur;\n        eqTail = cur;\n      }\n      cur = next;\n    }\n    loTail.next = eqHead.next != null ? eqHead.next : hiHead.next;\n    eqTail.next = hiHead.next;\n    return loHead.next != null ? loHead.next : (eqHead.next != null ? eqHead.next : hiHead.next);\n  }\n}",
+    "naiveSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  // 图省事的写法：三段各自头插，最后串起来 —— 结果按段反转，审计顺序就没了\n  public static ListNode partitionList(ListNode head, int pivot) {\n    List<ListNode> lo = new ArrayList<ListNode>();\n    List<ListNode> eq = new ArrayList<ListNode>();\n    List<ListNode> hi = new ArrayList<ListNode>();\n    for (ListNode cur = head; cur != null; cur = cur.next) {\n      if (cur.val < pivot) lo.add(0, cur);\n      else if (cur.val > pivot) hi.add(0, cur);\n      else eq.add(0, cur);\n    }\n    List<ListNode> all = new ArrayList<ListNode>(lo);\n    all.addAll(eq);\n    all.addAll(hi);\n    ListNode dummy = new ListNode(0), tail = dummy;\n    for (ListNode n : all) {\n      n.next = null;\n      tail.next = n;\n      tail = n;\n    }\n    return dummy.next;\n  }\n}"
+  },
+  "answer": "**思路**：三条各带一个哨兵的子链 + 尾插，一次遍历完成归类，再把三段首尾相接。哨兵的价值是省掉「第一段第一个节点要特殊处理」的四五个分支；`cur.next = null` 是必须的——摘节点时不清空 next，最后一段的尾巴会指回中途某个节点，形成环，判题器读到的是无限链。\n\n**为什么头插会挂**：`add(0, cur)` / `cur.next = head` 这类写法把每段变成逆序，样例 `[3,5,2,1,4]` 会得到 `[1,2,3,4,5]`——看起来「更有序」，但审计要求的是到达顺序，稳定划分不是排序。\n\n**返回头的三种空段**：`lo` 空时要从 `eq` 起，`eq` 也空时要从 `hi` 起，三段都空（输入为 null）返回 null。漏掉任一种都会把哨兵节点混进结果里，表现为多出一个 `0`。\n\n**复杂度**：时间 `O(n)`，额外空间 `O(1)`（三个哨兵 + 常数个指针）。没有分配、没有容器，`n=2e5` 时零 GC 压力。\n\n**面试追问点**：\n1. 如果要求「等于段」放在最前面（比如临界请求优先出队），代码怎么改？（换拼接顺序即可，归类逻辑不动——这正是三段分开维护的好处）。\n2. 为什么不能用「值抄进 int[] 排序后重建节点」？（节点身份丢失：下游的幂等键、traceId 挂在节点对象上，重建等于换了一批实体；另外 O(n) 空间也不满足约束）。\n3. 如果链上可能有环（脏数据），你的实现会怎样？（当前实现会在摘节点时把环带进子链；生产上要先做 Floyd 判环或限制遍历步数，把脏数据显式失败掉而不是静默死循环）。\n4. 单线程够用，但如果三段由三个 worker 并行摘取再合并？（不再稳定：稳定划分要求全局到达顺序，并行需要改成「按索引区间分片 + 归并」，代价是多一轮 O(n) 合并）。",
+  "estimatedMinutes": 20,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-20T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md",
+    "addedBy": "n04-pointer-structures"
+  }
+}

@@ -1,0 +1,34 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+
+# 运行期数据（SQLite / 判题工作区 / 日志）—— 全部留在仓库内，不写到仓库外目录
+data/
+*.log
+
+# E2E 产物
+test-results/
+playwright-report/
+blob-report/
+
+# 本地覆盖
+.env
+.env.local
+*.local
+.qoder/settings.local.json
+
+# 题库计数的本机辅助文件（check-bank 的基线取 git 已跟踪题数，不依赖它）
+.bank-count
+
+# 浏览器自动化产生的临时页面快照
+.playwright-mcp/
+
+# npm 缓存里的"上次检查更新"时间戳：每次 npm 动一下就变，纯噪音
+docker-cache/npm/_update-notifier-last-checked
+
+# Python 编译缓存（spark_worker 的 .pyc 曾被提交进仓库）
+__pycache__/
+*.pyc

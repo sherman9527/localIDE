@@ -1,0 +1,329 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0012",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "周期快照的日历补齐与 LOCF：ROWS 还是 RANGE、lag 还是 last_value(ignore nulls)",
+  "statement": "## 背景与数据规模\n账户余额是**周期快照事实**（periodic snapshot，**3.2 亿账户 × 每日一行**，日均实际产出 2.6 亿行——有 **19% 的 (账户, 日) 组合没有记录**：夜间无变动、批量任务跳过、跨区同步延迟）。\n看板要「每日余额 + 日环比」，旧实现用 `LAG(balance)` 直接取上一行，于是**缺失日把环比变成 NULL、日期序列出现空洞**，产品看到的曲线在每个缺口处都掉零（把「没有记录」当成了「余额为 0」）。\n\n## 输入\n1. 临时视图 `dim_date`（建表阶段灌入，全题固定）：`d STRING(yyyy-MM-dd)`，覆盖 `2026-01-01` ~ `2026-01-06` 共 6 天，无缺口。\n2. 临时视图 `account_balance`（每个用例单独灌入）：\n   `dt STRING(yyyy-MM-dd，可能非法或超出日历范围), account STRING(可能 NULL), balance STRING(十进制文本，可能 NULL/脏值), updated_at STRING(该记录的写入时间)`\n\n## 口径定义（必须严格实现）\n1. 源行清洗：`dt IS NULL`、`dt` 无法解析为日期、`dt` **不在 `dim_date` 覆盖范围内**、`account IS NULL` 的行一律丢弃（它们既不能作为余额，也不能作为起点）。\n2. `balance` 为 NULL 或无法解析 → **视为该日有记录且余额 0.00**（这是业务确认过的口径：「有记录但金额未知」按 0 计，与「没有记录」严格区分）。\n3. 同一 `(dt, account)` 多条记录视为重复投递：按 `updated_at DESC, COALESCE(balance,'') DESC` 取第一条。\n4. **日历补齐**：每个账户从其**首个有效有值日**开始，直到 `dim_date` 末尾，**每天一行**（首日之前不产出行）。\n5. **LOCF（last observed carried forward）**：补齐出来的缺失日沿用「该账户截至当日的最近一个有值日」的余额。\n   必须写成 `LAST_VALUE(bal, TRUE) OVER (PARTITION BY account ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`；\n   `LAG`（等价于 `ROWS BETWEEN 1 PRECEDING AND 1 PRECEDING`）在缺失日会取到 NULL，`RANGE` 帧在同日多行/并列时行为不同——两者都是本题要抓的错误。\n6. `delta` = 当日余额 − 前一日余额（`DECIMAL(18,2)`）；账户的**首个输出日**没有前一日，`delta` 为 NULL（不是 0）。\n\n## 输出\n列**必须严格是** `d, account, balance, delta`；`balance`/`delta` 为 `DECIMAL(18,2)` 语义（判题按数值比对）。\n判题按行集合比对（行序不敏感）；生产写法请 `ORDER BY account, d`。\n\n## 约束\n- 只提交**一条** SELECT / WITH 查询。\n- 3.2 亿账户 × 6 天的笛卡尔积在真实系统里不可接受：追问会让你给出改写（按分区/分桶裁剪、只补齐「近 N 天有活动」的账户、把日历网格物化成 `spine` 表并与事实做 `LEFT JOIN` + 分区间裁剪），并说明用 `CROSS JOIN` 全量造网格的代价与替代（`range` 分区 + 窗口收敛）。",
+  "judgeKind": "pyspark",
+  "language": "sql",
+  "tags": [
+    "periodic-snapshot",
+    "date-spine",
+    "locf-window",
+    "rows-vs-range",
+    "spark-sql",
+    "modern:spark-4-2-metric-views"
+  ],
+  "cases": [
+    {
+      "name": "基础：缺失日 LOCF 沿用最近有值日（lag 会取到 NULL）",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": [
+          {
+            "dt": "2026-01-01",
+            "account": "A",
+            "balance": "100.00",
+            "updated_at": "2026-01-01 09:00:00"
+          },
+          {
+            "dt": "2026-01-04",
+            "account": "A",
+            "balance": "130.00",
+            "updated_at": "2026-01-04 09:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "d": "2026-01-01",
+          "account": "A",
+          "balance": "100",
+          "delta": null
+        },
+        {
+          "d": "2026-01-02",
+          "account": "A",
+          "balance": "100",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-03",
+          "account": "A",
+          "balance": "100",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-04",
+          "account": "A",
+          "balance": "130",
+          "delta": 30
+        },
+        {
+          "d": "2026-01-05",
+          "account": "A",
+          "balance": "130",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-06",
+          "account": "A",
+          "balance": "130",
+          "delta": 0
+        }
+      ],
+      "note": "首日 delta 是 NULL；01-05/01-06 也要延续（周期快照的当前态不能因为「后面没有记录」而消失）。"
+    },
+    {
+      "name": "重复边界：同日多条取 updated_at 最新（并列取 balance 文本较大者）",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": [
+          {
+            "dt": "2026-01-02",
+            "account": "B",
+            "balance": "50.00",
+            "updated_at": "2026-01-02 10:00:00"
+          },
+          {
+            "dt": "2026-01-02",
+            "account": "B",
+            "balance": "60.00",
+            "updated_at": "2026-01-02 11:00:00"
+          },
+          {
+            "dt": "2026-01-02",
+            "account": "B",
+            "balance": "70.00",
+            "updated_at": "2026-01-02 11:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "d": "2026-01-02",
+          "account": "B",
+          "balance": "70",
+          "delta": null
+        },
+        {
+          "d": "2026-01-03",
+          "account": "B",
+          "balance": "70",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-04",
+          "account": "B",
+          "balance": "70",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-05",
+          "account": "B",
+          "balance": "70",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-06",
+          "account": "B",
+          "balance": "70",
+          "delta": 0
+        }
+      ],
+      "note": "不先去重会让 01-02 产出三行，并把 LOCF 窗口的并列行为变成不确定结果。"
+    },
+    {
+      "name": "NULL 余额边界：有记录但金额未知按 0.00 计",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": [
+          {
+            "dt": "2026-01-03",
+            "account": "C",
+            "balance": null,
+            "updated_at": "2026-01-03 09:00:00"
+          },
+          {
+            "dt": "2026-01-05",
+            "account": "C",
+            "balance": "N/A",
+            "updated_at": "2026-01-05 09:00:00"
+          },
+          {
+            "dt": "2026-01-06",
+            "account": "C",
+            "balance": "10.00",
+            "updated_at": "2026-01-06 09:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "d": "2026-01-03",
+          "account": "C",
+          "balance": "0",
+          "delta": null
+        },
+        {
+          "d": "2026-01-04",
+          "account": "C",
+          "balance": "0",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-05",
+          "account": "C",
+          "balance": "0",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-06",
+          "account": "C",
+          "balance": "10",
+          "delta": 10
+        }
+      ],
+      "note": "`LAST_VALUE(bal, TRUE)` 的 ignore-nulls 只用于「无记录日」；有记录但脏值的日已经是 0.00 的确定值，不能被跳过。"
+    },
+    {
+      "name": "非法与越界日期边界：坏 dt 与日历外 dt 全部丢弃",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": [
+          {
+            "dt": "bad",
+            "account": "D",
+            "balance": "10.00",
+            "updated_at": "2026-01-01 09:00:00"
+          },
+          {
+            "dt": "2026-02-01",
+            "account": "D",
+            "balance": "20.00",
+            "updated_at": "2026-02-01 09:00:00"
+          },
+          {
+            "dt": null,
+            "account": "D",
+            "balance": "30.00",
+            "updated_at": "2026-01-01 09:00:00"
+          },
+          {
+            "dt": "2026-01-01",
+            "account": null,
+            "balance": "40.00",
+            "updated_at": "2026-01-01 09:00:00"
+          },
+          {
+            "dt": "2026-01-01",
+            "account": "D",
+            "balance": "5.00",
+            "updated_at": "2026-01-01 09:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "d": "2026-01-01",
+          "account": "D",
+          "balance": "5",
+          "delta": null
+        },
+        {
+          "d": "2026-01-02",
+          "account": "D",
+          "balance": "5",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-03",
+          "account": "D",
+          "balance": "5",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-04",
+          "account": "D",
+          "balance": "5",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-05",
+          "account": "D",
+          "balance": "5",
+          "delta": 0
+        },
+        {
+          "d": "2026-01-06",
+          "account": "D",
+          "balance": "5",
+          "delta": 0
+        }
+      ],
+      "note": "若把 '2026-02-01' 当成起点，账户 D 会变成从 01-01 起全 NULL（LOCF 无值可用）——起点必须只看日历内的有值日。"
+    },
+    {
+      "name": "单条快照边界：只有一个有值日也要补齐到日历末尾",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": [
+          {
+            "dt": "2026-01-05",
+            "account": "E",
+            "balance": "9.00",
+            "updated_at": "2026-01-05 08:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "d": "2026-01-05",
+          "account": "E",
+          "balance": "9",
+          "delta": null
+        },
+        {
+          "d": "2026-01-06",
+          "account": "E",
+          "balance": "9",
+          "delta": 0
+        }
+      ]
+    },
+    {
+      "name": "空事实分区：零行输出（不得因为日历存在而造出全 NULL 行）",
+      "input": {
+        "view": "account_balance",
+        "schema": "dt string, account string, balance string, updated_at string",
+        "rows": []
+      },
+      "expected": []
+    }
+  ],
+  "runner": {
+    "entry": "sql",
+    "timeoutMs": 75000,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW dim_date AS SELECT * FROM VALUES ('2026-01-01'), ('2026-01-02'), ('2026-01-03'), ('2026-01-04'), ('2026-01-05'), ('2026-01-06') AS t(d)"
+    ],
+    "referenceSolution": "WITH cleaned AS (\n  SELECT dt, account, bal FROM (\n    SELECT\n      s.dt AS dt,\n      s.account AS account,\n      COALESCE(CAST(s.balance AS DECIMAL(18,2)), CAST(0.00 AS DECIMAL(18,2))) AS bal,\n      s.updated_at AS updated_at,\n      ROW_NUMBER() OVER (\n        PARTITION BY s.dt, s.account\n        ORDER BY s.updated_at DESC, COALESCE(s.balance, '') DESC\n      ) AS rn\n    FROM account_balance s\n    JOIN dim_date dd ON s.dt = dd.d\n    WHERE s.dt IS NOT NULL AND s.account IS NOT NULL\n  ) x\n  WHERE x.rn = 1\n),\ngrid AS (\n  SELECT st.account AS account, dd.d AS d, c.bal AS bal\n  FROM (SELECT account, MIN(dt) AS first_dt FROM cleaned GROUP BY account) st\n  JOIN dim_date dd ON dd.d >= st.first_dt\n  LEFT JOIN cleaned c ON c.account = st.account AND c.dt = dd.d\n),\ncarried AS (\n  SELECT d, account,\n         LAST_VALUE(bal, TRUE) OVER (\n           PARTITION BY account ORDER BY d\n           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW\n         ) AS balance\n  FROM grid\n)\nSELECT d, account,\n       CAST(balance AS DECIMAL(18,2)) AS balance,\n       CAST(balance - LAG(balance) OVER (PARTITION BY account ORDER BY d) AS DECIMAL(18,2)) AS delta\nFROM carried\nORDER BY account, d",
+    "naiveSolution": "SELECT\n  dt AS d,\n  account,\n  CAST(balance AS DECIMAL(18,2)) AS balance,\n  CAST(CAST(balance AS DECIMAL(18,2)) - LAG(CAST(balance AS DECIMAL(18,2))) OVER (PARTITION BY account ORDER BY dt) AS DECIMAL(18,2)) AS delta\nFROM (\n  SELECT dt, account,\n         COALESCE(balance, '0.00') AS balance,\n         ROW_NUMBER() OVER (PARTITION BY dt, account ORDER BY updated_at DESC) AS rn\n  FROM account_balance\n  WHERE account IS NOT NULL AND dt IS NOT NULL\n)\nWHERE rn = 1\nORDER BY account, d"
+  },
+  "answer": "## 参考要点\n1. 周期快照的三件基本功：**日历网格（spine）+ LOCF + 明确的「无记录 vs 0」口径**。`LAST_VALUE(x, TRUE)` 的第二个参数是 ignoreNulls（Spark 方言），配合 `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` 才叫「截至当日最近有值」；`LAG` 只看物理上一行，遇到缺口就是 NULL，`FIRST_VALUE`/`MAX(...) OVER (... UNBOUNDED PRECEDING)` 也都不对（后者是「历史最大」不是「最近值」）。\n2. 帧的选择：补齐后的 `grid` 已经是 `(account, d)` 唯一，所以 `ROWS` 与 `RANGE` 等价；但只要去重（`rn = 1`）漏做，`RANGE` 帧会把同一日的并列行全部纳入当前帧，LOCF 与 delta 都会变得不确定——这是「同一天多条快照」的真实后果，也是本题第 2 个用例的考点。\n3. 起点必须只由**日历内的有值日**决定（case4）：否则越界日期会把起点推到日历外，账户在日历内反而一行都不出（或用例里的「全 NULL 前缀」）。同理 `balance` 脏值按 0 计，是「有记录」的确定值，LOCF 不得跳过它——「ignore nulls」只作用于没有记录的日期。\n4. 规模与成本：3.2 亿账户 × 日历的 `JOIN dim_date ON d >= first_dt` 本质是「每个账户的存续区间」展开，正确姿势是限定回溯窗口（只补近 90 天）、用 `bucket/dt` 分区裁剪、并把「存续区间」物化成维度（`account, valid_from, valid_to`）与日历做区间 join（可以用 `SEQUENCE` + `EXPLODE` 展开，但要给出膨胀系数估算）。看板类高并发查询不应实时算 LOCF：物化成日粒度快照表 + 增量维护，或者用 OLAP 侧的物化视图（Doris/StarRocks 的 async MV、ClickHouse 的 MV + `argMax` 去重），并说清「MV 刷新与一致性」的代价。\n5. `delta` 首日为 NULL 而不是 0：0 表示「环比持平」，NULL 表示「无前值」，两者在 BI 的同比/告警阈值里完全不同；这条要写进语义层指标定义（派生指标的「空值语义」）。\n6. 可验证性：上线断言应包含「每个账户行数 == 日历中该账户存续天数」「`delta` 全为 0 的天数占比突变告警」（LOCF 实现错误最直观的症状就是这个比例突然升高）。\n\n## 追问\n- 「如果余额字段被回填改成历史值，LOCF 表怎么更新？」→ 影响范围是「该账户该日之后直到下一个有值日」的连续段；按分区重算这段区间（幂等覆盖写），并冻结已发布区间的处理见 bd-pyspark-0008。\n- 「为什么不把缺失日补成 0？」→ 语义完全不同：0 表示账户真没钱，缺失表示没有观测；补 0 会让环比暴跌、风控误报。这正是本题「NULL 余额按 0 但缺失日 LOCF」两条规则并存的原因。\n- 「Spark 4.2 的 `CREATE VIEW ... WITH METRICS` 能帮你什么？」→ 把「环比/余额/存续天数」这类派生指标的定义与可加性沉到引擎层，BI 与批任务共用同一定义，减少「四份 SQL 四个数」；但 LOCF 的观测语义仍需显式实现，引擎不会替你决定「缺失怎么处理」。",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/warehouse-modeling-quality-backfill.md#dimensional-modeling",
+    "addedBy": "content-agent-bd"
+  }
+}

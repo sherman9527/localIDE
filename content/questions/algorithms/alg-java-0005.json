@@ -1,0 +1,176 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0005",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "外部排序归并阶段的多路 Top-K 发射",
+  "statement": "## 背景\n\n外部排序的 merge stage：上一阶段吐出 `runs.size()` 个**已按升序排好**的有序分片（run），下游只要全局最小的 `k` 条（典型形态：`ORDER BY score LIMIT k`）。分片可能为空（某个 spill 文件没数据），也可能出现大量重复值。\n\n全量归并再截断是 O(N log k) 且会写出中间文件；正确做法是**堆里只放每条 run 的当前游标**，取 k 次就停。\n\n## 入口\n\n```java\npublic static int[] mergeKSmallest(List<List<Integer>> runs, int k)\n```\n\n- 返回所有 run 中最小的 `k` 个值，**升序**；重复值按出现次数保留（**不去重**）；\n- 元素总数不足 k 时返回全部可用值（结果长度 = 元素总数）；\n- `k <= 0`、`runs` 为空或为 `null` → 返回 `int[0]`。\n\n## 不变式与硬约束\n\n1. 每个 run 内部升序（这是前提，不要求你校验；也**不许**为了保险先整体排序——那是 O(N log N) 的作弊路径，内存也未必放得下）。\n2. 用 `PriorityQueue` 时：比较器必须写 `Comparator.comparingInt(a -> a[0])`，**不许 `x[0] - y[0]`**（run 里可以出现 `Integer.MIN_VALUE / MAX_VALUE`）；堆条目要携带 run 下标与游标，弹出之后才能推进那一条 run。\n3. `PriorityQueue.iterator()` **只保证第一个元素是堆顶**，把它当\"有序遍历\"是本题设计的判负点；要有序只能反复 `poll()`。\n4. 每条 run 的读取次数不得超过 `min(k, run.size())`（惰性；不许 `new ArrayList<>(run)` 全量物化）。\n5. 复杂度 O(T + k log R)，T = runs.size()，R = 非空 run 条数；判分规模 Σ|run| ≤ 5000。\n\n## 输出契约\n\n返回新分配的 `int[]`（升序）。空结果返回长度 0 的数组，不要返回 `null`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "k-way-merge",
+    "priority-queue",
+    "external-sort",
+    "lazy-evaluation",
+    "modern:external-sort"
+  ],
+  "cases": [
+    {
+      "name": "空分片列表返回空数组",
+      "input": [
+        [],
+        3
+      ],
+      "expected": []
+    },
+    {
+      "name": "含空 run 的退化输入",
+      "input": [
+        [
+          [],
+          [
+            1,
+            5
+          ],
+          [],
+          [
+            2,
+            3
+          ]
+        ],
+        3
+      ],
+      "expected": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "name": "单元素 run 且 k 超过元素总数",
+      "input": [
+        [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ],
+        5
+      ],
+      "expected": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "重复值并列且不去重",
+      "input": [
+        [
+          [
+            7,
+            7,
+            7
+          ],
+          [
+            7,
+            7
+          ]
+        ],
+        4
+      ],
+      "expected": [
+        7,
+        7,
+        7,
+        7
+      ]
+    },
+    {
+      "name": "k 为 0 时不消费任何输入",
+      "input": [
+        [
+          [
+            1,
+            10,
+            20
+          ],
+          [
+            2,
+            11
+          ]
+        ],
+        0
+      ],
+      "expected": []
+    },
+    {
+      "name": "多分片正常归并",
+      "input": [
+        [
+          [
+            1,
+            10,
+            20
+          ],
+          [
+            2,
+            11
+          ],
+          [
+            3,
+            4,
+            30
+          ]
+        ],
+        5
+      ],
+      "expected": [
+        1,
+        2,
+        3,
+        4,
+        10
+      ]
+    },
+    {
+      "name": "极值元素不得让减法比较器溢出",
+      "input": [
+        [
+          [
+            -2147483648,
+            0
+          ],
+          [
+            2147483647
+          ]
+        ],
+        3
+      ],
+      "expected": [
+        -2147483648,
+        0,
+        2147483647
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] mergeKSmallest(List<List<Integer>> runs, int k)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.List;\n\npublic class Solution {\n  /**\n   * 堆里只放 (值, run 下标, run 内游标)：弹出后才推进对应 run，天然惰性。\n   * 比较器用 Comparator.comparingInt（绝不做减法），所以 MIN_VALUE 参与也不会错序。\n   * 用 PriorityQueue 而不是 TreeSet：重复值在 TreeSet 里因 compareTo==0 会被静默丢弃。\n   */\n  public static int[] mergeKSmallest(List<List<Integer>> runs, int k) {\n    if (runs == null || runs.isEmpty() || k <= 0) return new int[0];\n    int total = 0;\n    java.util.PriorityQueue<int[]> heap =\n        new java.util.PriorityQueue<int[]>(java.util.Comparator.comparingInt(a -> a[0]));\n    for (int r = 0; r < runs.size(); r++) {\n      List<Integer> run = runs.get(r);\n      total += run.size();\n      if (!run.isEmpty()) heap.add(new int[] { run.get(0), r, 0 });\n    }\n    int want = Math.min(k, total);\n    int[] out = new int[want];\n    for (int pos = 0; pos < want; pos++) {\n      int[] top = heap.poll();\n      out[pos] = top[0];\n      List<Integer> run = runs.get(top[1]);\n      int next = top[2] + 1;\n      if (next < run.size()) heap.add(new int[] { run.get(next), top[1], next });\n    }\n    return out;\n  }\n}\n",
+    "naiveSolution": "import java.util.List;\n\npublic class Solution {\n  // 朴素：只看每条 run 的队首（相当于\"每条 run 最多贡献一条\"），弹出后不推进游标。\n  // 于是 run 里第 2 个及之后的元素永远进不了结果，k 大于 run 条数时就少发了。\n  public static int[] mergeKSmallest(List<List<Integer>> runs, int k) {\n    java.util.List<Integer> heads = new java.util.ArrayList<>();\n    for (List<Integer> run : runs) {\n      if (!run.isEmpty()) heads.add(run.get(0));\n    }\n    java.util.Collections.sort(heads);\n    int want = Math.min(k, heads.size());\n    int[] out = new int[want];\n    for (int pos = 0; pos < want; pos++) out[pos] = heads.get(pos);\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：k 路归并的 Top-K 截断。堆大小 = 非空 run 条数 R，每次 `poll` 后把**同一条 run** 的下一个元素入堆；取 k 次即停 → O(T + k log R)，而不是 O(N log N) 的全量归并。\n\n**参考解刻意保留的三个 Java 语义点**：\n1. `Comparator.comparingInt(a -> a[0])`：`x[0] - y[0]` 在 `Integer.MIN_VALUE` 参与时溢出，堆序静默错乱（堆不会报错，只会把错的元素递给你）。\n2. 用 `PriorityQueue` 而非 `TreeSet`：重复值在 `TreeSet` 里因 `compareTo == 0` 被视为重复而**丢弃**（\"重复值并列\"用例正是为此设计）；要用有序容器就必须给复合键 `(value, runIdx)`。\n3. 不物化：`new ArrayList<>(run)` 或 `drain` 会打爆内存预算，也违反\"每条 run 至多读 min(k, size) 次\"的惰性契约。\n\n**`offer` vs 构造传集合**：`new PriorityQueue<>(collection)` 是 O(n) heapify，先 new 再逐个 `offer` 是 O(n log n)。这里 R 很小，两种都行，但要能说出差别（另一个高频点是 `peek/poll` 前必须判空，否则返回 null 直接 NPE）。\n\n**复杂度**：时间 O(T + k log R)，额外空间 O(R + k)（堆 + 输出）。\n\n**面试追问**：\n1. R 极大（几万个 run）、每个 run 很短？（分层归并/tournament tree 减少 sift 距离；或按 run 分组先做局部归并，控制单次比较的跳数。）\n2. 要\"第 K 大\"且 run 是降序？（对称改写；或用大小 k 的小顶堆流式扫全量 O(N log k)，此时不需要 run 有序。）\n3. 把它做成迭代器给下游流式消费？（`hasNext()` 必须幂等（不能推进堆）、空堆时 `next()` 抛 `NoSuchElementException`；上游是迭代器时要缓存 peek 才能\"先比较再取\"，这正是判题爱考的契约。）\n4. 生产上为什么 Top-K 常快过完整 `ORDER BY ... LIMIT k`？（省掉 spill 写放大；但下界是\"每条 run 至少读一次队首\"的随机 IO，run 数多时这一步会主导。）",
+  "estimatedMinutes": 20,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-collections-heaps.md#14-priorityqueue-的四条硬知识",
+    "addedBy": "content-agent-alg"
+  }
+}

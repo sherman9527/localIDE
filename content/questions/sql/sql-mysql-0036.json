@@ -1,0 +1,418 @@
+{
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "预订占用对账：半开区间重叠才是事故，锁的生死决定这一行算不算违约",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。当前时刻放在单行表 `clock` 里（**每条语句都是新连接，\n会话变量不跨语句**，所以别指望 `SET @as_of` 还能在下一条里用到 —— 提交就一条查询，自己 cross join 拿）。\n\n```\nclock  (as_of DATETIME)                       -- 只有一行\nhold   (hold_id INT PRIMARY KEY, listing_id INT NOT NULL, guest_id INT NOT NULL,\n        start_date DATE NOT NULL, end_date DATE NOT NULL,\n        state VARCHAR(10) NOT NULL,           -- COMMITTED | HELD | CANCELLED\n        held_until DATETIME NULL)             -- 仅 HELD 有值：锁窗口到点时刻\n```\n\n## 业务口径（判分点，逐条都要照做）\n\n1. **日期区间是半开的 `[start_date, end_date)`**：`end_date` 是退房日，那一晚不占用。\n   所以\"9/25 退房\"与\"9/25 入住\"**不冲突**。\n2. 参与判定的只有**有效占用**：`state='COMMITTED'`，或者 `state='HELD' AND held_until >= as_of`\n   （锁窗口还活着）。`CANCELLED` 与**已过期**的 `HELD` 一律不参与 ——\n   过期锁已经让位，拿它去指控别人违约是假警报。\n3. 同一 `listing_id` 内两两配对，**每对只报一次**（取 `hold_id` 小的在前）。\n4. `conflict_kind` 按两边的状态分三类：\n   两边都 `COMMITTED` ⇒ `double-commit`（真超卖，客人会被要求搬家）；\n   一边 `HELD` 一边 `COMMITTED` ⇒ `lock-breach`（提交绕过了还活着的锁窗口）；\n   两边都 `HELD` ⇒ `lock-contention`（互斥本身失效了 —— 锁没起作用）。\n5. `overlap_days` = 重叠段的天数 = `DATEDIFF(LEAST(两结束), GREATEST(两开始))`。\n   被完全包含时按**被包含那段**算，不是按较长那条算。\n6. 没有冲突 ⇒ **返回空结果集**（不是返回一行 NULL / 0）。\n7. 输出列顺序固定为 `listing_id, hold_a, hold_b, conflict_kind, overlap_days`，\n   并 `ORDER BY listing_id, hold_a, hold_b`。\n\n只提交一条 `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n素材里那句\"**锁只是效率手段，正确性落在占用表的约束上**\"不是一句口号：它意味着\n\"有没有事故\"必须能从占用表本身查出来，而不是问 Redis。这道题就是那个查询 ——\n- **半开区间**是日历系统最常见的 off-by-one 来源，用 `<=` 会把\"同日退房即入住\"报成冲突，\n  于是每天中午都有几百条假警报，很快就没人看这个报表了；\n- **过期锁要不要参与**决定了这份报表是\"抓真事故\"还是\"抓噪声\"；\n- 三分类不是装饰：`double-commit` 要立刻逐单安置，`lock-breach` 要查提交路径为什么没看锁，\n  `lock-contention` 要查锁本身 —— 混成一列数字，处置动作就没法定。",
+  "judgeKind": "mysql",
+  "tags": [
+    "interval-overlap",
+    "half-open-interval",
+    "reconciliation",
+    "lock-window",
+    "over-selling",
+    "modern:marketplace-integrity"
+  ],
+  "source": {
+    "company": "Airbnb",
+    "role": "市场交易完整性 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-marketplace-booking.md §1.2、§2.1、§2.7（素材给出\"锁只是效率手段 + 悬挂预订对账\"的结论，未做成可判分的区间口径与分类）",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-25T06:30:29.016Z"
+  },
+  "language": "sql",
+  "cases": [
+    {
+      "name": "基线：三类冲突各一行，同日衔接与过期锁都不算",
+      "input": [],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            2,
+            "double-commit",
+            1
+          ],
+          [
+            1,
+            1,
+            4,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            2,
+            3,
+            "double-commit",
+            2
+          ],
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ],
+          [
+            4,
+            11,
+            12,
+            "double-commit",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：只剩同日退房即入住的两笔 ⇒ listing 1 一行都不出",
+      "input": [
+        "DELETE FROM hold WHERE hold_id = 2",
+        "DELETE FROM hold WHERE hold_id = 4"
+      ],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ],
+          [
+            4,
+            11,
+            12,
+            "double-commit",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "1 号(9/20–9/25) 与 3 号(9/25–9/27) 是同日衔接；闭区间实现会在这里多出一行 overlap_days=0 的\"冲突\"，而 0 天的重叠根本不是重叠",
+      "visible": true
+    },
+    {
+      "name": "重复：把过期锁的到点时刻推到未来 ⇒ 多出一行 lock-breach",
+      "input": [
+        "UPDATE hold SET held_until = '2026-09-20 00:00:00' WHERE hold_id = 5"
+      ],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            2,
+            "double-commit",
+            1
+          ],
+          [
+            1,
+            1,
+            4,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            1,
+            5,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            2,
+            3,
+            "double-commit",
+            2
+          ],
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ],
+          [
+            4,
+            11,
+            12,
+            "double-commit",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "只改 held_until 一个字段，5 号从\"已让位\"变成\"活锁被绕过\"",
+      "visible": true
+    },
+    {
+      "name": "退化：删掉那笔已取消的占用，一行都不该变",
+      "input": [
+        "DELETE FROM hold WHERE hold_id = 7"
+      ],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            2,
+            "double-commit",
+            1
+          ],
+          [
+            1,
+            1,
+            4,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            2,
+            3,
+            "double-commit",
+            2
+          ],
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ],
+          [
+            4,
+            11,
+            12,
+            "double-commit",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "CANCELLED 本来就不参与；把它 JOIN 进来的实现这里数字会动",
+      "visible": true
+    },
+    {
+      "name": "并列：锁的到点时刻正好等于当前时刻 ⇒ 仍算活锁，结果与基线一致",
+      "input": [
+        "UPDATE hold SET held_until = '2026-09-15 12:00:00' WHERE hold_id = 4"
+      ],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            2,
+            "double-commit",
+            1
+          ],
+          [
+            1,
+            1,
+            4,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            2,
+            3,
+            "double-commit",
+            2
+          ],
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ],
+          [
+            4,
+            11,
+            12,
+            "double-commit",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "考 >= 与 > 的差别：写成 > 的实现会少一行 lock-breach",
+      "visible": true
+    },
+    {
+      "name": "极大：把被包含的那笔挪到完全不相交 ⇒ 包含关系那行消失",
+      "input": [
+        "UPDATE hold SET start_date = '2027-06-01' WHERE hold_id = 12",
+        "UPDATE hold SET end_date = '2027-06-10' WHERE hold_id = 12"
+      ],
+      "expected": {
+        "columns": [
+          "listing_id",
+          "hold_a",
+          "hold_b",
+          "conflict_kind",
+          "overlap_days"
+        ],
+        "rows": [
+          [
+            1,
+            1,
+            2,
+            "double-commit",
+            1
+          ],
+          [
+            1,
+            1,
+            4,
+            "lock-breach",
+            1
+          ],
+          [
+            1,
+            2,
+            3,
+            "double-commit",
+            2
+          ],
+          [
+            2,
+            6,
+            8,
+            "lock-breach",
+            2
+          ],
+          [
+            3,
+            9,
+            10,
+            "lock-contention",
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "note": "11 号是整年长租；12 号挪到 2027-06 之后与它不再相交",
+      "visible": true
+    },
+    {
+      "name": "单条：只留一笔有效占用 ⇒ 没有任何配对",
+      "input": [
+        "DELETE FROM hold WHERE hold_id = 2",
+        "DELETE FROM hold WHERE hold_id = 3",
+        "DELETE FROM hold WHERE hold_id = 4",
+        "DELETE FROM hold WHERE hold_id = 5",
+        "DELETE FROM hold WHERE hold_id = 6",
+        "DELETE FROM hold WHERE hold_id = 7",
+        "DELETE FROM hold WHERE hold_id = 8",
+        "DELETE FROM hold WHERE hold_id = 9",
+        "DELETE FROM hold WHERE hold_id = 10",
+        "DELETE FROM hold WHERE hold_id = 11",
+        "DELETE FROM hold WHERE hold_id = 12",
+        "DELETE FROM hold WHERE hold_id = 13"
+      ],
+      "expected": [],
+      "note": "空结果集不是\"一行 NULL\"",
+      "visible": true
+    }
+  ],
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS hold",
+      "DROP TABLE IF EXISTS clock",
+      "CREATE TABLE clock (as_of DATETIME NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE hold (hold_id INT PRIMARY KEY, listing_id INT NOT NULL, guest_id INT NOT NULL, start_date DATE NOT NULL, end_date DATE NOT NULL, state VARCHAR(10) NOT NULL, held_until DATETIME NULL) ENGINE=InnoDB",
+      "INSERT INTO clock VALUES ('2026-09-15 12:00:00')",
+      "INSERT INTO hold VALUES (1, 1, 901, '2026-09-20', '2026-09-25', 'COMMITTED', NULL), (2, 1, 902, '2026-09-24', '2026-09-28', 'COMMITTED', NULL), (3, 1, 903, '2026-09-25', '2026-09-27', 'COMMITTED', NULL), (4, 1, 904, '2026-09-21', '2026-09-22', 'HELD', '2026-09-16 00:00:00'), (5, 1, 905, '2026-09-20', '2026-09-21', 'HELD', '2026-09-14 00:00:00'), (6, 2, 906, '2026-10-01', '2026-10-05', 'COMMITTED', NULL), (7, 2, 907, '2026-10-02', '2026-10-03', 'CANCELLED', NULL), (8, 2, 908, '2026-10-03', '2026-10-08', 'HELD', '2026-09-18 00:00:00'), (9, 3, 909, '2026-11-01', '2026-11-05', 'HELD', '2026-09-17 00:00:00'), (10, 3, 910, '2026-11-04', '2026-11-06', 'HELD', '2026-09-17 00:00:00'), (11, 4, 911, '2026-01-01', '2027-01-01', 'COMMITTED', NULL), (12, 4, 912, '2026-06-01', '2026-06-10', 'COMMITTED', NULL), (13, 5, 913, '2026-09-20', '2026-09-25', 'COMMITTED', NULL)"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH live AS (\n  SELECT h.hold_id, h.listing_id, h.start_date, h.end_date, h.state\n  FROM hold h CROSS JOIN clock c\n  WHERE h.state = 'COMMITTED'\n     OR (h.state = 'HELD' AND h.held_until >= c.as_of)\n), pairs AS (\n  SELECT a.listing_id,\n         a.hold_id AS hold_a,\n         b.hold_id AS hold_b,\n         a.state AS state_a,\n         b.state AS state_b,\n         DATEDIFF(LEAST(a.end_date, b.end_date), GREATEST(a.start_date, b.start_date)) AS overlap_days\n  FROM live a\n  JOIN live b\n    ON b.listing_id = a.listing_id\n   AND b.hold_id > a.hold_id\n   AND a.start_date < b.end_date\n   AND b.start_date < a.end_date\n)\nSELECT listing_id, hold_a, hold_b,\n       CASE WHEN state_a = 'COMMITTED' AND state_b = 'COMMITTED' THEN 'double-commit'\n            WHEN state_a = 'HELD' AND state_b = 'HELD' THEN 'lock-contention'\n            ELSE 'lock-breach' END AS conflict_kind,\n       overlap_days\nFROM pairs\nORDER BY listing_id, hold_a, hold_b",
+    "naiveSolution": "WITH all_states AS (\n  SELECT hold_id, listing_id, start_date, end_date, state FROM hold\n), pairs AS (\n  SELECT a.listing_id, a.hold_id AS hold_a, b.hold_id AS hold_b,\n         a.state AS state_a, b.state AS state_b,\n         DATEDIFF(LEAST(a.end_date, b.end_date), GREATEST(a.start_date, b.start_date)) AS overlap_days\n  FROM all_states a\n  JOIN all_states b\n    ON b.listing_id = a.listing_id\n   AND b.hold_id > a.hold_id\n   AND a.start_date <= b.end_date          -- 闭区间：把\"同日退房即入住\"也报成冲突\n   AND b.start_date <= a.end_date\n)\nSELECT listing_id, hold_a, hold_b,\n       CASE WHEN state_a = 'COMMITTED' AND state_b = 'COMMITTED' THEN 'double-commit'\n            ELSE 'lock-breach' END AS conflict_kind,      -- 不看 HELD 生死，也不分 lock-contention\n       overlap_days\nFROM pairs\nORDER BY listing_id, hold_a, hold_b",
+    "entry": "function"
+  },
+  "estimatedMinutes": 26,
+  "answer": "**基线有 6 行**（由模型从行集算出，不是手抄）：\n`double-commit` 3 行、\n`lock-breach` 2 行、\n`lock-contention` 1 行。\n\n**三条规则各自在哪个用例上起作用**（数字全部量自 `probe_naive.py`）：\n\n- **半开区间**：listing 1 的 1 号（9/20–9/25）与 3 号（9/25–9/27）**不是冲突**。\n  基线里它们不出现在结果中；把区间写成闭区间的实现会多出这一对，\n  而它的 `overlap_days` 是 **0** —— 这正是\"每天几百条假警报\"的形状：0 天的冲突根本不是冲突。\n  用例「边界：只剩同日退房即入住的两笔 ⇒ listing 1 一行都不出」把这条单独隔离出来\n  （删掉 2 号与 4 号之后，listing 1 只剩 1 号与 3 号这对同日衔接）：\n  正确实现**不输出 listing 1 的任何行**，闭区间实现输出一行 `overlap_days = 0`。\n- **过期锁不参与**：5 号锁的 `held_until` 早于 `as_of`，所以它与 1 号的重叠不算事故。\n  用例「重复：把过期锁的到点时刻推到未来」只改这一个字段，结果就多出一行\n  `[1, 1, 4, 'lock-breach', 1]`（1 天 lock-breach）。忽略 `held_until` 的实现会在基线里就多报这一行。\n- **`>=` 还是 `>`**：用例「并列：锁的到点时刻正好等于当前时刻 ⇒ 仍算活锁，结果与基线一致」\n  把 4 号的 `held_until` 改成 `as_of` 本身 ⇒ 口径是\"到点那一刻仍然有效\"，所以**结果与基线完全一致**；\n  写成 `>` 的实现这一行会掉进\"已过期\"，基线的 lock-breach 直接少一行。\n- **`CANCELLED` 是噪声**：用例「退化：删掉那笔已取消的占用」删掉 7 号，\n  **一行都不该变**。任何\"把所有状态都 JOIN 进来\"的实现在这里会掉行或加行。\n- **包含关系按被包含段算**：11 号是整年长租，12 号只有 9 天 ⇒\n  重叠是 9 天，不是 365 天。\n- **不同 listing 从不冲突**：13 号与 1 号日期完全相同，但分属 listing 5 与 1 ⇒ 不报。\n  漏掉 `listing_id` 等值条件的实现会把它当成最严重的一类。\n\n**为什么\"锁更强、TTL 更长\"不是答案**（素材 §3 点名的常见错误）：把 TTL 拉长只是把\n悬挂的时间拉长，超卖照样发生；真正兜底的是占用表上的唯一约束与这份对账查询。\n`lock-contention` 这一类的存在尤其说明问题 —— 两个**都还活着**的锁重叠，意味着互斥\n从来没有生效过（比如锁键用了 `listing_id` 而没带日期区间），这时加多长的 TTL 都只是在\n掩盖一个键设计错误。\n\n**处置顺序**（面试追问点）：先停相关写路径 ⇒ 按 `conflict_kind` 分流\n（`double-commit` 逐单安置 + 补偿；`lock-breach` 查提交路径；`lock-contention` 查锁键设计）\n⇒ 再补上\"写入时唯一约束\"让同类事故不可能发生，最后把这份对账挂成常态监控而不是事后脚本。",
+  "schemaVersion": 1,
+  "id": "sql-mysql-0036"
+}

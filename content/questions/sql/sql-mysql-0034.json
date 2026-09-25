@@ -1,0 +1,388 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0034",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "分库分表体检：主键跨片重复、买家散落分片数、GSI 回表与索引缺失，分页行数两种口径",
+  "statement": "## 背景\n\nPolarDB-X 官方文档里有一条被反复误读的话【源 S29】：\n\n> \"**分库分表中，分表内保证主键的唯一性，但是主键在分库分表中不保证唯一性**，\n> 如有需要可使用全局唯一索引。\"\n\n同一批文档还给了三条相关事实：\n\n- **全局唯一 ID 与全局唯一约束是两件事**：前者靠序列（雪花 / 号段 / DB sequence），\n  后者才需要 GSI【源 S29】＋【推】；\n- \"**每个 GSI 对应一张索引表，使用 XA 多写保证主表和索引表之间数据强一致**\"，\n  `COVERING` 覆盖列\"默认包含主键和主表的分库分表键\"【源 S28】；\n- 拆分键的首要原则是\"尽可能找到**数据所归属的业务逻辑实体**，\n  并确定大部分（或核心的）SQL 都围绕这个实体进行\"【源 S27】。\n\n素材 §4 考点 14 的出题建议是\"拆分后的订单主表 + 买家维度 GSI 表，\n实现跨库分页不重不漏 + 校验主键是否出现重复 + 统计需回表的行数并断言\"，\n本题把这三件事拆成**十个必须互相独立的数字**。\n\n## 表\n\n```\nshard_row(shard_idx INT, row_id BIGINT, buyer_id INT, order_time INT,\n          PRIMARY KEY (shard_idx, row_id))\n   -- 逻辑表被拆到 shard_idx = 0/1/2 三个分片；主键只在\"分片内\"唯一\ngsi_index(row_id BIGINT PK, buyer_id INT, shard_idx INT, covering INT)\n   -- 按 buyer_id 维度建的全局二级索引表；covering=1 表示所需列都在索引里（不用回表）\n```\n\n## 任务\n\n只交**一条 SELECT**（可以用 `WITH`），输出十行指标，列固定 `metric, value`，按 `metric` 升序：\n\n| `metric` | 定义 |\n| --- | --- |\n| `total-rows` | `shard_row` 的总行数 |\n| `distinct-pk` | `COUNT(DISTINCT row_id)` |\n| `duplicate-pk-rows` | `total-rows − distinct-pk`（**多出来的行数**，不是重复主键的个数） |\n| `duplicate-pk-groups` | 出现在 **≥ 2 个不同分片**的 `row_id` 个数 |\n| `buyers-scattered` | 订单散在多于一个分片上的 `buyer_id` **个数**（这些买家的查询要扫全库） |\n| `gsi-back-to-table-rows` | `covering = 0` 的索引行数（每条都要回主表） |\n| `gsi-missing-rows` | 主表里存在、GSI 里**没有**的**不同** `row_id` 个数 |\n| `gsi-orphan-rows` | GSI 里存在、主表里**没有**的**不同** `row_id` 个数 |\n| `page-rows-correct` | 全局排序 `(order_time DESC, row_id DESC)` 后**第 3 页**（每页 3 行）的行数 |\n| `page-rows-naive-per-shard` | \"每个分片各自取第 3 页\"再合起来的行数（即 `shard_rn BETWEEN 7 AND 9`） |\n\n## 三条口径纪律\n\n- **`duplicate-pk-rows` 与 `duplicate-pk-groups` 必须分列**：\n  一个主键有 3 个副本 ⇒ 差额 2 行、1 个组。混成一列就分不清\n  \"脏数据规模\"与\"要人工核对几个订单\"。\n- **`buyers-scattered` 要按 `COUNT(DISTINCT shard_idx) > 1`，不是 `COUNT(*) > 1`**：\n  一个买家 4 条订单全在同一分片是**好事**（拆分键选对了）；\n  用行数判会把大客户全报成问题。\n- **两个对账指标都要先取\"不同 `row_id`\"再算差集**：\n  主表本身有重复主键，直接 `COUNT(*)` 做差会把重复行数算进\"索引缺失\"，\n  于是索引回填进度被虚报。`missing` 与 `orphan` **也不是互补的两个数**：\n  前者是 XA 多写少了一半，后者是删除路径没对称 —— 各自对应不同的修复动作。\n\n**关于分页**：`page-rows-correct` 与 `page-rows-naive-per-shard` 用同一个\n`BETWEEN 7 AND 9`，差别只在 `ROW_NUMBER` 有没有 `PARTITION BY shard_idx`。\n**正确页的行数与分片数无关，朴素分页的行数随分片数线性变化** ——\n这就是素材里\"跨库分页不重不漏\"的可判形态（真实的正确取法是\n每片取前 `page_no × page_size` 行再全局归并）。\n\n只允许一条 `SELECT`。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "sharding",
+    "primary-key-uniqueness",
+    "global-secondary-index",
+    "cross-shard-pagination",
+    "xa-multi-write",
+    "modern:distributed-database"
+  ],
+  "cases": [
+    {
+      "name": "基线：主键跨分片重复 2 行、一个买家散在两个分片、两行要回表",
+      "input": [],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            1
+          ],
+          [
+            "distinct-pk",
+            7
+          ],
+          [
+            "duplicate-pk-groups",
+            2
+          ],
+          [
+            "duplicate-pk-rows",
+            2
+          ],
+          [
+            "gsi-back-to-table-rows",
+            2
+          ],
+          [
+            "gsi-missing-rows",
+            1
+          ],
+          [
+            "gsi-orphan-rows",
+            1
+          ],
+          [
+            "page-rows-correct",
+            3
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "total-rows=9 / distinct-pk=7 ⇒ 重复 2 行、重复组 2 个（5003 与 5007）；买家 102 在分片 0 与 1 都有单 ⇒ buyers-scattered=1（105 的两行都在分片 2，\"一个分片里买家重复\"不是散落）；gsi 里 covering=0 的两行要回表；主表 7 个不同主键里有 1 个不在 gsi ⇒ missing=1"
+    },
+    {
+      "name": "边界：把 GSI 全部补齐覆盖列 ⇒ 回表行数归零，但主键重复一行都没变",
+      "input": [
+        "UPDATE gsi_index SET covering = 1 WHERE covering = 0"
+      ],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            1
+          ],
+          [
+            "distinct-pk",
+            7
+          ],
+          [
+            "duplicate-pk-groups",
+            2
+          ],
+          [
+            "duplicate-pk-rows",
+            2
+          ],
+          [
+            "gsi-back-to-table-rows",
+            0
+          ],
+          [
+            "gsi-missing-rows",
+            1
+          ],
+          [
+            "gsi-orphan-rows",
+            1
+          ],
+          [
+            "page-rows-correct",
+            3
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "GSI 解决\"按哪个维度查\"，不解决\"主键在分库分表里不保证唯一\"——两件事必须分开报"
+    },
+    {
+      "name": "边界：删掉分片 2 的全部行 ⇒ 全局末页还剩 1 行，\"每片各取第 3 页\"一行都不剩",
+      "input": [
+        "DELETE FROM shard_row WHERE shard_idx = 2",
+        "DELETE FROM gsi_index WHERE row_id = 5006"
+      ],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            1
+          ],
+          [
+            "distinct-pk",
+            6
+          ],
+          [
+            "duplicate-pk-groups",
+            1
+          ],
+          [
+            "duplicate-pk-rows",
+            1
+          ],
+          [
+            "gsi-back-to-table-rows",
+            2
+          ],
+          [
+            "gsi-missing-rows",
+            1
+          ],
+          [
+            "gsi-orphan-rows",
+            1
+          ],
+          [
+            "page-rows-correct",
+            1
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            7
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "删空一个分片之后总数从 9 掉到 7：全局第 3 页（offset 6、size 3）还剩 1 行，而\"每片各取第 3 页\"在删片前后都是 0 —— 分片越多、每片的行数越少，这种写法就会**静默返回空页**，前端看到的是\"没有更多了\"。（搬移而不是删除的写法在这里会撞主键：5007 在分片 0 已经有了，Python 模型不会撞、MySQL 会 —— 所以变异 kinds 里专门有 delcol。）"
+    },
+    {
+      "name": "退化：主表被清空 ⇒ 只剩孤儿索引行，两个分页指标都是 0",
+      "input": [
+        "DELETE FROM shard_row"
+      ],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            0
+          ],
+          [
+            "distinct-pk",
+            0
+          ],
+          [
+            "duplicate-pk-groups",
+            0
+          ],
+          [
+            "duplicate-pk-rows",
+            0
+          ],
+          [
+            "gsi-back-to-table-rows",
+            2
+          ],
+          [
+            "gsi-missing-rows",
+            0
+          ],
+          [
+            "gsi-orphan-rows",
+            7
+          ],
+          [
+            "page-rows-correct",
+            0
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            0
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：索引表被清空 ⇒ 回表 0 行，但\"索引缺失\"是 7 行不是 0",
+      "input": [
+        "DELETE FROM gsi_index"
+      ],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            1
+          ],
+          [
+            "distinct-pk",
+            7
+          ],
+          [
+            "duplicate-pk-groups",
+            2
+          ],
+          [
+            "duplicate-pk-rows",
+            2
+          ],
+          [
+            "gsi-back-to-table-rows",
+            0
+          ],
+          [
+            "gsi-missing-rows",
+            7
+          ],
+          [
+            "gsi-orphan-rows",
+            0
+          ],
+          [
+            "page-rows-correct",
+            3
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "gsi-missing-rows=7、gsi-orphan-rows=0、gsi-back-to-table-rows=0；把\"没有回表\"读成\"索引很健康\"是反向陷阱"
+    },
+    {
+      "name": "边界：把散落的那个买家并回一个分片 ⇒ buyers-scattered 归零，重复主键一行没变",
+      "input": [
+        "UPDATE shard_row SET buyer_id = 101 WHERE shard_idx = 0 AND row_id = 5003"
+      ],
+      "expected": {
+        "columns": [
+          "metric",
+          "value"
+        ],
+        "rows": [
+          [
+            "buyers-scattered",
+            0
+          ],
+          [
+            "distinct-pk",
+            7
+          ],
+          [
+            "duplicate-pk-groups",
+            2
+          ],
+          [
+            "duplicate-pk-rows",
+            2
+          ],
+          [
+            "gsi-back-to-table-rows",
+            2
+          ],
+          [
+            "gsi-missing-rows",
+            1
+          ],
+          [
+            "gsi-orphan-rows",
+            1
+          ],
+          [
+            "page-rows-correct",
+            3
+          ],
+          [
+            "page-rows-naive-per-shard",
+            0
+          ],
+          [
+            "total-rows",
+            9
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "只改 `(0, 5003)` 这一行：102 就只剩分片 1 的单 ⇒ scattered=0，而 5003 依旧是跨分片重复的主键 ⇒ duplicate 两列不动。**这条必须用 setpk 写**：`set` 只认单列 pk 代理，按 `row_id = 5003` 会连着改掉分片 1 的那一行，于是\"并回一个分片\"变成\"两个副本都改了买家\"—— 散落没归零、还多出一个假散射"
+    }
+  ],
+  "answer": "## 参考答案\n\n一个 `WITH` 出 `ranked`（同时给 `global_rn` 与 `shard_rn`）、`per_row`、`missing`、`orphan`、\n`scattered` 五个 CTE，再 `UNION ALL` 十段。结构上没有难点，难点全在**十个定义互不重叠**。\n\n**基线十行**：`total-rows=9`、`distinct-pk=7`、`duplicate-pk-rows=2`、\n`duplicate-pk-groups=2`（5003 与 5007）、`buyers-scattered=1`（只有 102 散在分片 0 与 1；\n105 的两行都在分片 2 —— \"同一个分片里买家重复\"不是散落）、\n`gsi-back-to-table-rows=2`、`gsi-missing-rows=1`（5007 —— 它在主表出现两次，\n但按**不同主键**只算一个）、`gsi-orphan-rows=1`（5008）、\n`page-rows-correct=3`、`page-rows-naive-per-shard=0`。\n\n**`gsi-missing-rows=1` 是这道题最容易算错的一格**：主表 9 行 / 7 个不同主键，\nGSI 7 行 —— 少掉的那个主键是 5007，而它在主表**有两个副本**。\n如果写成 `COUNT(*)` 的差会得到 2（两个副本各算一次），\n而\"要回填几个主键\"是 1。**重复主键会顺着所有\"两表对账\"的口径往下传染**，\n这正是不加 `DISTINCT` 的代价。\n\n**两个分页列的差就是本题结论**：第 3 页每页 3 行 ⇒ 全局排序的第 7~9 名有 3 行；\n\"每片各取第 3 页\"给 **0 行**（三个分片各只有 4 / 3 / 2 行，谁都凑不到第 7 名）。\n**行数不同只是症状**：真正的问题是\"每片的第 7~9 名\"根本不对应\"全局第 7~9 名\"，\n而它的表现不是\"数字错了\"，是**翻到第三页永远空白** —— 用户以为到底了。\n正确做法是每片取前 `page_no × page_size = 9` 行再全局归并。\n用例「删掉分片 2 的全部行」把这条摊开：正确口径 3 → 1（末页只剩一行，这次是**真的**到底），\n朴素口径 0 → 0（它\"到底之前\"也是 0）—— 一个从来给不出\"还剩几行\"的分页实现，\n连自己错了都报不出来。\n\n**用例「GSI 全部补齐覆盖列」**：`gsi-back-to-table-rows` 归 0，\n而 `duplicate-pk-rows` 与 `duplicate-pk-groups` 一行没变。\n这条是防\"加个索引就万事大吉\"的直觉 —— 素材明确把\n\"全局唯一 ID（序列）\"与\"全局唯一约束（GSI）\"分成两件事【源 S29】＋【推】。\n\n**用例「索引表被清空」是全题最反直觉的一条**：\n`gsi-back-to-table-rows = 0` 看着像\"索引很健康\"，\n同一份结果里 `gsi-missing-rows = 7` 说明索引压根没建起来。\n**任何\"某项指标为 0 所以放心\"的判断，都要先问它的补集是哪一列。**\n\n**用例「把散落的那个买家并回一个分片」**：`buyers-scattered` 归 0、重复主键两列不变。\n这两列各对应一条治理动作：前者改**拆分键选择**，后者改**主键生成方式**。\n并成一列\"分库分表问题数\"就会出现\"上了全局序列，散列买家依然天天扫全库\"的现场。\n（这条的变异写法本身就是判分点之一：`set` 只认 `table_spec` 里那一个 pk 代理列，\n而这张表的声明主键是 `(shard_idx, row_id)` —— 用 `row_id = 5003` 去 UPDATE\n会连着改掉分片 1 的那个副本，\"并回一个分片\"当场变成\"两边都改了买家\"。\n所以变异 kinds 里另给了 `setpk`：**按声明主键的每一列定位、命中多行就拒绝生成**。）\n\n**朴素解挂五类、共六列**：重复主键两列直接写 0（默认\"主键当然全局唯一\"）；\n`buyers-scattered` 用 `HAVING COUNT(*) > 1`（把\"一个买家有多条单\"当成散落，\n基线给出 3 而正确答案是 1 —— 105 的两行都在分片 2，压根不是散落）；\n`gsi-missing-rows` 不加 `DISTINCT`（给出 2 而不是 1）；\n`gsi-orphan-rows` 写 0（看不见\"索引表有、主表没有\"）；\n两个分页列用同一个全局 `ROW_NUMBER`（两列永远相等，本题的核心断言被抹平）。\n\n**工程延伸（面试追问点）**\n\n1. 加了 GSI 写为什么会变慢？（官方依据：\"每个 GSI 对应一张索引表，使用 **XA 多写**\n   保证主表和索引表之间数据强一致\"【源 S28】—— 一次业务写被放大成多分片写。）\n2. GSI 与热点行优化互斥怎么处理？（素材考点 4 引 PolarDB-X【源 S11】：\n   热点更新\"**不支持带有全局索引的表**\"。所以爆款 SKU 那张表要么放弃内核热点优化，\n   要么把买家维度的查询改走异步宽表。`gsi-back-to-table-rows` 就是决策输入：\n   回表行数低说明覆盖得好，换成异步宽表的代价就小。）\n3. 主键重复怎么修？（不能\"随便留一行\"：两个副本可能是**两条不同的真实订单**\n   （号段发号器重叠），也可能是同一订单写了两遍。\n   判据是 `buyer_id`/`order_time` 是否一致，不一致就要走业务裁决 ——\n   这正是 `duplicate-pk-groups` 单独成一列的原因：它是\"要人看的清单\"的长度。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS `shard_row`",
+      "DROP TABLE IF EXISTS `gsi_index`",
+      "CREATE TABLE shard_row (shard_idx INT NOT NULL, row_id BIGINT NOT NULL, buyer_id INT NOT NULL, order_time INT NOT NULL, PRIMARY KEY (shard_idx, row_id)) ENGINE=InnoDB",
+      "CREATE TABLE gsi_index (row_id BIGINT NOT NULL PRIMARY KEY, buyer_id INT NOT NULL, shard_idx INT NOT NULL, covering INT NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO shard_row VALUES (0, 5001, 101, 100), (0, 5002, 101, 110), (0, 5003, 102, 120), (0, 5007, 103, 130), (1, 5003, 104, 140), (1, 5004, 102, 150), (1, 5005, 102, 160), (2, 5006, 105, 170), (2, 5007, 105, 180)",
+      "INSERT INTO gsi_index VALUES (5001, 101, 0, 1), (5002, 101, 0, 1), (5003, 102, 0, 0), (5004, 102, 1, 1), (5005, 102, 1, 0), (5006, 105, 2, 1), (5008, 106, 0, 1)"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 20000,
+    "referenceSolution": "WITH ranked AS (\n  SELECT s.shard_idx, s.row_id, s.buyer_id, s.order_time,\n         ROW_NUMBER() OVER (ORDER BY s.order_time DESC, s.row_id DESC)  AS global_rn,\n         ROW_NUMBER() OVER (PARTITION BY s.shard_idx\n                            ORDER BY s.order_time DESC, s.row_id DESC)  AS shard_rn\n  FROM shard_row s\n),\nper_row AS (\n  SELECT row_id, COUNT(*) AS copies FROM shard_row GROUP BY row_id\n),\nmissing AS (\n  SELECT DISTINCT s.row_id AS pk FROM shard_row s\n  LEFT JOIN gsi_index g ON g.row_id = s.row_id\n  WHERE g.row_id IS NULL\n),\norphan AS (\n  SELECT DISTINCT g.row_id AS pk FROM gsi_index g\n  LEFT JOIN shard_row s ON s.row_id = g.row_id\n  WHERE s.row_id IS NULL\n),\nscattered AS (\n  SELECT buyer_id FROM shard_row GROUP BY buyer_id HAVING COUNT(DISTINCT shard_idx) > 1\n)\nSELECT 'total-rows' AS metric, COUNT(*) AS value FROM shard_row\nUNION ALL\nSELECT 'distinct-pk', COUNT(DISTINCT row_id) FROM shard_row\nUNION ALL\nSELECT 'duplicate-pk-rows', COUNT(*) - COUNT(DISTINCT row_id) FROM shard_row\nUNION ALL\nSELECT 'duplicate-pk-groups', COUNT(*) FROM per_row WHERE copies > 1\nUNION ALL\nSELECT 'buyers-scattered', COUNT(*) FROM scattered\nUNION ALL\nSELECT 'gsi-back-to-table-rows', COUNT(*) FROM gsi_index WHERE covering = 0\nUNION ALL\nSELECT 'gsi-missing-rows', COUNT(*) FROM missing\nUNION ALL\nSELECT 'gsi-orphan-rows', COUNT(*) FROM orphan\nUNION ALL\nSELECT 'page-rows-correct', COUNT(*) FROM ranked WHERE global_rn BETWEEN 7 AND 9\nUNION ALL\nSELECT 'page-rows-naive-per-shard', COUNT(*) FROM ranked WHERE shard_rn BETWEEN 7 AND 9\nORDER BY metric",
+    "naiveSolution": "SELECT 'total-rows' AS metric, COUNT(*) AS value FROM shard_row\nUNION ALL\nSELECT 'distinct-pk', COUNT(DISTINCT row_id) FROM shard_row\nUNION ALL\nSELECT 'duplicate-pk-rows', 0 FROM shard_row LIMIT 1\nUNION ALL\nSELECT 'duplicate-pk-groups', 0 FROM shard_row LIMIT 1\nUNION ALL\nSELECT 'buyers-scattered', COUNT(*) FROM (\n         SELECT buyer_id FROM shard_row GROUP BY buyer_id HAVING COUNT(*) > 1) b\nUNION ALL\nSELECT 'gsi-back-to-table-rows', COUNT(*) FROM gsi_index WHERE covering = 0\nUNION ALL\nSELECT 'gsi-missing-rows', (SELECT COUNT(*) FROM shard_row s\n                            LEFT JOIN gsi_index g ON g.row_id = s.row_id\n                            WHERE g.row_id IS NULL)\nFROM shard_row LIMIT 1\nUNION ALL\nSELECT 'gsi-orphan-rows', 0 FROM shard_row LIMIT 1\nUNION ALL\nSELECT 'page-rows-correct', COUNT(*) FROM (\n         SELECT ROW_NUMBER() OVER (ORDER BY order_time DESC, row_id DESC) rn\n         FROM shard_row) r WHERE r.rn BETWEEN 7 AND 9\nUNION ALL\nSELECT 'page-rows-naive-per-shard', COUNT(*) FROM (\n         SELECT ROW_NUMBER() OVER (ORDER BY order_time DESC, row_id DESC) rn\n         FROM shard_row) r WHERE r.rn BETWEEN 7 AND 9"
+  },
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发 / 服务端研发（分布式数据库与拆分治理方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 14（分库分表与全局一致性：\"分表内主键唯一、分库分表中不保证唯一\"【源 S29】、\"每个 GSI 对应一张索引表 + XA 多写强一致\"与 COVERING 覆盖列【源 S28】、拆分键要选\"数据所归属的业务逻辑实体\"【源 S27】；素材该考点的出题建议正是\"跨库分页不重不漏 + 校验主键是否出现重复 + 统计需回表的行数并断言\"。十个指标的拆分口径与分页对照写法是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T15:57:50.397Z"
+  }
+}

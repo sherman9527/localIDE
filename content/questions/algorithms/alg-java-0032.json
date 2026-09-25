@@ -1,0 +1,481 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0032",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "H3 k-ring 邻近 join：轨迹级去重，六边形距离不是曼哈顿",
+  "statement": "## 背景\n\n海量轨迹与兴趣点做邻近匹配时，\"逐对算球面距离\"是笛卡尔积，跑不动也分布式不了。\n通行做法是把经纬度离散成网格 cell（H3 的六边形格、S2 的球面格），\n于是\"邻近\"退化成 **cell 等值 join + 一圈 ring 扩展**。\n\n扩展之后有个必踩的坑：**同一条轨迹会命中同一个兴趣点的多个 cell**\n（轨迹本来就跨格，POI 补 ring 之后又是多个 cell），\n不去重就把\"多少条轨迹 nearby\"算成\"有多少个命中对\"。\n\n## 你要实现的入口\n\n```java\npublic static int[] distinctTrajsPerPoi(int[] trajId, int[] cellQ, int[] cellR,\n                                        int[] poiQ, int[] poiR, int k)\n```\n\n- 轨迹侧：第 `i` 个轨迹点是 `(trajId[i], cellQ[i], cellR[i])`。一条轨迹有**多个点**是常态。\n- POI 侧：第 `j` 个兴趣点在 `(poiQ[j], poiR[j])`。\n- 返回长度等于 POI 个数：第 `j` 项 = **有多少条不同的轨迹**，其任一点与该 POI 的\n  六边形距离 `<= k`。输出按 POI 下标顺序，不排序。\n\n## 六边形距离（轴向坐标）\n\n网格用**轴向坐标** `(q, r)`（第三个立方坐标 `s = -q - r`，所以只存两个）。\n两点距离：\n\n```\ndist = max(|Δq|, |Δr|, |Δq + Δr|)\n```\n\n**这不是曼哈顿、也不是切比雪夫**：本题的用例专门各造了一条能区分它们的点。\n邻居数：距离 `<= 1` 含中心共 7 格，`<= 2` 共 19 格。\n\n## 规则细节\n\n1. \"命中\"是**轨迹级**的：一条轨迹只要有 ≥1 个点落在 ring 内就贡献 **1**，多命中不重复计。\n2. `k = 0` 退化成精确同格。\n3. 坐标可正可负（轴向坐标没有非负约束），原点没有特殊性。\n4. 轨迹点数组为空 ⇒ 每个 POI 都是 `0`；POI 数组为空 ⇒ 返回长度为 0 的数组。\n5. 非法输入抛 `IllegalArgumentException`：`k < 0`、三根轨迹数组长度互不相等、\n   两根 POI 数组长度不等、`trajId <= 0`。\n\n不许引入第三方依赖（H3 库不在沙箱里 —— 本题只考\"补 ring 之后\"的那一步）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "spatial-index",
+    "hex-grid",
+    "distinct-count",
+    "integer-overflow",
+    "modern:geospatial-join"
+  ],
+  "cases": [
+    {
+      "name": "同一条轨迹的三个点都命中同一个 POI：仍然算 1 条",
+      "input": [
+        [
+          7,
+          7,
+          7,
+          8
+        ],
+        [
+          0,
+          1,
+          2,
+          10
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        2
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true,
+      "note": "朴素版给 4 —— 命中对数与轨迹数是两个不同的数"
+    },
+    {
+      "name": "切比雪夫会多算：(1,1) 的六边形距离是 2",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        1
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true,
+      "note": "traj 1 在 (1,1)：max(1,1,2)=2 > 1 ⇒ 不命中；traj 2 在原点 ⇒ 命中"
+    },
+    {
+      "name": "曼哈顿会漏算：(2,-1) 的六边形距离是 2",
+      "input": [
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          -1
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        2
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true,
+      "note": "曼哈顿 3 会把它挡在 k=2 之外"
+    },
+    {
+      "name": "多 POI 输出按 POI 下标，不排序",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          0,
+          5,
+          0
+        ],
+        [
+          0,
+          5,
+          1
+        ],
+        [
+          0,
+          0,
+          5
+        ],
+        [
+          0,
+          1,
+          5
+        ],
+        1
+      ],
+      "expected": [
+        2,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "POI0 命中 traj1(0,0) 与 traj3(0,1)=2；POI1 同样 2；POI2 命中 traj2=1"
+    },
+    {
+      "name": "k=0 退化成精确同格",
+      "input": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          1,
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        0
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "2-ring 全貌：19 个格各一点、同一条轨迹",
+      "input": [
+        [
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4,
+          4
+        ],
+        [
+          -2,
+          -2,
+          -2,
+          -1,
+          -1,
+          -1,
+          -1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          2,
+          2,
+          2
+        ],
+        [
+          0,
+          1,
+          2,
+          -1,
+          0,
+          1,
+          2,
+          -2,
+          -1,
+          0,
+          1,
+          2,
+          -2,
+          -1,
+          0,
+          1,
+          -2,
+          -1,
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        2
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true,
+      "note": "距离 <=2 含中心正好 19 格，且它们同属一条轨迹 ⇒ 答案仍是 1"
+    },
+    {
+      "name": "负坐标没有特殊性",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          -3,
+          3
+        ],
+        [
+          -4,
+          4
+        ],
+        [
+          -3
+        ],
+        [
+          -4
+        ],
+        0
+      ],
+      "expected": [
+        1
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何轨迹点",
+      "input": [
+        [],
+        [],
+        [],
+        [
+          0,
+          5
+        ],
+        [
+          0,
+          5
+        ],
+        3
+      ],
+      "expected": [
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何 POI",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [],
+        [],
+        5
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "坐标接近 int 边界：先升 long 再相减",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          2000000000,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          -2000000000,
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        3
+      ],
+      "expected": [
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "int 相减溢出会让 (2e9,0) 意外\"命中\"原点附近"
+    },
+    {
+      "name": "非法：k 为负",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        -1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：轨迹三根数组长度不一致",
+      "input": [
+        [
+          1,
+          2
+        ],
+        [
+          0
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：POI 两根数组长度不一致",
+      "input": [
+        [
+          1
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          0
+        ],
+        1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：trajId 为 0",
+      "input": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          0
+        ],
+        1
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "0 不是\"第 0 条轨迹\"，是没赋值 —— 收下它会造出一条不存在的轨迹"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n对每个 POI 扫一遍轨迹点，命中就把 `trajId` 丢进 `HashSet`，最后取 `size()`。\n`O(点数 × POI 数)` 时间（真实系统里这一步是\"cell 等值 join 之后的小范围收敛\"，\n所以两边的量都不大）。距离公式用 `max(|dq|, |dr|, |dq+dr|)`。\n\n**为什么必须去重**（用例「同一条轨迹的三个点都命中同一个 POI：仍然算 1 条」）：\n轨迹本来就是连续的 —— 一条经过 POI 附近的轨迹通常**跨好几个 cell**。\n\"多少条轨迹经过这个商圈\"与\"有多少个轨迹点落在范围内\"是两个数，\n后者还随采样率线性变化：把轨迹抽稀一倍，指标就掉一半，\n而业务方完全看不出统计口径变了。**这类\"随数据量而非现象变化\"的指标是数据平台最典型的负债。**\n\n**两个反例点各自钉死一种错度量**：\n- `(dq=1, dr=1)`：六边形距离 2、切比雪夫（`max(|dq|,|dr|)`）1 ⇒ 用切比雪夫会**多算**；\n- `(dq=2, dr=-1)`：六边形距离 2、曼哈顿 3 ⇒ 用曼哈顿会**漏算**。\n所以本题至少需要这两条用例 —— 只造一条的话，另一种错误度量能混过去。\n（这正是\"网格距离\"最容易写错的地方：三维立方坐标只存了两维，\n第三维 `s = -q-r` 的贡献必须通过 `dq+dr` 项回到公式里。）\n\n**升宽再减**（用例「坐标接近 int 边界：先升 long 再相减」）：\n`cellQ = 2_000_000_000`、`poiQ = -2_000_000_000` 相减在 `int` 上溢出，\n结果变成负的小数字，`abs()` 之后可能落进 `k` 以内 ——\n症状是\"个别格子意外命中\"，而且只在特定区域出现，最难复现。\n真实 H3 的 cell 是 64 位整数（不是这里的抽象坐标），\n所以\"空间索引 id 用 int 存\"本身就是该被 review 拦掉的写法。\n\n**工程延伸（面试追问点）**\n\n1. 为什么这个写法在真集群里还是不对？（它是 POI 侧广播 × 轨迹侧全扫。\n   可分布式的形状是**两侧都按 cell 分桶再 join**：把 POI 预先展开成\n   `(poi_id, covered_cell)`（k-ring 的物化表，k 固定时可以离线算好），\n   轨迹点按 cell 分桶 ⇒ 变成等值 join + 一次 `COUNT(DISTINCT traj_id)`。\n   去重的那一步要能在分区内局部完成，否则就退化成 shuffle 全量 id。）\n2. 分辨率怎么选？（细格精确但 ring 扇出与存储暴涨、且轨迹采样点可能稀疏到每格一个；\n   粗格 join 扇出小但误命中多。真实做法是**两级**：粗格做候选、细格或精确距离做复核 ——\n   这题的 `k` 就是粗格那一级的半径参数。另外隐私侧要求\"对外的聚合用粗格\"，\n   同一套 cell 服务两种精度，靠分辨率而不是两套索引。）\n3. `COUNT(DISTINCT)` 在 SQL 里怎么不炸？（大基数的 `COUNT(DISTINCT)` 是单点聚合，\n   要做两阶段（先 `GROUP BY traj_id` 局部去重再计数），或按精度要求换 HLL/theta sketch。\n   换成 sketch 之后\"环比涨跌\"要先确认误差带，否则会把量化噪声读成趋势。）\n4. 为什么不用 geohash？（geohash 是正方形分层，邻近查询要贴 8 个邻居且**边界处距离不等**\n   （四角比正边远），六边形的 1-ring 距离处处相等，这是选 H3 的唯一硬理由；\n   其余都是生态与实现成本。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] distinctTrajsPerPoi(int[] trajId, int[] cellQ, int[] cellR, int[] poiQ, int[] poiR, int k)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  public static int[] distinctTrajsPerPoi(int[] trajId, int[] cellQ, int[] cellR,\n                                          int[] poiQ, int[] poiR, int k) {\n    if (trajId.length != cellQ.length || trajId.length != cellR.length) {\n      throw new IllegalArgumentException(\"trajectory arrays disagree\");\n    }\n    if (poiQ.length != poiR.length) {\n      throw new IllegalArgumentException(\"poi arrays disagree\");\n    }\n    if (k < 0) {\n      throw new IllegalArgumentException(\"k must be >= 0\");\n    }\n    for (int t : trajId) {\n      if (t <= 0) throw new IllegalArgumentException(\"trajId must be positive\");\n    }\n    int[] out = new int[poiQ.length];\n    for (int j = 0; j < poiQ.length; j++) {\n      Set<Integer> distinct = new HashSet<>();      // 轨迹级去重，不是命中计数\n      for (int i = 0; i < trajId.length; i++) {\n        long dq = (long) cellQ[i] - poiQ[j];        // 先升宽再相减：坐标接近 int 边界时不溢出\n        long dr = (long) cellR[i] - poiR[j];\n        long dist = Math.max(Math.abs(dq), Math.max(Math.abs(dr), Math.abs(dq + dr)));\n        if (dist <= k) {\n          distinct.add(trajId[i]);\n        }\n      }\n      out[j] = distinct.size();\n    }\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 补 ring 之后直接 COUNT(*) 的写法：每个\"轨迹点 × POI\"的命中对都数一遍\n  public static int[] distinctTrajsPerPoi(int[] trajId, int[] cellQ, int[] cellR,\n                                          int[] poiQ, int[] poiR, int k) {\n    if (trajId.length != cellQ.length || trajId.length != cellR.length) {\n      throw new IllegalArgumentException(\"trajectory arrays disagree\");\n    }\n    if (poiQ.length != poiR.length) {\n      throw new IllegalArgumentException(\"poi arrays disagree\");\n    }\n    if (k < 0) throw new IllegalArgumentException(\"k must be >= 0\");\n    for (int t : trajId) {\n      if (t <= 0) throw new IllegalArgumentException(\"trajId must be positive\");\n    }\n    int[] out = new int[poiQ.length];\n    for (int j = 0; j < poiQ.length; j++) {\n      for (int i = 0; i < trajId.length; i++) {\n        int dq = cellQ[i] - poiQ[j];\n        int dr = cellR[i] - poiR[j];\n        if (Math.abs(dq) + Math.abs(dr) <= k) {     // 错法：把六边形距离当成曼哈顿距离\n          out[j]++;\n        }\n      }\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "Apple",
+    "role": "地图数据 / 空间索引 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §19.6（H3/S2 把空间 join 降成等值 join、ring 扩展与分辨率权衡；手册只给概念，未给可判分的距离与去重口径）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:15:58.173Z"
+  }
+}

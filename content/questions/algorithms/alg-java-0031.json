@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0031",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "Schema 契约门禁：破坏性变更清单（按名字匹配，枚举加值也算破坏）",
+  "statement": "## 背景\n\n事件表的一条硬规范（手册里写了、也真出过事故）：**\"加字段永远安全\"是错的**。\n老 SDK 还在按旧 schema 写数据，而新 schema 里一个 `NOT NULL` 且没有默认值的新字段，\n会让所有历史行在读侧直接失败 —— 表现是\"上线后昨天的数据突然查不出来\"。\n\n你要实现发布流水线里的那道门禁：给定新旧两版字段列表，**列出全部破坏性变更**。\n\n## 你要实现的入口\n\n```java\npublic static String[] breakingChanges(String[] oldFields, String[] newFields)\n```\n\n每个字段是一个 spec 串，段数 3 或 4，用 `:` 分隔：\n\n```\nname:type:nullable            →  无默认值\nname:type:nullable:default    →  有默认值（第四段只能是字面量 default）\n```\n\n- `type` ∈ `int` `long` `double` `bool` `string` `bytes` `ts` `enum(v1,v2,...)`\n- `nullable` ∈ `true` `false`\n- 字段名非空、不含 `:`、同一侧不重复\n\n## 输出：破坏性变更代码，**按字典序升序**\n\n一个字段可以同时命中多条规则，**每条都要输出**。没有破坏性变更 ⇒ 返回长度为 0 的数组。\n\n| 代码 | 触发条件 |\n| --- | --- |\n| `REMOVED:<name>` | 老 schema 有、新 schema 没有 |\n| `ADDED_REQUIRED:<name>` | 新增字段，且 `nullable=false`，且**没有**默认值 |\n| `RETIGHTENED:<name>` | 该字段 `nullable` 由 `true` 变 `false` |\n| `TYPE_INCOMPATIBLE:<name>` | 类型变更**不**兼容（见下） |\n\n## 类型兼容规则（判分点）\n\n1. 数值族 `int < long < double`：**加宽兼容**（`int→long`、`int→double`、`long→double` 安全），\n   **窄化不兼容**（`long→int` 不兼容，即使当前样本全都装得下）。\n   同族同型当然兼容。\n2. `bool` / `string` / `bytes` / `ts` 只有**完全相同**才兼容 —— 特别地 `bool→int`、\n   `string→ts`、`ts→long` 都**不**兼容（`ts` 的表示形式不是本题的授权范围）。\n3. `enum(...)`：**值集合有任何变化都不兼容**，包括\"只是多加了一个值\"。\n   加值是破坏性的，因为老读方对未知枚举值的行为未定义（多半是抛错或静默丢行）；\n   去值也是，因为历史数据里那个值在新 schema 下无法表示。\n   但**同一集合的重排/重复去重**兼容（枚举是无序集合）。\n\n## 另外两条不成文但会咬人的规则\n\n- **字段必须按名字匹配，不按位置**。调整顺序是安全变更。\n  （把两侧按下标 zip 的实现，会把一次纯重排判成一堆 `REMOVED` + `ADDED_REQUIRED`。）\n- `oldFields` 为空数组 ⇒ 这是**第一版** schema：没有既有的读方，返回空数组。\n  不要因为\"有 `NOT NULL` 无默认的新字段\"就报破坏 —— 那个规则针对的是\"老数据读不出来\"，\n  第一版没有老数据。\n\n## 非法输入（抛 `IllegalArgumentException`）\n\n字段 spec 段数不是 3 或 4；第四段不是 `default`；字段名为空；`nullable` 段不是\n`true`/`false`；未知类型名；`enum()` 括号为空或含空值；同一侧字段名重复；spec 为 `null`。\n\n不许引入第三方依赖。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "schema-evolution",
+    "contract-testing",
+    "compatibility",
+    "false-positive-cost",
+    "modern:data-contract"
+  ],
+  "cases": [
+    {
+      "name": "基线安全演进：加宽 + 新增可空 + 纯重排",
+      "input": [
+        [
+          "page_view:bool:false",
+          "duration:int:true"
+        ],
+        [
+          "duration:long:true",
+          "page_view:bool:false",
+          "city:string:true"
+        ]
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "三条规则都不该触发；这是\"看起来最危险其实最安全\"的一类"
+    },
+    {
+      "name": "删字段 + 新增必填无默认，而 b 是放宽不许报",
+      "input": [
+        [
+          "a:int:true",
+          "b:string:false",
+          "c:long:false"
+        ],
+        [
+          "b:string:true",
+          "c:long:false",
+          "d:ts:false"
+        ]
+      ],
+      "expected": [
+        "ADDED_REQUIRED:d",
+        "REMOVED:a"
+      ],
+      "visible": true,
+      "note": "只有两条：REMOVED:a 与 ADDED_REQUIRED:d。b 走的是 false→true 的**放宽**，把它报出去就是误拦发布"
+    },
+    {
+      "name": "数值窄化不兼容、加宽兼容",
+      "input": [
+        [
+          "big:long:true",
+          "widen:int:false"
+        ],
+        [
+          "big:int:true",
+          "widen:double:false"
+        ]
+      ],
+      "expected": [
+        "TYPE_INCOMPATIBLE:big"
+      ],
+      "visible": true
+    },
+    {
+      "name": "枚举加值是破坏，重排与去重不是",
+      "input": [
+        [
+          "kind:enum(click,view):false",
+          "state:enum(on,off):true"
+        ],
+        [
+          "kind:enum(click,view,purchase):false",
+          "state:enum(off,on):true"
+        ]
+      ],
+      "expected": [
+        "TYPE_INCOMPATIBLE:kind"
+      ],
+      "visible": true,
+      "note": "state 只是顺序变了 —— 用 List.equals 比就会误报"
+    },
+    {
+      "name": "跨族：bool→int、string→ts、ts→long 全都不兼容",
+      "input": [
+        [
+          "flag:bool:false",
+          "path:string:true",
+          "when:ts:false"
+        ],
+        [
+          "flag:int:false",
+          "path:ts:true",
+          "when:long:false"
+        ]
+      ],
+      "expected": [
+        "TYPE_INCOMPATIBLE:flag",
+        "TYPE_INCOMPATIBLE:path",
+        "TYPE_INCOMPATIBLE:when"
+      ],
+      "visible": true
+    },
+    {
+      "name": "新增 NOT NULL 但有默认值：安全",
+      "input": [
+        [
+          "id:long:false"
+        ],
+        [
+          "id:long:false",
+          "source:string:false:default"
+        ]
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "放宽 null：false→true 是安全变更",
+      "input": [
+        [
+          "email:string:false"
+        ],
+        [
+          "email:string:true"
+        ]
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "首个 schema：没有既有读方就没有兼容问题",
+      "input": [
+        [],
+        [
+          "id:long:false",
+          "kind:enum(a,b):false"
+        ]
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "套用\"新增字段规则\"会把每次事件类型首次注册都拦下来"
+    },
+    {
+      "name": "同一字段既窄化又收紧：两条都要出",
+      "input": [
+        [
+          "score:double:true"
+        ],
+        [
+          "score:int:false"
+        ]
+      ],
+      "expected": [
+        "RETIGHTENED:score",
+        "TYPE_INCOMPATIBLE:score"
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：两侧都为空",
+      "input": [
+        [],
+        []
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "非法：spec 段数不对",
+      "input": [
+        [
+          "a:int"
+        ],
+        [
+          "a:int:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：nullable 段不是 true/false",
+      "input": [
+        [
+          "a:int:yes"
+        ],
+        [
+          "a:int:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：未知类型名",
+      "input": [
+        [
+          "a:float:true"
+        ],
+        [
+          "a:float:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "float 不在授权类型里 —— 数值族只认 int/long/double，放过来会让\"加宽\"规则静默失效"
+    },
+    {
+      "name": "非法：第四段不是 default",
+      "input": [
+        [
+          "a:int:true:DEFAULT"
+        ],
+        [
+          "a:int:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：同一侧字段名重复",
+      "input": [
+        [
+          "a:int:true",
+          "a:long:false"
+        ],
+        [
+          "a:int:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：枚举值为空",
+      "input": [
+        [
+          "a:enum(,b):true"
+        ],
+        [
+          "a:enum(b):true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：字段名为空",
+      "input": [
+        [
+          ":int:true"
+        ],
+        [
+          "b:int:true"
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n先把两侧解析成 `{name → field}` 的**按名字索引**，然后三条规则各自独立地往结果里加代码：\n遍历老字段得出 `REMOVED` / `TYPE_INCOMPATIBLE` / `RETIGHTENED`，\n遍历新字段得出 `ADDED_REQUIRED`，最后排序。核心难点不是控制流，是那张规则表里\n**哪些变更\"看着安全其实不安全\"**。\n\n**按下标配对是这题最危险的实现**（用例「基线安全演进：加宽 + 新增可空 + 纯重排」）：\n一次把 `country` 挪到第一位的调整，zip 版会报 `REMOVED:country` +\n`ADDED_REQUIRED:page_view` 之类一串 —— 而门禁一响，发布就被拦下，\n于是团队学会第一件事就是\"给门禁加白名单\"。**误报的代价不是多算一次，是把闸门废掉。**\n\n**加枚举值也是破坏性的**（用例「枚举加值是破坏，重排与去重不是」）：\n多数团队的直觉是\"加枚举值向后兼容\"，这话只对**写方**成立。读方通常这样实现：\n`switch (kind) { ... default: throw new IllegalStateException(); }` —— 新值一来就崩，\n或者更糟：静默走到 default 分支把整行丢掉。\n所以本题把枚举定义为\"集合相等才兼容\"，并用 `HashSet.equals` 实现，\n顺带让 `{a,b}` 与 `{b,a}` 判为兼容（枚举是无序集合，写成 `List.equals` 就错了）。\n\n**`long→int` 即使\"当前数据都装得下\"也不兼容**（用例「数值窄化不兼容、加宽兼容」）：\n兼容性的判断对象是**全部历史数据 + 未来写入方**，不是今天采到的样本。\n按样本量判断的门禁，会在某个 outlier 落入分区的那天失效，而那天通常是月底或对账日。\n\n**`RETIGHTENED` 与 `ADDED_REQUIRED` 是同一件事的两个时间方向**：\n前者针对\"老数据里有 null，新 schema 不许 null\"；\n后者针对\"老写入方还在产不带这个字段的记录\"。\n两者都只在**读侧**暴露，写侧测试全绿 —— 这也是为什么这道门禁必须卡在发布流水线上，\n而不是指望人 review。\n\n**第一版返回空**（用例「首个 schema：没有既有读方就没有兼容问题」）：\n`oldFields` 为空时套用\"新增字段规则\"会报出 `ADDED_REQUIRED:*` 一片，\n把每个新事件类型的首次注册都拦下来。规则的目的决定规则的适用范围 ——\n这是门禁类代码最容易写错的地方，因为**少一个 if 看起来完全正常**。\n\n**工程延伸（面试追问点）**\n\n1. `ts` 到 `long`（epoch）为什么不算兼容？（\"同族加宽\"只对**同一物理表示**成立；\n   `ts` 的时区口径、精度（秒/毫秒）与时区偏移都不是类型能表达的。\n   真要改，正确做法是新增一个字段双写、按 `schema_version` 路由，而不是改类型。）\n2. 这道门禁能拦住\"字段改名\"吗？（拦不住 —— 它会报成 `REMOVED:old` + `ADDED_REQUIRED:new`，\n   所以**必须**报，只是报告形态不直观。做法是在门禁里加一层相似度提示\n   （名字接近 + 类型相同 ⇒ 标注\"疑似改名，请显式登记 rename\"），但**不要**自动当成兼容：\n   自动识别改名等于给\"偷偷换语义\"开门。）\n3. 为什么不直接上 protobuf/avro 的兼容性检查器？（它们的规则是\"wire 兼容\"，\n   而事件治理要的是**数据可用**：avro 允许 `int→long`、允许加带默认值的字段，\n   但它不知道\"这个字段被三个下游看板当过滤条件用\"。所以门禁 = schema 层规则 +\n   语义层规则 + 下游依赖图，前两者可以纯代码判，第三者需要注册表。）\n4. 有默认值的 `NOT NULL` 新增字段真的安全吗？（对读侧安全，对**回填语义**不一定：\n   历史行会读出默认值，于是\"这个字段上线前的真实值\"和\"上线后恰好等于默认值\"混在一起。\n   正确做法是新字段先可空、跑完回填、再收紧 —— 而\"先可空后收紧\"这步恰好是本门禁会拦的\n   `RETIGHTENED`，所以收紧要走一次性豁免 + 回填完成证明，不能靠改规则放行。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "String[] breakingChanges(String[] oldFields, String[] newFields)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.Arrays;\nimport java.util.HashMap;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Set;\n\npublic class Solution {\n  private static final List<String> ATOMS = Arrays.asList(\"bool\", \"string\", \"bytes\", \"ts\");\n  private static final Map<String, Integer> WIDEN = new HashMap<>();\n\n  static {\n    WIDEN.put(\"int\", 0);\n    WIDEN.put(\"long\", 1);\n    WIDEN.put(\"double\", 2);\n  }\n\n  private static final class Field {\n    final String name;\n    final boolean isEnum;\n    final String atom;\n    final Set<String> enumValues;\n    final boolean nullable;\n    final boolean hasDefault;\n\n    Field(String name, boolean isEnum, String atom, Set<String> enumValues,\n          boolean nullable, boolean hasDefault) {\n      this.name = name;\n      this.isEnum = isEnum;\n      this.atom = atom;\n      this.enumValues = enumValues;\n      this.nullable = nullable;\n      this.hasDefault = hasDefault;\n    }\n  }\n\n  public static String[] breakingChanges(String[] oldFields, String[] newFields) {\n    List<Field> old = parseAll(oldFields, \"old\");\n    List<Field> neu = parseAll(newFields, \"new\");\n    if (old.isEmpty()) {\n      return new String[0];              // 第一版：没有既有读方，谈不上破坏兼容\n    }\n    Map<String, Field> oldByName = index(old);\n    Map<String, Field> newByName = index(neu);\n    List<String> codes = new ArrayList<>();\n\n    for (Field a : old) {\n      Field b = newByName.get(a.name);\n      if (b == null) {\n        codes.add(\"REMOVED:\" + a.name);\n        continue;\n      }\n      if (!compatible(a, b)) {\n        codes.add(\"TYPE_INCOMPATIBLE:\" + b.name);\n      }\n      if (a.nullable && !b.nullable) {\n        codes.add(\"RETIGHTENED:\" + b.name);\n      }\n    }\n    for (Field b : neu) {\n      if (!oldByName.containsKey(b.name) && !b.nullable && !b.hasDefault) {\n        codes.add(\"ADDED_REQUIRED:\" + b.name);\n      }\n    }\n    codes.sort(String::compareTo);\n    return codes.toArray(new String[0]);\n  }\n\n  private static List<Field> parseAll(String[] specs, String side) {\n    List<Field> out = new ArrayList<>();\n    Set<String> seen = new HashSet<>();\n    for (String spec : specs) {\n      if (spec == null) throw new IllegalArgumentException(\"null field spec\");\n      String[] p = spec.split(\":\", -1);\n      if (p.length != 3 && p.length != 4) {\n        throw new IllegalArgumentException(\"bad spec arity in \" + side + \": \" + spec);\n      }\n      if (p[0].isEmpty()) throw new IllegalArgumentException(\"empty field name in \" + side);\n      if (p.length == 4 && !\"default\".equals(p[3])) {\n        throw new IllegalArgumentException(\"fourth segment must be 'default': \" + spec);\n      }\n      boolean hasDefault = p.length == 4;\n      boolean nullable = parseNullable(p[2], spec);\n      Set<String> enumValues = null;\n      boolean isEnum;\n      if (p[1].startsWith(\"enum(\") && p[1].endsWith(\")\")) {\n        isEnum = true;\n        enumValues = new HashSet<>(Arrays.asList(p[1].substring(5, p[1].length() - 1).split(\",\", -1)));\n        if (enumValues.contains(\"\")) {\n          throw new IllegalArgumentException(\"empty enum value: \" + spec);\n        }\n      } else {\n        isEnum = false;\n        if (!WIDEN.containsKey(p[1]) && !ATOMS.contains(p[1])) {\n          throw new IllegalArgumentException(\"unknown field type: \" + p[1]);\n        }\n      }\n      if (!seen.add(p[0])) {\n        throw new IllegalArgumentException(\"duplicated field name in \" + side + \": \" + p[0]);\n      }\n      out.add(new Field(p[0], isEnum, p[1], enumValues, nullable, hasDefault));\n    }\n    return out;\n  }\n\n  private static boolean parseNullable(String raw, String spec) {\n    if (\"true\".equals(raw)) return true;\n    if (\"false\".equals(raw)) return false;\n    throw new IllegalArgumentException(\"nullable must be true/false: \" + spec);\n  }\n\n  private static Map<String, Field> index(List<Field> fields) {\n    Map<String, Field> byName = new HashMap<>();\n    for (Field f : fields) byName.put(f.name, f);\n    return byName;\n  }\n\n  private static boolean compatible(Field a, Field b) {\n    if (a.isEnum || b.isEnum) {\n      return a.isEnum && b.isEnum && a.enumValues.equals(b.enumValues);   // 无序集合比较\n    }\n    Integer from = WIDEN.get(a.atom);\n    Integer to = WIDEN.get(b.atom);\n    if (from != null && to != null) {\n      return from <= to;                 // 只允许同族加宽\n    }\n    return a.atom.equals(b.atom);        // 跨族一律不兼容\n  }\n}",
+    "naiveSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  // \"看起来在干活\"版：按下标配对，只比类型字符串\n  public static String[] breakingChanges(String[] oldFields, String[] newFields) {\n    List<String> codes = new ArrayList<>();\n    int shared = Math.min(oldFields.length, newFields.length);\n    for (int i = 0; i < shared; i++) {\n      String[] a = oldFields[i].split(\":\", -1);\n      String[] b = newFields[i].split(\":\", -1);\n      if (!a[1].equals(b[1])) {\n        codes.add(\"TYPE_INCOMPATIBLE:\" + b[0]);\n      }\n      if (\"true\".equals(a[2]) && \"false\".equals(b[2])) {\n        codes.add(\"RETIGHTENED:\" + b[0]);\n      }\n    }\n    for (int i = shared; i < newFields.length; i++) {\n      String[] b = newFields[i].split(\":\", -1);\n      if (\"false\".equals(b[2])) {\n        codes.add(\"ADDED_REQUIRED:\" + b[0]);\n      }\n    }\n    for (int i = shared; i < oldFields.length; i++) {\n      codes.add(\"REMOVED:\" + oldFields[i].split(\":\", -1)[0]);\n    }\n    java.util.Collections.sort(codes);\n    return codes.toArray(new String[0]);\n  }\n}"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 事件管道 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §19.1（schema 契约兼容性）+ §9.2.3（\"新增 NOT NULL 字段让历史行读不出来\"的静默丢列事故）；手册只给了概念清单，未做成可判分规则表",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T15:15:58.170Z"
+  }
+}

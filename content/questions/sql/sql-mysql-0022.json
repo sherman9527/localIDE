@@ -1,0 +1,282 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0022",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "日账单为一次真相：把\"该结没结\"拆成账期未到/风控/退款冲销/真差异四类",
+  "statement": "## 基线\n\nMySQL 8.0，默认 `ONLY_FULL_GROUP_BY`。\n\n平台给商家 / ISV 的资金对账通道是**\"商家货款日账单下载链接\"**\n（`pdd.finance.balance.daily.bill.url.get`）—— 也就是说，**对账以\"日账单文件\"为一次真相，\n不是实时接口**。实时接口只用来定位差异。\n\n```\nrun_config  (id INT PK, as_of_date DATE, tolerance DECIMAL(12,2))   -- 单行参数表\norders      (order_sn INT PK, confirm_status, group_status, risk_control_status,\n             settle_due_date DATE, pay_amount DECIMAL(12,2), service_fee DECIMAL(12,2))\nbill_daily  (bill_date DATE, order_sn INT PK, settle_amount DECIMAL(12,2))  -- 日账单入库\norder_refund(order_sn INT PK, refund_amount DECIMAL(12,2))\n```\n\n## 任务\n\n输出**所有有问题的订单**，两列 `order_sn, issue`，按 `order_sn` 升序。\n完全对得上的（`settled`）**不要输出**；没有任何问题时返回**空结果集**。\n\n## 判据（按顺序命中即止，这张表就是判分点）\n\n**应结算集合**：`confirm_status = 1 AND group_status = 1`。\n不在这个集合里的订单（未成交、已取消、团失败）**一律不判** ——\n注意\"钱付了但团失败\"（`confirm_status = 1 AND group_status = 2`）也**不在**应结算集合里。\n\n**期望结算额** `expected = pay_amount − service_fee − COALESCE(refund_amount, 0)`。\n（服务费是平台收入、不参与给商家的结算；退款要回冲。）\n\n| 顺序 | 条件 | `issue` |\n| --- | --- | --- |\n| 1 | 账单里有这单，且 `ABS(settle_amount − expected) >= tolerance` | `amount-mismatch` |\n| 2 | 账单里有这单且差额在容差内 | `settled`（**不输出**） |\n| 3 | 账单里没有，且 `settle_due_date > as_of_date` | `not-yet-due` |\n| 4 | 账单里没有、已到账期，且 `risk_control_status = 1` | `risk-hold` |\n| 5 | 账单里没有、已到账期、非审核中，且 `refund_amount >= pay_amount`（全额退款） | `refund-offset` |\n| 6 | 其余（账单里没有、已到账期、无上述任何理由） | `real-gap` |\n\n`tolerance` 从 `run_config` 里读（**不要写死**），比较用 `>=`：\n正好差一分（`0.01`）在默认容差 `0.01` 下**算差异**。\n\n只提交**一条** `SELECT` / `WITH` 查询。\n\n## 这题真正考的东西\n\n- **第 6 类才是要报警的那一个**，前五类都是\"可以解释的缺席\"。\n  只查\"账单里多出来的\"实现对，永远不会产出第 6 类，因为**少给钱**这个方向根本没被扫描。\n- **风控审核中不是止损终点**：它解释的是\"这一期为什么没结\"，不是\"这单可以不给\"。\n  所以 `risk-hold` 必须与 `real-gap` 分开，并且一旦 `risk_control_status` 被解除，\n  同一行就要从前者变成后者。\n- **容差是口径不是风格**：写成 `> 0` 会把 DECIMAL 显示差异当事故，\n  写成 `>= 1` 会把真实的一分钱差错吞掉。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "settlement-recon",
+    "bill-of-record",
+    "risk-control",
+    "refund-offset",
+    "modern:finance-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：四类缺席各中一条，真差异只有一条",
+      "input": [],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2002,
+            "amount-mismatch"
+          ],
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "risk-hold"
+          ],
+          [
+            2005,
+            "refund-offset"
+          ],
+          [
+            2006,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "2001/2008 对上不出；2007 未成交与 2009 团失败压根不在应结算集合里"
+    },
+    {
+      "name": "容差边界：把账单补到一分不差，amount-mismatch 消失",
+      "input": [
+        "UPDATE bill_daily SET settle_amount = '190.00' WHERE order_sn = 2002"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "risk-hold"
+          ],
+          [
+            2005,
+            "refund-offset"
+          ],
+          [
+            2006,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true
+    },
+    {
+      "name": "容差放宽一分：同一笔分位差不再算差异（tolerance 必须从表里读）",
+      "input": [
+        "UPDATE run_config SET tolerance = '0.02' WHERE id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "risk-hold"
+          ],
+          [
+            2005,
+            "refund-offset"
+          ],
+          [
+            2006,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "写死 0.01 的实现这里不会变，仍然把 2002 报出来 ⇒ 与期望不符"
+    },
+    {
+      "name": "解除风控：同一行必须从 risk-hold 变成 real-gap",
+      "input": [
+        "UPDATE orders SET risk_control_status = 0 WHERE order_sn = 2004"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2002,
+            "amount-mismatch"
+          ],
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "real-gap"
+          ],
+          [
+            2005,
+            "refund-offset"
+          ],
+          [
+            2006,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "风控是延迟理由不是免单理由；实现若直接跳过审核中单，这里会少一行"
+    },
+    {
+      "name": "团失败但已支付：一旦变成\"成交且成团\"就进应结算集合",
+      "input": [
+        "UPDATE orders SET confirm_status = 1, group_status = 1 WHERE order_sn = 2009"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2002,
+            "amount-mismatch"
+          ],
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "risk-hold"
+          ],
+          [
+            2005,
+            "refund-offset"
+          ],
+          [
+            2006,
+            "real-gap"
+          ],
+          [
+            2009,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "基线里 2009 没进账单也不算问题（不在应结算集合）；把应结算集合写成只看 confirm_status 的实现，基线就会多出一行"
+    },
+    {
+      "name": "退款没到全额：refund-offset 不成立，落到 real-gap",
+      "input": [
+        "UPDATE order_refund SET refund_amount = '49.99' WHERE order_sn = 2005"
+      ],
+      "expected": {
+        "columns": [
+          "order_sn",
+          "issue"
+        ],
+        "rows": [
+          [
+            2002,
+            "amount-mismatch"
+          ],
+          [
+            2003,
+            "not-yet-due"
+          ],
+          [
+            2004,
+            "risk-hold"
+          ],
+          [
+            2005,
+            "real-gap"
+          ],
+          [
+            2006,
+            "real-gap"
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "49.99 < 50.00 实付 ⇒ 不是全额冲销；期望额同时变成 50.00 − 2.50 − 49.99"
+    },
+    {
+      "name": "全部结清：每一单都有账单且金额都对上 ⇒ 返回空结果集（裸 []）",
+      "input": [
+        "UPDATE bill_daily SET settle_amount = '190.00' WHERE order_sn = 2002",
+        "DELETE FROM order_refund WHERE order_sn = 2005",
+        "INSERT INTO bill_daily VALUES ('2026-05-14', 2003, '57.00')",
+        "INSERT INTO bill_daily VALUES ('2026-05-14', 2004, '43.00')",
+        "INSERT INTO bill_daily VALUES ('2026-05-14', 2005, '47.50')",
+        "INSERT INTO bill_daily VALUES ('2026-05-14', 2006, '66.50')"
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "2005 的退款先撤掉才能用 50.00 − 2.50 = 47.50 结清；零行结果在 mysql 判题里必须写成裸 []，带 columns 会因没有表头而判不了"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n先固定\"应结算集合\"（`confirm_status = 1 AND group_status = 1`）与期望额，\n再对着账单做**一次** LEFT JOIN，用一个 `CASE` 按表里的顺序落类。\n顺序不能换：`not-yet-due` 必须早于 `risk-hold`，\n否则\"未到账期且恰好在审核中\"的单会被解释成\"被风控扣住\"，而真相是\"还没到时候\"。\n\n**基线报出的五条**（用来核对 expected 是不是真的对）：\n`2002 → amount-mismatch`：期望 `200.00 − 10.00 = 190.00`，账单给 189.99，\n差 `0.01` 正好落在 `>= tolerance` 这一侧 —— **这条就是容差边界**。\n`2003 → not-yet-due`（账期 05-20 晚于基准日 05-15）；\n`2004 → risk-hold`；`2005 → refund-offset`（退款 50.00 ≥ 实付 50.00）；\n`2006 → real-gap` —— **全题唯一需要人去做事的一条**。\n`2001` 与 `2008` 对上了不输出（`2008` 是\"扣服务费再扣部分退款\"：\n`80.00 − 4.00 − 20.00 = 56.00`，与账单一致）。\n`2007`（未成交）与 `2009`（团失败）压根不在应结算集合里，\n**哪怕它们也没进账单，也不许报成漏结** —— 这就是\"钱付了不等于成交\"在结算侧的体现。\n\n**为什么 `risk-hold` 不能并进 `real-gap`**：两者的处置责任人不同。\n审核中要问风控（什么时候解开、要不要止付），真差异要问结算（是账单生成漏了还是金额算错）。\n合成一类之后，看板上的\"对账异常数\"会随风控动作起伏，\n于是结算团队可以永远声称\"这是风控的事\"。\n\n**风控解除之后同一行必须改类别**（用例「解除风控」）：\n`risk_control_status` 从 1 变 0，那一行就从 `risk-hold` 变成 `real-gap`。\n这条变化的意义是：**风控是延迟理由，不是免单理由**。\n实现里如果把 `risk-hold` 做成\"直接跳过不输出\"，解除之后就什么记录都没有了 ——\n那笔钱永久沉没，而这正是官方自列风险里的 \"failure to manage funds accurately or loss of funds\"\n的日常形态。\n\n**空结果集要真的是空**（用例「全部结清」）：\n补齐账单、把没到账期的单挪到账期之外之后，查询返回零行。\n判题侧注意：`mysql --batch` 在零行时连表头都不发，所以期望值必须是**裸空数组**\n（`docs/JUDGING.md` 里的纪律，本仓库已经有题踩过一次）。\n\n**工程延伸（面试追问点）**\n\n1. 为什么以日账单为一次真相？（官方给外部的就是\"日账单文件下载\"。\n   实时接口没有账期概念、也不保证补录；用它做终态对账会出现\n   \"两边都实时、谁也说不清哪边对\"的死循环。）\n2. 容差怎么定？（按**最小结算单位**定，不按感觉定：DECIMAL(12,2) 的系统里容差就是 0.01，\n   比它小的差是显示/精度问题。跨币种才需要放大，\n   而且要写成\"容差 = 汇率换算步长\"而不是一个拍出来的百分比。）\n3. 服务费与佣金什么时候入账？（把服务费写进 `expected` 是**有意的简化**：\n   真实系统要区分\"账单口径的应结\"与\"订单口径的实付\"，\n   并把退款/赔付/服务费的**入账时点差**做成显式账期字段，否则 `amount-mismatch`\n   会被时点差永久占据，真正的金额错误反而看不见。）\n4. 只跑一个方向行不行？（不行。本查询是\"订单侧有、账单侧无（或金额不对）\"，\n   反向还要有一条\"账单侧有、订单侧不该有\" —— 那是多付/重复结算，\n   方向相反但同样是资损。只查一半的对账等于没做。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS run_config",
+      "DROP TABLE IF EXISTS orders",
+      "DROP TABLE IF EXISTS bill_daily",
+      "DROP TABLE IF EXISTS order_refund",
+      "CREATE TABLE run_config (id INT PRIMARY KEY, as_of_date DATE NOT NULL, tolerance DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE orders (order_sn INT PRIMARY KEY, confirm_status TINYINT NOT NULL, group_status TINYINT NOT NULL, risk_control_status TINYINT NOT NULL, settle_due_date DATE NOT NULL, pay_amount DECIMAL(12,2) NOT NULL, service_fee DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE bill_daily (bill_date DATE NOT NULL, order_sn INT PRIMARY KEY, settle_amount DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "CREATE TABLE order_refund (order_sn INT PRIMARY KEY, refund_amount DECIMAL(12,2) NOT NULL) ENGINE=InnoDB",
+      "INSERT INTO run_config VALUES (1, '2026-05-15', '0.01')",
+      "INSERT INTO orders VALUES (2001, 1, 1, 0, '2026-05-10', '100.00', '5.00'), (2002, 1, 1, 0, '2026-05-11', '200.00', '10.00'), (2003, 1, 1, 0, '2026-05-20', '60.00', '3.00'), (2004, 1, 1, 1, '2026-05-09', '45.00', '2.00'), (2005, 1, 1, 0, '2026-05-09', '50.00', '2.50'), (2006, 1, 1, 0, '2026-05-09', '70.00', '3.50'), (2007, 0, 1, 0, '2026-05-09', '20.00', '1.00'), (2008, 1, 1, 0, '2026-05-08', '80.00', '4.00'), (2009, 1, 2, 0, '2026-05-09', '35.00', '1.50')",
+      "INSERT INTO bill_daily VALUES ('2026-05-12', 2001, '95.00'), ('2026-05-13', 2002, '189.99'), ('2026-05-11', 2008, '56.00')",
+      "INSERT INTO order_refund VALUES (2005, '50.00'), (2008, '20.00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 9000,
+    "referenceSolution": "WITH cfg AS (\n  SELECT r.as_of_date, r.tolerance FROM run_config r\n), universe AS (\n  SELECT o.* FROM orders o WHERE o.confirm_status = 1 AND o.group_status = 1\n), expected AS (\n  SELECT u.order_sn, u.risk_control_status, u.settle_due_date, u.pay_amount,\n         u.pay_amount - u.service_fee - COALESCE(rf.refund_amount, 0) AS expected_amount\n  FROM universe u\n  LEFT JOIN order_refund rf ON rf.order_sn = u.order_sn\n)\nSELECT e.order_sn,\n       CASE WHEN b.order_sn IS NOT NULL THEN 'amount-mismatch'\n            WHEN e.settle_due_date > c.as_of_date THEN 'not-yet-due'\n            WHEN e.risk_control_status = 1 THEN 'risk-hold'\n            WHEN COALESCE(rf2.refund_amount, 0) >= e.pay_amount THEN 'refund-offset'\n            ELSE 'real-gap' END AS issue\nFROM expected e\nCROSS JOIN cfg c\nLEFT JOIN bill_daily b ON b.order_sn = e.order_sn\nLEFT JOIN order_refund rf2 ON rf2.order_sn = e.order_sn\nWHERE b.order_sn IS NULL\n   OR ABS(b.settle_amount - e.expected_amount) >= c.tolerance\nORDER BY e.order_sn",
+    "naiveSolution": "-- \"只查账单里多出来的 + 把风控当免单\"版：\n-- 该结没结的方向只报一个笼统的 missing，而审核中的单被直接跳过 —— 那笔钱就永久沉没。\nSELECT b.order_sn, 'bill-only' AS issue\nFROM bill_daily b\nLEFT JOIN orders o ON o.order_sn = b.order_sn\nWHERE o.order_sn IS NULL\nUNION ALL\nSELECT o.order_sn, 'missing'\nFROM orders o\nLEFT JOIN bill_daily b ON b.order_sn = o.order_sn\nWHERE b.order_sn IS NULL AND o.confirm_status = 1 AND o.risk_control_status = 0\nORDER BY order_sn"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（结算与资金方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 6（`pdd.finance.balance.daily.bill.url.get`：对账以日账单文件为一次真相）＋ 考点 10「素材建议 judgeKind=mysql：账单文件 vs 订单表差异定位」＋ §2 追问 7；素材给了通道与方向，未给可判分的四类判据表",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.120Z"
+  }
+}

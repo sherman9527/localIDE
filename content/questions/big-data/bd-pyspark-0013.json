@@ -1,0 +1,494 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0013",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "版本偏斜的规范层：单位按 schema_version 路由，且必须先归一再比",
+  "statement": "## 背景\n\n一条摄取管道同时接收**多个客户端 schema 版本**的事件 —— iOS 不能强制升级，\n线上同时跑着 v1 与 v2 的 SDK，过渡期还有设备两边都发。规范层（canonical layer）要在聚合之前\n把语义对齐，否则下游每一个指标都会带着一个没人解释得清的数量级误差。\n\n输入视图 `raw_events`：\n\n```\ndevice_id       string   -- 设备\nschema_version  int      -- 1 或 2；其它值一律视为脏数据\nevent_name      string   -- 原始事件名\npayload         double   -- 可为 null\nts              string   -- 'yyyy-MM-dd HH:mm:ss'，全部是 UTC\n```\n\n## 语义映射（这是口径，写死）\n\n| 版本 | 单位 | 说明 |\n| --- | --- | --- |\n| `schema_version = 1` | `payload` 是 **MB** | 归一到 GB 要 `/ 1024` |\n| `schema_version = 2` | `payload` 已经是 **GB** | 不许再除 |\n\n事件名别名（归一到 canonical 名）：`screen_viewed` → `screen_view`；`application_open` → `app_open`。\n映射表里没有的名字**保留原样**（不丢弃 —— 新事件先于映射表上线是常态）。\n\n## 规则（逐条都是判分点）\n\n1. **未知 `schema_version`（既不是 1 也不是 2）的行整行丢弃**。\n   不许写成 `else` 分支当成 v2 处理 —— 那等于给一个语义未知的数据强行赋一个数量级。\n2. `payload` 为 `null` 的行**仍然算一个事件**，只是对总量贡献 0。\n   （这是口径选择：事件数与数据量是两件事，不能因为量缺失就把事件也丢掉。）\n3. **先归一，再去重**：同一 `(device_id, canonical_name, ts)` 只计一次。\n   过渡期双上报的两条记录用的是**不同的原始事件名**（v1 发 `screen_view`、v2 发 `screen_viewed`），\n   所以按原始名去重等于没去重 —— 顺序错了就会双计数。\n4. 按 `(device_id, day)` 聚合，`day = ts` 的前 10 个字符。\n\n## 输出\n\n每行：`device_id, day, events, payload_gb`（`payload_gb` 保留到 6 位小数），\n按 `device_id`、`day` 升序。空输入返回 0 行。\n\n## 这题真正考的东西\n\n- **单位必须按版本路由**。全局 `/1024` 是最省事的写法，它把 v2 的 GB 也除了 1000 多倍 ——\n  症状是\"指标变小了没人报错\"，因为量级错误不会触发任何断言。\n  反过来全局不除，v1 的 MB 会被当成 GB（用例 4 用一条等价改写把这两种错法同时钉住）。\n- **去重的键必须是归一后的键**。这是\"先映射再聚合\"里最容易写反的一步。\n  双上报那一对的 canonical payload 恰好相同（512 MB = 0.5 GB 与 0.5 GB），\n  所以保留哪一条都不影响结果 —— 这不是巧合，而是\"必须先归一再比\"的成立前提。\n- **未知版本要显式排除，不要走 `else`**。`else` 分支会把未来的 v3 静默按 v2 解释。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "schema-evolution",
+    "unit-normalization",
+    "dedup-order",
+    "data-quality-gate",
+    "modern:canonical-layer"
+  ],
+  "cases": [
+    {
+      "name": "基线：双上报、MB/GB 混单位、未知版本与 null payload 各自落在哪",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 10:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "app_open",
+            "payload": 1024,
+            "ts": "2026-05-01 11:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 2,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 0.25,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 0.5,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 3,
+            "event_name": "tap",
+            "payload": 9,
+            "ts": "2026-05-01 09:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "app_open",
+            "payload": null,
+            "ts": "2026-05-01 15:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 1,
+            "event_name": "application_open",
+            "payload": 2048,
+            "ts": "2026-05-01 15:30:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "device_id": "d1",
+          "day": "2026-05-01",
+          "events": 5,
+          "payload_gb": 4.25
+        },
+        {
+          "device_id": "d2",
+          "day": "2026-05-01",
+          "events": 2,
+          "payload_gb": 2
+        }
+      ],
+      "visible": true,
+      "note": "d1 是 5 个事件 / 4.25 GB（13:00 那对只算一次）；d2 的 v3 行被丢弃、null 仍算事件"
+    },
+    {
+      "name": "把未知版本改成 v2：它就必须被收进来（白名单而不是 else）",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 10:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "app_open",
+            "payload": 1024,
+            "ts": "2026-05-01 11:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 2,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 0.25,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 0.5,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 9,
+            "ts": "2026-05-01 09:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "app_open",
+            "payload": null,
+            "ts": "2026-05-01 15:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 1,
+            "event_name": "application_open",
+            "payload": 2048,
+            "ts": "2026-05-01 15:30:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "device_id": "d1",
+          "day": "2026-05-01",
+          "events": 5,
+          "payload_gb": 4.25
+        },
+        {
+          "device_id": "d2",
+          "day": "2026-05-01",
+          "events": 3,
+          "payload_gb": 11
+        }
+      ],
+      "visible": true,
+      "note": "与基线唯一的差别是那行版本从 3 变 2 → d2 从 2 个事件/2.0 GB 变 3 个/11.0 GB"
+    },
+    {
+      "name": "删掉双上报的 v1 侧：结果一字不变（证明它真的被去重了）",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 10:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "app_open",
+            "payload": 1024,
+            "ts": "2026-05-01 11:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 2,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 0.25,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 0.5,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 3,
+            "event_name": "tap",
+            "payload": 9,
+            "ts": "2026-05-01 09:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "app_open",
+            "payload": null,
+            "ts": "2026-05-01 15:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 1,
+            "event_name": "application_open",
+            "payload": 2048,
+            "ts": "2026-05-01 15:30:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "device_id": "d1",
+          "day": "2026-05-01",
+          "events": 5,
+          "payload_gb": 4.25
+        },
+        {
+          "device_id": "d2",
+          "day": "2026-05-01",
+          "events": 2,
+          "payload_gb": 2
+        }
+      ],
+      "visible": true,
+      "note": "留 v2 侧 0.5 GB 与基线保留 v1 侧 512 MB 等价 —— 归一后的键相同"
+    },
+    {
+      "name": "单位等价改写：v1 的 512 MB 换成 v2 的 0.5 GB，输出必须完全相同",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_view",
+            "payload": 0.5,
+            "ts": "2026-05-01 10:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "app_open",
+            "payload": 1024,
+            "ts": "2026-05-01 11:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 2,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 0.25,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 0.5,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 3,
+            "event_name": "tap",
+            "payload": 9,
+            "ts": "2026-05-01 09:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "app_open",
+            "payload": null,
+            "ts": "2026-05-01 15:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 1,
+            "event_name": "application_open",
+            "payload": 2048,
+            "ts": "2026-05-01 15:30:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "device_id": "d1",
+          "day": "2026-05-01",
+          "events": 5,
+          "payload_gb": 4.25
+        },
+        {
+          "device_id": "d2",
+          "day": "2026-05-01",
+          "events": 2,
+          "payload_gb": 2
+        }
+      ],
+      "visible": true,
+      "note": "这条专打\"全局除 1024\"和\"全局不除\"两种实现 —— 它们在这里都会给出不同的数"
+    },
+    {
+      "name": "跨天：新增一天的事件要单独成行",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": [
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 10:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "app_open",
+            "payload": 1024,
+            "ts": "2026-05-01 11:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 2,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 0.25,
+            "ts": "2026-05-01 12:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 1,
+            "event_name": "screen_view",
+            "payload": 512,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "screen_viewed",
+            "payload": 0.5,
+            "ts": "2026-05-01 13:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 3,
+            "event_name": "tap",
+            "payload": 9,
+            "ts": "2026-05-01 09:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 2,
+            "event_name": "app_open",
+            "payload": null,
+            "ts": "2026-05-01 15:00:00"
+          },
+          {
+            "device_id": "d2",
+            "schema_version": 1,
+            "event_name": "application_open",
+            "payload": 2048,
+            "ts": "2026-05-01 15:30:00"
+          },
+          {
+            "device_id": "d1",
+            "schema_version": 2,
+            "event_name": "tap",
+            "payload": 1.5,
+            "ts": "2026-05-02 08:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "device_id": "d1",
+          "day": "2026-05-01",
+          "events": 5,
+          "payload_gb": 4.25
+        },
+        {
+          "device_id": "d1",
+          "day": "2026-05-02",
+          "events": 1,
+          "payload_gb": 1.5
+        },
+        {
+          "device_id": "d2",
+          "day": "2026-05-01",
+          "events": 2,
+          "payload_gb": 2
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：空输入返回 0 行",
+      "input": {
+        "view": "raw_events",
+        "schema": "device_id string, schema_version int, event_name string, payload double, ts string",
+        "rows": []
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三段式：**命名 → 定量 → 去重 → 聚合**，顺序不能换。\n\n```python\nnamed   = raw.withColumn('canonical_name', 别名映射)\nsized   = named.withColumn('gb', v1 除 1024 / v2 原值 / null 记 0) \\\n               .filter(col('schema_version').isin(1, 2))          # 未知版本丢弃\ndeduped = sized.dropDuplicates(['device_id', 'canonical_name', 'ts'])   # 归一之后才去重\nresult  = deduped.groupBy('device_id', day).agg(count, round(sum(gb), 6))\n```\n\n**三处判分点**\n\n1. **单位按版本路由**（用例 4 钉它）：把一条 v1 的 `512 MB` 改写成 v2 的 `0.5 GB`，\n   正确答案**一字不变**。全局 `/1024` 或全局不除的实现都会在这里露出来 ——\n   而且露出的方式是\"数字变小/变大\"，没有任何异常抛出，这正是量级错误能在生产里活很久的原因。\n2. **先归一再比**（基线用例钉它）：13:00 那一对双上报，v1 侧叫 `screen_view`、v2 侧叫 `screen_viewed`。\n   按原始名去重会留下两条 → `events` 从 5 变 6、`payload_gb` 从 4.25 变 4.75。\n   这对记录的 canonical payload 相同（512 MB == 0.5 GB），所以\"保留哪条\"不影响结果 ——\n   真实系统里如果不等，就必须再定一条优先级规则（一般取新版本），并把\"两边不等\"本身做成监控指标。\n3. **未知版本显式排除**（用例 2 钉它）：写成 `.otherwise(v2 语义)` 的实现会把 v3 的 9.0 当成 9 GB 收进来，\n   `d2` 的 `events` 从 2 变 3、`payload_gb` 从 2.0 变 11.0。\n   用 `isin(1, 2)` 白名单而不是 `!= 1` 黑名单，是为了让\"新增版本\"必须显式登记语义。\n\n**工程延伸（面试追问点）**\n\n1. 为什么映射表写在代码里而不是数据表里？（两种都要有理由：写代码里=变更走发布、可回溯、无运行时依赖；\n   写表里=运营可改但引入\"映射表版本\"这个新的 schema skew。真实做法通常是代码 + 版本化配置，\n   并把用到的映射版本记进产出数据的元信息，否则历史数据无法复现。）\n2. v3 上线时最希望发生什么？（**管道报错或数据消失**，而不是静默按 v2 解释。\n   所以\"未知版本丢弃\"要配一个\"被丢弃行数\"的告警，否则丢弃会变成另一种更隐蔽的静默错误 ——\n   这一条是本题真正的产品含义：门禁要显式，且门禁本身要可观测。）\n3. `payload is null` 算不算事件？（口径题。这里算事件、贡献 0。\n   另一种合理口径是\"null 视为该事件不可信、整行丢弃\" —— 关键是**写进契约**并让下游知道，\n   因为两种口径在\"错误率\"类指标上会差出一个数量级。）\n4. 双上报会不会两边 payload 真的不等？（会，比如 v1 只上报了部分字段。这时去重规则要能解释\n   \"为什么保留这条\"，并且理想做法是保留两条 + 一个 `source_versions` 数组，\n   在指标层再按口径取舍 —— 把决策推到离问题最近的地方。）\n5. 端上时间不可信怎么办？（本题刻意把时区/时钟问题留在别的题里。真实规范层还要处理\n   `device_ts` 与 `server_recv_ts` 的选择、DST、以及\"未来时间戳\"的水位线过滤 ——\n   那是一组独立的口径题。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\nALIASES = {'screen_viewed': 'screen_view', 'application_open': 'app_open'}\n\n\ndef solve(spark):\n    raw = spark.table('raw_events')\n\n    alias_expr = F.col('event_name')\n    for src, dst in ALIASES.items():\n        alias_expr = F.when(F.col('event_name') == F.lit(src), F.lit(dst)).otherwise(alias_expr)\n\n    named = raw.withColumn('canonical_name', alias_expr)\n\n    # 单位按版本路由；未知版本整行丢弃（不许落到 else 当成 v2）\n    sized = named.withColumn(\n        'gb',\n        F.when(F.col('payload').isNull(), F.lit(0.0))\n        .when(F.col('schema_version') == F.lit(1), F.col('payload') / F.lit(1024.0))\n        .when(F.col('schema_version') == F.lit(2), F.col('payload').cast('double'))\n        .otherwise(F.lit(None).cast('double')),\n    ).filter(F.col('schema_version').isin(1, 2))\n\n    # 关键顺序：先归一（canonical_name + 单位）再去重，否则双上报的两条不同名记录会都留下\n    deduped = sized.dropDuplicates(['device_id', 'canonical_name', 'ts'])\n\n    return (\n        deduped\n        .withColumn('day', F.substring('ts', 1, 10))\n        .groupBy('device_id', 'day')\n        .agg(F.count(F.lit(1)).alias('events'), F.round(F.sum('gb'), 6).alias('payload_gb'))\n        .orderBy('device_id', 'day')\n    )",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    return (\n        spark.table('raw_events')\n        .withColumn(\n            'canonical_name',\n            F.when(F.col('event_name') == 'screen_viewed', F.lit('screen_view'))\n            .when(F.col('event_name') == 'application_open', F.lit('app_open'))\n            .otherwise(F.col('event_name')),\n        )\n        # 错法一：单位全局处理，不看 schema_version\n        .withColumn('gb', F.coalesce(F.col('payload'), F.lit(0.0)) / F.lit(1024.0))\n        # 错法二：按原始事件名去重 —— 双上报的两条名字不同，去不掉\n        .dropDuplicates(['device_id', 'event_name', 'ts'])\n        .withColumn('day', F.substring('ts', 1, 10))\n        .groupBy('device_id', 'day')\n        .agg(F.count(F.lit(1)).alias('events'), F.round(F.sum('gb'), 6).alias('payload_gb'))\n        .orderBy('device_id', 'day')\n    )"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 摄取与规范层 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §1.2（改名、米→英尺、本地→UTC 都是静默错误）+ §16 版本偏斜；手册讲了现象，未做成可判分的摄取契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T12:43:55.539Z"
+  }
+}

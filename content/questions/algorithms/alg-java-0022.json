@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0022",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "分页 KV Cache 的连续块分配：空闲块数不等于可服务会话数",
+  "statement": "## 背景\n\n你在实现推理引擎的 KV Cache 分配器（PagedAttention 那一层）。显存被切成等大的 block，\n用一个位图描述占用：`blockFree[i] == 0` 表示第 i 块空闲，`== 1` 表示已用。\n\n每个会话需要**恰好 `blocksPerSession` 个物理上连续的 block**（连续是为了让 attention kernel\n用一段 stride 访问 K/V；跨段访问会让 kernel 退化成 gather）。\n\n分配按「从左到右扫描、凑满就下单」的贪心进行；下单后这些块视为已占用，不再服务后续会话。\n\n## 这题真正考的东西\n\n新手会写成 `freeCount / blocksPerSession`。**这个公式在外部碎片下是错的**：\n\n```\nfree = [0,0,1,0,0,1,0,0]  blocksPerSession = 3\n三段连续空闲各 2 块，空闲块共 6 个 → 6/3 = 2，\n但没有任何一段凑得出 3 块连续，正确答案是 0。\n```\n\n显存监控显示「还有 40% 空闲」而新会话进不来，就是这个形状 —— 是碎片，不是不够。\n\n## 你要实现的入口\n\n```java\npublic static int maxServableSessions(int[] blockFree, int blocksPerSession)\n```\n\n- 返回值：按上述贪心，最多能同时下单多少个会话；\n- `blockFree` 为空数组时返回 `0`；\n- 出现既不是 0 也不是 1 的值，说明位图被写坏，抛 `IllegalArgumentException`\n  （不要按「非 0 即已用」宽容处理，那会把脏数据读成「刚好够用」）。\n\n## 约定\n\n1. `blocksPerSession <= 0` 抛 `IllegalArgumentException`。\n2. 单个空闲段内可以连续下多个单（长度 6 的段、每会话 2 块 → 3 个单）。\n3. 段尾凑不满一个单的零头必须浪费掉，不许跨段拼接（这正是碎片的定义）。\n\n## 复杂度要求\n\n`O(n)` 时间、`O(1)` 额外空间，单遍扫描（不许先物化所有段再统计）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "memory-fragmentation",
+    "llm-inference",
+    "kv-cache",
+    "greedy-scan",
+    "modern:inference-gateway"
+  ],
+  "cases": [
+    {
+      "name": "外部碎片：6 个空闲块但无一段够 3 连续，答案是 0",
+      "input": [
+        [
+          0,
+          0,
+          1,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        3
+      ],
+      "expected": 0,
+      "note": "freeCount/bps = 6/3 = 2 的朴素算法在这里翻车"
+    },
+    {
+      "name": "单段内可连续下多个单",
+      "input": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        2
+      ],
+      "expected": 3,
+      "note": "长度 6 的空闲段、每会话 2 块 → 3 个单"
+    },
+    {
+      "name": "混合：一段够用一段凑不满",
+      "input": [
+        [
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        3
+      ],
+      "expected": 1,
+      "note": "段长 2（浪费）+ 段长 3（下单）+ 段长 1（浪费）"
+    },
+    {
+      "name": "全部空闲",
+      "input": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        2
+      ],
+      "expected": 2,
+      "note": "末尾 1 块浪费"
+    },
+    {
+      "name": "退化：一个空闲块都没有",
+      "input": [
+        [
+          1,
+          1,
+          1
+        ],
+        1
+      ],
+      "expected": 0
+    },
+    {
+      "name": "退化：空位图",
+      "input": [
+        [],
+        4
+      ],
+      "expected": 0,
+      "note": "空输入不得抛异常"
+    },
+    {
+      "name": "blocksPerSession 为 1 时每块各成一单",
+      "input": [
+        [
+          0,
+          1,
+          0,
+          0
+        ],
+        1
+      ],
+      "expected": 3
+    },
+    {
+      "name": "脏位图值必须显式失败",
+      "input": [
+        [
+          0,
+          2,
+          0
+        ],
+        1
+      ],
+      "expected": null,
+      "expectThrow": "IllegalArgumentException",
+      "note": "宽容处理会把脏数据读成可用容量"
+    }
+  ],
+  "answer": "**思路**：单遍扫描维护当前连续空闲段长度 `run`；`run` 达到 `blocksPerSession` 就下单并把 `run` 归零（这样同一段里可以连续下多单）；遇到已用块把 `run` 清零（零头作废）。`O(n)` 时间、`O(1)` 空间。\n\n**为什么 `freeCount / bps` 是错的**：它把「容量」当成「可分配性」。连续约束下真正可服务的是**按段取整后求和** `Σ floor(runᵢ / bps)`，而不是 `floor(Σ runᵢ / bps)`。两者之差就是外部碎片。用例 1 就是这个反例：`[0,0,1,0,0,1,0,0]`、`bps=3`，三段各 2 块 → 朴素解答 2，真答案是 0。\n\n**为什么脏值要抛错而不是当已用**：若 `bit=2` 被当成「非 0 即已用」，位图写坏会表现为「容量突然变小」，运维去查内存泄漏；若被当成「非 1 即可用」，会表现为「超卖」。两者都比一次显式失败贵得多。\n\n**工程延伸（面试追问点）**：\n1. 怎么量化碎片率？（`1 − Σ floor(runᵢ/bps)·bps / freeCount`；做成 gauge，比「空闲率」更能预测拒绝）。\n2. 真引擎怎么缓解？（块链表 + 逻辑块到物理块映射，放弃连续性换 kernel 的 gather；或按 bps 分档维护 free list 做 buddy 分配；或周期性 compaction 迁移活跃会话的 KV）。\n3. 为什么允许段内多单却不允许跨段拼接？（下单即绑定物理地址；跨段拼接意味着已经跑起来的 kernel 地址要变）。\n4. 会话释放时怎么避免立刻又碎掉？（LIFO 归还 + 合并相邻空闲段；或给会话打代际标签，同代际尽量同段）。\n5. 多模型/多精度混部时 `bps` 不是常数怎么办？（按 (模型, 量化位宽) 分池，每池独立 free list —— 否则碎片率会被跨池复用伪装成「够用」）。",
+  "runner": {
+    "className": "Solution",
+    "signature": "int maxServableSessions(int[] blockFree, int blocksPerSession)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int maxServableSessions(int[] blockFree, int blocksPerSession) {\n    if (blocksPerSession <= 0) throw new IllegalArgumentException(\"bad session footprint\");\n    if (blockFree == null) throw new IllegalArgumentException(\"null bitmap\");\n    int run = 0;\n    int sessions = 0;\n    for (int bit : blockFree) {\n      if (bit != 0 && bit != 1) throw new IllegalArgumentException(\"dirty bitmap value: \" + bit);\n      if (bit == 0) {\n        run++;\n      } else {\n        run = 0;                       // 段被切断：零头作废，不许跨段拼接\n      }\n      if (run == blocksPerSession) {   // 凑满立刻下单并归零，实现\"单段内多单\"\n        sessions++;\n        run = 0;\n      }\n    }\n    return sessions;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 生产事故版：拿空闲块总数除以每会话块数，看不见碎片\n  public static int maxServableSessions(int[] blockFree, int blocksPerSession) {\n    if (blocksPerSession <= 0) throw new IllegalArgumentException(\"bad session footprint\");\n    if (blockFree == null) throw new IllegalArgumentException(\"null bitmap\");\n    int free = 0;\n    for (int bit : blockFree) {\n      if (bit != 0 && bit != 1) throw new IllegalArgumentException(\"dirty bitmap value: \" + bit);\n      if (bit == 0) free++;\n    }\n    return free / blocksPerSession;\n  }\n}"
+  },
+  "estimatedMinutes": 18,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理引擎 / 显存调度 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#32,#46（原文讲 PagedAttention 与 KV 淘汰，但未把「连续性 × 碎片」做成可判分点）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-20T16:10:56.933Z"
+  }
+}

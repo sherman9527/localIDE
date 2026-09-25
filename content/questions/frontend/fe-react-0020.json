@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0020",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实验报告结论区：SRM 压过显著性，T-1 与分母口径不满足就不许给放行按钮",
+  "statement": "## 背景\n\n火山引擎 A/B 测试的《如何看懂实验报告》给了三条口径事实【源 S10】：\n\n- 统计方式是**多天累计数据**：\"以进组用户数为例，多天累计的用户数，即是实验期间累计进组并\n  **去重**后的用户数\"；\n- 官方对三种口径的评价：\"相比单天累计，多天累计更能保证各组的样本是「**同质可比**」的；\n  相比多天平均，多天累计更易检验出受影响指标的**显著性**\"；\n- 更新时点：\"**实验开启当天按实时统计进组人数，开启第二天之后按 T-1 日天级更新，\n  具体口径为截止当天 0 点的实验累计进组人数**\"。\n\n《实验报告概述》另给了报告页的形状：天级趋势图、概率分布图、箱型图，\n指标分事件/留存/漏斗三类【源 S11】。\n\n至于\"进组比例偏离预设多少就该把实验判废\"（SRM），**DataTester 的公开文档里没有这条**\n（素材 §7 第 4 条明确说明），所以下面的阈值是**本题设定的契约**，\n答题时请把它当成\"你自己会怎么定这条线与为什么\"。\n\n## 任务\n\n实现一个纯函数（实验报告页的**结论区视图模型**）：\n\n```ts\nexport function reportView(input: ReportInput): ReportView\n```\n\n```ts\n{\n  daysRunning: number;        // 实验已开第几天，>= 1\n  expectedSplitBps: number;   // 预设分流比例，万分比（50/50 => 5000）\n  actualSplitBps: number;     // 实验组实际进组占比，万分比\n  samplePerGroup: number;     // 每组样本数\n  updatedT1: boolean;         // 本次读数是不是\"截止当天 0 点的 T-1 累计\"\n  denominator: 'cumulative-dedup' | 'daily-active';\n  significant: boolean;\n  liftBps: number;            // 指标提升，万分比（410 = +4.10%）\n}\n```\n\n```ts\n{\n  splitDeviationBps: number;  // |actual - expected| * 10000 / expected，**向下取整**\n  blockers: string[];         // 按下面顺序收集，命中才 push（可以多个）\n  verdict: 'invalid' | 'hold' | 'not-significant' | 'watch' | 'ship-candidate';\n  tone: 'danger' | 'warn' | 'muted' | 'ok';\n  headline: string;\n  canPublish: boolean;\n  liftBps: number;            // 原样透传（结论区不许改数字，只许改措辞）\n}\n```\n\n## blockers 的收集顺序（**顺序即优先级**）\n\n| 码 | 条件 |\n| --- | --- |\n| `SRM` | `splitDeviationBps > 1000`（相对偏离超过 10%） |\n| `DENOMINATOR` | `denominator !== 'cumulative-dedup'` |\n| `STALE` | `!updatedT1` **且** `daysRunning > 1` |\n| `LOW-SAMPLE` | `samplePerGroup < 1000` |\n\n`verdict` / `headline` / `tone` 按第一个命中的 blocker 决定（**从上到下，命中即止**）：\n\n| 条件 | verdict | tone | headline |\n| --- | --- | --- | --- |\n| 有 `SRM` | `invalid` | danger | `进组比例偏离预设 X%，结论不成立`（X = dev/100，两位小数） |\n| 有 `DENOMINATOR` | `hold` | warn | `分母口径不是累计去重进组用户，先换回官方口径再判` |\n| 有 `STALE` | `hold` | warn | `数据未按 T-1 更新，今天的数字还不是结论` |\n| 无 blocker 但 `!significant` | `not-significant` | muted | `未达显著，按预注册时长继续或加样本` |\n| 有 `LOW-SAMPLE` | `watch` | warn | `显著但样本偏少，只做观察不做放行` |\n| 其余 | `ship-candidate` | ok | `可提交放行评审` |\n\n`canPublish` 只在 `ship-candidate` 时为 `true`。\n\n四条口径纪律（这题的全部难点在这四条）：\n\n- **`SRM` 压过一切，包括\"已达显著\"。**\n  进组比例本身就是分流系统的输出，它偏了 ⇒ 两组的\"同质可比\"前提不成立，\n  此时任何 p 值都是在错的总体上算的。**先作废、再解释**，顺序反了就是在编故事。\n- **`STALE` 的判据是 `daysRunning > 1`，不是 `!updatedT1`。**\n  官方口径就是\"开启当天按实时统计\"【源 S10】⇒ 第 1 天没有 T-1 是**正常**的。\n  把它判成 stale，实验平台会在每次开新实验的那天自动报一条假警。\n- **`LOW-SAMPLE` 排在\"未达显著\"之后。**\n  都不显著的实验没有\"能不能放行\"的问题，先说结论再说样本；\n  反过来会把\"样本不足 ⇒ 当然不显著\"这件事从待办列表里藏起来。\n- **`blockers` 要全部列出，`headline` 只说一个。**\n  只保留第一个 = 修掉 SRM 之后还得再进一轮才知道分母也错了。\n\n## 校验（抛 `Error`，消息一字不差）\n\n`input must be an object` / `unknown denominator` / `expectedSplitBps out of range` /\n`actualSplitBps out of range` / `daysRunning must be positive` /\n`samplePerGroup must be non-negative` / `flags must be booleans`\n\n## 这题真正考的东西\n\n素材 §3 的\"常见错误答案\"表里那条 **\"实验开一天看不出显著就拉长\"**，\n和这条更接近：**\"降级之后错误率为什么掉了\"** ——\n两者都是**读数面板替结论做了粉饰**。\n结论区的职责不是给一个好看的答案，是**在证据不足时拒绝给出答案**。\n所以本题把 `canPublish` 单独拉出来：它必须**只能**由 `ship-candidate` 得出。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "ab-reading-caliber",
+    "srm-check",
+    "evidence-gate",
+    "permission-aware-rendering",
+    "modern:experimentation"
+  ],
+  "cases": [
+    {
+      "name": "基线：累计去重 + 比例均衡 + 已达显著 ⇒ 可提交放行评审",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [],
+        "verdict": "ship-candidate",
+        "tone": "ok",
+        "headline": "可提交放行评审",
+        "canPublish": true,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "官方口径：进组 48.7% vs 预设 50% ⇒ 相对偏离 260 万分比，未越 1000 线",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 4870,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 260,
+        "blockers": [],
+        "verdict": "ship-candidate",
+        "tone": "ok",
+        "headline": "可提交放行评审",
+        "canPublish": true,
+        "liftBps": 410
+      },
+      "visible": true,
+      "note": "素材短题里\"两组 51.3%/48.7%\"看起来吓人，但相对偏离只有 2.6%；判 SRM 看的是\"偏离是否超出该样本量的随机波动\"，不是\"是不是刚好一半\""
+    },
+    {
+      "name": "SRM 优先于一切解释：偏离超过 10% 就直接判废",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 4400,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 900
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 1200,
+        "blockers": [
+          "SRM"
+        ],
+        "verdict": "invalid",
+        "tone": "danger",
+        "headline": "进组比例偏离预设 12.00%，结论不成立",
+        "canPublish": false,
+        "liftBps": 900
+      },
+      "visible": true,
+      "note": "dev = |4400-5000|*10000/5000 = 1200 > 1000 ⇒ verdict=invalid，此时 +9.00% 的 lift 一个字都不许出现在标题里"
+    },
+    {
+      "name": "分母换成就\"显著\"了 ⇒ 先降级成 hold，不去解释业务",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "daily-active",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [
+          "DENOMINATOR"
+        ],
+        "verdict": "hold",
+        "tone": "warn",
+        "headline": "分母口径不是累计去重进组用户，先换回官方口径再判",
+        "canPublish": false,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：实验已开到第 4 天但数据没按 T-1 更新 ⇒ 今天的数不是结论",
+      "input": [
+        {
+          "daysRunning": 4,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": false,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [
+          "STALE"
+        ],
+        "verdict": "hold",
+        "tone": "warn",
+        "headline": "数据未按 T-1 更新，今天的数字还不是结论",
+        "canPublish": false,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：实验第 1 天尚未 T-1（官方口径：开启当天按实时统计）⇒ 不算 STALE",
+      "input": [
+        {
+          "daysRunning": 1,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": false,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [],
+        "verdict": "ship-candidate",
+        "tone": "ok",
+        "headline": "可提交放行评审",
+        "canPublish": true,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "显著但样本不足 ⇒ watch：能看不能放",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 999,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [
+          "LOW-SAMPLE"
+        ],
+        "verdict": "watch",
+        "tone": "warn",
+        "headline": "显著但样本偏少，只做观察不做放行",
+        "canPublish": false,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：样本数恰好等于 1000 ⇒ 不再算 LOW-SAMPLE",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 1000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [],
+        "verdict": "ship-candidate",
+        "tone": "ok",
+        "headline": "可提交放行评审",
+        "canPublish": true,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "未达显著时不报 blockers 之外的坏消息（blockers 仍要如实列出）",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 500,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": false,
+          "liftBps": 410
+        }
+      ],
+      "expected": {
+        "splitDeviationBps": 0,
+        "blockers": [
+          "LOW-SAMPLE"
+        ],
+        "verdict": "not-significant",
+        "tone": "muted",
+        "headline": "未达显著，按预注册时长继续或加样本",
+        "canPublish": false,
+        "liftBps": 410
+      },
+      "visible": true
+    },
+    {
+      "name": "非法：整份入参是 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "input must be an object"
+    },
+    {
+      "name": "非法：未知分母口径",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "all-users",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown denominator"
+    },
+    {
+      "name": "非法：预设分流比例越界",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 0,
+          "actualSplitBps": 5000,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "expectedSplitBps out of range"
+    },
+    {
+      "name": "非法：实际占比是负数",
+      "input": [
+        {
+          "daysRunning": 3,
+          "expectedSplitBps": 5000,
+          "actualSplitBps": -1,
+          "samplePerGroup": 20000,
+          "updatedT1": true,
+          "denominator": "cumulative-dedup",
+          "significant": true,
+          "liftBps": 410
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "actualSplitBps out of range"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n`splitDeviationBps` 用 `Math.abs(actual - expected) * 10000 / expected` 再 `Math.floor`\n—— 注意分母是**预设值**而不是 10000：\n\"偏离多少\"要相对\"应该有多少\"来度量，否则 50/50 与 1/99 的分流会用同一条线。\n\n**官方那个\"48.7% vs 50%\"的例子算出来是 260 万分比（2.60%）⇒ 不触发 SRM。**\n用例「官方口径：进组 48.7% vs 预设 50%」的期望是 `verdict='ship-candidate'`\n且 `splitDeviationBps=260`。这条用例存在的全部理由就是**打脸\"不是刚好一半就是有问题\"**：\n真实分流本来就是随机的，2.6% 的相对偏离在几万样本下完全在波动内。\n阈值线该定在哪是【推】（素材 §7 第 4 条：DataTester 没公开 SRM 能力），\n但\"必须按**相对偏离**而不是绝对差判\"这件事是确定的 ——\n绝对差 130 万分比在 50/50 里是噪声，在 1/99 的分流里是天塌。\n\n**`SRM` 命中时 `liftBps` 仍然原样透传，但 headline 里一个字都不提。**\n用例「SRM 优先于一切解释」的 `liftBps=900`（+9.00%）出现在返回对象的\n`liftBps` 字段里，而 `headline` 是\"进组比例偏离预设 12.00%，结论不成立\"。\n**这就是\"结论区只改措辞、不改数字\"**：\n数据一行都不许动（否则下游看板与报告对不上），\n能动的只有\"这一轮的结论允不允许被说出来\"。\n朴素解反过来 —— 它把 lift 写进标题、`blockers` 恒空、`canPublish` 直接等于 `significant`，\n于是它在那条 +9% 的用例上给出 `ship-candidate`：一次可以被直接放行到线上的假结论。\n\n**`STALE` 与第 1 天的关系**（用例「退化：实验第 1 天尚未 T-1」⇒ 不是 STALE）：\n判据写成 `daysRunning > 1` 是因为官方口径就是\"开启当天按实时统计进组人数\"【源 S10】。\n少了这个条件，每次开新实验当天都会亮一条黄警 ——\n而**一条必然误报的告警等于没有告警**，这和熔断器 `MinSample` 是同一类问题。\n\n**`LOW-SAMPLE` 排在\"未达显著\"之后**（用例「未达显著时不报 blockers 之外的坏消息」：\n`significant=false, samplePerGroup=500` ⇒ `verdict='not-significant'`\n但 `blockers=['LOW-SAMPLE']`）：\n标题说\"未达显著\"，待办列表仍然要说\"样本不足\"。\n两者不冲突，**缺哪一个都会让下一轮实验的样本量继续拍脑袋**。\n\n**工程延伸（面试追问点）**\n\n1. 这些判据该在前端还是后端？（**判定在后端，渲染在前端**。\n   这题把它做成纯函数是为了可测；真实系统里 `verdict` 必须由服务端给出，\n   否则\"前端自己判能不能发布\"是可以被 DevTools 绕过的。）\n2. `canPublish` 与 `verdict` 为什么两个都要？（`verdict` 是给人看的结论，\n   `canPublish` 是给按钮的开关。只留 `verdict` ⇒ 每个按钮各自 `verdict === '...'`，\n   新增一个状态时一定有人忘；只留 `canPublish` ⇒ 界面说不出为什么不能点。）\n3. 还要哪些 blocker？（同层互斥违例（同一批人被两个实验抢占）【源 S9】、\n   父子继承（结论外推边界）【源 S9】、多重比较（同一天看 20 个指标必有显著）【推】、\n   窥视（每天看一次显著就停）【推】。\n   `blockers` 设计成**有序数组**正是为了往里加而不改 verdict 的语义。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "reportView.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { reportView } from './Solution';\n\n/**\n * 断言由 gen.py 里同一个 Python 模型生成，不手抄 ——\n * react-vitest 题的判分事实来源就是这份文件，抄错一次就永久错一次。\n * 契约型用例断言到**消息**：只写 .toThrow() 会让几条\"都该抛错\"的用例收敛成同一条。\n */\ndescribe('reportView：实验报告结论区读数口径', () => {\n  it(\"基线：累计去重 + 比例均衡 + 已达显著 ⇒ 可提交放行评审\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [], \"verdict\": \"ship-candidate\", \"tone\": \"ok\", \"headline\": \"可提交放行评审\", \"canPublish\": true, \"liftBps\": 410});\n  });\n  it(\"官方口径：进组 48.7% vs 预设 50% ⇒ 相对偏离 260 万分比，未越 1000 线\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 4870, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 260, \"blockers\": [], \"verdict\": \"ship-candidate\", \"tone\": \"ok\", \"headline\": \"可提交放行评审\", \"canPublish\": true, \"liftBps\": 410});\n  });\n  it(\"SRM 优先于一切解释：偏离超过 10% 就直接判废\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 4400, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 900})).toEqual({\"splitDeviationBps\": 1200, \"blockers\": [\"SRM\"], \"verdict\": \"invalid\", \"tone\": \"danger\", \"headline\": \"进组比例偏离预设 12.00%，结论不成立\", \"canPublish\": false, \"liftBps\": 900});\n  });\n  it(\"分母换成就\\\"显著\\\"了 ⇒ 先降级成 hold，不去解释业务\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"daily-active\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [\"DENOMINATOR\"], \"verdict\": \"hold\", \"tone\": \"warn\", \"headline\": \"分母口径不是累计去重进组用户，先换回官方口径再判\", \"canPublish\": false, \"liftBps\": 410});\n  });\n  it(\"边界：实验已开到第 4 天但数据没按 T-1 更新 ⇒ 今天的数不是结论\", () => {\n    expect(reportView({\"daysRunning\": 4, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": false, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [\"STALE\"], \"verdict\": \"hold\", \"tone\": \"warn\", \"headline\": \"数据未按 T-1 更新，今天的数字还不是结论\", \"canPublish\": false, \"liftBps\": 410});\n  });\n  it(\"退化：实验第 1 天尚未 T-1（官方口径：开启当天按实时统计）⇒ 不算 STALE\", () => {\n    expect(reportView({\"daysRunning\": 1, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": false, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [], \"verdict\": \"ship-candidate\", \"tone\": \"ok\", \"headline\": \"可提交放行评审\", \"canPublish\": true, \"liftBps\": 410});\n  });\n  it(\"显著但样本不足 ⇒ watch：能看不能放\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 999, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [\"LOW-SAMPLE\"], \"verdict\": \"watch\", \"tone\": \"warn\", \"headline\": \"显著但样本偏少，只做观察不做放行\", \"canPublish\": false, \"liftBps\": 410});\n  });\n  it(\"边界：样本数恰好等于 1000 ⇒ 不再算 LOW-SAMPLE\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 1000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [], \"verdict\": \"ship-candidate\", \"tone\": \"ok\", \"headline\": \"可提交放行评审\", \"canPublish\": true, \"liftBps\": 410});\n  });\n  it(\"未达显著时不报 blockers 之外的坏消息（blockers 仍要如实列出）\", () => {\n    expect(reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 500, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": false, \"liftBps\": 410})).toEqual({\"splitDeviationBps\": 0, \"blockers\": [\"LOW-SAMPLE\"], \"verdict\": \"not-significant\", \"tone\": \"muted\", \"headline\": \"未达显著，按预注册时长继续或加样本\", \"canPublish\": false, \"liftBps\": 410});\n  });\n  it(\"非法：整份入参是 null\", () => {\n    expect(() => reportView(null)).toThrow(\"input must be an object\");\n  });\n  it(\"非法：未知分母口径\", () => {\n    expect(() => reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"all-users\", \"significant\": true, \"liftBps\": 410})).toThrow(\"unknown denominator\");\n  });\n  it(\"非法：预设分流比例越界\", () => {\n    expect(() => reportView({\"daysRunning\": 3, \"expectedSplitBps\": 0, \"actualSplitBps\": 5000, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toThrow(\"expectedSplitBps out of range\");\n  });\n  it(\"非法：实际占比是负数\", () => {\n    expect(() => reportView({\"daysRunning\": 3, \"expectedSplitBps\": 5000, \"actualSplitBps\": -1, \"samplePerGroup\": 20000, \"updatedT1\": true, \"denominator\": \"cumulative-dedup\", \"significant\": true, \"liftBps\": 410})).toThrow(\"actualSplitBps out of range\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 60000,
+    "referenceSolution": "export interface ReportInput {\n  daysRunning: number;\n  expectedSplitBps: number;\n  actualSplitBps: number;\n  samplePerGroup: number;\n  updatedT1: boolean;\n  denominator: string;\n  significant: boolean;\n  liftBps: number;\n}\n\nexport interface ReportView {\n  splitDeviationBps: number;\n  blockers: string[];\n  verdict: string;\n  tone: string;\n  headline: string;\n  canPublish: boolean;\n  liftBps: number;\n}\n\nconst SRM_LIMIT_BPS = 1000;\nconst MIN_SAMPLE = 1000;\n\nexport function reportView(input: ReportInput): ReportView {\n  if (input === null || input === undefined || typeof input !== 'object') {\n    throw new Error('input must be an object');\n  }\n  if (input.denominator !== 'cumulative-dedup' && input.denominator !== 'daily-active') {\n    throw new Error('unknown denominator');\n  }\n  if (input.expectedSplitBps <= 0 || input.expectedSplitBps > 10000) {\n    throw new Error('expectedSplitBps out of range');\n  }\n  if (input.actualSplitBps < 0 || input.actualSplitBps > 10000) {\n    throw new Error('actualSplitBps out of range');\n  }\n  if (input.daysRunning < 1) throw new Error('daysRunning must be positive');\n  if (input.samplePerGroup < 0) throw new Error('samplePerGroup must be non-negative');\n  if (typeof input.updatedT1 !== 'boolean' || typeof input.significant !== 'boolean') {\n    throw new Error('flags must be booleans');\n  }\n\n  const dev = Math.floor(Math.abs(input.actualSplitBps - input.expectedSplitBps) * 10000\n    / input.expectedSplitBps);\n  const blockers: string[] = [];\n  if (dev > SRM_LIMIT_BPS) blockers.push('SRM');\n  if (input.denominator !== 'cumulative-dedup') blockers.push('DENOMINATOR');\n  if (!input.updatedT1 && input.daysRunning > 1) blockers.push('STALE');\n  if (input.samplePerGroup < MIN_SAMPLE) blockers.push('LOW-SAMPLE');\n\n  let verdict: string;\n  let tone: string;\n  let headline: string;\n  if (blockers.indexOf('SRM') >= 0) {\n    verdict = 'invalid';\n    tone = 'danger';\n    headline = `进组比例偏离预设 ${(dev / 100).toFixed(2)}%，结论不成立`;\n  } else if (blockers.indexOf('DENOMINATOR') >= 0) {\n    verdict = 'hold';\n    tone = 'warn';\n    headline = '分母口径不是累计去重进组用户，先换回官方口径再判';\n  } else if (blockers.indexOf('STALE') >= 0) {\n    verdict = 'hold';\n    tone = 'warn';\n    headline = '数据未按 T-1 更新，今天的数字还不是结论';\n  } else if (!input.significant) {\n    verdict = 'not-significant';\n    tone = 'muted';\n    headline = '未达显著，按预注册时长继续或加样本';\n  } else if (blockers.indexOf('LOW-SAMPLE') >= 0) {\n    verdict = 'watch';\n    tone = 'warn';\n    headline = '显著但样本偏少，只做观察不做放行';\n  } else {\n    verdict = 'ship-candidate';\n    tone = 'ok';\n    headline = '可提交放行评审';\n  }\n  return {\n    splitDeviationBps: dev,\n    blockers,\n    verdict,\n    tone,\n    headline,\n    canPublish: verdict === 'ship-candidate',\n    liftBps: input.liftBps,\n  };\n}",
+    "naiveSolution": "export function reportView(input: any): any {\n  // \"把 lift 当标题\"版：显著就报提升，不看分流是否均衡、不看分母口径、不看更新时点。\n  // 这正是\"用大盘骗过 SRE\"的前端形态：结论区永远是绿的。\n  const ok = !!input.significant;\n  return {\n    splitDeviationBps: 0,\n    blockers: [],\n    verdict: ok ? 'ship-candidate' : 'not-significant',\n    tone: ok ? 'ok' : 'muted',\n    headline: ok\n      ? `实验组提升 ${(input.liftBps / 100).toFixed(2)}%，可提交放行评审`\n      : '未达显著，按预注册时长继续或加样本',\n    canPublish: ok,\n    liftBps: input.liftBps,\n  };\n}"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发 / 实验平台前端（A/B 测试方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 12（实验读数口径：多天累计、进组用户累计去重、\"开启当天实时、次日起 T-1 且口径为截止当天 0 点\"）＋ 考点 11/13（SRM 与样本量：素材 §7 第 4 条声明 DataTester 未公开 SRM 能力，故本题阈值写成【推】= 题面设定的契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:33:24.468Z"
+  }
+}

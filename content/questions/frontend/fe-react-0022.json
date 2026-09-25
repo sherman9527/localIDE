@@ -1,0 +1,648 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0022",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "微前端隔离档位回归：抛错 / 忽略 / 降级三种出口必须分开，scoped css 也不是\"全都加前缀\"",
+  "statement": "## 背景（版本必须钉住：qiankun 2.10.16，npm `latest`）\n\n一个基座（主应用）挂多个子应用。\"隔离\"在 qiankun 里**不是一个开关**，而是两组互相牵连的配置：\n\n* **全局变量沙箱**：浏览器有没有 `window.Proxy` 决定 ProxySandbox 还是 SnapshotSandbox；\n  `sandbox.loose` 决定 ProxySandbox 还是 LegacySandbox；\n* **样式隔离**：`strictStyleIsolation`（把内容塞进 shadow dom）与\n  `experimentalStyleIsolation`（运行时改写 `<style>` 里的选择器）。**这两档互斥，strict 赢**。\n\n难点不是\"知不知道有这几个配置\"，而是**三种出口长得很像、后果完全不同**：\n\n| 出口 | 触发条件 | 线上表现 |\n| --- | --- | --- |\n| **硬失败**（抛 `QiankunError`） | 子应用提供了自定义 `render`（旧渲染）却又开了任一档样式隔离 | 应用压根加载不出来 |\n| **静默忽略**（只 `console.warn`） | 浏览器不支持 shadow dom 时开 `strictStyleIsolation` | 配置写了、没生效、也没人报错 |\n| **自动降级**（改写配置 + warn） | 浏览器没有 `window.Proxy` | 换成快照沙箱，`loose` 被强制为真 |\n\n把三种出口压成一条 `warnings` 的决策器，就是这道题要筛掉的答案。\n\n## 你要实现的两个导出\n\n```ts\nexport function resolveIsolation(input: IsolationInput): IsolationView;\nexport function scopeCss(rules: CssRule[], prefix: string): string;\n```\n\n### 1) `resolveIsolation`\n\n```ts\ninterface IsolationInput {\n  hasProxy: boolean;                   // window.Proxy 是否存在\n  hasConstDestructAssignment: boolean; // 是否支持 `const { a } = { a: 1 }`（speedy 的前提）\n  supportsShadowDOM: boolean;\n  legacyRender: boolean;               // 子应用提供了自定义 render（旧渲染），**不是指 sandbox:false**\n  sandbox?: true | false | {\n    strictStyleIsolation?: boolean;\n    experimentalStyleIsolation?: boolean;\n    loose?: boolean;\n    speedy?: boolean;\n  };\n  singular?: boolean;\n  appName: string;\n  instanceSeq: number;                 // 该 appName 第几次被加载，从 1 开始\n}\n\ninterface IsolationView {\n  sandboxType: 'Proxy' | 'LegacyProxy' | 'Snapshot' | 'None';\n  singular: boolean;\n  scopedCss: boolean;\n  shadowWrapped: boolean;\n  containerAttr: string | null;        // 容器上会写入的 data-qiankun 值；不启用 scoped css 时为 null\n  warnings: string[];                  // 只放\"告警后继续跑\"的那几条\n  thrown: string[];                    // 只放\"抛 QiankunError\"的那条（本版本最多一条）\n}\n```\n\n**默认值**：`sandbox` 省略按 `true`、`singular` 省略按 `true`\n（对应 `start()` 里的 `frameworkConfiguration = { prefetch: true, singular: true, sandbox: true, ...opts }`）。\n\n**规则（逐条对应源码）**\n\n1. **低版本浏览器降级**：仅当 `sandbox` 为真值时执行，且**两条分支互斥**（第一条命中就直接返回）：\n   * `hasProxy === false` ⇒ 追加 `W_PROXY`；**当且仅当输入里显式写了 `singular: false`** 再追加\n     `W_SINGULAR`；然后把 `sandbox` 改写为 `{ ...原对象, loose: true }`\n     （原值是 `true` 时变成 `{ loose: true }`）。\n     ⚠️ **`singular` 的值不许被改写**——FAQ 说\"会自动把 singular 配为 true\"，v2.10.16 源码只警告不改值，\n     本题按源码判。\n   * 否则（有 Proxy）当 `hasConstDestructAssignment === false` 且\n     （`sandbox === true` 或 `sandbox.speedy !== false`）⇒ 追加 `W_SPEEDY`（speedy 被关掉）。\n2. **沙箱选型**：`sandbox` 为假 ⇒ `'None'`；否则\n   `hasProxy ? (改写后 loose 为真 ? 'LegacyProxy' : 'Proxy') : 'Snapshot'`。\n3. **两档样式隔离互斥**：`strict = 改写后是对象 && !!strictStyleIsolation`；\n   `scopedCss = 改写后是对象 && !strict && !!experimentalStyleIsolation`。\n4. **shadow dom 不支持 ⇒ 静默忽略**：`strict && !supportsShadowDOM` ⇒ 追加 `W_SHADOW`，\n   `shadowWrapped: false`，**这条绝不许进 `thrown`**。`shadowWrapped = strict && supportsShadowDOM`。\n5. **旧渲染硬失败**（顺序：先 strict 后 scoped，所以两档同开时只有一条）：\n   `legacyRender && strict` ⇒ `thrown` 收 `E_STRICT`；否则 `legacyRender && scopedCss` ⇒ 收 `E_EXPERIMENTAL`。\n   注意求值顺序是\"先建元素（写 `data-qiankun`、判 shadow dom）→ 再取 wrapper（这里才抛）\"，\n   所以第 6 条与 `thrown` **可以同时非空**。\n6. **容器标识**：`scopedCss` 为真时 `containerAttr = instanceId`，其中\n   `instanceId = instanceSeq === 1 ? appName : appName + '_' + (instanceSeq - 1)`\n   （同名第二次加载得到 `react16_1`）。\n7. **顺序**：`warnings` 按时间序输出（降级发生在 `start()`，shadow dom 那条发生在建元素时）。\n\n**校验（`throw new Error(...)`，消息文本必须一致；按下列顺序检查）**\n\n| 条件 | 消息 |\n| --- | --- |\n| 输入是 `null` / `undefined` | `input must be an object` |\n| `sandbox` 不是 `true`/`false`/对象 | `unknown sandbox configuration` |\n| `hasProxy` / `hasConstDestructAssignment` / `supportsShadowDOM` / `legacyRender` 不是布尔 | `字段名 must be a boolean` |\n| `singular` 出现但不是布尔 | `singular must be a boolean` |\n| `appName` 不是非空字符串 | `appName must be a non-empty string` |\n| `instanceSeq` 不是 ≥1 的整数 | `instanceSeq must be a positive integer` |\n\n### 2) `scopeCss(rules, prefix)`\n\n运行时 scoped CSS 的改写器。**不要求你写 CSS 解析器**：入参已经是 CSSOM 走查后\n拿到的规则序列（对应 `ScopedCSS.rewrite(rules, prefix)` 的入参形态），\n你只需要按同样的规则决定\"哪条被改写、改成什么\"。\n\n```ts\ninterface CssRule {\n  type: number;        // CSSRule.type：1 STYLE / 3 IMPORT / 4 MEDIA / 5 FONT_FACE / 6 PAGE / 7 KEYFRAMES / 8 KEYFRAME / 12 SUPPORTS\n  text: string;        // type 1：selectorText（已 trim）；type 4/12：conditionText；其余：整条规则的原文\n  declarations?: string;  // 仅 type 1：声明块原文（自带首尾大括号），整条规则的原文 = text + ' ' + declarations\n  rules?: CssRule[];      // 仅 type 4/12：内层规则\n}\n```\n\n**输出**：一个字符串，等于「逐条渲染后直接拼接」（源码就是 `css += ...`，\n**规则之间没有任何分隔符**）。单条渲染：\n\n* `type 1` ⇒ 对 `text + ' ' + declarations` 跑下面的三步改写；\n* `type 4` ⇒ `'@media ' + text + ' {' + <内层递归渲染> + '}'`；\n* `type 12` ⇒ `'@supports ' + text + ' {' + <内层递归渲染> + '}'`；\n* `type 3 / 5 / 6 / 7 / 8` ⇒ **原样输出 `text`**（字体名、动画名、分页、`@import` 都不进作用域）。\n\n**`type 1` 的三步（顺序不能调）**\n\n```\nrootSelectorRE    = /((?:[^\\w\\-.#]|^)(body|html|:root))/gm\nrootCombinationRE = /(html[^\\w{[]+)/gm\nsiblingSelectorRE = /(html[^\\w{]+)(\\+|~)/gm\n```\n\n1. 若 `selectorText` 恰好是 `html` / `body` / `:root` ⇒ 把整条原文里所有\n   `rootSelectorRE` 的匹配**替换成 `prefix`**，结束。\n2. 若 `rootCombinationRE.test(selectorText)` 且 **不**满足 `siblingSelectorRE.test(selectorText)`\n   ⇒ `css = css.replace(rootCombinationRE, '')`（剥掉 `html...` 前缀）。\n   `html + body` / `html ~ body` 就是被这条例外**跳过剥前缀**的——但注意它**接下来照样进第 3 步**。\n3. 取整条原文里\"到最后一个 `{` 为止\"的段（`/^[\\s\\S]+{/`，**无 m 标志**，`^` 只锚串首），\n   把它按 `/(^|,\\n?)([^,]+)/g` 逐段处理（`item` = 整段，`p` = 第 1 组，`s` = 第 2 组）：\n   * 若 `rootSelectorRE.test(item)` ⇒ 对 `item` 跑 `replace(rootSelectorRE, m => ...)`：\n     匹配首字符是 `,` 或 `(` 时返回 `m[0] + prefix`（**不许吃掉前一个合法字符**，\n     这就是 `body,html` 与 `*:not(:root)` 不被破坏的原因），否则只返回 `prefix`；\n   * 否则 ⇒ 返回 `` `${p}${prefix} ${s.replace(/^ */, '')}` ``。\n\n**契约**：`scopeCss` 必须是纯函数——同一份输入喂两次结果一字不差，且**不得就地改动入参数组**\n（对应源码里 `ScopedCSS.ModifiedTag` 的\"同一个 style 节点只改写一次\"意图）。\n`rules` 里出现 `CSSRule.type` 取值表之外的类型 ⇒ `throw new Error('unknown css rule type')`；\n`rules` 不是数组 ⇒ `rules must be an array`；`prefix` 是空串 ⇒ `prefix must be a non-empty string`。\n\n> **用例保证的输入约束**：`declarations` 内不含 `{`、`}`、`html`、`body`、`:root` 字样，\n> 也不含换行。因此\"只在 selector 段上做替换\"与\"在整条 cssText 上跑同样的正则\"两种写法**结果等价**，\n> 本题不区分。\n\n## 消息常量表（逐字比对；这是基座团队自己维护的常量，不是要你背 qiankun）\n\n| 代号 | 文本 |\n| --- | --- |\n| `W_PROXY` | `[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox` |\n| `W_SINGULAR` | `[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy` |\n| `W_SPEEDY` | `[qiankun] Speedy mode will turn off as const destruct assignment not supported in current browser!` |\n| `W_SHADOW` | `[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!` |\n| `E_STRICT` | `strictStyleIsolation can not be used with legacy render!` |\n| `E_EXPERIMENTAL` | `experimentalStyleIsolation can not be used with legacy render!` |\n\n不许引入第三方依赖。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "microfrontend-isolation",
+    "css-scoping",
+    "silent-degradation",
+    "decision-table",
+    "modern:micro-frontend"
+  ],
+  "cases": [
+    {
+      "name": "基线：全支持 + sandbox:true ⇒ 严格 Proxy 沙箱，一条告警都不该有",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": true,
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "降级：无 Proxy 且显式 singular:false ⇒ 快照沙箱 + 两条告警，但 singular 不许被改",
+      "input": [
+        {
+          "hasProxy": false,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": true,
+          "singular": false,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Snapshot",
+        "singular": false,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [
+          "[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox",
+          "[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy"
+        ],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "降级：loose 显式开 ⇒ LegacyProxy（严格模式才是默认）",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": {
+            "loose": true
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "LegacyProxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "降级不吞配置：无 Proxy 时 experimentalStyleIsolation 要活下来（展开后补 loose）",
+      "input": [
+        {
+          "hasProxy": false,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": {
+            "experimentalStyleIsolation": true
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Snapshot",
+        "singular": true,
+        "scopedCss": true,
+        "shadowWrapped": false,
+        "containerAttr": "react16",
+        "warnings": [
+          "[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox"
+        ],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "硬失败：legacy render + 两档隔离同开 ⇒ 只有 strict 那条抛错，且两档互斥（scopedCss 为假）",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": true,
+          "sandbox": {
+            "strictStyleIsolation": true,
+            "experimentalStyleIsolation": true
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": true,
+        "containerAttr": null,
+        "warnings": [],
+        "thrown": [
+          "strictStyleIsolation can not be used with legacy render!"
+        ]
+      },
+      "visible": true
+    },
+    {
+      "name": "硬失败：legacy render + experimental ⇒ 抛对应那条，但容器标识已经写上了",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": true,
+          "sandbox": {
+            "experimentalStyleIsolation": true
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": true,
+        "shadowWrapped": false,
+        "containerAttr": "react16",
+        "warnings": [],
+        "thrown": [
+          "experimentalStyleIsolation can not be used with legacy render!"
+        ]
+      },
+      "visible": true
+    },
+    {
+      "name": "静默降级：不支持 shadow dom 时开 strict ⇒ 只 warn 并忽略，绝不进 thrown",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": false,
+          "legacyRender": false,
+          "sandbox": {
+            "strictStyleIsolation": true
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [
+          "[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!"
+        ],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "三种出口同现：无 Proxy + singular:false + 无 shadow dom + legacy render + strict",
+      "input": [
+        {
+          "hasProxy": false,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": false,
+          "legacyRender": true,
+          "sandbox": {
+            "strictStyleIsolation": true
+          },
+          "singular": false,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Snapshot",
+        "singular": false,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [
+          "[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox",
+          "[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy",
+          "[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!"
+        ],
+        "thrown": [
+          "strictStyleIsolation can not be used with legacy render!"
+        ]
+      },
+      "visible": true
+    },
+    {
+      "name": "speedy：不支持 const 解构且没显式关 ⇒ 只追加一条\"关掉 speedy\"的告警",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": false,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": true,
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [
+          "[qiankun] Speedy mode will turn off as const destruct assignment not supported in current browser!"
+        ],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "speedy 已显式关闭 ⇒ 不该再报\"我要关掉它\"",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": false,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": {
+            "speedy": false
+          },
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "分支互斥：无 Proxy 时先返回，const 解构不支持也不该再报 speedy",
+      "input": [
+        {
+          "hasProxy": false,
+          "hasConstDestructAssignment": false,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": true,
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "Snapshot",
+        "singular": true,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [
+          "[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox"
+        ],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：sandbox:false ⇒ 不降级、不告警，singular:false 原样保留（沙箱压根没建）",
+      "input": [
+        {
+          "hasProxy": false,
+          "hasConstDestructAssignment": false,
+          "supportsShadowDOM": false,
+          "legacyRender": false,
+          "sandbox": false,
+          "singular": false,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": {
+        "sandboxType": "None",
+        "singular": false,
+        "scopedCss": false,
+        "shadowWrapped": false,
+        "containerAttr": null,
+        "warnings": [],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "实例标识：同名第 3 次加载 ⇒ 容器属性值是 react16_2，不是 react16",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": {
+            "experimentalStyleIsolation": true
+          },
+          "appName": "react16",
+          "instanceSeq": 3
+        }
+      ],
+      "expected": {
+        "sandboxType": "Proxy",
+        "singular": true,
+        "scopedCss": true,
+        "shadowWrapped": false,
+        "containerAttr": "react16_2",
+        "warnings": [],
+        "thrown": []
+      },
+      "visible": true
+    },
+    {
+      "name": "非法：整行是 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "input must be an object"
+    },
+    {
+      "name": "非法：sandbox 写成字符串（true/false/对象之外的第四种）",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": "yes",
+          "singular": true,
+          "appName": "react16",
+          "instanceSeq": 1
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown sandbox configuration"
+    },
+    {
+      "name": "非法：instanceSeq 为 0（加载序从 1 开始）",
+      "input": [
+        {
+          "hasProxy": true,
+          "hasConstDestructAssignment": true,
+          "supportsShadowDOM": true,
+          "legacyRender": false,
+          "sandbox": {
+            "experimentalStyleIsolation": true
+          },
+          "appName": "react16",
+          "instanceSeq": 0
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "instanceSeq must be a positive integer"
+    },
+    {
+      "name": "基线：普通规则加前缀，@font-face 与 @keyframes 一个字都不动",
+      "input": [
+        [
+          {
+            "type": 1,
+            "text": ".app-main",
+            "declarations": "{font-size: 14px}"
+          },
+          {
+            "type": 5,
+            "text": "@font-face{font-family:icon;src:url(icon.woff)}"
+          },
+          {
+            "type": 7,
+            "text": "@keyframes fadeIn{from{opacity:0}to{opacity:1}}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "div[data-qiankun=\"react16\"] .app-main {font-size: 14px}@font-face{font-family:icon;src:url(icon.woff)}@keyframes fadeIn{from{opacity:0}to{opacity:1}}",
+      "visible": true
+    },
+    {
+      "name": "根选择器：html / body / :root 是被**替换**成容器，不是加前缀",
+      "input": [
+        [
+          {
+            "type": 1,
+            "text": "html",
+            "declarations": "{margin: 0}"
+          },
+          {
+            "type": 1,
+            "text": "body",
+            "declarations": "{padding: 0}"
+          },
+          {
+            "type": 1,
+            "text": ":root",
+            "declarations": "{--brand: blue}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "div[data-qiankun=\"react16\"] {margin: 0}div[data-qiankun=\"react16\"] {padding: 0}div[data-qiankun=\"react16\"] {--brand: blue}",
+      "visible": true
+    },
+    {
+      "name": "组合选择器：html body 与 html > body 先剥掉 html 前缀",
+      "input": [
+        [
+          {
+            "type": 1,
+            "text": "html body",
+            "declarations": "{color: red}"
+          },
+          {
+            "type": 1,
+            "text": "html > body",
+            "declarations": "{color: green}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "div[data-qiankun=\"react16\"] {color: red}div[data-qiankun=\"react16\"] {color: green}",
+      "visible": true
+    },
+    {
+      "name": "非标准兄弟规则：不剥前缀，但两个根选择器照样各自被替换（素材说\"原样\"是错的）",
+      "input": [
+        [
+          {
+            "type": 1,
+            "text": "html + body",
+            "declarations": "{color: red}"
+          },
+          {
+            "type": 1,
+            "text": "html ~ body",
+            "declarations": "{color: blue}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "div[data-qiankun=\"react16\"] +div[data-qiankun=\"react16\"] {color: red}div[data-qiankun=\"react16\"] ~div[data-qiankun=\"react16\"] {color: blue}",
+      "visible": true
+    },
+    {
+      "name": "组选择器：逐段处理，段首的逗号/括号不能被吃掉（body,html 与 *:not(:root)）",
+      "input": [
+        [
+          {
+            "type": 1,
+            "text": "div, body, span",
+            "declarations": "{color: red}"
+          },
+          {
+            "type": 1,
+            "text": "body,html",
+            "declarations": "{margin: 0}"
+          },
+          {
+            "type": 1,
+            "text": "*:not(:root)",
+            "declarations": "{color: red}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "div[data-qiankun=\"react16\"] div,div[data-qiankun=\"react16\"],div[data-qiankun=\"react16\"] span {color: red}div[data-qiankun=\"react16\"],div[data-qiankun=\"react16\"] {margin: 0}*:not(div[data-qiankun=\"react16\"]) {color: red}",
+      "visible": true
+    },
+    {
+      "name": "条件规则：@media/@supports 的条件原样保留、内部递归改写",
+      "input": [
+        [
+          {
+            "type": 4,
+            "text": "screen and (max-width: 300px)",
+            "rules": [
+              {
+                "type": 1,
+                "text": ".a",
+                "declarations": "{color: red}"
+              },
+              {
+                "type": 5,
+                "text": "@font-face{font-family:x}"
+              }
+            ]
+          },
+          {
+            "type": 12,
+            "text": "(display: grid)",
+            "rules": [
+              {
+                "type": 1,
+                "text": "body",
+                "declarations": "{gap: 1px}"
+              }
+            ]
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "@media screen and (max-width: 300px) {div[data-qiankun=\"react16\"] .a {color: red}@font-face{font-family:x}}@supports (display: grid) {div[data-qiankun=\"react16\"] {gap: 1px}}",
+      "visible": true
+    },
+    {
+      "name": "不参与作用域的其余两类：@import 与 @page 原样输出（字体名/动画名/分页仍全局打架）",
+      "input": [
+        [
+          {
+            "type": 3,
+            "text": "@import url(\"theme.css\");"
+          },
+          {
+            "type": 6,
+            "text": "@page{margin:1cm}"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "@import url(\"theme.css\");@page{margin:1cm}",
+      "visible": true
+    },
+    {
+      "name": "退化：空规则表 ⇒ 空串（幂等：同一份输入喂两次结果必须一字不差）",
+      "input": [
+        [],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": "",
+      "visible": true
+    },
+    {
+      "name": "非法：未知规则类型（CSSRule.type 里没有 99）",
+      "input": [
+        [
+          {
+            "type": 99,
+            "text": "whatever"
+          }
+        ],
+        "div[data-qiankun=\"react16\"]"
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown css rule type"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两个函数都是**查表 + 顺序敏感**，没有算法。分数的三个来源全在\"顺序\"上：\n**出口的类别**（抛 / 忽略 / 降级）、**分支的互斥**（无 Proxy 时不再判 speedy）、\n**改写的例外清单**（哪些根选择器被替换而不是加前缀）。\n\n**`resolveIsolation` 的四条硬判分点**\n\n1. **legacy render 抛错，shadow dom 不抛**。这是全题最贵的一格：\n   `strictStyleIsolation` 在不支持 shadow dom 的环境里是 `console.warn` 后**继续跑**\n   （`createElement` 里那条），而子应用自带 `render` 时是 `getAppWrapperGetter` 里\n   `throw new QiankunError(...)` —— 同一个配置项，一个静默一个致命。\n   **两者都进 `thrown`** 或**两者都进 `warnings`** 的实现都会在\"静默降级\"与\"硬失败\"里各挂一条。\n2. **两档互斥，strict 赢**（`isEnableScopedCSS` 里明写 `if (sandbox.strictStyleIsolation) return false`）。\n   所以\"两档同开 + legacy render\"只抛 **strict 那条**，且 `scopedCss` 必须是 `false`、\n   `containerAttr` 必须是 `null`。写成 `scopedCss = strict || experimental` 的实现挂三处。\n3. **`singular` 不许被改**。v2.10.16 的 `autoDowngradeForLowVersionBrowser` 在无 Proxy 时只做两件事：\n   把 `sandbox` 改写成 `{loose:true}`、以及**警告**。它**没有**改 `singular`——\n   与 FAQ 那句\"qiankun 会自动将 singular 配置为 true\"是**不一致**的，本题按源码判。\n   （素材 §6 表末尾专门写了这条冲突，出处是素材 F2 vs F6。）\n4. **降级分支先 return，speedy 那条不会被执行**。所以\n   `hasProxy:false + hasConstDestructAssignment:false` 只有一条 `W_PROXY`，\n   **没有** `W_SPEEDY`。写成两个独立 `if` 的实现多出一条告警。\n   顺带：无 Proxy 时 speedy 名义上还是开的（源码 `speedy !== false` 的判定发生在\n   `loadApp` 里读**降级之后**的 sandbox，而降级只是加了 `loose`）。\n\n**另外三处容易写反的方向**\n\n* **`containerAttr` 与 `thrown` 可以同时非空**：`data-qiankun` 是在 `createElement` 里写的，\n  抛错发生在随后取 wrapper 时。把\"抛错了所以没容器标识\"当成常识就会挂这一格。\n* **`loose` 只在有 Proxy 时才有意义**：无 Proxy 时不管 `loose` 是什么都是 `Snapshot`。\n  用 `loose ? 'LegacyProxy' : 'Proxy'` 开头、把 Proxy 判定放在后面的写法会漏掉这条。\n* **实例 id 的偏置**：`genAppInstanceIdByName` 首次返回 `appName` 本身，第二次先自增再拼接，\n  所以第 3 次是 `react16_2` 而不是 `react16_3`。差一是这类计数器最典型的 off-by-one。\n\n**`scopeCss` 的判分核心是\"三个不是\"**\n\n* **不是\"全都加前缀\"**：`@font-face` / `@keyframes` / `@import` / `@page` 走 `default` 分支原样输出。\n  这正是\"开了 `experimentalStyleIsolation`，子应用的图标字体还是把主应用改了\"的根因——\n  **字体名与动画名是全局的，scoped css 管不到**。\n* **不是\"根选择器也加前缀\"**：`html` / `body` / `:root` 是被**替换**成 prefix（\"根样式落到容器上\"）。\n  所以 `html {margin: 0}` 出来是 `div[data-qiankun=\"react16\"] {margin: 0}`，\n  写成 `prefix + ' html'` 的选择器永远不会命中（div 里没有 html 后代）——\n  **配置生效了但样式全丢**，是最难查的那种坏法。\n* **`html + body` 不是\"原样\"**：源码里 `siblingSelectorRE` 那条注释\n  （\"transformer will ignore it\"）说的是**跳过\"剥 html 前缀\"这一步**，\n  不是\"整条规则不处理\"。它随后照样进第 3 步，于是 `html` 与 `body` 两个根匹配\n  **各自被替换成 prefix**，得到 `prefix + ' + ' + prefix`。\n  （素材 §6 行 2 把这条写成\"原样\"，与 v2.10.16 源码不符，本题按源码判。）\n\n**两个实现细节才是真门槛**\n\n* **带 `g` 标志的正则不能提到模块作用域复用**。`rootSelectorRE.test(...)` 会推进 `lastIndex`，\n  下一次 `replace` 虽然会重置，但 `rootCombinationRE.test()` + 下一条规则再 `test()` 就会漏判。\n  源码把三个正则**声明在函数体内**正是为此。 hoist 出去复用 ⇒ 多条规则连喂时结果依赖调用顺序，\n  而本题的用例恰好每条都新建一次，所以只有\"组选择器\"那条会暴露它。\n* **`whitePrevChars = [',', '(']`**：`body,html` 里 `html` 的匹配串是 `,html`，\n  若直接返回 prefix 就把逗号吃了（`div,PREFIX,PREFIX` 变成合法但**少一段**的选择器）；\n  `*:not(:root)` 里匹配串是 `(:root`，吃掉 `(` 会产出非法 CSS。\n  所以\"首字符是 `,` 或 `(` 时要把它还回去\"。`*:not(:root)` 这条用例专门打这一点。\n\n**工程延伸（面试追问点）**\n\n1. 既然 scoped css 挡不住 `@font-face` / `@keyframes`，你怎么办？\n   （不改构建链的止血：基座给主应用的 antd 前缀做 `@ant-prefix` modifyVars +\n   `ConfigProvider prefixCls`，把命名空间冲突面缩小；根治：构建期给子应用的\n   字体名与动画名加前缀（`postcss-modules` / `css-modules` 的 `generateScopedName` 同族做法），\n   或把字体走 CDN 绝对路径。`LINK` 引入的样式表更直接——\n   源码只对 `<style>` 生效，`<link>` 只 `console.warn('Feature: sandbox.experimentalStyleIsolation is not support for link element yet.')`。）\n2. 为什么\"抛错\"要设计成延迟到取 wrapper 时才抛，而不是 `loadApp` 入口就校验？\n   （`getAppWrapperGetter` 每次 mount/unmount 都会被调，抛错点贴近真实使用；\n   代价是**错误发生在异步链路深处**，表现为\"应用 died in status ...\"而不是配置期报错。\n   基座团队的做法是在 `registerMicroApps` 之前把这些组合校验前移成一道 lint/CI 检查。）\n3. 这个决策器该放前端还是服务端？\n   （`hasProxy` / `hasConstDestructAssignment` 是**浏览器能力**，只能在运行时探；\n   但\"哪个子应用用哪档隔离\"是**基座配置**，必须由服务端下发并版本化，\n   否则同一个子应用在灰度批次里拿到不同档位，样式表现会随用户命中的配置漂移。）\n4. 怎么防止新增一档隔离时这里失配？\n   （给这张决策表写**契约测试**：把 `{hasProxy, sandbox 的 5 个开关, legacyRender, supportsShadowDOM}`\n   的笛卡尔积全跑一遍，断言\"每个输入恰好命中一个出口类别，且 `warnings` 与 `thrown` 不同时包含\n   同一条文案\"。加档位时它会红，而不是靠 code review。本仓库的 `naiveSolution` 就是被\n   这种测试筛出来的一次\"看起来能跑\"的实现。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "isolation.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { resolveIsolation, scopeCss } from './Solution';\n\n/**\n * 断言由 fe_gen.py 里同一份 Python 模型（_resolve_sandbox / _rule_style）生成，不手抄 ——\n * react-vitest 题的判分事实来源就是这份测试文件，抄错一次就永久错一次。\n * 契约型用例断言到**消息**：只写 .toThrow() 会让几条\"都该抛错\"的用例收敛成同一条。\n */\ndescribe('resolveIsolation：微前端隔离档位的三种出口', () => {\n  it(\"基线：全支持 + sandbox:true ⇒ 严格 Proxy 沙箱，一条告警都不该有\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": true, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [], \"thrown\": []});\n  });\n  it(\"降级：无 Proxy 且显式 singular:false ⇒ 快照沙箱 + 两条告警，但 singular 不许被改\", () => {\n    expect(resolveIsolation({\"hasProxy\": false, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": true, \"singular\": false, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Snapshot\", \"singular\": false, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [\"[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox\", \"[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy\"], \"thrown\": []});\n  });\n  it(\"降级：loose 显式开 ⇒ LegacyProxy（严格模式才是默认）\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": {\"loose\": true}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"LegacyProxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [], \"thrown\": []});\n  });\n  it(\"降级不吞配置：无 Proxy 时 experimentalStyleIsolation 要活下来（展开后补 loose）\", () => {\n    expect(resolveIsolation({\"hasProxy\": false, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": {\"experimentalStyleIsolation\": true}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Snapshot\", \"singular\": true, \"scopedCss\": true, \"shadowWrapped\": false, \"containerAttr\": \"react16\", \"warnings\": [\"[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox\"], \"thrown\": []});\n  });\n  it(\"硬失败：legacy render + 两档隔离同开 ⇒ 只有 strict 那条抛错，且两档互斥（scopedCss 为假）\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": true, \"sandbox\": {\"strictStyleIsolation\": true, \"experimentalStyleIsolation\": true}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": true, \"containerAttr\": null, \"warnings\": [], \"thrown\": [\"strictStyleIsolation can not be used with legacy render!\"]});\n  });\n  it(\"硬失败：legacy render + experimental ⇒ 抛对应那条，但容器标识已经写上了\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": true, \"sandbox\": {\"experimentalStyleIsolation\": true}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": true, \"shadowWrapped\": false, \"containerAttr\": \"react16\", \"warnings\": [], \"thrown\": [\"experimentalStyleIsolation can not be used with legacy render!\"]});\n  });\n  it(\"静默降级：不支持 shadow dom 时开 strict ⇒ 只 warn 并忽略，绝不进 thrown\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": false, \"legacyRender\": false, \"sandbox\": {\"strictStyleIsolation\": true}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [\"[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!\"], \"thrown\": []});\n  });\n  it(\"三种出口同现：无 Proxy + singular:false + 无 shadow dom + legacy render + strict\", () => {\n    expect(resolveIsolation({\"hasProxy\": false, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": false, \"legacyRender\": true, \"sandbox\": {\"strictStyleIsolation\": true}, \"singular\": false, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Snapshot\", \"singular\": false, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [\"[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox\", \"[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy\", \"[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!\"], \"thrown\": [\"strictStyleIsolation can not be used with legacy render!\"]});\n  });\n  it(\"speedy：不支持 const 解构且没显式关 ⇒ 只追加一条\\\"关掉 speedy\\\"的告警\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": false, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": true, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [\"[qiankun] Speedy mode will turn off as const destruct assignment not supported in current browser!\"], \"thrown\": []});\n  });\n  it(\"speedy 已显式关闭 ⇒ 不该再报\\\"我要关掉它\\\"\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": false, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": {\"speedy\": false}, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [], \"thrown\": []});\n  });\n  it(\"分支互斥：无 Proxy 时先返回，const 解构不支持也不该再报 speedy\", () => {\n    expect(resolveIsolation({\"hasProxy\": false, \"hasConstDestructAssignment\": false, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": true, \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"Snapshot\", \"singular\": true, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [\"[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox\"], \"thrown\": []});\n  });\n  it(\"退化：sandbox:false ⇒ 不降级、不告警，singular:false 原样保留（沙箱压根没建）\", () => {\n    expect(resolveIsolation({\"hasProxy\": false, \"hasConstDestructAssignment\": false, \"supportsShadowDOM\": false, \"legacyRender\": false, \"sandbox\": false, \"singular\": false, \"appName\": \"react16\", \"instanceSeq\": 1})).toEqual({\"sandboxType\": \"None\", \"singular\": false, \"scopedCss\": false, \"shadowWrapped\": false, \"containerAttr\": null, \"warnings\": [], \"thrown\": []});\n  });\n  it(\"实例标识：同名第 3 次加载 ⇒ 容器属性值是 react16_2，不是 react16\", () => {\n    expect(resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": {\"experimentalStyleIsolation\": true}, \"appName\": \"react16\", \"instanceSeq\": 3})).toEqual({\"sandboxType\": \"Proxy\", \"singular\": true, \"scopedCss\": true, \"shadowWrapped\": false, \"containerAttr\": \"react16_2\", \"warnings\": [], \"thrown\": []});\n  });\n  it(\"非法：整行是 null\", () => {\n    expect(() => resolveIsolation(null as never)).toThrow(\"input must be an object\");\n  });\n  it(\"非法：sandbox 写成字符串（true/false/对象之外的第四种）\", () => {\n    expect(() => resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": \"yes\", \"singular\": true, \"appName\": \"react16\", \"instanceSeq\": 1} as never)).toThrow(\"unknown sandbox configuration\");\n  });\n  it(\"非法：instanceSeq 为 0（加载序从 1 开始）\", () => {\n    expect(() => resolveIsolation({\"hasProxy\": true, \"hasConstDestructAssignment\": true, \"supportsShadowDOM\": true, \"legacyRender\": false, \"sandbox\": {\"experimentalStyleIsolation\": true}, \"appName\": \"react16\", \"instanceSeq\": 0} as never)).toThrow(\"instanceSeq must be a positive integer\");\n  });\n});\n\ndescribe('scopeCss：运行时 scoped CSS 的改写规则', () => {\n  it(\"基线：普通规则加前缀，@font-face 与 @keyframes 一个字都不动\", () => {\n    const rules = [{\"type\": 1, \"text\": \".app-main\", \"declarations\": \"{font-size: 14px}\"}, {\"type\": 5, \"text\": \"@font-face{font-family:icon;src:url(icon.woff)}\"}, {\"type\": 7, \"text\": \"@keyframes fadeIn{from{opacity:0}to{opacity:1}}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"div[data-qiankun=\\\"react16\\\"] .app-main {font-size: 14px}@font-face{font-family:icon;src:url(icon.woff)}@keyframes fadeIn{from{opacity:0}to{opacity:1}}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 1, \"text\": \".app-main\", \"declarations\": \"{font-size: 14px}\"}, {\"type\": 5, \"text\": \"@font-face{font-family:icon;src:url(icon.woff)}\"}, {\"type\": 7, \"text\": \"@keyframes fadeIn{from{opacity:0}to{opacity:1}}\"}]);\n  });\n  it(\"根选择器：html / body / :root 是被**替换**成容器，不是加前缀\", () => {\n    const rules = [{\"type\": 1, \"text\": \"html\", \"declarations\": \"{margin: 0}\"}, {\"type\": 1, \"text\": \"body\", \"declarations\": \"{padding: 0}\"}, {\"type\": 1, \"text\": \":root\", \"declarations\": \"{--brand: blue}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"div[data-qiankun=\\\"react16\\\"] {margin: 0}div[data-qiankun=\\\"react16\\\"] {padding: 0}div[data-qiankun=\\\"react16\\\"] {--brand: blue}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 1, \"text\": \"html\", \"declarations\": \"{margin: 0}\"}, {\"type\": 1, \"text\": \"body\", \"declarations\": \"{padding: 0}\"}, {\"type\": 1, \"text\": \":root\", \"declarations\": \"{--brand: blue}\"}]);\n  });\n  it(\"组合选择器：html body 与 html > body 先剥掉 html 前缀\", () => {\n    const rules = [{\"type\": 1, \"text\": \"html body\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"html > body\", \"declarations\": \"{color: green}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"div[data-qiankun=\\\"react16\\\"] {color: red}div[data-qiankun=\\\"react16\\\"] {color: green}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 1, \"text\": \"html body\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"html > body\", \"declarations\": \"{color: green}\"}]);\n  });\n  it(\"非标准兄弟规则：不剥前缀，但两个根选择器照样各自被替换（素材说\\\"原样\\\"是错的）\", () => {\n    const rules = [{\"type\": 1, \"text\": \"html + body\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"html ~ body\", \"declarations\": \"{color: blue}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"div[data-qiankun=\\\"react16\\\"] +div[data-qiankun=\\\"react16\\\"] {color: red}div[data-qiankun=\\\"react16\\\"] ~div[data-qiankun=\\\"react16\\\"] {color: blue}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 1, \"text\": \"html + body\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"html ~ body\", \"declarations\": \"{color: blue}\"}]);\n  });\n  it(\"组选择器：逐段处理，段首的逗号/括号不能被吃掉（body,html 与 *:not(:root)）\", () => {\n    const rules = [{\"type\": 1, \"text\": \"div, body, span\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"body,html\", \"declarations\": \"{margin: 0}\"}, {\"type\": 1, \"text\": \"*:not(:root)\", \"declarations\": \"{color: red}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"div[data-qiankun=\\\"react16\\\"] div,div[data-qiankun=\\\"react16\\\"],div[data-qiankun=\\\"react16\\\"] span {color: red}div[data-qiankun=\\\"react16\\\"],div[data-qiankun=\\\"react16\\\"] {margin: 0}*:not(div[data-qiankun=\\\"react16\\\"]) {color: red}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 1, \"text\": \"div, body, span\", \"declarations\": \"{color: red}\"}, {\"type\": 1, \"text\": \"body,html\", \"declarations\": \"{margin: 0}\"}, {\"type\": 1, \"text\": \"*:not(:root)\", \"declarations\": \"{color: red}\"}]);\n  });\n  it(\"条件规则：@media/@supports 的条件原样保留、内部递归改写\", () => {\n    const rules = [{\"type\": 4, \"text\": \"screen and (max-width: 300px)\", \"rules\": [{\"type\": 1, \"text\": \".a\", \"declarations\": \"{color: red}\"}, {\"type\": 5, \"text\": \"@font-face{font-family:x}\"}]}, {\"type\": 12, \"text\": \"(display: grid)\", \"rules\": [{\"type\": 1, \"text\": \"body\", \"declarations\": \"{gap: 1px}\"}]}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"@media screen and (max-width: 300px) {div[data-qiankun=\\\"react16\\\"] .a {color: red}@font-face{font-family:x}}@supports (display: grid) {div[data-qiankun=\\\"react16\\\"] {gap: 1px}}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 4, \"text\": \"screen and (max-width: 300px)\", \"rules\": [{\"type\": 1, \"text\": \".a\", \"declarations\": \"{color: red}\"}, {\"type\": 5, \"text\": \"@font-face{font-family:x}\"}]}, {\"type\": 12, \"text\": \"(display: grid)\", \"rules\": [{\"type\": 1, \"text\": \"body\", \"declarations\": \"{gap: 1px}\"}]}]);\n  });\n  it(\"不参与作用域的其余两类：@import 与 @page 原样输出（字体名/动画名/分页仍全局打架）\", () => {\n    const rules = [{\"type\": 3, \"text\": \"@import url(\\\"theme.css\\\");\"}, {\"type\": 6, \"text\": \"@page{margin:1cm}\"}];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"@import url(\\\"theme.css\\\");@page{margin:1cm}\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([{\"type\": 3, \"text\": \"@import url(\\\"theme.css\\\");\"}, {\"type\": 6, \"text\": \"@page{margin:1cm}\"}]);\n  });\n  it(\"退化：空规则表 ⇒ 空串（幂等：同一份输入喂两次结果必须一字不差）\", () => {\n    const rules = [];\n    const once = scopeCss(rules, \"div[data-qiankun=\\\"react16\\\"]\");\n    expect(once).toEqual(\"\");\n    expect(scopeCss(JSON.parse(JSON.stringify(rules)), \"div[data-qiankun=\\\"react16\\\"]\")).toEqual(once);\n    expect(rules).toEqual([]);\n  });\n  it(\"非法：未知规则类型（CSSRule.type 里没有 99）\", () => {\n    expect(() => scopeCss([{\"type\": 99, \"text\": \"whatever\"}] as never, \"div[data-qiankun=\\\"react16\\\"]\")).toThrow(\"unknown css rule type\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 60000,
+    "referenceSolution": "export const STRICT_MSG = 'strictStyleIsolation can not be used with legacy render!';\nexport const EXPERIMENTAL_MSG = 'experimentalStyleIsolation can not be used with legacy render!';\nconst W_PROXY = '[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox';\nconst W_SINGULAR =\n  '[qiankun] Setting singular as false may cause unexpected behavior while your browser not support window.Proxy';\nconst W_SPEEDY =\n  '[qiankun] Speedy mode will turn off as const destruct assignment not supported in current browser!';\nconst W_SHADOW =\n  '[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!';\n\nexport interface SandboxCfg {\n  strictStyleIsolation?: boolean;\n  experimentalStyleIsolation?: boolean;\n  loose?: boolean;\n  speedy?: boolean;\n}\n\nexport interface IsolationInput {\n  hasProxy: boolean;\n  hasConstDestructAssignment: boolean;\n  supportsShadowDOM: boolean;\n  /** 子应用提供了自定义 render（旧渲染），不是指 sandbox:false */\n  legacyRender: boolean;\n  sandbox?: true | false | SandboxCfg;\n  singular?: boolean;\n  appName: string;\n  instanceSeq: number;\n}\n\nexport interface IsolationView {\n  sandboxType: 'Proxy' | 'LegacyProxy' | 'Snapshot' | 'None';\n  singular: boolean;\n  scopedCss: boolean;\n  shadowWrapped: boolean;\n  containerAttr: string | null;\n  warnings: string[];\n  thrown: string[];\n}\n\nconst isBool = (v: unknown): boolean => typeof v === 'boolean';\n\nexport function resolveIsolation(input: IsolationInput): IsolationView {\n  if (input === null || input === undefined) throw new Error('input must be an object');\n  const raw = input as unknown as Record<string, unknown>;\n  let sandbox: true | false | SandboxCfg = raw.sandbox === undefined ? true : (raw.sandbox as SandboxCfg);\n  if (sandbox !== true && sandbox !== false && typeof sandbox !== 'object') {\n    throw new Error('unknown sandbox configuration');\n  }\n  if (!isBool(raw.hasProxy)) throw new Error('hasProxy must be a boolean');\n  if (!isBool(raw.hasConstDestructAssignment)) throw new Error('hasConstDestructAssignment must be a boolean');\n  if (!isBool(raw.supportsShadowDOM)) throw new Error('supportsShadowDOM must be a boolean');\n  if (!isBool(raw.legacyRender)) throw new Error('legacyRender must be a boolean');\n  if (raw.singular !== undefined && !isBool(raw.singular)) throw new Error('singular must be a boolean');\n  if (typeof raw.appName !== 'string' || raw.appName === '') throw new Error('appName must be a non-empty string');\n  if (typeof raw.instanceSeq !== 'number' || !Number.isInteger(raw.instanceSeq) || raw.instanceSeq < 1) {\n    throw new Error('instanceSeq must be a positive integer');\n  }\n  const hasProxy = raw.hasProxy as boolean;\n  const hasConst = raw.hasConstDestructAssignment as boolean;\n  const supportsShadowDOM = raw.supportsShadowDOM as boolean;\n  const singular = (raw.singular === undefined ? true : raw.singular) as boolean;\n\n  const warnings: string[] = [];\n  // --- autoDowngradeForLowVersionBrowser：两条分支互斥，无 Proxy 那条先 return\n  if (sandbox) {\n    if (!hasProxy) {\n      warnings.push(W_PROXY);\n      if (raw.singular === false) warnings.push(W_SINGULAR);\n      sandbox = { ...(typeof sandbox === 'object' ? sandbox : {}), loose: true };\n    } else if (!hasConst && (sandbox === true || (sandbox as SandboxCfg).speedy !== false)) {\n      warnings.push(W_SPEEDY);\n      sandbox = { ...(sandbox as SandboxCfg), speedy: false };\n    }\n  }\n\n  let sandboxType: IsolationView['sandboxType'] = 'None';\n  if (sandbox) {\n    sandboxType = !hasProxy ? 'Snapshot' : ((sandbox as SandboxCfg).loose ? 'LegacyProxy' : 'Proxy');\n  }\n\n  // isEnableScopedCSS：strict 开着时 experimental 不生效（两档互斥，strict 赢）\n  const strict = typeof sandbox === 'object' && !!sandbox.strictStyleIsolation;\n  const scopedCss = typeof sandbox === 'object' && !strict && !!sandbox.experimentalStyleIsolation;\n\n  const thrown: string[] = [];\n  if (raw.legacyRender) {\n    if (strict) thrown.push(STRICT_MSG);\n    else if (scopedCss) thrown.push(EXPERIMENTAL_MSG);\n  }\n\n  let shadowWrapped = false;\n  if (strict) {\n    if (supportsShadowDOM) shadowWrapped = true;\n    else warnings.push(W_SHADOW);\n  }\n\n  const seq = raw.instanceSeq as number;\n  const appInstanceId = seq === 1 ? (raw.appName as string) : raw.appName + '_' + (seq - 1);\n\n  return {\n    sandboxType,\n    singular,\n    scopedCss,\n    shadowWrapped,\n    containerAttr: scopedCss ? appInstanceId : null,\n    warnings,\n    thrown,\n  };\n}\n\nexport interface CssRule {\n  type: number;\n  text: string;\n  declarations?: string;\n  rules?: CssRule[];\n}\n\n/**\n * ScopedCSS.ruleStyle 的逐行对应实现（v2.10.16 src/sandbox/patchers/css.ts L121-173）。\n * 三个正则**必须每次新建**：带 g 标志的正则 .test() 会推进 lastIndex，\n * 提到模块作用域复用会让多条规则连喂时结果依赖调用顺序。\n */\nfunction ruleStyle(css: string, selector: string, prefix: string): string {\n  const rootSelectorRE = /((?:[^\\w\\-.#]|^)(body|html|:root))/gm;\n  const rootCombinationRE = /(html[^\\w{[]+)/gm;\n\n  // handle html { ... } / body { ... } / :root { ... }\n  if (selector === 'html' || selector === 'body' || selector === ':root') {\n    return css.replace(rootSelectorRE, prefix);\n  }\n\n  // handle html body { ... } / html > body { ... }\n  if (rootCombinationRE.test(selector)) {\n    const siblingSelectorRE = /(html[^\\w{]+)(\\+|~)/gm;\n    // since html + body is a non-standard rule for html, transformer will ignore it\n    if (!siblingSelectorRE.test(selector)) {\n      css = css.replace(rootCombinationRE, '');\n    }\n  }\n\n  // handle grouping selector, a,span,p,div { ... }\n  return css.replace(/^[\\s\\S]+{/, (selectors) =>\n    selectors.replace(/(^|,\\n?)([^,]+)/g, (item, p, s) => {\n      const rootRE = /((?:[^\\w\\-.#]|^)(body|html|:root))/gm;\n      if (rootRE.test(item)) {\n        return item.replace(rootRE, (m) => {\n          // do not discard valid previous character, such as body,html or *:not(:root)\n          const whitePrevChars = [',', '('];\n          if (m && whitePrevChars.includes(m[0])) {\n            return `${m[0]}${prefix}`;\n          }\n          return prefix;\n        });\n      }\n      return `${p}${prefix} ${s.replace(/^ */, '')}`;\n    }),\n  );\n}\n\nfunction rewrite(rules: CssRule[], prefix: string): string {\n  let css = '';\n  rules.forEach((rule) => {\n    if (rule === null || typeof rule !== 'object') throw new Error('css rule must be an object');\n    if (typeof rule.type !== 'number' || !Number.isInteger(rule.type)) throw new Error('unknown css rule type');\n    if (typeof rule.text !== 'string') throw new Error('css rule text must be a string');\n    switch (rule.type) {\n      case 1:\n        if (typeof rule.declarations !== 'string') throw new Error('style rule needs declarations');\n        css += ruleStyle(rule.text + ' ' + rule.declarations, rule.text, prefix);\n        break;\n      case 4:\n        css += `@media ${rule.text} {${rewrite(rule.rules ?? [], prefix)}}`;\n        break;\n      case 12:\n        css += `@supports ${rule.text} {${rewrite(rule.rules ?? [], prefix)}}`;\n        break;\n      case 3:\n      case 5:\n      case 6:\n      case 7:\n      case 8:\n        css += `${rule.text}`;\n        break;\n      default:\n        throw new Error('unknown css rule type');\n    }\n  });\n  return css;\n}\n\nexport function scopeCss(rules: CssRule[], prefix: string): string {\n  if (!Array.isArray(rules)) throw new Error('rules must be an array');\n  if (typeof prefix !== 'string' || prefix === '') throw new Error('prefix must be a non-empty string');\n  return rewrite(rules, prefix);\n}\n",
+    "naiveSolution": "export function resolveIsolation(input: any): any {\n  // \"一律 warn\"版：三种出口（抛错 / 忽略 / 降级）被压进同一个 warnings 数组。\n  // 症状：legacy render 下只 warn（线上表现是\"隔离配了没生效、也没人报错\"），\n  // 且照着 FAQ 把 singular 改成 true（v2.10.16 源码其实只警告不改值）。\n  const warnings: string[] = [];\n  const sandbox = input?.sandbox === undefined ? true : input.sandbox;\n  const cfg = typeof sandbox === 'object' ? sandbox : {};\n  const strict = !!cfg.strictStyleIsolation;\n  const scoped = !!cfg.experimentalStyleIsolation;\n  let singular = input?.singular !== false;\n  if (!input?.hasProxy) {\n    warnings.push('[qiankun] Missing window.Proxy, proxySandbox will degenerate into snapshotSandbox');\n    singular = true;\n  }\n  if (!input?.hasConstDestructAssignment) {\n    warnings.push('[qiankun] Speedy mode will turn off as const destruct assignment not supported in current browser!');\n  }\n  if (strict && !input?.supportsShadowDOM) {\n    warnings.push('[qiankun]: As current browser not support shadow dom, your strictStyleIsolation configuration will be ignored!');\n  }\n  if (input?.legacyRender && (strict || scoped)) {\n    warnings.push('style isolation can not be used with legacy render!');\n  }\n  return {\n    sandboxType: input?.hasProxy ? (cfg.loose ? 'LegacyProxy' : 'Proxy') : 'Snapshot',\n    singular,\n    scopedCss: strict || scoped,\n    shadowWrapped: strict,\n    containerAttr: scoped ? input?.appName : null,\n    warnings,\n    thrown: [],\n  };\n}\n\nexport function scopeCss(rules: any[], prefix: string): string {\n  // \"给每条规则都加前缀\"版：例外清单与\"根选择器是被替换\"这两条都没有。\n  let css = '';\n  rules.forEach((rule) => {\n    if (rule.type === 1) {\n      css += prefix + ' ' + rule.text + ' ' + rule.declarations;\n    } else if (rule.type === 4 || rule.type === 12) {\n      css += '@media ' + rule.text + ' {' + scopeCss(rule.rules ?? [], prefix) + '}';\n    } else {\n      css += prefix + ' ' + rule.text;\n    }\n  });\n  return css;\n}\n"
+  },
+  "estimatedMinutes": 45,
+  "source": {
+    "company": "Alibaba",
+    "role": "前端工程（微前端基座 / 中台工程化方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-frontend-and-open-source.md#5 出题角度 草稿 A ＋ §6 可判分事实表行 1、2、4、5（★）；逐字文案由 fe_gen.py 按 §8 F4/F6/F7 的 v2.10.16 原文复核",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-24T02:31:09.715Z"
+  }
+}

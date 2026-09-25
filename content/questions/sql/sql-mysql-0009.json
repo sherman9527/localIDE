@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0009",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "按列自己的排序规则去重：0900_ai_ci 折叠重音、但不吞尾部空格",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46）。表 account(id INT 主键, display_name VARCHAR(50), signed_at DATETIME) 建在默认库上，列排序规则就是 **utf8mb4_0900_ai_ci**（8.0 默认）。\n\n产品要合并「同一个人被重复注册的昵称」。**判等口径 = 该列自身的排序规则**（不引入任何显式 COLLATE、不做 BINARY 比较、不做 TRIM/LOWER 之类的预处理），也就是：\n- 大小写不敏感、**重音不敏感**（`Alice` = `alice` = `ÁLICE`；`ß` = `ss`；全角 `ｄａｎ` = 半角 `dan`）；\n- 但 **NO PAD**：尾部空格是有意义的，`'bob'` 与 `'bob '` 是**两个不同的人**（这是 8.0 相对 utf8mb3/general_ci 的行为变化，也是很多历史去重脚本的翻车点）。\n\n要求：只输出**成员数 ≥ 2 的重复组**，列顺序与别名必须是 canonical_id, canonical_name, member_count：\n- member_count = 组内行数；\n- canonical_id = 组内 `signed_at` **最早**那一行的 id（signed_at 并列时取最小 id）；\n- canonical_name = 那一行的 display_name **原文**（保留原大小写与重音）；\n- 判题按行序敏感比对，必须自带 ORDER BY canonical_id。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。提示：`GROUP BY display_name` 与 `PARTITION BY display_name` 用的就是列的排序规则，别自作聪明地「规范化」。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "collation",
+    "utf8mb4-0900-ai-ci",
+    "dedup",
+    "window-functions",
+    "modern:mysql8-collation-0900"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：重音/全角/ß 折叠与尾部空格不折叠并列",
+      "input": [],
+      "expected": {
+        "columns": ["canonical_id", "canonical_name", "member_count"],
+        "orderSensitive": true,
+        "rows": [
+          [3, "ÁLICE", 3],
+          [4, "bob", 2],
+          [7, "café", 2],
+          [9, "Günther", 2],
+          [11, "ss", 2],
+          [13, "dan", 2]
+        ]
+      },
+      "note": "id 5 是 'bob '（尾部空格）单独一组，只有 1 人所以不出现；组 1 的代表行是 signed_at 最早的 id 3，不是 MIN(id)。"
+    },
+    {
+      "name": "新增尾部空格变体后不得过度合并（NO PAD 边界）",
+      "input": ["INSERT INTO account VALUES (15,'dan ','2026-07-03 08:00:00'),(16,'ＤＡＮ','2026-07-04 08:00:00')"],
+      "expected": {
+        "columns": ["canonical_id", "canonical_name", "member_count"],
+        "orderSensitive": true,
+        "rows": [
+          [3, "ÁLICE", 3],
+          [4, "bob", 2],
+          [7, "café", 2],
+          [9, "Günther", 2],
+          [11, "ss", 2],
+          [13, "dan", 3]
+        ]
+      },
+      "note": "全角大写 ＤＡＮ 与 dan 同人（组变 3 人），但 'dan '（尾部空格）仍然独立。"
+    },
+    {
+      "name": "全员同名的极端并列边界",
+      "input": [
+        "DELETE FROM account",
+        "INSERT INTO account VALUES (1,'X','2026-01-01 00:00:00'),(2,'ẍ','2025-12-31 23:00:00'),(3,'x','2026-02-01 00:00:00')"
+      ],
+      "expected": {
+        "columns": ["canonical_id", "canonical_name", "member_count"],
+        "orderSensitive": true,
+        "rows": [[2, "ẍ", 3]]
+      }
+    },
+    {
+      "name": "只有单人组的退化边界（不得输出任何组）",
+      "input": [
+        "DELETE FROM account",
+        "INSERT INTO account VALUES (1,'Solo','2026-01-01 00:00:00'),(2,'Only ','2026-01-02 00:00:00')"
+      ],
+      "expected": []
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM account"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nWITH ranked AS (\n  SELECT id, display_name,\n         COUNT(*) OVER (PARTITION BY display_name) AS member_count,\n         ROW_NUMBER() OVER (PARTITION BY display_name ORDER BY signed_at, id) AS rn\n  FROM account\n)\nSELECT id AS canonical_id, display_name AS canonical_name, member_count\nFROM ranked\nWHERE rn = 1 AND member_count >= 2\nORDER BY id;\n```\n1) `utf8mb4_0900_ai_ci` 的三个「看起来一样其实不一样」：`ai`（重音不敏感，`a` = `á` = `à`）、`ci`（大小写不敏感）、**NO PAD**（`'bob'` ≠ `'bob '`）。而旧的 `utf8mb4_general_ci` / `utf8mb3_*` 是 PAD SPACE，尾部空格被吞 —— 8.0 迁移后「去重结果突然变多」的线上事故基本都是这一条。\n2) `ß` = `ss`、全角 `ＤＡＮ` = 半角 `dan`：0900 系（UCA 9.0 CLDR）在 primary strength 上做了兼容折叠，所以「大小写不敏感」这件事不能靠 `LOWER()` 手搓 —— MySQL 的 `LOWER()` 走的是同一套排序规则，`LOWER(TRIM(x))` 反而**改变了口径**（TRIM 把 NO PAD 的差异抹掉了）。\n3) 组内代表行必须是「排序后取一行」：`GROUP BY display_name` + `MIN(id)` 得到的是「最小 id」而不是「最早注册」，`ONLY_FULL_GROUP_BY` 还会直接拒绝 `MIN(display_name)` 之外的裸列；窗口 `ROW_NUMBER()` 才是唯一稳的写法。\n4) 反例汇总：`GROUP BY CAST(display_name AS BINARY)` / `COLLATE utf8mb4_bin` → 把 `Alice`/`alice`/`ÁLICE` 拆成 3 组（漏合并）；`GROUP BY LOWER(TRIM(display_name))` → 把 `bob`/`bob ` 合成 1 组（过度合并）。两种都会被判负，且都能给出「最小复现数据」，这就是面试里区分「背过 collation 列表」与「做过 i18n 数据治理」的地方。\n\n面试追问：\n- 如果业务其实想要「尾部空格也忽略」，怎么改数据而不是改每个查询？→ 在写入路径统一 `RTRIM` + 增加一列 `name_norm VARCHAR(50) COLLATE utf8mb4_0900_as_cs GENERATED ALWAYS AS (...) VIRTUAL` + 唯一索引；关键是**归一化口径必须落在写入侧**，不能散在每个查询里。\n- 为什么「组内最早那行的原文」不能存成 `MIN(display_name)`？→ ci 排序里三者相等，`MIN` 取到哪一个取决于存储顺序（不可复现），必须给决定性 ORDER BY。\n- 大小写敏感的唯一约束怎么建？→ 生成列 + `COLLATE utf8mb4_0900_as_cs`（或 `utf8mb4_bin`）再建 UNIQUE 索引；靠 `BINARY` 前缀表达式建不了索引。\n- 跨库 JOIN 报 `Illegal mix of collations` 怎么治？→ 迁移期统一列排序规则（`ALTER TABLE ... CONVERT TO CHARACTER SET utf8mb4 COLLATE ...` 是重建表的 INPLACE/COPY 判定要看清），临时救急用 `COLLATE` 显式化一侧，但那是把技术债写进查询。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS account",
+      "CREATE TABLE account (id INT PRIMARY KEY, display_name VARCHAR(50) NOT NULL, signed_at DATETIME NOT NULL, KEY idx_name (display_name)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO account VALUES (1,'Alice','2026-01-05 10:00:00'),(2,'alice','2026-02-01 09:00:00'),(3,'ÁLICE','2026-01-02 08:00:00'),(4,'bob','2026-03-01 08:00:00'),(5,'bob ','2026-03-02 08:00:00'),(6,'BOB','2026-03-05 08:00:00'),(7,'café','2026-04-01 08:00:00'),(8,'CAFE','2026-04-02 08:00:00'),(9,'Günther','2026-05-01 08:00:00'),(10,'gunther','2026-05-02 08:00:00'),(11,'ss','2026-06-01 08:00:00'),(12,'ß','2026-06-02 08:00:00'),(13,'dan','2026-07-01 08:00:00'),(14,'ｄａｎ','2026-07-02 08:00:00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH ranked AS (\n  SELECT id, display_name, signed_at,\n         COUNT(*) OVER (PARTITION BY display_name) AS member_count,\n         ROW_NUMBER() OVER (PARTITION BY display_name ORDER BY signed_at, id) AS rn\n  FROM account\n)\nSELECT id AS canonical_id, display_name AS canonical_name, member_count\nFROM ranked\nWHERE rn = 1 AND member_count >= 2\nORDER BY id",
+    "naiveSolution": "SELECT MIN(id) AS canonical_id, LOWER(TRIM(display_name)) AS canonical_name, COUNT(*) AS member_count\nFROM account\nGROUP BY LOWER(TRIM(display_name))\nHAVING COUNT(*) >= 2\nORDER BY canonical_id"
+  },
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql8-optimizer.md#14-索引失效与排序的硬规则",
+    "addedBy": "content-agent-sql"
+  }
+}

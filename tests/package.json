@@ -1,0 +1,14 @@
+{
+  "name": "@arena/tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "playwright test -c playwright.config.ts",
+    "e2e:install": "playwright install chromium",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1"
+  }
+}

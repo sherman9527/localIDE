@@ -1,0 +1,439 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0055",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "Sentinel 系统自适应保护：load 只做启动控制，通过量由 maxQps×minRt/RT 决定",
+  "statement": "## 背景\n\nSentinel《系统自适应保护》这篇文档先讲的是一个**被官方点名的旧做法怎么出事**【源 S18】：\n\n> 下游应用不可靠导致 RT 很高、load 冲高；下游恢复后 RT 降下来，但此时 load 仍高，\n> \"通过率恢复不了\"……无论怎么调参数、调比例，都是**按照果来调节因**。\n\n它给的做法是两条：\n\n- \"**用 load1 作为启动控制流量的值，而允许通过的流量由处理请求的能力\n  （响应时间 + 当前正在处理的请求速率）决定**\"；\n- 推导式 `T ≈ QPS × Avg(RT)`（水管模型），系统容量由 **`maxQps × minRt`** 计算，\n  Load 阈值\"设定参考值一般是 **CPU cores × 2.5**\"。\n\n另有两条常被忽略的约束：系统规则是**应用整体维度、仅对入口流量（`EntryType.IN`）生效**；\n除 Load 外还有 RT / 线程数 / 入口 QPS / CPU usage 四类阈值【源 S18】。\n\n（把这四类阈值排成\"硬保护先于软收口\"的优先级、`RT = 0` 的估法、\n以及 `lastFullBlock` 这个监控列，是按【推】补全的**本题设定**。）\n\n## 任务\n\n实现 `public static int[] sysAdmission(int cores, int maxQps, int minRtMs, int rtHardLimitMs, int threadLimit, int[] loadTenth, int[] rtMs, int[] inflight, int[] inQps, int[] isEntry)`，\n按秒模拟，返回 `{总放行请求数, 总拒绝请求数, 触发 load 门的秒数, 最后一个\"有流量却整秒全拒\"的下标}`\n（没有这种秒就输出 `-1`）。\n\n数组按秒对齐、长度相同；`loadTenth[i]` 是 `load1 × 10` 的整数（避免浮点）。\n\n## 每秒的判定顺序（**从上到下，命中即止**）\n\n| # | 条件 | 结果 |\n| --- | --- | --- |\n| 1 | `isEntry[i] == 0` | 全放行（系统规则只管入口流量） |\n| 2 | `rtMs[i] > rtHardLimitMs` | 整秒拒绝 |\n| 3 | `inflight[i] > threadLimit` | 整秒拒绝 |\n| 4 | `loadTenth[i] > cores × 25` | **按处理能力放行**：`gateTicks++`，`admitted = min(inQps[i], maxQps × minRtMs / rtEff)` |\n| 5 | 其余 | 全放行 |\n\n`rtEff` 的取法：`rtMs[i] > 0 ? rtMs[i] : minRtMs`。\n**RT = 0 的含义是\"这一秒没有任何完成样本\"**（不是\"响应耗时 0 毫秒\"），\n此时按 `minRt` 估能力；直接除以 `rtMs[i]` 会除零，而\"当成无穷小 ⇒ 容量 0\"\n会把一个空闲系统判成全拒。\n\n第 4 行是本题的全部难点：load 高**不是**\"禁流\"的信号，而是\"要按能力收口\"的信号。\n`maxQps × minRt / RT` 在 RT 回到 `minRt` 时正好等于 `maxQps` —— **门自己就开了**，\n不需要等 load1 掉下来。这就是\"不按果调因\"的实现形态。\n\n## 参数校验（抛 `IllegalArgumentException`，消息一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `cores <= 0` | `cores must be positive` |\n| `maxQps <= 0` | `maxQps must be positive` |\n| `minRtMs <= 0` | `min rt must be positive` |\n| `rtHardLimitMs < minRtMs` | `rt hard limit below min rt` |\n| `threadLimit < 0` | `thread limit must be non-negative` |\n| 任一数组为 null 或五个数组长度不一致 | `array length mismatch` |\n| `loadTenth[i] < 0` / `rtMs[i] < 0` / `inflight[i] < 0` / `inQps[i] < 0` | `negative load` / `negative rt` / `negative inflight` / `negative qps` |\n| `isEntry[i]` 不是 0/1 | `isEntry must be 0 or 1` |\n\n**`rtHardLimitMs < minRtMs` 必须拒绝**：`minRt` 是\"压测出来的最好 RT\"，\n把硬阈值配在它下面意味着**健康系统也会被第 2 行判成全拒**，\n而且第 4 行的比例放行永远轮不到。悄悄钳成 `minRtMs` 等于把一次配置事故变成一个静默的死配置。\n\n## 这题真正考的东西\n\n素材 §2 追问 14 那句\"为什么不直接按 load 限流\"的答案就是第 4 行的算式。\n`lastFullBlock` 这一列是给监控用的：**下游恢复之后还有\"整秒全拒\"就说明门卡住了**。\n一个只在故障期拒绝、恢复期自动放开的实现，这一列会停在故障期内；\n按 load 禁流的实现则会把最后一个全拒秒拖到 load1 自然回落之后\n（load1 是 1 分钟指数加权平均，本身就比故障慢）—— 这才是\"通过率恢复不了\"的可测量形态。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "sentinel",
+    "adaptive-protection",
+    "littles-law",
+    "entry-traffic-only",
+    "recovery-not-permission",
+    "modern:resilience-semantics"
+  ],
+  "cases": [
+    {
+      "name": "基线：load 冲高那一秒按\"处理能力 = maxQps × minRt / 当前RT\"部分放行",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          40,
+          60,
+          120,
+          160,
+          130,
+          50
+        ],
+        [
+          10,
+          12,
+          40,
+          90,
+          20,
+          8
+        ],
+        [
+          4,
+          5,
+          20,
+          30,
+          12,
+          5
+        ],
+        [
+          100,
+          120,
+          150,
+          200,
+          160,
+          140
+        ],
+        [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        446,
+        424,
+        3,
+        -1
+      ],
+      "visible": true,
+      "note": "load 阈值 = cores × 2.5 ⇒ 整数写法 cores × 25（数组里是 load×10）。第 2/3/4 秒触发 load 门，放行分别是 25、11、50"
+    },
+    {
+      "name": "恢复期：下游已恢复（RT 回到 minRt 附近）而 load 仍高 ⇒ 不许\"按果调因\"",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          300,
+          300,
+          300
+        ],
+        [
+          5,
+          4,
+          6
+        ],
+        [
+          2,
+          3,
+          2
+        ],
+        [
+          200,
+          200,
+          200
+        ],
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        566,
+        34,
+        3,
+        -1
+      ],
+      "visible": true,
+      "note": "官方点名的旧做法故障：下游恢复后 RT 降了但 load1 还没降，\"load 超阈值就禁流\"会让通过率永远回不来"
+    },
+    {
+      "name": "优先级：RT 越过硬阈值 ⇒ 整秒拒绝，即使 load 很低",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          10
+        ],
+        [
+          101
+        ],
+        [
+          1
+        ],
+        [
+          50
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        50,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "优先级：线程数超限先于 load 门 ⇒ 整秒拒绝而不是按比例放行",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          999
+        ],
+        [
+          50
+        ],
+        [
+          41
+        ],
+        [
+          200
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        200,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：非入口流量不受系统规则约束（系统规则仅对 EntryType.IN 生效）",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          999,
+          999
+        ],
+        [
+          999,
+          5
+        ],
+        [
+          99,
+          5
+        ],
+        [
+          300,
+          300
+        ],
+        [
+          0,
+          1
+        ]
+      ],
+      "expected": [
+        500,
+        100,
+        1,
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：load 正好等于 cores × 2.5 ⇒ 不触发（判据是 >，等于算正常水位）",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          100
+        ],
+        [
+          50
+        ],
+        [
+          10
+        ],
+        [
+          300
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        300,
+        0,
+        0,
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：该秒没有任何完成样本（RT=0）⇒ 按 minRt 估能力，而不是除以 0",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          120
+        ],
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          300
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": [
+        200,
+        100,
+        1,
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：空统计序列 ⇒ {0, 0, 0, -1}（一个都没放行也没拒绝）",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        -1
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：RT 硬阈值低于 minRt ⇒ 健康系统也会被判超限，必须拒绝配置而不是钳制",
+      "input": [
+        4,
+        200,
+        50,
+        20,
+        40,
+        [
+          10
+        ],
+        [
+          50
+        ],
+        [
+          1
+        ],
+        [
+          10
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "rt hard limit below min rt"
+    },
+    {
+      "name": "非法：load 为负",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          -1
+        ],
+        [
+          5
+        ],
+        [
+          1
+        ],
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative load"
+    },
+    {
+      "name": "非法：五个数组长度不一致",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        40,
+        [
+          10,
+          10
+        ],
+        [
+          5
+        ],
+        [
+          1
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "array length mismatch"
+    },
+    {
+      "name": "非法：线程数阈值为负",
+      "input": [
+        4,
+        200,
+        5,
+        100,
+        -1,
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "thread limit must be non-negative"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一个五档 `if/else` 链，关键是第 4 档写的是**算式**而不是 `0`：\n\n```java\nlong cap = (long) maxQps * minRtMs / rtEff;   // Little 定律：容量 T = QPS × RT\nok = Math.min(inQps[i], cap);\n```\n\n**基线（cores=4 ⇒ load 阈值 100，maxQps=200、minRt=5ms、硬阈值 100ms、线程上限 40）\n输出 `{446, 424, 3, -1}`**。逐秒：\n\n| 秒 | load×10 | RT | 在途 | 入口 QPS | 判定 | 放行 / 拒绝 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 0 | 40 | 10 | 4 | 100 | 第 5 档 | 100 / 0 |\n| 1 | 60 | 12 | 5 | 120 | 第 5 档 | 120 / 0 |\n| 2 | 120 | 40 | 20 | 150 | 第 4 档 | 25 / 125 |\n| 3 | 160 | 90 | 30 | 200 | 第 4 档 | 11 / 189 |\n| 4 | 130 | 20 | 12 | 160 | 第 4 档 | 50 / 110 |\n| 5 | 50 | 8 | 5 | 140 | 第 5 档 | 140 / 0 |\n\n第 2 秒的 `25` 是 `200 × 5 / 40`、第 3 秒的 `11` 是 `200 × 5 / 90` 向下取整、\n第 4 秒的 `50` 是 `200 × 5 / 20`。**第 4 秒 load 比第 3 秒只低一点点（130 对 160），\n放行量却从 11 涨到 50** —— 因为决定通过量的是 RT，不是 load。\n把第 4 档写成\"按 load 超出的比例打折\"的实现给不出这个形状：\n它把 load 当成原因，而 load 只是结果。\n\n**用例「恢复期」是这道题的题眼**：`load = 300`（远超 4 核的 100）但\n`rt = 5 / 4 / 6ms` 已经回到压测下界附近 ⇒ 三秒的容量分别是\n`200×5/5 = 200`、`200×5/4 = 250`、`200×5/6 = 166`（整数除法向下取整），\n对照入口 200/200/200 ⇒ 放行 200、200、166，输出 `{566, 34, 3, -1}`。\n`gateTicks = 3` 记录\"门确实触发了三次\"，`lastFullBlock = -1` 记录\"一次都没全拒\"。\n第二秒 `rt = 4ms` 比 `minRt` 还小 ⇒ 容量算出来 250 > 入口 200，\n**门在这一秒是完全透明的**（这正确：它比压测标定的最好情况还好，没有任何理由收口）。\n朴素解在这条上给出 `{0, 600, 3, 2}` —— 全拒，而且最后一个全拒秒就是最后一秒，\n监控上表现为\"load 高 ⇒ 系统拒绝服务\"，而真实的下游早就好了。\n**这就是官方说的\"按果调因\"**：load1 是 1 分钟加权平均，它比故障本身慢，\n于是禁流的时间比故障长，通过率被自己压住。\n\n**用例「优先级：线程数超限先于 load 门」**（load=999、rt=50、inflight=41 > 40）⇒\n`{0, 200, 0, 0}`：整秒拒绝，且 `gateTicks = 0`。\n这条把\"第 3 档与第 4 档不能合并\"钉住：线程数/RT 是**硬保护**（再放就雪崩），\nload 是**软收口**（还能按能力过）。合并之后要么把硬保护写成比例（雪崩），\n要么把软收口写成开关（恢复不了）。\n\n**用例「边界：非入口流量」**：两秒 load 都是 999、RT 分别 999 与 5、在途 99 与 5，\n但第 0 秒 `isEntry = 0` ⇒ 走第 1 档全放行 300；\n第 1 秒是入口流量：rt=5 未越硬阈值、inflight=5 未越线程上限、load 超阈值 ⇒\n容量 `200×5/5 = 200` ⇒ 放行 200、拒绝 100。输出 `{500, 100, 1, -1}`。\n**系统规则是入口维度的**：应用内部对下游的调用不该被\"整机保护\"二次限流，\n否则一次故障会被限两遍（而且第二遍没有业务语义）。\n这条同时钉住\"第 1 档必须排在所有阈值之前\"——\n把 `isEntry` 判在 load 门之后，内部调用就会替入口流量受过。\n\n**用例「边界：load 正好等于 cores × 2.5」**（load=100、阈值 100）⇒ `{300, 0, 0, -1}`：\n判据是 `>`，等于算正常水位，`gateTicks = 0`。\n写成 `>=` 的实现会把每个稳态秒都算进门（`gateTicks` 虚高），\n而在阈值附近抖动时按 `>=` 会给出\"容量 = 200×5/RT\"的收口 ——\n**一个健康系统被自己的指标限住，且监控上只看得到\"门触发很多\"**。\n\n**用例「边界：该秒没有任何完成样本」**：`load=120 > 100`、`rt=0` ⇒ `rtEff = minRt = 5` ⇒ 容量 200 ⇒\n放行 200、拒绝 100。另一条路（当成容量 0）会给出整秒全拒，\n而\"该秒没有完成样本\"最常见的原因恰恰是**该秒几乎没有请求**——\n把一个空闲系统判成过载，是全拒类误伤里最离谱的一种。\n\n**工程延伸（面试追问点）**\n\n1. `minRt` 和 `maxQps` 从哪来？（压测标定。素材 §7 第 3 条明确写了\n   AHAS/MSE 的**线上阈值基线没有可核查出处**，所以这题把两者做成入参，\n   面试要答的是**测法**：`minRt` 取低水位压测下的 RT 下界，\n   `maxQps` 取资源未饱和时的吞吐上界，且两者必须来自**同一轮**压测，\n   否则乘出来的容量没有意义。）\n2. 单机阈值怎么换算到集群？（`cores × 2.5` 是**单机**的；集群期望总量 = 单机 × 实例数，\n   而弹性伸缩会让实例数变 ⇒ 容量式要与实例数联动，\n   否则一次扩容就把全局阈值抬高一倍。）\n3. 为什么还要有\"入口 QPS\"这一类阈值？（`T ≈ QPS × RT` 只在 RT 可信时成立；\n   RT 统计窗口被长尾污染时容量式会给出过大或过小的数，\n   所以文档把入口 QPS 与 CPU/RT/线程数并列成独立阈值【源 S18】。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] sysAdmission(int cores, int maxQps, int minRtMs, int rtHardLimitMs, int threadLimit, int[] loadTenth, int[] rtMs, int[] inflight, int[] inQps, int[] isEntry)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int[] sysAdmission(int cores, int maxQps, int minRtMs, int rtHardLimitMs, int threadLimit,\n                                   int[] loadTenth, int[] rtMs, int[] inflight, int[] inQps, int[] isEntry) {\n    if (cores <= 0) throw new IllegalArgumentException(\"cores must be positive\");\n    if (maxQps <= 0) throw new IllegalArgumentException(\"maxQps must be positive\");\n    if (minRtMs <= 0) throw new IllegalArgumentException(\"min rt must be positive\");\n    if (rtHardLimitMs < minRtMs) throw new IllegalArgumentException(\"rt hard limit below min rt\");\n    if (threadLimit < 0) throw new IllegalArgumentException(\"thread limit must be non-negative\");\n    if (loadTenth == null || rtMs == null || inflight == null || inQps == null || isEntry == null) {\n      throw new IllegalArgumentException(\"array length mismatch\");\n    }\n    int n = loadTenth.length;\n    if (rtMs.length != n || inflight.length != n || inQps.length != n || isEntry.length != n) {\n      throw new IllegalArgumentException(\"array length mismatch\");\n    }\n    final int loadLimit = cores * 25;                 // load1 阈值 = CPU cores × 2.5，数组里是 load×10\n    long admittedTotal = 0, deniedTotal = 0;\n    int gateTicks = 0, lastFullBlock = -1;\n\n    for (int i = 0; i < n; i++) {\n      if (loadTenth[i] < 0) throw new IllegalArgumentException(\"negative load\");\n      if (rtMs[i] < 0) throw new IllegalArgumentException(\"negative rt\");\n      if (inflight[i] < 0) throw new IllegalArgumentException(\"negative inflight\");\n      if (inQps[i] < 0) throw new IllegalArgumentException(\"negative qps\");\n      if (isEntry[i] != 0 && isEntry[i] != 1) throw new IllegalArgumentException(\"isEntry must be 0 or 1\");\n\n      int ok;\n      if (isEntry[i] == 0) {\n        ok = inQps[i];                                // 系统规则仅对入口流量生效\n      } else if (rtMs[i] > rtHardLimitMs) {\n        ok = 0;\n      } else if (inflight[i] > threadLimit) {\n        ok = 0;\n      } else if (loadTenth[i] > loadLimit) {\n        gateTicks++;\n        int rtEff = rtMs[i] > 0 ? rtMs[i] : minRtMs;  // 该秒没有完成样本 -> 按压测下界估\n        long cap = (long) maxQps * minRtMs / rtEff;   // Little: T ~= QPS x RT\n        ok = (int) Math.min((long) inQps[i], cap);\n      } else {\n        ok = inQps[i];\n      }\n      admittedTotal += ok;\n      deniedTotal += inQps[i] - ok;\n      if (ok == 0 && inQps[i] > 0) lastFullBlock = i;\n    }\n    return new int[] {(int) admittedTotal, (int) deniedTotal, gateTicks, lastFullBlock};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"load 超阈值就禁流\"版：官方点名的旧做法。它和正确解在\"下游恢复后 load 还没降\"的那几秒\n  // 完全分歧 —— 症状是流量永远回不来，而每台机器的 load 指标都说自己没问题。\n  public static int[] sysAdmission(int cores, int maxQps, int minRtMs, int rtHardLimitMs, int threadLimit,\n                                   int[] loadTenth, int[] rtMs, int[] inflight, int[] inQps, int[] isEntry) {\n    if (cores <= 0) throw new IllegalArgumentException(\"cores must be positive\");\n    if (maxQps <= 0) throw new IllegalArgumentException(\"maxQps must be positive\");\n    if (minRtMs <= 0) throw new IllegalArgumentException(\"min rt must be positive\");\n    if (rtHardLimitMs < minRtMs) throw new IllegalArgumentException(\"rt hard limit below min rt\");\n    if (threadLimit < 0) throw new IllegalArgumentException(\"thread limit must be non-negative\");\n    if (loadTenth == null || rtMs == null || inflight == null || inQps == null || isEntry == null) {\n      throw new IllegalArgumentException(\"array length mismatch\");\n    }\n    int n = loadTenth.length;\n    if (rtMs.length != n || inflight.length != n || inQps.length != n || isEntry.length != n) {\n      throw new IllegalArgumentException(\"array length mismatch\");\n    }\n    final int loadLimit = cores * 25;\n    long admittedTotal = 0, deniedTotal = 0;\n    int gateTicks = 0, lastFullBlock = -1;\n    for (int i = 0; i < n; i++) {\n      if (loadTenth[i] < 0) throw new IllegalArgumentException(\"negative load\");\n      if (rtMs[i] < 0) throw new IllegalArgumentException(\"negative rt\");\n      if (inflight[i] < 0) throw new IllegalArgumentException(\"negative inflight\");\n      if (inQps[i] < 0) throw new IllegalArgumentException(\"negative qps\");\n      if (isEntry[i] != 0 && isEntry[i] != 1) throw new IllegalArgumentException(\"isEntry must be 0 or 1\");\n      int ok;\n      if (loadTenth[i] > loadLimit || rtMs[i] > rtHardLimitMs || inflight[i] > threadLimit) {\n        if (loadTenth[i] > loadLimit) gateTicks++;\n        ok = 0;\n      } else {\n        ok = inQps[i];\n      }\n      admittedTotal += ok;\n      deniedTotal += inQps[i] - ok;\n      if (ok == 0 && inQps[i] > 0) lastFullBlock = i;\n    }\n    return new int[] {(int) admittedTotal, (int) deniedTotal, gateTicks, lastFullBlock};\n  }\n}"
+  },
+  "estimatedMinutes": 35,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（稳定性与流量治理方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 11（系统自适应保护：官方点名的\"按果调因\"故障、load1 作启动控制、T ≈ QPS × Avg(RT)、系统容量 maxQps × minRt、Load 参考值 CPU cores × 2.5、应用整体维度且仅入口流量生效、另有 RT/线程数/入口 QPS/CPU 四类阈值【源 S18】。四类阈值的优先级、RT=0 的估法与 lastFullBlock 指标是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:47.931Z"
+  }
+}

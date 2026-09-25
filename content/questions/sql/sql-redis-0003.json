@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0003",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "无 Lua 的任务领取：原子搬运、消息幂等与 fencing token",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7）。**判题器禁用 `EVAL`/`FCALL`/`SCRIPT`**，所以这一题考的是「不靠脚本时，你能把正确性推进到哪一步」——这本身就是线上真实约束（很多代理与托管集群模式不允许自定义脚本）。\n\n场景：异步任务 `job:42`，payload 固定为字符串 `job:42|payload-A`。键与写入值全部固定（判题只按这些常量断言，含空格的值请用双引号包起来）：\n- 队列：`task:pending`（待处理）、`task:processing`（在途），setup 已把 payload RPUSH 进 `task:pending`；\n- 消息幂等键：`idem:msg-777`，value = 首次登记的 worker id（`A` 或 `B`）；\n- fencing 计数器：`fence:job-42`（下游存储据此拒绝旧持有者的写，因此**绝不能给它设 TTL**）；\n- 结果版本戳：`result:job-42`（有序集合，固定成员 `outcome`，score = 接受写入时的 token）；\n- 结果值：`result:job-42:val`（哈希，field `outcome`）；worker-B 的写回值固定为 `ok-by-worker-B token=2`，worker-A 的迟到写回值固定为 `fail-by-worker-A token=1`。\n\n按时间线顺序提交命令序列（每行一条命令）：\n  t1 worker-A 收到消息 msg-777，先登记幂等键（value 写 `A`，租约 3600 秒；**只有首次登记成功才允许继续**）\n  t2 首次登记成功 → 原子领取任务到 processing 队列\n  t3 取租约号（fencing token）\n  t4 上游**重复投递**同一条消息 msg-777（value 写 `B`）：幂等判定必须失败，失败分支什么都不做\n  t5 worker-A 发生 GC 停顿、租约到期，运维把任务从 processing 退回 pending（这是一条真实的搬运命令）\n  t6 worker-B 领取任务\n  t7 worker-B 取新的租约号\n  t8 worker-B 写结果：先更新版本戳（token=2），再写结果值（**只有第一次写入生效**），并给两个键挂 3600 秒租约\n  t9 worker-A 停顿结束，带着旧 token=1 迟到写回：版本戳**不得被降级**，结果值**不得被覆盖**\n  t10 worker-B 处理成功，把任务从 processing 精确移除\n\n硬性要求：\n- 领取与退回都必须是**一条命令完成的原子搬运**（两条命令的版本在崩溃时会丢任务或造出重复任务）；\n- 结果值写入必须用「字段不存在时才写」的原子命令，迟到写回必须被拒绝；\n- 幂等键、结果键、版本戳键都要有 TTL；`fence:job-42` 必须**没有** TTL；\n- 不许对锁/幂等键用 `DEL`（没有脚本时无法校验持有者，删了就是删别人的）；禁止 KEYS/FLUSHALL/EVAL/SCRIPT/OBJECT/SORT。",
+  "judgeKind": "redis",
+  "tags": [
+    "reliable-queue",
+    "idempotency",
+    "fencing-token",
+    "atomic-command",
+    "modern:redis7-atomic-commands"
+  ],
+  "cases": [
+    {
+      "name": "队列不残留也不凭空多任务（原子搬运边界）",
+      "input": ["LLEN task:pending", "LLEN task:processing"],
+      "expected": [0, 0],
+      "note": "LPOP + RPUSH 的两步写法在 t5 退回之后会凭空多一份 payload，或者在崩溃时两头都没有。"
+    },
+    {
+      "name": "重复投递被幂等键挡住且没有覆盖持有者",
+      "input": ["GET idem:msg-777"],
+      "expected": "A",
+      "note": "t4 必须拿到 nil 且不能把持有者改成 B；用无条件 SET 的实现这里会是 B。"
+    },
+    {
+      "name": "fencing token 单调递增",
+      "input": ["GET fence:job-42"],
+      "expected": 2
+    },
+    {
+      "name": "fence 键绝不能带 TTL（token 回绕边界）",
+      "input": ["EXISTS fence:job-42", "EXPIRE fence:job-42 5 XX"],
+      "expected": [1, 0],
+      "note": "EXPIRE ... XX 只有在键**已经存在过期时间**时才返回 1；返回 0 才说明没设 TTL。"
+    },
+    {
+      "name": "旧持有者的迟到写回被拒绝",
+      "input": ["HGET result:job-42:val outcome"],
+      "expected": "ok-by-worker-B token=2"
+    },
+    {
+      "name": "版本戳没有被旧 token 降级",
+      "input": ["ZSCORE result:job-42 outcome"],
+      "expected": 2,
+      "note": "必须用 `ZADD ... GT` 让 score 只升不降；无条件 ZADD 会被 t9 打回 1。"
+    },
+    {
+      "name": "结果两个键的结构必须正确",
+      "input": ["TYPE result:job-42", "TYPE result:job-42:val"],
+      "expected": ["zset", "hash"],
+      "note": "队列键在 t10 之后已经空掉（空列表的键会被自动删除），所以只能断言结果键的结构；用 SET/字符串存结果的实现会在这里返回 string。"
+    },
+    {
+      "name": "结果键与幂等键都要挂租约",
+      "input": ["EXPIRE result:job-42 999 XX", "EXPIRE result:job-42:val 999 XX", "EXPIRE idem:msg-777 999 XX"],
+      "expected": [1, 1, 1]
+    }
+  ],
+  "answer": "参考解：\n```\nSET idem:msg-777 A NX EX 3600           # t1 幂等登记\nRPOPLPUSH task:pending task:processing  # t2 原子领取\nINCR fence:job-42                       # t3 -> 1\nSET idem:msg-777 B NX EX 3600           # t4 重复投递 -> nil，失败分支什么都不做\nRPOPLPUSH task:processing task:pending  # t5 退回队列（原子）\nRPOPLPUSH task:pending task:processing  # t6 worker-B 领取\nINCR fence:job-42                       # t7 -> 2\nZADD result:job-42 2 outcome            # t8 版本戳\nEXPIRE result:job-42 3600 NX\nHSETNX result:job-42:val outcome \"ok-by-worker-B token=2\"\nEXPIRE result:job-42:val 3600 NX\nZADD result:job-42 GT 1 outcome         # t9 -> 0：score 只升不降\nHSETNX result:job-42:val outcome \"fail-by-worker-A token=1\"   # -> 0：值不变\nLREM task:processing 0 job:42|payload-A # t10 精确摘除\n```\n要点（这题真正的收获是「哪些正确性在无脚本时拿不到」）：\n1) **原子搬运**取代「先读再删」：`RPOPLPUSH`（6.2 起也可 `LMOVE ... LEFT RIGHT`）一条命令完成「从 pending 弹出并压入 processing」，崩溃时任务一定在两个队列之一；`LPOP` + `RPUSH` 在中间崩溃 = 任务凭空消失，或者像朴素解那样在退回队列后凭空**多出**一份。\n2) **幂等**用 `SET key val NX EX ttl`：它的返回值（OK / nil）就是「我是不是第一个」的判定依据。绝不能用 `EXISTS` + `SET`（两条命令之间被插队 = 两个 worker 都以为自己是第一次）。\n3) **fencing token 必须来自永不淘汰的单调计数器**（`INCR`）。给它设 TTL 是隐蔽的致命 bug：计数器过期后 token 回到 1，旧持有者的写又能被下游接受。判题用 `EXPIRE key 5 XX == 0` 证明「这个键没有 TTL」，因为直接断言 `TTL` 数值会因跨秒抖动而不稳定。\n4) **Redis 7.2 没有「比较版本再覆盖值」的单命令原子操作**：\n   - `ZADD key GT score member` 只在 score 更大时更新**已存在**成员，而官方明确「GT 不阻止新增成员」→ 成员名必须是固定值（这里是 `outcome`），否则旧写入会带着新成员混进来；\n   - `SET key val ... GT/LT`（通用版本号语义）要 **Redis 8.0 的 `SET ... VER`** 才有，7.2 的 SET 只有 NX/XX；\n   - 所以「值」这一层只能退化成 first-writer-wins（`HSETNX`）：能保证「迟到写不覆盖已完成结果」，但**不能**保证「更高版本可以修正结果」。需要 last-writer-wins 就把它交给有比较交换能力的存储（`UPDATE ... WHERE version < ?`）或 Redis 8 的 `VER` —— 能讲清这个降级与补救路径才是 principal。\n5) 为什么禁止对锁/幂等键 `DEL`：没有脚本就没有「校验持有者后再删」的原子性，`DEL` 会删掉别人的锁（RedLock 争议里最直观的一条）。正解 = 租约自动过期 + 用 token 让旧写在下游被拒。\n6) `EXPIRE key ttl NX`（7.0）= 只在还没有 TTL 时设置，用来避免「每次写都把租约无限续期」。\n\n追问：\n- 「GC 停顿导致两个持有者」的完整链路：租约 + 单调 token + 存储层拒绝旧 token；说清 `WAIT`/`min-replicas-to-write` 保证的是副本 ack，不是互斥。\n- 观测口径：`task:processing` 的长度与最老条目空闲时长、fence 计数器增速、`ZADD GT` 返回 0 的次数（= 旧持有者试图写回的次数，这是最有价值的告警）。\n- 为什么更推荐 Streams：consumer group + `XACK` + `XAUTOCLAIM` 把「在途可见、超时接管」做成一等能力，`RPOPLPUSH` 方案要自己维护 processing 列表并处理「摘除失败」的孤儿。",
+  "runner": {
+    "setup": [
+      "DEL task:pending",
+      "DEL task:processing",
+      "DEL idem:msg-777",
+      "DEL fence:job-42",
+      "DEL result:job-42",
+      "DEL result:job-42:val",
+      "RPUSH task:pending job:42|payload-A"
+    ],
+    "timeoutMs": 10000,
+    "referenceSolution": "SET idem:msg-777 A NX EX 3600\nRPOPLPUSH task:pending task:processing\nINCR fence:job-42\nSET idem:msg-777 B NX EX 3600\nRPOPLPUSH task:processing task:pending\nRPOPLPUSH task:pending task:processing\nINCR fence:job-42\nZADD result:job-42 2 outcome\nEXPIRE result:job-42 3600 NX\nHSETNX result:job-42:val outcome \"ok-by-worker-B token=2\"\nEXPIRE result:job-42:val 3600 NX\nZADD result:job-42 GT 1 outcome\nHSETNX result:job-42:val outcome \"fail-by-worker-A token=1\"\nLREM task:processing 0 job:42|payload-A",
+    "naiveSolution": "SET idem:msg-777 A EX 3600\nLPOP task:pending\nRPUSH task:processing job:42|payload-A\nINCR fence:job-42\nSET idem:msg-777 B EX 3600\nRPUSH task:pending job:42|payload-A\nLPOP task:pending\nRPUSH task:processing job:42|payload-A\nINCR fence:job-42\nZADD result:job-42 2 outcome\nHSET result:job-42:val outcome \"ok-by-worker-B token=2\"\nZADD result:job-42 1 outcome\nHSET result:job-42:val outcome \"fail-by-worker-A token=1\"\nEXPIRE fence:job-42 3600"
+  },
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#13-原子性的三档工具与选择",
+    "addedBy": "content-agent-sql"
+  }
+}

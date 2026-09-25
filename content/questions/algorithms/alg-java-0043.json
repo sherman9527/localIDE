@@ -1,0 +1,365 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0043",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "官方金额口径：pay_amount 的加法构成与 promotion_type=30 的\"已包含\"双计陷阱",
+  "statement": "## 背景\n\n拼多多开放平台的订单对象里金额字段有**官方口径公式**，面试里自己另写一套 GMV 公式是硬伤。\n官方给的是三条：\n\n```\npay_amount     = 商品金额 − 折扣金额 + 邮费 + 服务费\ngoods_amount   = 商品销售价格 × 商品数量 − 订单改价折扣金额\ndiscount_amount = 平台优惠 + 商家优惠 + 团长免单优惠金额\n```\n\n还有一个专门写在字段注释里的坑：**`promotion_type = 30`（以旧换新优惠）——\"优惠金额已包含平台优惠金额里\"**。\n也就是说把它再加一次就是**双计**。另一层是国补：\n`trade_in_national_subsidy_amount_type` 取 `1 支付优惠 / 2 商家优惠`，\n出资方不同 ⇒ 算不算\"平台真实让利\"就不同。\n\n## 你要实现的入口\n\n```java\npublic static long[] settleAmount(long[] base, int[][] promotions)\n```\n\n`base` 是**定长 11 列**（顺序写死，钱一律以**分**为单位）：\n\n| 下标 | 字段 |\n| --- | --- |\n| 0 | `unitPrice` 商品销售价格 |\n| 1 | `qty` 商品数量 |\n| 2 | `changeDiscount` 订单改价折扣金额 |\n| 3 | `postFee` 邮费 |\n| 4 | `serviceFee` 服务费 |\n| 5 | `platformDiscount` 平台优惠金额 |\n| 6 | `sellerDiscount` 商家优惠金额 |\n| 7 | `captainFreeDiscount` 团长免单优惠金额 |\n| 8 | `declaredPayAmount` 订单上**记着的** `pay_amount` |\n| 9 | `nationalSubsidyAmount` 以旧换新国补金额 |\n| 10 | `subsidyType` 国补出资分型：0 无国补 / 1 支付优惠 / 2 商家优惠 |\n\n`promotions[i] = [promotion_type, promotion_amount]` 是这笔订单的优惠明细行（分单位）。\n\n返回 `long[]{goods_amount, discount_amount, pay_amount_formula, identity_diff, platform_subsidy}`。\n\n## 口径（逐条都是判分点）\n\n1. `goods_amount = unitPrice × qty − changeDiscount`。\n2. `discount_amount = platformDiscount + sellerDiscount + captainFreeDiscount`。\n   **国补金额不许再加**：`subsidyType = 1` 时它是支付渠道出的钱，\n   `subsidyType = 2` 时它已经含在 `sellerDiscount` 里 —— 两种情况都不是官方三项之和的第四项。\n3. `pay_amount_formula = goods_amount − discount_amount + postFee + serviceFee`。\n   邮费与服务费是**加项**（很多人按\"实付 = 货款减优惠\"漏掉它们）。\n4. `identity_diff = declaredPayAmount − pay_amount_formula`。\n   0 表示恒等式成立；不为 0 就是要被拉出来对账的行。**符号有意义**：正数 = 订单表多收了钱。\n5. `platform_subsidy`（平台真实让利）`= platformDiscount + Σ(promotion_amount where promotion_type != 30)`；\n   当 `subsidyType == 1` 时再减去 `nationalSubsidyAmount`（那笔是支付渠道出的，不是平台出的）。\n   **`promotion_type = 30` 的明细行一律不加** —— 官方注释说它已包含在 `platformDiscount` 里。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- `base` 不是 11 列 ⇒ `base must have 11 fields`\n- `qty < 0` ⇒ `negative qty`\n- `subsidyType` 不在 {0,1,2} ⇒ `unknown subsidy type`\n- 明细行不是 2 列 ⇒ `promotion must be [type, amount]`\n- 明细金额为负 ⇒ `negative promotion amount`\n- 算出的 `platform_subsidy < 0` ⇒ `negative platform subsidy`\n  （这不是防御性编程：它意味着\"`subsidyType=1` 的国补金额比平台优惠还大\"，\n  即**数据自相矛盾**，静默夹到 0 会让一笔出资认定错误变成一条看不出来的正常记录。）\n\n校验顺序按上面列出的先后。明细行内部先查列数再查金额。\n\n## 为什么必须是 `long`\n\n`unitPrice × qty` 在分单位下很容易超过 `int`（单价 1 万元 × 10 万件 = 10¹⁰ 分）。\n本题有专门的用例会打到这个点上。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "amount-caliber",
+    "double-counting",
+    "subsidy-attribution",
+    "money-precision",
+    "modern:finance-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：恒等式差 2600 的问题行，type=30 那笔不许多加",
+      "input": [
+        [
+          10000,
+          3,
+          500,
+          600,
+          300,
+          2000,
+          800,
+          200,
+          30000,
+          1200,
+          0
+        ],
+        [
+          [
+            30,
+            1200
+          ],
+          [
+            10,
+            500
+          ]
+        ]
+      ],
+      "expected": [
+        29500,
+        3000,
+        27400,
+        2600,
+        2500
+      ],
+      "visible": true,
+      "note": "goods 29500 / discount 3000 / pay 27400 / diff 2600 / 平台让利 2500；把 1200 那笔再加就变 3700（双计）"
+    },
+    {
+      "name": "国补归属支付渠道（type=1）：平台让利要把国补剔出去",
+      "input": [
+        [
+          5000,
+          2,
+          0,
+          0,
+          0,
+          3000,
+          0,
+          0,
+          7000,
+          1000,
+          1
+        ],
+        [
+          [
+            30,
+            1000
+          ]
+        ]
+      ],
+      "expected": [
+        10000,
+        3000,
+        7000,
+        0,
+        2000
+      ],
+      "visible": true,
+      "note": "goods 10000、discount 3000 ⇒ pay 7000、diff 0；让利 = 3000 − 1000 = 2000"
+    },
+    {
+      "name": "国补归属商家（type=2）：已含在 sellerDiscount，不再减也不再加",
+      "input": [
+        [
+          5000,
+          2,
+          0,
+          0,
+          0,
+          1000,
+          1500,
+          0,
+          8500,
+          1000,
+          2
+        ],
+        []
+      ],
+      "expected": [
+        10000,
+        2500,
+        7500,
+        1000,
+        1000
+      ],
+      "visible": true
+    },
+    {
+      "name": "没有优惠明细行：让利就等于平台优惠本身",
+      "input": [
+        [
+          100,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100,
+          0,
+          0
+        ],
+        []
+      ],
+      "expected": [
+        100,
+        0,
+        100,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：零数量订单 ⇒ goods 只剩负的改价折扣",
+      "input": [
+        [
+          9999,
+          0,
+          300,
+          0,
+          0,
+          0,
+          300,
+          0,
+          -300,
+          0,
+          0
+        ],
+        []
+      ],
+      "expected": [
+        -300,
+        300,
+        -600,
+        300,
+        0
+      ],
+      "visible": true,
+      "note": "goods = −300、discount = 300 ⇒ pay = −600，diff = 300 —— 口径题必须能诚实输出负数，而不是\"看起来正常\""
+    },
+    {
+      "name": "极大：单价 20 亿分 × 5 件，int 会绕成负数",
+      "input": [
+        [
+          2000000000,
+          5,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          10000000000,
+          0,
+          0
+        ],
+        []
+      ],
+      "expected": [
+        10000000000,
+        0,
+        10000000000,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：base 少了列",
+      "input": [
+        [
+          100,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100
+        ],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "base must have 11 fields"
+    },
+    {
+      "name": "非法：数量为负",
+      "input": [
+        [
+          100,
+          -1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100,
+          0,
+          0
+        ],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative qty"
+    },
+    {
+      "name": "非法：未知出资分型（3 不在 0/1/2 里）",
+      "input": [
+        [
+          100,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100,
+          0,
+          3
+        ],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown subsidy type"
+    },
+    {
+      "name": "非法：优惠明细行不是两列",
+      "input": [
+        [
+          100,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100,
+          0,
+          0
+        ],
+        [
+          [
+            7
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "promotion must be [type, amount]"
+    },
+    {
+      "name": "非法：优惠金额为负",
+      "input": [
+        [
+          100,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          100,
+          0,
+          0
+        ],
+        [
+          [
+            10,
+            -5
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative promotion amount"
+    },
+    {
+      "name": "非法：国补比平台优惠还大 ⇒ 出资认定自相矛盾，不许夹到 0",
+      "input": [
+        [
+          10000,
+          1,
+          0,
+          0,
+          0,
+          500,
+          0,
+          0,
+          9500,
+          800,
+          1
+        ],
+        []
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative platform subsidy"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n五个数都是**同一套公式的不同投影**，写出来才是\"背过官方口径\"，写不出来就是\"自己发明过一套\"。\n判分集中在三处：`promotion_type = 30` 只进一次、邮费与服务费是加项、国补按出资分型决定归不归平台。\n\n**基线那笔的手算**（用例「基线：恒等式差 2600」，用来核对 expected 是不是真的对）：\n`goods_amount = 10000 × 3 − 500 = 29500`；\n折扣三项相加 `2000 + 800 + 200 = 3000`；\n实付 `29500 - 3000 = 26500`，再加邮费与服务费 `26500 + 600 + 300 = 27400`；\n恒等式差 `30000 - 27400 = 2600` ⇒ 这一行本身就是要被拉出来对账的问题行；\n平台让利 `2000 + 500 = 2500` —— 那笔 `type=30` 的 1200 分**不加**，\n因为官方注释说它已含在 `platformDiscount` 里。\n\n**\"已包含\"三个字的杀伤力**：把明细表当成独立事实再累加一次，平台让利就变成 `2500 + 1200 = 3700`。\n在营销复盘里这意味着\"平台多掏了 1200 分\"，而真实是同一笔钱被记了两次 ——\n**双计不会报错，只会让复盘数字变好看**，所以它活得很久。\n\n**国补出资分型为什么必须单独一列**：`type=1 支付优惠` 的钱是支付渠道出的、\n`type=2 商家优惠` 的钱已含在 `sellerDiscount` 里。两者都**不该**进\"平台真实让利\"，\n但原因不同：前者是\"不是平台出的\"，后者是\"已经算过了\"。\n把它们合并成一个布尔值，下一次新增第 3 种出资方时就会静默算错 ——\n这也是官方为什么要单独开一个 `trade_in_national_subsidy_amount_type` 字段。\n\n**`platform_subsidy < 0` 必须抛而不是夹到 0**：出现负数只有一种可能 ——\n`subsidyType=1` 的国补金额比 `platformDiscount` 还大，即两个字段在互相矛盾。\n夹到 0 会产出一条\"平台零让利\"的正常记录，之后谁也查不到这笔账；\n抛错则是把**数据契约破坏**留在原地。这类\"报错换静默\"的取舍，senior 必须能主动说清是哪一类\n（本题属于\"错了没人能发现\"那一类，所以必须抛）。\n\n**必须用 `long`**：单价 20 亿分 × 5 件 = 10¹⁰，`int` 会绕成负数。\n朴素解把 `unitPrice`/`qty` 强转 `int` 再相乘，于是它在\"极大\"用例上直接给出荒谬的 `goods_amount`。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"买家实付 ≠ 商家应收 ≠ 平台收入\"？（实付含邮费与服务费；商家应收要扣平台佣金与\n   商家承担的优惠；平台收入只有佣金那一段。三个数各自有各自的分母，混起来就是\"GMV 争议\"。）\n2. 退款怎么摊？（按**分摊比例**回冲而不是按面额：一笔优惠由三方出资时，\n   退 1 件要按 `各出资额 / goods_amount` 拆，否则会出现\"退款额 > 实付额\"。）\n3. 开票按哪个金额？（按买家实付扣除服务费/邮费归属之后的货款部分，且平台优惠与商家优惠的\n   开票主体不同 —— 这正是\"出资方必须是一等属性\"的现实版本。）\n4. 恒等式校验放在哪一层？（写入时强校验会挡业务（改价、赔付都会临时破坏恒等式），\n   所以正确做法是**落库照常、校验做成指标**：`identity_diff != 0` 的行数与金额分布\n   进 DQC，超阈值阻断结算而不是阻断下单。）\n5. 这套公式变了怎么办？（官方字段口径变更必须**显式公告 + 冻结可比区间**，\n   历史数据用当期口径重算会同时改掉同比环比 —— 这是口径治理，不是算术。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "long[] settleAmount(long[] base, int[][] promotions)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static long[] settleAmount(long[] base, int[][] promotions) {\n    if (base == null || base.length != 11) throw new IllegalArgumentException(\"base must have 11 fields\");\n    long unitPrice = base[0], qty = base[1], changeDiscount = base[2], postFee = base[3];\n    long serviceFee = base[4], platformDiscount = base[5], sellerDiscount = base[6];\n    long captainFree = base[7], declaredPay = base[8], nationalSubsidy = base[9];\n    int subsidyType = (int) base[10];\n    if (qty < 0) throw new IllegalArgumentException(\"negative qty\");\n    if (subsidyType < 0 || subsidyType > 2) throw new IllegalArgumentException(\"unknown subsidy type\");\n\n    long extra = 0;\n    for (int[] promo : promotions) {\n      if (promo == null || promo.length != 2) throw new IllegalArgumentException(\"promotion must be [type, amount]\");\n      int type = promo[0];\n      long amount = promo[1];\n      if (amount < 0) throw new IllegalArgumentException(\"negative promotion amount\");\n      // promotion_type == 30（以旧换新）官方注释：金额已包含在平台优惠里 ⇒ 再加就是双计\n      if (type != 30) extra += amount;\n    }\n\n    long goods = unitPrice * qty - changeDiscount;                       // 必须整体在 long 域里算\n    long discount = platformDiscount + sellerDiscount + captainFree;      // 国补不是第四项\n    long pay = goods - discount + postFee + serviceFee;\n    long subsidy = platformDiscount + extra;\n    if (subsidyType == 1) subsidy -= nationalSubsidy;                     // 支付渠道出的钱\n    if (subsidy < 0) throw new IllegalArgumentException(\"negative platform subsidy\");\n    return new long[] {goods, discount, pay, declaredPay - pay, subsidy};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"所有优惠都加一遍才保险\"版：把\"已包含\"当注释没写，并且漏掉邮费与服务费。\n  public static long[] settleAmount(long[] base, int[][] promotions) {\n    int unitPrice = (int) base[0];\n    int qty = (int) base[1];\n    int platform = (int) base[5];\n    int discount = platform + (int) base[6] + (int) base[7];\n    int goods = unitPrice * qty - (int) base[2];\n    int subsidy = platform;\n    for (int[] promo : promotions) {\n      discount += promo[1];     // 错：连 promotion_type=30 也加进折扣\n      subsidy += promo[1];      // 错：双计\"已包含\"的那笔\n    }\n    int pay = goods - discount; // 错：邮费与服务费没加\n    return new long[] {goods, discount, pay, base[8] - pay, subsidy};\n  }\n}"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（交易/营销方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 2（`pay_amount`/`goods_amount`/`discount_amount` 三条官方公式、`promotion_type=30 已包含在平台优惠里`、`trade_in_national_subsidy_amount_type` 出资分型）＋ §5 题面草稿 A 第 1、2 问；素材只给了字段清单，未做成可判分函数",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.107Z"
+  }
+}

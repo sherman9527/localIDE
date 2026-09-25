@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0001",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "数据管道 Sink 的最小 flush 批次数",
+  "statement": "## 背景\n\n你负责一个 ETL Sink：上游按到达顺序吐出一条条记录（不可重排、不可拆分），你要把它们切分成尽量少的批次（batch）发给下游对象存储。一个批次同时受两条上限约束：\n\n- `maxBatchRecords`：单批最多多少条（下游请求体条数限制）；\n- `maxBatchBytes`：单批最多多少字节（网络 MTU / 压缩缓冲区预算）。\n\n生产上最常见的事故是**只用条数切批**，遇到几条超大记录时把批次撑爆，触发下游 413 与整条管道重试风暴。所以这里要的是**同时尊重两条预算的最切批**。\n\n## 你要实现的入口\n\n```java\npublic static int minFlushBatches(int[] recordBytes, int maxBatchBytes, int maxBatchRecords)\n```\n\n- `recordBytes[i]` = 第 i 条记录编码后的字节数（按到达顺序给出）；\n- 返回值：把全部记录切完所需的**最少批次数量**；\n- 只要存在一条 `recordBytes[i] > maxBatchBytes`，单条记录自己就无法成批，直接返回 `-1`（这是业务失败，**不要抛异常**）；\n- `recordBytes` 为空（长度 0）时返回 `0`。\n\n## 约定（不变式，必须遵守）\n\n1. `maxBatchBytes >= 1`、`maxBatchRecords >= 1`；违反说明调用方配置错误，抛 `IllegalArgumentException`。\n2. `recordBytes[i] >= 0`；出现负数同样抛 `IllegalArgumentException`（脏数据要显式失败，不能静默算出更小的批次）。\n3. 长度为 0 的记录合法：它**不占字节但仍占一条的额度**（下游按条数计费），这是判分点之一。\n4. 字节累加**不得在 `int` 域完成**：`maxBatchBytes` 可以到 `Integer.MAX_VALUE`，两条各 1.5e9 字节的记录相加会溢出成负数，从而被误判为「还能塞进同一批」。请在实现里说清你用的是 `long` 中转还是别的等价写法。\n\n## 复杂度要求\n\n- 时间 `O(n)`、额外空间 `O(1)`（不许为了切批先排序或建表）；\n- `n` 上界 `2e5`。\n\n## 输出契约\n\n返回 `int`；不要返回装箱类型，不要返回集合。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": ["greedy-partition", "data-pipeline", "overflow-contract", "constant-space", "modern:backpressure-aware"],
+  "cases": [
+    {
+      "name": "空记录列表返回 0 批",
+      "input": [[], 1024, 100],
+      "expected": 0,
+      "note": "空输入不得抛异常，也不得返回 1"
+    },
+    {
+      "name": "单条记录超过字节上限返回 -1",
+      "input": [[2048, 10], 1024, 100],
+      "expected": -1,
+      "note": "业务失败而非契约失败：只能返回 -1"
+    },
+    {
+      "name": "只受条数约束时的切批",
+      "input": [[10, 10, 10, 10, 10], 1024, 2],
+      "expected": 3
+    },
+    {
+      "name": "零长度记录退化输入：字节不 binding 但占条数额度",
+      "input": [[0, 700, 0, 0, 600, 500], 1000, 100],
+      "expected": 3,
+      "note": "0 字节记录不能因为不占字节就被忽略"
+    },
+    {
+      "name": "重复的贴边记录：恰好等于上限必须能单独成批",
+      "input": [[1000, 1000, 1000], 1000, 5],
+      "expected": 3
+    },
+    {
+      "name": "两条 1.5e9 字节记录在 int 域相加会溢出",
+      "input": [[1500000000, 1500000000, 100], 2000000000, 10],
+      "expected": 2,
+      "note": "int 累加的实现会算出 1 批，从而判负"
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "int minFlushBatches(int[] recordBytes, int maxBatchBytes, int maxBatchRecords)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 贪心切批：按到达顺序尽量往当前批次里塞，一旦\"再加一条就破预算\"就 flush。\n   * 因为可行性对批次长度单调（越塞越不可行），贪心即最优；O(n) 时间、O(1) 额外空间。\n   */\n  public static int minFlushBatches(int[] recordBytes, int maxBatchBytes, int maxBatchRecords) {\n    if (maxBatchBytes <= 0 || maxBatchRecords <= 0) {\n      throw new IllegalArgumentException(\"bad batch policy\");\n    }\n    if (recordBytes == null) {\n      throw new IllegalArgumentException(\"recordBytes is null\");\n    }\n    long maxBytes = maxBatchBytes & 0xffffffffL;\n    for (int b : recordBytes) {\n      if (b < 0) throw new IllegalArgumentException(\"negative record size\");\n      if ((b & 0xffffffffL) > maxBytes) return -1; // 单条超预算：业务失败\n    }\n    int batches = 0;\n    int curCount = 0;\n    long curBytes = 0L;\n    for (int b : recordBytes) {\n      boolean byteBreak = curBytes + b > maxBytes;      // long 域比较，杜绝 int 溢出\n      boolean countBreak = curCount + 1 > maxBatchRecords;\n      if (curCount > 0 && (byteBreak || countBreak)) {\n        batches++;\n        curCount = 0;\n        curBytes = 0L;\n      }\n      curCount++;\n      curBytes += b;\n    }\n    if (curCount > 0) batches++;\n    return batches;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // 只看条数预算（生产里最常见的\"我们的 sink 只配了 maxRecords\"版本）\n  public static int minFlushBatches(int[] recordBytes, int maxBatchBytes, int maxBatchRecords) {\n    if (maxBatchBytes <= 0 || maxBatchRecords <= 0) {\n      throw new IllegalArgumentException(\"bad batch policy\");\n    }\n    if (recordBytes == null || recordBytes.length == 0) return 0;\n    for (int b : recordBytes) {\n      if (b < 0) throw new IllegalArgumentException(\"negative record size\");\n    }\n    return (recordBytes.length + maxBatchRecords - 1) / maxBatchRecords;\n  }\n}"
+  },
+  "answer": "**思路**：批次的可行性对「往当前批里多塞一条」是单调变坏的（字节与条数都只增不减），所以「能塞就塞、塞不下立刻 flush」的贪心即最优；一次遍历、三个标量（批数、当前条数、当前字节和），O(n) 时间 O(1) 空间。\n\n**数值口径**：判断「再加一条会不会破预算」必须在 `long` 域做（`curBytes + b`）。若 `maxBatchBytes` 接近 `Integer.MAX_VALUE`、两条 1.5e9 的记录在 `int` 域相加得到负数 → 误判为可塞 → 批数偏小且下游 413。题面里那条 `1500000000` 的用例就是专门杀这个写法的。\n\n**契约**：单条超预算返回 `-1`（业务失败）；配置非法（预算 ≤ 0）与脏数据（负字节数）抛 `IllegalArgumentException`（契约失败）。两者必须分开：调用方对前者的反应是「告警 + 丢弃该记录」，对后者是「回滚配置」，混成异常会让 oncall 无法分级。\n\n**复杂度**：时间 `O(n)`，额外空间 `O(1)`；`n=2e5` 时几毫秒内完成，零分配，因此没有 GC 压力。\n\n**面试追问点**：\n1. 如果加第三条约束「单批的 key 基数 ≤ D」（下游按 key 聚合），贪心还成立吗？（不成立：可行性不再对前缀单调——把一条 key 众多的记录提前挤到下一批可能整体更优，需要 `dp[i] = min(dp[j]) + 1` + 双指针维护最远可行起点，仍可到 O(n)）。\n2. 如果允许重排（按大小装箱）？（bin packing，NP-hard；First-Fit-Decreasing 有 11/9 近似比，但生产里通常禁止重排以保持事件时间顺序）。\n3. 0 字节记录为什么还要占额度？（下游按条数计费/请求体条数硬上限；忽略它会让 `curCount` 与真实条数脱钩）。\n4. 生产上如何观测？（把每批的 count/bytes/「是字节还是条数触发的 flush」打成直方图，用来回推 `maxBatch*` 配置是否合理）。\n5. 为什么不用前缀和 + 二分定位每批边界？（可行，但 `O(batches · log n)` 且要额外数组；单遍贪心更省、更好测）。",
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#12-溢出与数值安全long-不是护身符",
+    "addedBy": "content-agent-alg"
+  }
+}

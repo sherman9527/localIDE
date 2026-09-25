@@ -1,0 +1,195 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0010",
+  "category": "algorithms",
+  "difficulty": "principal",
+  "title": "工作流引擎的关键路径长度与假环检测",
+  "statement": "## 背景\n\n编排引擎（Airflow/Dagster 类）要算一次调度的 **makespan**：任务可并行执行，总完成时间 = **关键路径（加权最长路径）长度**。节点权重是任务耗时 `nodeMillis[i]`，边是依赖 `u -> v`（u 完成后 v 才能开始）。同时要能识别环——有环的 DAG 定义不成立，调度器会永久挂起。\n\n生产上这类计算有两种失败模式：**(a) 递归 DFS 在长链上 `StackOverflowError`**；**(b) 用一个 `boolean[] visited` 做环检测，把菱形交叉边误判成环**（真环没报、假环一堆告警）。\n\n## 入口\n\n```java\npublic static long criticalPathMillis(int n, int[] edgeFrom, int[] edgeTo, int[] nodeMillis)\n```\n\n- 节点编号 `0..n-1`；边由平行数组 `edgeFrom[e] -> edgeTo[e]` 给出（长度相等）；\n- 返回最长路径的**节点耗时之和**（路径可以是单节点）；\n- 图含环（含自环 `u == u`）时返回 `-1`；\n- `n == 0` 返回 `0`。\n\n## 不变式与硬约束\n\n1. `edgeFrom.length == edgeTo.length` 且 `nodeMillis.length == n`，否则抛 `IllegalArgumentException`；端点越界（`< 0` 或 `>= n`）抛 `IllegalArgumentException`。\n2. **必须迭代实现**（Kahn 拓扑 + DP，或显式栈）。递归深度可达 `n`，`n=2e5` 的链式依赖在任何默认 `-Xss` 下都会 `StackOverflowError`；`StackOverflowError` 属于 `VirtualMachineError`，捕获它不可靠。\n3. 图的内部表示要求**不装箱**：CSR/前向星（`int[] head, to, next`，`head` 必须 `Arrays.fill(head, -1)`）。`List<List<Integer>>` 在 `n=2e5, m=5e5` 下是 30~40MB 且每步虚调用，能说出量级。\n4. 重边（同一条边出现多次）与自环都要正确处理：重边不得让 DP 结果变大，自环必须判环。\n5. 路径耗时累加用 `long`：`n * max(nodeMillis) = 2e5 * 1e9 = 2e14`，`int` 必然溢出。\n6. 判分规模 n ≤ 2000、m ≤ 5000，但请给出 O(n + m) 的实现与论证。\n\n## 输出契约\n\n返回 `long`；有环返回 `-1`（不要抛异常，调度器要的是\"标记这批任务不可调度\"）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "topological-sort",
+    "dag-longest-path",
+    "iterative-traversal",
+    "memory-budget",
+    "modern:dag-scheduler"
+  ],
+  "cases": [
+    {
+      "name": "空图（零节点）返回 0",
+      "input": [
+        0,
+        [],
+        [],
+        []
+      ],
+      "expected": 0
+    },
+    {
+      "name": "单节点无依赖取自身耗时",
+      "input": [
+        1,
+        [],
+        [],
+        [
+          5
+        ]
+      ],
+      "expected": 5
+    },
+    {
+      "name": "链式依赖累加全部耗时",
+      "input": [
+        3,
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          2
+        ],
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "expected": 6
+    },
+    {
+      "name": "两条分支并列时取最长路径",
+      "input": [
+        4,
+        [
+          0,
+          0,
+          1,
+          2
+        ],
+        [
+          1,
+          2,
+          3,
+          3
+        ],
+        [
+          1,
+          10,
+          1,
+          5
+        ]
+      ],
+      "expected": 16
+    },
+    {
+      "name": "菱形交叉边不是环（三色陷阱）",
+      "input": [
+        4,
+        [
+          0,
+          0,
+          1,
+          2
+        ],
+        [
+          1,
+          2,
+          3,
+          3
+        ],
+        [
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": 3
+    },
+    {
+      "name": "自环必须判为环并返回 -1",
+      "input": [
+        2,
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          1,
+          1
+        ]
+      ],
+      "expected": -1
+    },
+    {
+      "name": "重复边不得放大耗时",
+      "input": [
+        2,
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          3,
+          4
+        ]
+      ],
+      "expected": 7
+    },
+    {
+      "name": "多节点环返回 -1",
+      "input": [
+        5,
+        [
+          0,
+          1,
+          2,
+          3,
+          4
+        ],
+        [
+          1,
+          2,
+          3,
+          4,
+          0
+        ],
+        [
+          1,
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": -1
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "long criticalPathMillis(int n, int[] edgeFrom, int[] edgeTo, int[] nodeMillis)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 前向星（CSR）+ Kahn 拓扑 + DP，全程迭代、零装箱：\n   *   dp[v] = 以 v 结尾的最长路径耗时 = nodeMillis[v] + max(dp[pred])\n   * 环检测靠\"拓扑排出的节点数 < n\"，不依赖 DFS 三色标记，因此菱形交叉边不会被误判。\n   * 重边只是让松弛多做一次（幂等），indeg 的 +1/-1 也按边发生次数成对抵消，结果不受影响。\n   */\n  public static long criticalPathMillis(int n, int[] edgeFrom, int[] edgeTo, int[] nodeMillis) {\n    if (edgeFrom.length != edgeTo.length) throw new IllegalArgumentException(\"edge arrays must be parallel\");\n    if (nodeMillis.length != n) throw new IllegalArgumentException(\"duration array size mismatch\");\n    if (n == 0) return 0L;\n    int m = edgeFrom.length;\n    int[] head = new int[n];\n    java.util.Arrays.fill(head, -1);            // 忘了填 -1 会把\"无边\"当成\"0 号边\"\n    int[] to = new int[m];\n    int[] next = new int[m];\n    int[] indeg = new int[n];\n    for (int e = 0; e < m; e++) {\n      int u = edgeFrom[e];\n      int v = edgeTo[e];\n      if (u < 0 || u >= n || v < 0 || v >= n) throw new IllegalArgumentException(\"edge endpoint out of range\");\n      to[e] = v;\n      next[e] = head[u];\n      head[u] = e;\n      indeg[v]++;\n    }\n    int[] queue = new int[n];                   // 手写 int 队列，避免 ArrayDeque<Integer> 装箱\n    int qh = 0;\n    int qt = 0;\n    long[] dp = new long[n];\n    for (int v = 0; v < n; v++) {\n      dp[v] = nodeMillis[v];\n      if (indeg[v] == 0) queue[qt++] = v;\n    }\n    int settled = 0;\n    long answer = 0L;\n    while (qh < qt) {\n      int u = queue[qh++];\n      settled++;\n      if (dp[u] > answer) answer = dp[u];\n      for (int e = head[u]; e != -1; e = next[e]) {\n        int v = to[e];\n        long candidate = dp[u] + nodeMillis[v];  // long 域累加\n        if (candidate > dp[v]) dp[v] = candidate;\n        if (--indeg[v] == 0) queue[qt++] = v;\n      }\n    }\n    return settled == n ? answer : -1L;         // 有环（含自环）时排不完\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：递归 DFS + 一个 boolean[] visited，把\"访问过\"当成\"在递归栈上\"。\n  // 于是菱形图的交叉边被当成回边 -> 误报环（长链还会 StackOverflowError）。\n  static java.util.List<java.util.List<Integer>> graph;\n  static boolean[] visited;\n  static int[] dur;\n\n  public static long criticalPathMillis(int n, int[] edgeFrom, int[] edgeTo, int[] nodeMillis) {\n    graph = new java.util.ArrayList<java.util.List<Integer>>();\n    for (int v = 0; v < n; v++) graph.add(new java.util.ArrayList<Integer>());\n    for (int e = 0; e < edgeFrom.length; e++) graph.get(edgeFrom[e]).add(edgeTo[e]);\n    visited = new boolean[n];\n    dur = nodeMillis;\n    if (n == 0) return 0L;\n    long best = 0L;\n    for (int v = 0; v < n; v++) {\n      long value = dfs(v);\n      if (value < 0) return -1L;\n      if (value > best) best = value;\n    }\n    return best;\n  }\n\n  static long dfs(int u) {\n    if (visited[u]) return -1L;                 // BUG：交叉边 != 回边\n    visited[u] = true;\n    long best = 0L;\n    for (int v : graph.get(u)) {\n      long sub = dfs(v);\n      if (sub < 0) return -1L;\n      if (sub > best) best = sub;\n    }\n    return best + dur[u];\n  }\n}\n"
+  },
+  "answer": "**思路**：Kahn 拓扑排序 + DP。`dp[v] = nodeMillis[v] + max(dp[pred])`，按拓扑序松弛；答案 = max over dp。排出的节点数 `< n` 即有环（自环让 `indeg[u]` 永远降不到 0，天然覆盖）。\n\n**为什么不用 DFS 三色而是 Kahn**：两者都对，但 Kahn 的环检测是\"计数\"而不是\"回边判定\"，实现上更难写错；DFS 版本必须区分\"已完成（黑）\"与\"在栈上（灰）\"——把 `visited` 当 `inStack` 就是本题朴素解的假阳性（菱形 `0→1,0→2,1→3,2→3` 会被判成有环）。生产上\"假环告警\"比\"真环漏报\"更常发生，因为它出现在正常依赖图里。\n\n**为什么不递归**：递归深度 = 路径长度，`n=2e5` 的链式依赖在任何默认线程栈（512KB~1MB，帧 48~96B）上都会 `StackOverflowError`；它是 `VirtualMachineError`，栈可能已经不足以走 catch，所以只能靠\"不递归\"来防。判题镜像给了 `-Xss4m`，但那不是生产保证。\n\n**内存量级**（principal 必答）：`List<List<Integer>>` 在 n=2e5、m=5e5 时是 2e5 个 ArrayList 头（~24B each）+ 5e5 个装箱 `Integer`（16B each）≈ 30~40MB；前向星是 `head[n] + to[m] + next[m]` 三个 int 数组 ≈ (4n + 8m) B ≈ 4.8MB，遍历是纯数组访问、无虚调用。能报出量级并解释\"为什么 `int[][]` 也差（n 个数组头 + 行不连续）\"是 10 年信号。\n\n**复杂度**：时间 O(n + m)，空间 O(n + m)。`dp` 用 `long[]`（值域证明：n × max(nodeMillis) = 2e14 < 9.22e18）。\n\n**面试追问**：\n1. 重边为什么不影响结果？（DP 松弛幂等；`indeg` 对每条边 +1、对每条边 -1，成对抵消。若用 `Map<u, Map<v,w>>` 合并边反而会漏掉\"多条平行边取最小\"的语义差别。）\n2. 增量的生产形态？（新版本只重算受影响子图：按拓扑序从变更点向下传播 `dp`；环检测要单独跑（Kahn 对子图），否则会出现\"局部震荡 + 全局不收敛\"。）\n3. 如果有环，怎么报出**具体**是哪几个节点？（拓扑排完后，`indeg > 0` 的节点集合就是环上的点及其下游被阻塞部分；要精确的最小环可以在这诱导子图里用 DFS 找一条回边并回溯栈。）\n4. 字典序最小的拓扑序？（队列换 `PriorityQueue` → O(m log n)；若还要\"关键路径不变\"就不能任意换序，只能做优先级调度。）\n5. 为什么 `head` 必须 `Arrays.fill(head, -1)`？（默认 0 会把\"无边\"当成\"0 号边\"，遍历会跳到 `to[0]`——CSR 最经典的 bug，且不会报错只会算错。）",
+  "estimatedMinutes": 28,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-graph-dp-adversarial.md#12-遍历栈队列与不能用递归的判据",
+    "addedBy": "content-agent-alg"
+  }
+}

@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0003",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "配置热更新的批量区间加权（差分数组）",
+  "statement": "## 背景\n\n配置中心要下发一批\"区间加权\"变更：第 k 条变更把 key 编号区间 [starts[k], ends[k]] 内所有 key 的权重加上 `deltas[k]`（可正可负，负值就是回滚）。全部变更应用完之后，控制台需要**每个 key 的最终权重**。\n\n逐条区间覆盖着写是 O(n·m) 的，生产上会把一次热更新变成几十秒的卡顿；正解是差分数组 + 一次前缀和。\n\n## 入口\n\n```java\npublic static long[] applyRanges(int n, int[] starts, int[] ends, int[] deltas)\n```\n\n- 返回长度 `n` 的 `long[]`，`out[j]` = 覆盖 key j 的所有 `deltas` 之和；\n- `starts.length == ends.length == deltas.length`（变更条数 m），m 可以为 0，此时返回全 0；\n- `n == 0` 时返回长度为 0 的数组（不得抛异常）。\n\n## 不变式与硬约束\n\n1. `n >= 0`；每条变更满足 `0 <= starts[k] <= ends[k]`，否则抛 `IllegalArgumentException`（脏配置必须显式失败，不能静默算出更小的权重）。\n2. `ends[k]` **允许越界**：按 `min(ends[k], n - 1)` 截断；`starts[k] >= n` 的变更整条跳过（它只影响还没分配出来的 key）。这两种情况都不是错误。\n3. `|deltas[k]|` 可达 2e9，m ≤ 2e5 → **中间累加必须落在 `long` 域**。用 `int` 累加（先 `weight[j] += delta` 再拓宽）会在溢出后返回负权重，且**不抛任何异常**。\n4. 差分数组长度必须是 `n + 1`（否则 `end = n - 1` 时 `diff[end + 1]` 越界），这是本题最常见的 `ArrayIndexOutOfBoundsException` 来源。\n5. 复杂度 O(n + m) 时间、O(n) 额外空间。\n\n## 输出契约\n\n返回 `long[]`（判题逐元素比较），不要返回 `List<Long>` 或 `int[]`。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "difference-array",
+    "prefix-sum",
+    "overflow-contract",
+    "data-pipeline",
+    "modern:config-rollout"
+  ],
+  "cases": [
+    {
+      "name": "零个 key 的空数组",
+      "input": [
+        0,
+        [],
+        [],
+        []
+      ],
+      "expected": []
+    },
+    {
+      "name": "负值 delta 做回滚",
+      "input": [
+        4,
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          3
+        ],
+        [
+          10,
+          -5
+        ]
+      ],
+      "expected": [
+        0,
+        10,
+        5,
+        5
+      ]
+    },
+    {
+      "name": "累加超出 int 需要 long",
+      "input": [
+        3,
+        [
+          0,
+          1
+        ],
+        [
+          2,
+          2
+        ],
+        [
+          2000000000,
+          2000000000
+        ]
+      ],
+      "expected": [
+        2000000000,
+        4000000000,
+        4000000000
+      ]
+    },
+    {
+      "name": "end 越界必须截断而不是抛异常",
+      "input": [
+        2,
+        [
+          0
+        ],
+        [
+          99
+        ],
+        [
+          5
+        ]
+      ],
+      "expected": [
+        5,
+        5
+      ]
+    },
+    {
+      "name": "start 整体越界的退化变更被跳过",
+      "input": [
+        3,
+        [
+          5
+        ],
+        [
+          7
+        ],
+        [
+          9
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "多区间叠加且起点并列",
+      "input": [
+        5,
+        [
+          0,
+          0,
+          4
+        ],
+        [
+          4,
+          1,
+          4
+        ],
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "expected": [
+        3,
+        3,
+        1,
+        1,
+        4
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "long[] applyRanges(int n, int[] starts, int[] ends, int[] deltas)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 差分数组：+d 落在 start，-d 落在 min(end, n-1)+1，最后一遍前缀和还原。\n   * diff 长度 n+1；累加全程 long（两个 ±2e9 相加就超出 int 上限 2.147e9）。\n   */\n  public static long[] applyRanges(int n, int[] starts, int[] ends, int[] deltas) {\n    if (n < 0) throw new IllegalArgumentException(\"n must be >= 0\");\n    long[] diff = new long[n + 1];\n    for (int k = 0; k < starts.length; k++) {\n      int a = starts[k];\n      int b = ends[k];\n      if (a < 0 || b < a) throw new IllegalArgumentException(\"bad range\");\n      if (a >= n) continue;               // 整条落在未分配的 key 上，跳过\n      int last = Math.min(b, n - 1);      // end 越界按截断处理，绝不产生 n+1 下标\n      long d = deltas[k];\n      diff[a] += d;\n      diff[last + 1] -= d;\n    }\n    long[] out = new long[n];\n    long run = 0;\n    for (int j = 0; j < n; j++) {\n      run += diff[j];\n      out[j] = run;\n    }\n    return out;\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：逐条区间直接覆盖写。复杂度 O(n*m)，并且权重在 int 域累加 ——\n  // 溢出后静默返回负数（先 int 相加、再赋给 long，溢出早已发生）。\n  public static long[] applyRanges(int n, int[] starts, int[] ends, int[] deltas) {\n    int[] weight = new int[n];\n    for (int k = 0; k < starts.length; k++) {\n      int a = starts[k];\n      int b = ends[k];\n      if (a < 0 || b < a) throw new IllegalArgumentException(\"bad range\");\n      for (int j = a; j <= b && j < n; j++) {\n        weight[j] += deltas[k];\n      }\n    }\n    long[] out = new long[n];\n    for (int j = 0; j < n; j++) out[j] = weight[j];\n    return out;\n  }\n}\n"
+  },
+  "answer": "**思路**：差分 + 前缀和。区间加 d 只改两个点：`diff[start] += d`、`diff[min(end, n-1) + 1] -= d`；最后一遍 `run += diff[j]` 还原。O(n + m)。\n\n**三个必考点**：\n1. **n+1 长度**：`end = n-1` 时 `diff[n]` 是合法槽位；开 `long[n]` 必然越界（或用 if 特判，丑且容易漏）。\n2. **累加域**：deltas 量级 2e9，两个同号相加就到 4e9，超过 int 上限 2.147e9。朴素写法先在 int 域溢出、再赋给 long —— 拓宽救不回来。值域证明要写出来：m * |Δ| ≤ 2e5 * 2e9 = 4e14 < 9.22e18，long 安全。\n3. **越界是截断还是错误**：题面把 end 越界定义为截断、`start > end` 定义为契约失败。语义钉死才可判分，否则\"正确答案\"不唯一。\n\n**复杂度**：时间 O(n+m)，额外空间 O(n)（diff 与 out）。若只要\"最大值\"而不要全量结果，可以只留 diff 边扫边算，把 out 省掉。\n\n**面试追问**：\n1. 变更与查询交错（在线）怎么办？（差分失效——要 `TreeMap` 维护有序 delta 点 + 前缀查询，或分块 / Fenwick 树做 O(log n) 区间加单点查；只有离线批量才允许差分。）\n2. 二维版本（key × 机房的矩形加权）哨兵怎么开？（`diff[n+1][m+1]`，四角加减，前缀和 `s[i][j] = diff[i][j] + s[i-1][j] + s[i][j-1] - s[i-1][j-1]`，哨兵行列免掉边界特判。）\n3. `Arrays.parallelPrefix` 能用吗？（能，JDK 8 起对 `long[]` 有 `LongBinaryOperator` 重载，可原地并行前缀和；但它是**原地**的，diff 会被改写成结果，\"保留差分以便继续增量下发\"的语义就没了。）\n4. 生产上如何避免一次误配置把权重打成天文数字？（下发前做量级校验：|Δ| 与 m 的乘积超阈值即拒绝；比事后检测溢出便宜得多。）",
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#12-溢出与数值安全long-不是护身符",
+    "addedBy": "content-agent-alg"
+  }
+}

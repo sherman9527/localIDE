@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0007",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "比率口径与 null 语义：先聚合后相除、除零不抛异常、NULL 键的 null-safe 关联",
+  "statement": "## 背景与数据规模\n`funnel_daily` 是投放与预订的日粒度聚合（**日均 120 万行，约 900 个 (day × country) 组合**），下游是经营看板与实验平台。\n一次典型的「静默数字错误」：某位同学把转化率写成 `avg(bookings / impressions)`（逐行相除再平均），\n与正确口径 `sum(bookings) / sum(impressions)` 差了 3 倍多——因为小曝光量的国家把均值拉偏了；\n同时上游把三个数值列改成**字符串投递**（JSON 里数字/字符串混用），空值与脏值混在里面，报表既不报错也不对。\n\n## 输入\n1. 临时视图 `dim_country`（建表阶段灌入，全题固定）：`country STRING, region STRING`；其中**含一行 `country IS NULL`（region='UNKNOWN'）**，代表「未知归属」这个真实维度成员。\n2. 临时视图 `funnel_daily`（每个用例单独灌入，`spark.table('funnel_daily')`）：\n   `day STRING, country STRING(可能 NULL), impressions STRING, bookings STRING, gmv STRING`\n   —— 三个数值列是**十进制文本**，可能出现 `'N/A'`、`'1,000'`、`'12.3.4'`、空串、NULL 等 cast 失败值。\n\n## 口径定义（必须严格实现）\n1. 显式 `cast`：`impressions`/`bookings` → `BIGINT`，`gmv` → `DECIMAL(18,2)`。cast 失败结果为 NULL（**不得抛异常**：Spark 4.0 起 ANSI 默认开启会把非法 cast 变成作业失败，正确做法是显式 `try_cast` + 隔离，本题按「失败即 NULL」处理）。\n2. 按 `(day, country)` 分组（`country IS NULL` 自成一组，不得被丢掉）：\n   - `rows_in` = 组内源行数（含脏行）\n   - `impressions` = 组内可解析的 `impressions` 之和；**`impressions` 为 NULL 的行整行不参与转化率分子与分母**；若组内全部不可解析则记 0\n   - `bookings` = 在上述「可用行」范围内的 `bookings` 之和，其中 `bookings` 为 NULL 的可用行按 **0** 计\n   - `cr` = `bookings / impressions`（**先各自聚合、最后再相除**），保留 6 位小数输出为 `DECIMAL(20,6)`；\n     当 `impressions` 汇总为 0 时 `cr` 必须是 **NULL**（既不许抛异常、也不许写成 0——0 会把「没有曝光」和「有曝光零转化」混成同一个数）\n   - `gmv` = 组内 `gmv` 之和，NULL 按 0 计（金额与转化率相互独立：一行 impressions 脏掉，它的 gmv 仍然要计入）\n3. 维度关联：与 `dim_country` 做 **null-safe 等值关联**（SQL 里是 `<=>`，PySpark 里是 `eqNullSafe`），使 `country IS NULL` 命中维度里的 NULL 行得到 `UNKNOWN`；维度里没有的国家（如 `ZZ`）→ `NOMAP`。用普通 `=` 关联会把 NULL 组配不上，从而错误地输出 `NOMAP`。\n\n## 输出\nDataFrame，列**必须严格是** `day, country, region, rows_in, impressions, bookings, cr, gmv`。\n判题按行集合比对（行序不敏感）；生产写法请 `orderBy('day','country')`。\n注意：输出里的 `country` 保持 NULL（不要 coalesce 成字符串 'unknown'，那是维度归属的事，不是主键的事）。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "null-semantics",
+    "ratio-additivity",
+    "divide-by-zero",
+    "null-safe-join",
+    "pyspark",
+    "modern:spark-4-ansi-default"
+  ],
+  "cases": [
+    {
+      "name": "基础：先聚合后相除（与逐行平均结果不同）",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": [
+          { "day": "2026-09-01", "country": "SF", "impressions": "100", "bookings": "10", "gmv": "1000.00" },
+          { "day": "2026-09-01", "country": "SF", "impressions": "100", "bookings": "20", "gmv": "2000.50" },
+          { "day": "2026-09-01", "country": "NY", "impressions": "1000", "bookings": "5", "gmv": "9000.00" },
+          { "day": "2026-09-02", "country": "SF", "impressions": "50", "bookings": "4", "gmv": "500.00" }
+        ]
+      },
+      "expected": [
+        { "day": "2026-09-01", "country": "SF", "region": "US-West", "rows_in": 2, "impressions": 200, "bookings": 30, "cr": 0.15, "gmv": 3000.5 },
+        { "day": "2026-09-01", "country": "NY", "region": "US-East", "rows_in": 1, "impressions": 1000, "bookings": 5, "cr": 0.005, "gmv": 9000 },
+        { "day": "2026-09-02", "country": "SF", "region": "US-West", "rows_in": 1, "impressions": 50, "bookings": 4, "cr": 0.08, "gmv": 500 }
+      ],
+      "note": "逐行相除再平均会得到 (0.1+0.2)/2 = 0.15 巧合相同？不——本题 SF 两行分母相同才巧合，NY 与 SF 混在一起就会偏；生产上必须写聚合后相除。"
+    },
+    {
+      "name": "除零边界：曝光汇总为 0 时转化率必须是 NULL 而不是 0",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": [
+          { "day": "2026-09-01", "country": "SF", "impressions": "0", "bookings": "5", "gmv": "50.00" },
+          { "day": "2026-09-01", "country": "NY", "impressions": "0", "bookings": "0", "gmv": "0.00" },
+          { "day": "2026-09-01", "country": "LDN", "impressions": "200", "bookings": "1", "gmv": "10.00" }
+        ]
+      },
+      "expected": [
+        { "day": "2026-09-01", "country": "LDN", "region": "EMEA", "rows_in": 1, "impressions": 200, "bookings": 1, "cr": 0.005, "gmv": 10 },
+        { "day": "2026-09-01", "country": "NY", "region": "US-East", "rows_in": 1, "impressions": 0, "bookings": 0, "cr": null, "gmv": 0 },
+        { "day": "2026-09-01", "country": "SF", "region": "US-West", "rows_in": 1, "impressions": 0, "bookings": 5, "cr": null, "gmv": 50 }
+      ],
+      "note": "cr=0 与 cr=NULL 的语义差别是治理问题：0 会被下游当成「真实的零转化」进入同比。"
+    },
+    {
+      "name": "null 语义边界：脏 impressions 整行不参与，脏 bookings 按 0 计",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": [
+          { "day": "2026-09-01", "country": "SF", "impressions": "N/A", "bookings": "7", "gmv": "700.00" },
+          { "day": "2026-09-01", "country": "SF", "impressions": "1,000", "bookings": "3", "gmv": "10.00" },
+          { "day": "2026-09-01", "country": "SF", "impressions": "300", "bookings": null, "gmv": "20.00" },
+          { "day": "2026-09-01", "country": "SF", "impressions": "300", "bookings": "", "gmv": null }
+        ]
+      },
+      "expected": [
+        { "day": "2026-09-01", "country": "SF", "region": "US-West", "rows_in": 4, "impressions": 600, "bookings": 0, "cr": 0, "gmv": 730 }
+      ],
+      "note": "前两行 impressions 无法解析 → 整行不参与分子分母（但 gmv 700/10 仍要计入）；后两行 bookings 为 NULL/空串 → 按 0 计入分子。"
+    },
+    {
+      "name": "NULL 分组键与未知维度：null-safe 关联 vs 普通等值关联",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": [
+          { "day": "2026-09-01", "country": null, "impressions": "3", "bookings": "2", "gmv": "3.00" },
+          { "day": "2026-09-01", "country": null, "impressions": "3", "bookings": "1", "gmv": "4.00" },
+          { "day": "2026-09-01", "country": "ZZ", "impressions": "10", "bookings": "1", "gmv": "9.00" }
+        ]
+      },
+      "expected": [
+        { "day": "2026-09-01", "country": null, "region": "UNKNOWN", "rows_in": 2, "impressions": 6, "bookings": 3, "cr": 0.5, "gmv": 7 },
+        { "day": "2026-09-01", "country": "ZZ", "region": "NOMAP", "rows_in": 1, "impressions": 10, "bookings": 1, "cr": 0.1, "gmv": 9 }
+      ],
+      "note": "用 `=` 关联时 NULL 组会拿到 NOMAP（把「维度里有 NULL 成员」错成「维度缺失」）；`groupBy` 也不能把 NULL 键丢掉。"
+    },
+    {
+      "name": "空输入：无任何投放记录返回零行",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": []
+      },
+      "expected": [],
+      "note": "不得因为维度表存在而产出 4 行全 0（那是把 join 写反了方向）。"
+    },
+    {
+      "name": "脏金额与极端分数：gmv cast 失败记 0，cr 保留 6 位",
+      "input": {
+        "view": "funnel_daily",
+        "schema": "day string, country string, impressions string, bookings string, gmv string",
+        "rows": [
+          { "day": "2026-09-03", "country": "SF", "impressions": "3", "bookings": "2", "gmv": "12.3.4" },
+          { "day": "2026-09-03", "country": "NY", "impressions": "7", "bookings": "1", "gmv": "0.10" }
+        ]
+      },
+      "expected": [
+        { "day": "2026-09-03", "country": "SF", "region": "US-West", "rows_in": 1, "impressions": 3, "bookings": 2, "cr": 0.666667, "gmv": 0 },
+        { "day": "2026-09-03", "country": "NY", "region": "US-East", "rows_in": 1, "impressions": 7, "bookings": 1, "cr": 0.142857, "gmv": 0.1 }
+      ],
+      "note": "2/3 → 0.666667、1/7 → 0.142857（六位小数的舍入方向也要一致）。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW dim_country AS SELECT * FROM VALUES ('SF','US-West'), ('NY','US-East'), ('LDN','EMEA'), ('PAR','EMEA'), (CAST(NULL AS STRING),'UNKNOWN') AS t(country, region)"
+    ],
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    typed = (\n        spark.table('funnel_daily')\n        .withColumn('imp', F.col('impressions').cast('bigint'))\n        .withColumn('book', F.col('bookings').cast('bigint'))\n        .withColumn('gmv_dec', F.coalesce(F.col('gmv').cast('decimal(18,2)'), F.lit(0).cast('decimal(18,2)')))\n    )\n    agg = typed.groupBy('day', 'country').agg(\n        F.count(F.lit(1)).alias('rows_in'),\n        F.coalesce(F.sum('imp'), F.lit(0)).alias('impressions'),\n        F.coalesce(\n            F.sum(F.when(F.col('imp').isNotNull(), F.coalesce(F.col('book'), F.lit(0)))),\n            F.lit(0),\n        ).alias('bookings'),\n        F.coalesce(F.sum('gmv_dec'), F.lit(0).cast('decimal(18,2)')).alias('gmv'),\n    )\n    with_cr = agg.withColumn(\n        'cr',\n        F.when(F.col('impressions') > F.lit(0), F.col('bookings') / F.col('impressions')).cast('decimal(20,6)'),\n    )\n    dim = spark.table('dim_country').select(F.col('country').alias('dim_country'), 'region')\n    return (\n        with_cr.join(dim, with_cr['country'].eqNullSafe(dim['dim_country']), 'left')\n        .select(\n            'day',\n            'country',\n            F.coalesce(F.col('region'), F.lit('NOMAP')).alias('region'),\n            'rows_in',\n            'impressions',\n            'bookings',\n            'cr',\n            'gmv',\n        )\n        .orderBy('day', 'country')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    agg = (\n        spark.table('funnel_daily')\n        .filter(F.col('country').isNotNull())\n        .groupBy('day', 'country')\n        .agg(\n            F.count(F.lit(1)).alias('rows_in'),\n            F.sum(F.col('impressions').cast('int')).alias('impressions'),\n            F.sum(F.col('bookings').cast('int')).alias('bookings'),\n            F.avg(F.col('bookings').cast('double') / F.col('impressions').cast('double')).alias('cr'),\n            F.sum(F.col('gmv').cast('double')).alias('gmv'),\n        )\n    )\n    dim = spark.table('dim_country').select(F.col('country').alias('dim_country'), 'region')\n    return agg.join(dim, agg['country'] == dim['dim_country'], 'left').select(\n        'day', 'country', 'region', 'rows_in', 'impressions', 'bookings', 'cr', 'gmv'\n    )\n"
+  },
+  "answer": "## 参考要点\n1. **可加性决定聚合顺序**：比率是「不可加指标」，唯一正确形态是分子分母各自聚合后相除；`avg(per-row ratio)` 等于给小分母行更高权重（辛普森悖论的常见触发方式）。语义层里应给指标打「是否可加 / 上卷函数 = 分子分母各自上卷」的标志，从工具层禁止错误上卷（Airbnb Minerva/MetricFlow 类做法）。\n2. **NULL 的四种来源要分开定义**：列本身 NULL（上游没投）、cast 失败（脏文本）、空串、以及「业务真值 0」。本题把 `impressions` 不可解析视为「该行不可用」（分子分母同时剔除，保持比率定义域一致），把 `bookings` 不可解析视为 0（有曝光没转化记录）；这两种处理必须由业务确认并写进口档文档，不能由实现者随手决定。\n3. **除零输出 NULL 而不是 0**：0 与 NULL 在下游 `avg`/同比/阈值告警里语义完全不同；Spark 4.x ANSI 默认开启后 `1/0` 会直接抛 `DIVIDE_BY_ZERO`，所以正确写法是先 `when(denom > 0, ...)` 或用 `try_divide`（4.0+），而不是关掉 ANSI。脏值 cast 同理用 `try_cast` + quarantine。\n4. **null-safe 关联**：维度里存在 NULL 成员时（本表 `country IS NULL → region UNKNOWN`），普通 `=` 会配不上，`<=>`/`eqNullSafe` 才对；同时注意外连接的谓词位置（写在 WHERE 会退化成 inner）。\n5. 治理层面的追问答案：这类「数字静默错误」的防线不是 code review，而是**双路径对账**（明细重算 vs 聚合层上卷，按 `day × country` 归因差异）+ 不变量断言（`0 <= cr <= 1`、`impressions >= bookings`、NULL 率）+ 语义层单一定义。比率类指标还要在 BI 层禁止跨维求和。\n\n## 追问\n- 「为什么 gmv 与 cr 的脏值处理不对称？」——因为它们的定义域不同：GMV 是可加的金额，行缺失就是少一笔；转化率是**同一行内两个量的比**，缺一即不可用。混用同一套 coalesce 会把分母灌大、把 cr 稀释。\n- 「`DECIMAL(20,6)` 的 6 位够用吗？」——取决于分母量级与下游同比的最小可辨差异；给出你的推导（例如曝光 1e8 量级时 6 位仍有 1e-6 的相对精度），并说明为什么不能用 double（金额与比率的跨引擎一致性要求定点）。\n- 「如果要求按 region 上卷呢？」——不能在 cr 上求和/平均，必须把 impressions/bookings 两列都带上，让上层重新相除；这就是「比率指标必须随分子分母一起下发」的具体含义。",
+  "estimatedMinutes": 24,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/warehouse-modeling-quality-backfill.md#semantic-layer",
+    "addedBy": "content-agent-bd"
+  }
+}

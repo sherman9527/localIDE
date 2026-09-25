@@ -1,0 +1,142 @@
+/* 答题形态切换（文本/代码）与语言选择 */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line, #dfe5ee);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.seg button {
+  border: 0;
+  background: transparent;
+  padding: 0.3rem 0.7rem;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--muted, #5b6675);
+  cursor: pointer;
+}
+
+.seg-on {
+  background: var(--primary-soft, #e8f0fe);
+  color: var(--primary, #3b82f6);
+  font-weight: 600;
+}
+
+.seg button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.inline-field select {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: 8px;
+  border: 1px solid var(--line, #dfe5ee);
+  background: #fff;
+  color: var(--text, #1f2733);
+}
+
+/* 工具栏窄宽度：整块换行，控件内部绝不拆词（否则"美化代码""文本 / Markdown"会被劈成两行） */
+.answer-bar {
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+}
+
+.answer-bar .card-title,
+.seg,
+.seg button,
+.inline-field,
+.inline-field span,
+.inline-field select,
+.answer-bar .btn,
+.kbd-hint {
+  white-space: nowrap;
+}
+
+/* 挤到第二行时提示与按钮自己成一组，不跟左侧控件拉出大空隙 */
+.answer-bar .kbd-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+@media (max-width: 720px) {
+  .answer-bar .spacer {
+    display: none;
+  }
+}
+
+/* 自测用例面板 */
+.selftest summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.selftest summary::-webkit-details-marker {
+  display: none;
+}
+
+.selftest summary::before {
+  content: '▸ ';
+  color: var(--muted, #5b6675);
+}
+
+.selftest[open] summary::before {
+  content: '▾ ';
+}
+
+.selftest-input {
+  min-height: 6.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+}
+
+.selftest-errors {
+  color: var(--danger, #e11d48);
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.selftest-result {
+  margin-top: 0.6rem;
+  border-top: 1px dashed var(--line, #dfe5ee);
+  padding-top: 0.6rem;
+}
+
+.selftest-result ul {
+  margin: 0.3rem 0 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.selftest-fail code {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--danger, #e11d48);
+  background: #fef2f4;
+  border-radius: 6px;
+  padding: 0.2rem 0.35rem;
+}
+
+.selftest-pass {
+  color: var(--success, #16a34a);
+}
+
+.selftest-log {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: #f8fafc;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  max-height: 12rem;
+  overflow: auto;
+}

@@ -1,0 +1,74 @@
+<mxfile host="Electron" modified="2026-09-20T00:00:00.000Z" agent="arena-doc" version="24.0.0" type="device">
+  <diagram id="verify-gates" name="06-验证门禁">
+    <mxGraphModel dx="1180" dy="720" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1160" pageHeight="700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="验证门禁：改完凭什么说它没坏" style="text;html=1;align=left;fontSize=18;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="40" y="14" width="900" height="28" as="geometry" />
+        </mxCell>
+
+        <mxCell id="change" value="&lt;b&gt;一次改动&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="60" y="66" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="fast" value="&lt;b&gt;npm run verify:fast&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;宿主机 · 约 45s&lt;br&gt;SKIP_E2E=1 SKIP_JUDGE=1&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1F3F5;strokeColor=#666666;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="240" y="60" width="210" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="container" value="&lt;b&gt;容器内 npm run verify&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;./start.sh --verify&lt;br&gt;必须报 0 skipped&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="490" y="60" width="210" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="e2e" value="&lt;b&gt;宿主 npm run e2e&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;起独立隔离实例&lt;br&gt;127.0.0.1:7798 · data/e2e&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="740" y="60" width="210" height="72" as="geometry" />
+        </mxCell>
+        <mxCell id="ship" value="&lt;b&gt;可交付&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5FBEC;strokeColor=#82B366;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="990" y="72" width="110" height="48" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ef1" style="html=1;strokeColor=#666666;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="change" target="fast"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ef2" value="碰了判题/题库" style="html=1;strokeColor=#D79B00;strokeWidth=2;fontSize=10;fontColor=#B85C00;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="fast" target="container"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ef3" value="改了前端 / 交付前" style="html=1;strokeColor=#1F9E7E;strokeWidth=2;fontSize=10;fontColor=#1F9E7E;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="container" target="e2e"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="ef4" style="html=1;strokeColor=#82B366;strokeWidth=2;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="e2e" target="ship"><mxGeometry relative="1" as="geometry" /></mxCell>
+
+        <mxCell id="gTitle" value="verify.sh 的阶段（任一步失败立即退出并打印阶段名）" style="text;html=1;align=left;fontSize=13;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="60" y="162" width="800" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="g1" value="&lt;b&gt;lint&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;eslint --max-warnings=0&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="196" width="120" height="56" as="geometry" /></mxCell>
+        <mxCell id="g2" value="&lt;b&gt;typecheck&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;tsc -b 三栈 + 测试文件&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="196" y="196" width="120" height="56" as="geometry" /></mxCell>
+        <mxCell id="g3" value="&lt;b&gt;前端构建&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;NODE_ENV=production&lt;br&gt;vite build&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="332" y="196" width="120" height="56" as="geometry" /></mxCell>
+        <mxCell id="g4" value="&lt;b&gt;产物预算&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;check-bundle.mjs&lt;br&gt;首屏不许拖进 zod / CM6&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontSize=11;" vertex="1" parent="1"><mxGeometry x="468" y="196" width="126" height="56" as="geometry" /></mxCell>
+        <mxCell id="g5" value="&lt;b&gt;单元测试&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;shared + bank&lt;br&gt;+ regression + server 根级&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="610" y="196" width="126" height="56" as="geometry" /></mxCell>
+        <mxCell id="g6" value="&lt;b&gt;题库只增不减&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;check-bank --count-only&lt;br&gt;基线取 git 跟踪数&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1"><mxGeometry x="752" y="196" width="126" height="56" as="geometry" /></mxCell>
+        <mxCell id="g7" value="&lt;b&gt;题库闸门&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;ARENA_FULL_GATE=1&lt;br&gt;含类别覆盖度&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#82B366;fontSize=11;" vertex="1" parent="1"><mxGeometry x="894" y="196" width="126" height="56" as="geometry" /></mxCell>
+        <mxCell id="g8" value="&lt;b&gt;游戏后端 + 前端测试&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;game / api / llm / web&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="272" width="180" height="56" as="geometry" /></mxCell>
+        <mxCell id="g9" value="&lt;b&gt;判题回归矩阵&lt;/b&gt;（容器内）&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;server/test/judge/*　每个 runner 双向：已知正解必 pass、已知错解必 fail&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;strokeWidth=2;fontSize=11;" vertex="1" parent="1"><mxGeometry x="268" y="272" width="330" height="56" as="geometry" /></mxCell>
+        <mxCell id="g10" value="&lt;b&gt;判题矩阵确实跑到了&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;assert-ran.mjs —— 整片 it.skip 也算失败&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4E6;strokeColor=#D79B00;fontSize=11;" vertex="1" parent="1"><mxGeometry x="626" y="272" width="230" height="56" as="geometry" /></mxCell>
+        <mxCell id="g11" value="&lt;b&gt;E2E（Playwright）&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;宿主默认浏览器 Edge&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F5F1;strokeColor=#1F9E7E;strokeWidth=2;fontSize=11;" vertex="1" parent="1"><mxGeometry x="880" y="272" width="140" height="56" as="geometry" /></mxCell>
+
+        <mxCell id="gateTitle" value="门禁自己也要被门禁（server/test/regression/）" style="text;html=1;align=left;fontSize=13;fontStyle=1;fontColor=#111827;" vertex="1" parent="1">
+          <mxGeometry x="60" y="356" width="700" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="rg1" value="&lt;b&gt;typecheck-coverage&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;测试文件是否纳入类型检查&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F3FB;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="60" y="388" width="250" height="48" as="geometry" /></mxCell>
+        <mxCell id="rg2" value="&lt;b&gt;verify-coverage&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;每个 *.test.ts 是否被 verify.sh 某阶段认领&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F3FB;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="326" y="388" width="290" height="48" as="geometry" /></mxCell>
+        <mxCell id="rg3" value="&lt;b&gt;runner-coverage&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;每个 judgeKind 是否都有双向往返测试&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F3FB;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="632" y="388" width="250" height="48" as="geometry" /></mxCell>
+        <mxCell id="rg4" value="&lt;b&gt;assert-ran.mjs&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot;&gt;判题矩阵整片 skip 也判失败&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F7F3FB;strokeColor=#9673A6;fontSize=11;" vertex="1" parent="1"><mxGeometry x="898" y="388" width="202" height="48" as="geometry" /></mxCell>
+
+        <mxCell id="hooks" value="&lt;b&gt;提交前自动校验&lt;/b&gt;：npm run hooks:install 把 core.hooksPath 指到 .githooks，之后每次 commit 自动跑 verify:fast。start.sh 启动时会检查闸门有没有接上，没接上就打印提示。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#666666;fontSize=11;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="462" width="520" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="browser" value="&lt;b&gt;前端改动额外一条：必须在真浏览器里看过&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot;&gt;本项目有过三个&quot;静默降级&quot;缺陷（评分 401 掉到自检表、模型输出内层引号毁掉 JSON、桥 token 漂移），它们在断言下全是绿的。&lt;br&gt;最低要求：打开页面 → console error 为 0 → 关键元素断到 DOM 上，必要时截图。&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9B2;strokeColor=#D6B656;fontSize=11;align=left;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="600" y="462" width="500" height="96" as="geometry" />
+        </mxCell>
+
+        <mxCell id="isolate" value="&lt;b&gt;E2E 的状态隔离&lt;/b&gt;：e2e 服务的 ARENA_DATA_DIR / ARENA_DB_FILE / ARENA_HIDDEN_FILE 全指向 data/e2e，content 只读挂载 —— 测试既读不到也写不进真人的 arena.db 与 hidden.json。别占 :7799（宿主 CLI 桥端口），撞上会让两边的 llm-rubric 一起变 false。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EBF3FC;strokeColor=#6C8EBF;fontSize=11;align=left;spacing=10;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="544" width="1040" height="64" as="geometry" />
+        </mxCell>
+
+        <mxCell id="footnote" value="&lt;font style=&quot;font-size:11px;color:#595959&quot;&gt;完整约定见 .qoder/rules/dev_verify_workflow.md；TDD 要求&quot;红必须是缺功能造成的红&quot;，搞不清时做一次破坏性验证：把被测物改坏，看门禁是否真的红。&lt;/font&gt;" style="text;html=1;align=left;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="60" y="622" width="1040" height="24" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,785 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0015",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "训练特征的时点正确性：可见性以查询时刻为界，并列要有确定规则",
+  "statement": "## 输入\n\nPySpark 3.5（判题容器内）。工作区里已经注册好一张表：\n\n```\nfeature_observations(\n  obs_id INT, row_id INT, listing_id INT, feature STRING,\n  as_of_query STRING,      -- 该训练样本的**查询时刻**（同一 row_id 内恒定），'yyyy-MM-dd HH:mm:ss'\n  observed_at STRING,      -- 这条特征值被观测到的时刻，同上格式\n  value DOUBLE)\n```\n\n一行 = 一个\"某样本的某特征在某时刻被观测到\"的事实。同一个 `(row_id, feature)`\n会有多条观测，**其中一些的时间晚于 `as_of_query`**（那是上线之后才会出现的数据）。\n\n## 任务\n\n实现 `solve(spark)`，返回**时点正确的训练特征表**，列为：\n\n```\nrow_id, feature, value, obs_id_used, future_count\n```\n\n按 `row_id`、`feature` 升序。每个 `(row_id, feature)` 输出**一行**。\n\n## 口径（逐条都是判分点）\n\n1. **可见性以 `as_of_query` 为界**：只有 `observed_at <= as_of_query` 的观测可用。\n   **等号算可见**（查询发生在那一刻，那一刻已经存在的值是看得到的）。\n2. 从可见观测里取 `observed_at` 最新的一条；\n   **若同一时刻有多条，取 `obs_id` 最大的那条**（确定性要求 —— 不定义 tie-break 的实现\n   在同一份数据上两次跑可能给出不同 `value`）。\n3. `value` / `obs_id_used` 就是被选中的那条观测的值与 `obs_id`。\n   **没有任何可见观测 ⇒ 两列都是 `null`**（不许回退去用未来值，也不许填 0）。\n4. `future_count` = 该 `(row_id, feature)` 下 `observed_at > as_of_query` 的观测条数\n   （可以为 0）。它是\"这个样本有多容易被取错时间而泄漏\"的量度 —— 特征值本身可能一模一样，\n   但**只要有一条未来观测存在，写错的 join 就会悄悄改变结果**。\n\n## 这题真正考的东西\n\n- **`<= as_of_query` 与 `<= label_ts` 的区别不会让作业失败**。\n  用标签时刻做可见性边界，训练集照样跑通、离线 AUC 还会**变高**\n  （因为它提前看到了\"价格已经涨到 310\"这类与成交结果同源的信息），\n  上线后指标掉下去，而没人会怀疑特征生成器 —— 这就是\"时点正确性\"这一整类事故的形状。\n- **\"取最新\"必须有确定性的并列规则**。同一秒批量灌进来的观测很常见\n  （上游一次跑批写多条），按 Spark 分区顺序随便取一条，\n  结果是**同一份数据两次训练产出不同模型**，再也无法复现。\n- `future_count` 是本题唯一的**产出侧**要求：\n  它让下游可以在不重跑训练的情况下筛掉\"高危样本\"（比如只保留 `future_count = 0` 的样本\n  做一致性对照）。泄漏防不住的时候，至少要能度量。\n\n## 约束\n\n不许 `collect()` 全表到驱动侧再算；不许建 UDF 做 Python 循环遍历；\n只允许 DataFrame / Spark SQL 算子。输入表可能有几十万行。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "point-in-time",
+    "feature-store",
+    "label-leakage",
+    "determinism",
+    "modern:ml-platform"
+  ],
+  "cases": [
+    {
+      "name": "基线：未来价格不许进训练集，并列取 obs_id 最大",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 1,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 09:00:00",
+            "value": 120.5
+          },
+          {
+            "obs_id": 2,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-30 08:00:00",
+            "value": 99.99
+          },
+          {
+            "obs_id": 3,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-03 18:00:00",
+            "value": 310
+          },
+          {
+            "obs_id": 4,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 12:00:00",
+            "value": 7
+          },
+          {
+            "obs_id": 5,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-01 00:00:00",
+            "value": 3
+          },
+          {
+            "obs_id": 6,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "host_reply",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-02 10:00:00",
+            "value": 0.91
+          },
+          {
+            "obs_id": 7,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 88
+          },
+          {
+            "obs_id": 8,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 87
+          },
+          {
+            "obs_id": 9,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-05 00:00:00",
+            "value": 90
+          },
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          },
+          {
+            "obs_id": 11,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-12 08:00:00",
+            "value": 46
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 1,
+          "feature": "host_reply",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "price",
+          "value": 120.5,
+          "obs_id_used": 1,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "supply_days",
+          "value": 7,
+          "obs_id_used": 4,
+          "future_count": 0
+        },
+        {
+          "row_id": 2,
+          "feature": "price",
+          "value": 90,
+          "obs_id_used": 9,
+          "future_count": 0
+        },
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 2
+        }
+      ],
+      "visible": true,
+      "note": "(1,price) 120.5 而不是 310.0；(1,supply_days) 等号可见取 7.0；(1,host_reply) 全未来 ⇒ null"
+    },
+    {
+      "name": "把等号改成不含：正好在查询时刻的那条观测被踢出可见集",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 1,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 09:00:00",
+            "value": 120.5
+          },
+          {
+            "obs_id": 2,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-30 08:00:00",
+            "value": 99.99
+          },
+          {
+            "obs_id": 3,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-03 18:00:00",
+            "value": 310
+          },
+          {
+            "obs_id": 5,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-01 00:00:00",
+            "value": 3
+          },
+          {
+            "obs_id": 6,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "host_reply",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-02 10:00:00",
+            "value": 0.91
+          },
+          {
+            "obs_id": 7,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 88
+          },
+          {
+            "obs_id": 8,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 87
+          },
+          {
+            "obs_id": 9,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-05 00:00:00",
+            "value": 90
+          },
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          },
+          {
+            "obs_id": 11,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-12 08:00:00",
+            "value": 46
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 1,
+          "feature": "host_reply",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "price",
+          "value": 120.5,
+          "obs_id_used": 1,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "supply_days",
+          "value": 3,
+          "obs_id_used": 5,
+          "future_count": 0
+        },
+        {
+          "row_id": 2,
+          "feature": "price",
+          "value": 90,
+          "obs_id_used": 9,
+          "future_count": 0
+        },
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 2
+        }
+      ],
+      "visible": true,
+      "note": "(1,supply_days) 退回 obs 5 的 3.0 —— 这条用例专门钉\"等号算可见\""
+    },
+    {
+      "name": "把未来观测挪到查询之前：泄漏样本转正",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 1,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 09:00:00",
+            "value": 120.5
+          },
+          {
+            "obs_id": 2,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-30 08:00:00",
+            "value": 99.99
+          },
+          {
+            "obs_id": 3,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 11:00:00",
+            "value": 310
+          },
+          {
+            "obs_id": 4,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 12:00:00",
+            "value": 7
+          },
+          {
+            "obs_id": 5,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-01 00:00:00",
+            "value": 3
+          },
+          {
+            "obs_id": 6,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "host_reply",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-02 10:00:00",
+            "value": 0.91
+          },
+          {
+            "obs_id": 7,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 88
+          },
+          {
+            "obs_id": 8,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 87
+          },
+          {
+            "obs_id": 9,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-05 00:00:00",
+            "value": 90
+          },
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          },
+          {
+            "obs_id": 11,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-12 08:00:00",
+            "value": 46
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 1,
+          "feature": "host_reply",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "price",
+          "value": 310,
+          "obs_id_used": 3,
+          "future_count": 0
+        },
+        {
+          "row_id": 1,
+          "feature": "supply_days",
+          "value": 7,
+          "obs_id_used": 4,
+          "future_count": 0
+        },
+        {
+          "row_id": 2,
+          "feature": "price",
+          "value": 90,
+          "obs_id_used": 9,
+          "future_count": 0
+        },
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 2
+        }
+      ],
+      "visible": true,
+      "note": "(1,price) 变成 310.0、future_count 归 0 —— 证明未来/可见的划分确实是按 as_of_query 算的"
+    },
+    {
+      "name": "删掉 (1,price) 的两条可见观测：只剩未来值 ⇒ null 而不是 0",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 3,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-03 18:00:00",
+            "value": 310
+          },
+          {
+            "obs_id": 4,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 12:00:00",
+            "value": 7
+          },
+          {
+            "obs_id": 5,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-01 00:00:00",
+            "value": 3
+          },
+          {
+            "obs_id": 6,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "host_reply",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-02 10:00:00",
+            "value": 0.91
+          },
+          {
+            "obs_id": 7,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 88
+          },
+          {
+            "obs_id": 8,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 87
+          },
+          {
+            "obs_id": 9,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-05 00:00:00",
+            "value": 90
+          },
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          },
+          {
+            "obs_id": 11,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-12 08:00:00",
+            "value": 46
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 1,
+          "feature": "host_reply",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "supply_days",
+          "value": 7,
+          "obs_id_used": 4,
+          "future_count": 0
+        },
+        {
+          "row_id": 2,
+          "feature": "price",
+          "value": 90,
+          "obs_id_used": 9,
+          "future_count": 0
+        },
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 2
+        }
+      ],
+      "visible": true,
+      "note": "(1,price) 只剩 obs 3（未来）⇒ value/obs_id_used 都 null、future_count 1"
+    },
+    {
+      "name": "同一时刻两条并列 + 再插一条更早的：并列规则要确定",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 1,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 09:00:00",
+            "value": 120.5
+          },
+          {
+            "obs_id": 2,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-30 08:00:00",
+            "value": 99.99
+          },
+          {
+            "obs_id": 3,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "price",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-03 18:00:00",
+            "value": 310
+          },
+          {
+            "obs_id": 4,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-01 12:00:00",
+            "value": 7
+          },
+          {
+            "obs_id": 5,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "supply_days",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-05-01 00:00:00",
+            "value": 3
+          },
+          {
+            "obs_id": 6,
+            "row_id": 1,
+            "listing_id": 101,
+            "feature": "host_reply",
+            "as_of_query": "2026-06-01 12:00:00",
+            "observed_at": "2026-06-02 10:00:00",
+            "value": 0.91
+          },
+          {
+            "obs_id": 7,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 88
+          },
+          {
+            "obs_id": 8,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 87
+          },
+          {
+            "obs_id": 9,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-05 00:00:00",
+            "value": 90
+          },
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          },
+          {
+            "obs_id": 11,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-12 08:00:00",
+            "value": 46
+          },
+          {
+            "obs_id": 12,
+            "row_id": 2,
+            "listing_id": 102,
+            "feature": "price",
+            "as_of_query": "2026-06-05 00:00:00",
+            "observed_at": "2026-06-04 23:59:59",
+            "value": 86
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 1,
+          "feature": "host_reply",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "price",
+          "value": 120.5,
+          "obs_id_used": 1,
+          "future_count": 1
+        },
+        {
+          "row_id": 1,
+          "feature": "supply_days",
+          "value": 7,
+          "obs_id_used": 4,
+          "future_count": 0
+        },
+        {
+          "row_id": 2,
+          "feature": "price",
+          "value": 90,
+          "obs_id_used": 9,
+          "future_count": 0
+        },
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 2
+        }
+      ],
+      "visible": true,
+      "note": "obs 7/8/12 同刻、obs 9 更晚 ⇒ 仍取 obs 9；把 obs 9 删掉才会落到 12"
+    },
+    {
+      "name": "退化：只有一条观测",
+      "input": {
+        "view": "feature_observations",
+        "schema": "obs_id int, row_id int, listing_id int, feature string, as_of_query string, observed_at string, value double",
+        "rows": [
+          {
+            "obs_id": 10,
+            "row_id": 3,
+            "listing_id": 103,
+            "feature": "price",
+            "as_of_query": "2026-06-10 08:00:00",
+            "observed_at": "2026-06-11 08:00:00",
+            "value": 45
+          }
+        ]
+      },
+      "expected": [
+        {
+          "row_id": 3,
+          "feature": "price",
+          "value": null,
+          "obs_id_used": null,
+          "future_count": 1
+        }
+      ],
+      "visible": true,
+      "note": "只剩 obs 10（row 3 的未来观测）⇒ 一行输出且三个数都是 null/null/1"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一次 `groupBy('row_id','feature')` 出两件事：\n`max(when(observed_at <= as_of_query, struct(observed_at, obs_id, value)))` 取可见的最新一条，\n`sum(when(observed_at > as_of_query, 1))` 出 `future_count`。\n`struct` 的比较顺序（先 `observed_at` 再 `obs_id`）刚好就是 tie-break 规则，\n所以不需要窗口函数、也不需要把数据 `collect` 到驱动侧。\n不可见时 `when` 给 `null` 而 `max` 忽略 `null` ⇒ 全未来时整列自然为 `null`，\n不需要额外的\"没有可见观测\"分支。\n\n**基线手算一遍（用来核对 expected 是不是真的对）**：\n- `(1, price)`：可见 obs 1（09:00, 120.5）与 obs 2（05-30, 99.99）；obs 3 在 06-03 ⇒ 未来。\n  ⇒ `value=120.5, obs_id_used=1, future_count=1`。\n  **不按时点取会拿到 310.0**（obs 3 是\"涨价之后\"的价格，而它恰恰是成交的原因之一 ——\n  这就是标签泄漏最典型的形态：特征与标签来自同一次状态变化）。\n- `(1, supply_days)`：obs 4 的 `observed_at` **正好等于** `as_of_query` ⇒ 可见且更新 ⇒\n  `value=7.0, obs_id_used=4, future_count=0`。写成 `<`（不含等号）会退回 3.0。\n- `(1, host_reply)`：obs 6 晚于查询 ⇒ 没有可见观测 ⇒ `value=null, obs_id_used=null, future_count=1`。\n  填 0 的实现会造出一个\"房东回复率 0%\"的假样本，模型会学到\"这类房源很差\"。\n- `(2, price)`：obs 7 与 8 **同一时刻**（06-04 23:59:59）⇒ 取 `obs_id` 最大的 8 ⇒ `value=87.0`；\n  obs 9 正好在查询时刻 ⇒ 可见且更晚 ⇒ 实际取的是 obs 9（`value=90.0, obs_id_used=9`）。\n  这一条同时钉住\"等号可见\"和\"tie-break\"两点。\n- `(3, price)`：两条全在未来 ⇒ `null/null`，`future_count=2`。\n\n**为什么\"不定义并列规则\"是正确性问题而不是风格问题**：\n`max(struct)` 与\"随便取一条\"在数据上给的是同一个**分布**，\n但在两次运行中可能给出不同的 `obs_id` —— 于是同一份训练集两次产出不同模型。\n一个无法复现的训练管道，之后所有的 A/B 结论都要打折。\n\n**`observed_at` 用字符串比较为什么在这里是安全的**：\n格式固定 `yyyy-MM-dd HH:mm:ss`，字典序与时间序一致。\n真实系统里更稳的做法是存 timestamp 或 epoch 毫秒；\n本题沿用题库既有约定（输入是 JSON 行集），但这是**依赖格式纪律**的取舍，\n一旦上游混进 `2026-6-1 9:0:0` 就会静默排错序 —— 值得在契约里显式声明。\n\n**工程延伸（面试追问点）**\n\n1. 怎么自动发现\"未来信息\"？（两种可执行检查：① 生成特征时断言所有被用的\n   `observed_at <= as_of_query`（本题就是它的数据结构版本）；\n   ② 时间旅行反事实：用 `T-Δ` 与 `T` 各生成一份特征，比较标签可分性 ——\n   如果只用 `T` 的那份 AUC 明显更高，说明有东西跨过了时间边界。）\n2. 慢变特征和快变特征的存法不同怎么办？（快变（价格、可订天数）必须带观测时间且进\n   时间旅行表；慢变（房源类型、城市）可以用维表的 SCD2 区间。\n   两者混在一套 join 里是\"时点正确性\"最常被破坏的地方 ——\n   因为 SCD2 的 `start_date` 语义和\"最后一次观测\"语义不等价。）\n3. `future_count` 高说明什么？（说明该样本的**特征在查询后不久就变了**，\n   这类样本对\"用错时间\"最敏感，也是对线上表现预测力最弱的：\n   线上只有过去，训练里有未来可选。可以把 `future_count = 0` 的样本单独做一个对照集。）\n4. 要不要把不可见的特征直接丢掉整行？（不。`null` + `value_missing` 标记更诚实：\n   丢行会让样本分布偏移（越新的房源越容易没有历史观测，丢掉等于系统性歧视新供给），\n   而这正是上一题\"新供给曝光不足\"的另一种发生方式。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    obs = spark.table('feature_observations')\n\n    # max(struct(...)) 按字段顺序逐位比较 ⇒ 先比 observed_at，再比 obs_id，\n    # 正好是\"时刻最新、并列取 obs_id 最大\"。当量级不可见时 when 给 null，max 会忽略 null。\n    visible = F.when(F.col('observed_at') <= F.col('as_of_query'),\n                     F.struct(F.col('observed_at'), F.col('obs_id'), F.col('value')))\n\n    picked = obs.groupBy('row_id', 'feature').agg(\n        F.max(visible).alias('pick'),\n        F.sum(F.when(F.col('observed_at') > F.col('as_of_query'), 1).otherwise(0))\n         .alias('future_count'),\n    )\n\n    return picked.select(\n        F.col('row_id'),\n        F.col('feature'),\n        F.col('pick.value').alias('value'),\n        F.col('pick.obs_id').alias('obs_id_used'),\n        F.col('future_count').cast('int').alias('future_count'),\n    ).orderBy('row_id', 'feature')",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    obs = spark.table('feature_observations')\n\n    # \"取最新\"版：完全不看 as_of_query —— 这正是离线虚高、上线掉点的那个实现\n    picked = obs.groupBy('row_id', 'feature').agg(\n        F.max(F.struct(F.col('observed_at'), F.col('obs_id'), F.col('value'))).alias('pick'),\n        F.lit(0).alias('future_count'),\n    )\n\n    return picked.select(\n        F.col('row_id'),\n        F.col('feature'),\n        F.col('pick.value').alias('value'),\n        F.col('pick.obs_id').alias('obs_id_used'),\n        F.col('future_count'),\n    ).orderBy('row_id', 'feature')"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Airbnb",
+    "role": "ML Data Platform / 特征平台 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-search-ranking.md §1\"时点正确性\"与 §2.6（素材给出\"特征必须用查询时刻可见的值；用未来值 = 离线虚高上线掉点\"这条原则，未给可判分的可见性边界与并列规则）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T00:16:51.689Z"
+  }
+}

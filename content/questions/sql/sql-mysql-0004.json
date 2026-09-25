@@ -1,0 +1,131 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0004",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "HR 导出的组织数据里有环：上溯汇报链必须自己判重",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci；`cte_max_recursion_depth` 取默认 1000，不得依赖调大它来蒙混过关）。\n\n表 staff(id INT 主键, name VARCHAR(40), manager_id INT NULL, dept VARCHAR(16))：manager_id 指向 staff.id，NULL 表示顶层。**这批数据是 HR 系统批量导入的，已知存在脏数据**：可能存在自己指向自己的自环、以及两个员工互为上级的双节点环（这类脏数据在真实的组织同步链路里每年都要治理一次）。\n\n要求：对**表中每一位员工**，沿 manager_id 向上追溯（含自己），输出一行「链尾摘要」，列顺序与别名必须是 employee_id, top_ancestor_id, chain_depth, chain_path, reached_root：\n- employee_id：被追溯的员工本人 id；\n- top_ancestor_id：链上最后到达的那个祖先的 id（如果链被截断，就是截断处那一个）；\n- chain_depth：从本人到 top_ancestor_id 的**边数**（本人只有自己时为 0）；\n- chain_path：形如 `,115,114,113,112,107,104,102,101,` 的字符串 —— 以逗号分隔、**首尾各带一个逗号**、顺序为「本人 → 上级 → 更上级」；\n- reached_root：1 表示链真的走到了 manager_id IS NULL 的顶层；0 表示链在环里被截断（即 top_ancestor_id 自己的 manager_id 不是 NULL）。\n\n硬性要求：\n1) 必须用 `WITH RECURSIVE`，且**同一条链上同一个 id 只能出现一次**（用 chain_path 判重实现， MySQL 没有 `CYCLE` 子句）；环上的员工必须给出 reached_root = 0，绝不能因为递归深度上限报错（ERROR 3636）；\n2) 递归列必须显式定宽（`CAST(... AS CHAR(n))`），否则 MySQL 用锚点行推断列宽，长链会直接报 Data too long；\n3) 必须自带全序 ORDER BY employee_id —— 判题按行序敏感比对。\n\n只提交一条 WITH 查询（允许一条前置 SET SESSION）。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "recursive-cte",
+    "cycle-detection",
+    "graph-traversal",
+    "data-quality",
+    "modern:mysql8-recursive-cte"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：自环与双节点环并列存在",
+      "input": [],
+      "expected": {
+        "columns": ["employee_id", "top_ancestor_id", "chain_depth", "chain_path", "reached_root"],
+        "orderSensitive": true,
+        "rows": [
+          [101, 101, 0, ",101,", 1],
+          [102, 101, 1, ",102,101,", 1],
+          [103, 101, 1, ",103,101,", 1],
+          [104, 101, 2, ",104,102,101,", 1],
+          [105, 101, 2, ",105,102,101,", 1],
+          [106, 101, 2, ",106,103,101,", 1],
+          [107, 101, 3, ",107,104,102,101,", 1],
+          [108, 101, 3, ",108,105,102,101,", 1],
+          [109, 109, 0, ",109,", 0],
+          [110, 111, 1, ",110,111,", 0],
+          [111, 110, 1, ",111,110,", 0],
+          [112, 101, 4, ",112,107,104,102,101,", 1],
+          [113, 101, 5, ",113,112,107,104,102,101,", 1],
+          [114, 101, 6, ",114,113,112,107,104,102,101,", 1],
+          [115, 101, 7, ",115,114,113,112,107,104,102,101,", 1]
+        ]
+      },
+      "note": "109 自己是指向自己的环，链只有它本身；110/111 互为上级，各走一步就被 path 判重截断。"
+    },
+    {
+      "name": "脏数据被修复后的边界",
+      "input": [
+        "UPDATE staff SET manager_id = 101 WHERE id = 109",
+        "UPDATE staff SET manager_id = 103 WHERE id = 110"
+      ],
+      "expected": {
+        "columns": ["employee_id", "top_ancestor_id", "chain_depth", "chain_path", "reached_root"],
+        "orderSensitive": true,
+        "rows": [
+          [101, 101, 0, ",101,", 1],
+          [102, 101, 1, ",102,101,", 1],
+          [103, 101, 1, ",103,101,", 1],
+          [104, 101, 2, ",104,102,101,", 1],
+          [105, 101, 2, ",105,102,101,", 1],
+          [106, 101, 2, ",106,103,101,", 1],
+          [107, 101, 3, ",107,104,102,101,", 1],
+          [108, 101, 3, ",108,105,102,101,", 1],
+          [109, 101, 1, ",109,101,", 1],
+          [110, 101, 2, ",110,103,101,", 1],
+          [111, 101, 3, ",111,110,103,101,", 1],
+          [112, 101, 4, ",112,107,104,102,101,", 1],
+          [113, 101, 5, ",113,112,107,104,102,101,", 1],
+          [114, 101, 6, ",114,113,112,107,104,102,101,", 1],
+          [115, 101, 7, ",115,114,113,112,107,104,102,101,", 1]
+        ]
+      }
+    },
+    {
+      "name": "极长链的递归列宽边界",
+      "input": [
+        "DELETE FROM staff",
+        "INSERT INTO staff VALUES (900,'L0',NULL,'ENG'),(901,'L1',900,'ENG'),(902,'L2',901,'ENG'),(903,'L3',902,'ENG'),(904,'L4',903,'ENG'),(905,'L5',904,'ENG'),(906,'L6',905,'ENG'),(907,'L7',906,'ENG'),(908,'L8',907,'ENG'),(909,'L9',908,'ENG')"
+      ],
+      "expected": {
+        "columns": ["employee_id", "top_ancestor_id", "chain_depth", "chain_path", "reached_root"],
+        "orderSensitive": true,
+        "rows": [
+          [900, 900, 0, ",900,", 1],
+          [901, 900, 1, ",901,900,", 1],
+          [902, 900, 2, ",902,901,900,", 1],
+          [903, 900, 3, ",903,902,901,900,", 1],
+          [904, 900, 4, ",904,903,902,901,900,", 1],
+          [905, 900, 5, ",905,904,903,902,901,900,", 1],
+          [906, 900, 6, ",906,905,904,903,902,901,900,", 1],
+          [907, 900, 7, ",907,906,905,904,903,902,901,900,", 1],
+          [908, 900, 8, ",908,907,906,905,904,903,902,901,900,", 1],
+          [909, 900, 9, ",909,908,907,906,905,904,903,902,901,900,", 1]
+        ]
+      }
+    },
+    {
+      "name": "只有一名员工的退化边界",
+      "input": ["DELETE FROM staff", "INSERT INTO staff VALUES (1,'solo',NULL,'ENG')"],
+      "expected": {
+        "columns": ["employee_id", "top_ancestor_id", "chain_depth", "chain_path", "reached_root"],
+        "orderSensitive": true,
+        "rows": [[1, 1, 0, ",1,", 1]]
+      }
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM staff"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nWITH RECURSIVE up(employee_id, ancestor_id, depth, path) AS (\n  SELECT id, id, 0, CAST(CONCAT(',', id, ',') AS CHAR(500)) FROM staff\n  UNION ALL\n  SELECT up.employee_id, s.manager_id, up.depth + 1, CONCAT(up.path, s.manager_id, ',')\n  FROM up JOIN staff s ON s.id = up.ancestor_id\n  WHERE s.manager_id IS NOT NULL\n    AND up.path NOT LIKE CONCAT('%,', s.manager_id, ',%')   -- 环防护：MySQL 没有 NO CYCLE\n    AND up.depth < 64\n),\ndeepest AS (\n  SELECT up.*, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY depth DESC) AS rn FROM up\n)\nSELECT d.employee_id, d.ancestor_id AS top_ancestor_id, d.depth AS chain_depth, d.path AS chain_path,\n       (s.manager_id IS NULL) AS reached_root\nFROM deepest d JOIN staff s ON s.id = d.ancestor_id\nWHERE d.rn = 1\nORDER BY d.employee_id;\n```\n1) **path 判重是唯一正确的终止条件**。只写 `depth < N` 的实现在环上会把同一个 id 重复输出 N 次（朴素解就是这样），既慢又错；完全不写终止条件则依赖 `cte_max_recursion_depth` 报错（ERROR 3636）而不是返回结果。\n2) 首尾都带逗号是必需的：否则 `,11` 会匹配到 `,110,` 里的前缀，判重出现假阳性/假阴性。等价写法 `FIND_IN_SET(s.manager_id, REPLACE(path,',' ,' '))`，但更慢。\n3) 递归列宽由**锚点行**推断。锚点写 `CONCAT(',', id, ',')` 时列宽只有十几个字符，链一长就 `ERROR 1406 Data too long for column 'path'`（不是截断警告，是报错）→ 锚点必须 `CAST(... AS CHAR(n))`。n 要能容纳「所有 id 位数 + 逗号」，长链场景要算账。\n4) 单向链表（每人只有一个 manager_id）里，**向下递归永远不会遇到环**——环只可能沿 manager_id 方向出现，所以「向下展开下属」的题面配环是无效用例，这题故意沿上级方向追溯。\n5) `reached_root` 用「链尾那一行的 manager_id 是否 IS NULL」判定，比再写一次 EXISTS 便宜；这就是保留 depth 最大的那一行而不是简单 `MAX(depth)` 的原因（要拿到对应的 ancestor 与 path）。\n\n面试追问：\n- 20 万人、平均深度 6，怎么让这条 SQL 跑得动？→ 递归 CTE 每层都会扫一次 staff；正解是「按层批量 JOIN（应用层循环 + `(manager_id)` 索引）」或闭包表（closure table）/路径枚举列 + 索引前缀 LIKE；纯递归适合查询少数人，不适合全表遍历。\n- 如何把「有环的员工」单独捞出来做治理？→ `WHERE reached_root = 0`；再给 `manager_id` 加自引用外键（`FOREIGN KEY (manager_id) REFERENCES staff(id)`）+ `CHECK (manager_id <> id)` 从写入侧堵死。\n- 为什么 MySQL 的 CTE 不能像 PG 那样写 `MATERIALIZED`？→ 没有该语法；派生表合并受 `derived_merge` 控制，需要物化屏障时只能用聚合/窗口/LIMIT。\n- 若要输出「每个人到顶层的路径上的最低职级」，在不能引入用户变量的前提下怎么写？→ 在 up 里带一个 running MIN（窗口 `MIN(...) OVER (PARTITION BY employee_id ORDER BY depth)`），注意默认帧会含 peer。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS staff",
+      "CREATE TABLE staff (id INT PRIMARY KEY, name VARCHAR(40) NOT NULL, manager_id INT NULL, dept VARCHAR(16) NOT NULL, KEY idx_manager (manager_id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO staff VALUES (101,'Ceo',NULL,'TOP'),(102,'Ada',101,'ENG'),(103,'Ben',101,'SALES'),(104,'Cid',102,'ENG'),(105,'Dee',102,'ENG'),(106,'Eve',103,'SALES'),(107,'Fay',104,'ENG'),(108,'Gus',105,'ENG'),(109,'Hal',109,'OPS'),(110,'Ian',111,'OPS'),(111,'Jo',110,'OPS'),(112,'Kit',107,'ENG'),(113,'Lou',112,'ENG'),(114,'Mo',113,'ENG'),(115,'Nan',114,'ENG')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH RECURSIVE up(employee_id, ancestor_id, depth, path) AS (\n  SELECT id, id, 0, CAST(CONCAT(',', id, ',') AS CHAR(500)) FROM staff\n  UNION ALL\n  SELECT up.employee_id, s.manager_id, up.depth + 1, CONCAT(up.path, s.manager_id, ',')\n  FROM up JOIN staff s ON s.id = up.ancestor_id\n  WHERE s.manager_id IS NOT NULL\n    AND up.path NOT LIKE CONCAT('%,', s.manager_id, ',%')\n    AND up.depth < 64\n),\ndeepest AS (\n  SELECT up.employee_id, up.ancestor_id, up.depth, up.path,\n         ROW_NUMBER() OVER (PARTITION BY up.employee_id ORDER BY up.depth DESC) AS rn\n  FROM up\n)\nSELECT d.employee_id, d.ancestor_id AS top_ancestor_id, d.depth AS chain_depth, d.path AS chain_path,\n       (s.manager_id IS NULL) AS reached_root\nFROM deepest d JOIN staff s ON s.id = d.ancestor_id\nWHERE d.rn = 1\nORDER BY d.employee_id",
+    "naiveSolution": "WITH RECURSIVE up(employee_id, ancestor_id, depth, path) AS (\n  SELECT id, id, 0, CAST(CONCAT(',', id, ',') AS CHAR(500)) FROM staff\n  UNION ALL\n  SELECT up.employee_id, s.manager_id, up.depth + 1, CONCAT(up.path, s.manager_id, ',')\n  FROM up JOIN staff s ON s.id = up.ancestor_id\n  WHERE s.manager_id IS NOT NULL AND up.depth < 10\n),\ndeepest AS (\n  SELECT up.employee_id, up.ancestor_id, up.depth, up.path,\n         ROW_NUMBER() OVER (PARTITION BY up.employee_id ORDER BY up.depth DESC) AS rn\n  FROM up\n)\nSELECT d.employee_id, d.ancestor_id AS top_ancestor_id, d.depth AS chain_depth, d.path AS chain_path,\n       (s.manager_id IS NULL) AS reached_root\nFROM deepest d JOIN staff s ON s.id = d.ancestor_id\nWHERE d.rn = 1\nORDER BY d.employee_id"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#14-cte递归与派生表",
+    "addedBy": "content-agent-sql"
+  }
+}

@@ -1,0 +1,209 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0016",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "SSE 增量解析：chunk 边界不是事件边界，半截事件不许派发",
+  "statement": "## 背景\n\n模型是流式吐字的：网关用 SSE 把 token 一段一段推给浏览器。网络 chunk 的边界\n**不保证落在行边界上** —— 一个 `\\r\\n` 可以被劈成两个 chunk，一个 token 也可以。\n按\"每个 chunk 各自 `split('\\n')`\"实现的解析器，在生产里会在偶发位置留下脏字符。\n\n## 你要实现的入口\n\n```ts\nexport function sseFrames(chunks: string[]): string[]\n```\n\n输入是**按到达顺序**拼接的原始 SSE 文本片段，返回值是**已派发事件**的 data 载荷（按事件顺序）。\n\n## 解析规则（按 WHATWG SSE 的简化子集，逐条都是判分点）\n\n1. 先把所有 chunk **拼成一整段**再切行。行分隔符三种都合法：`\\r\\n`、`\\n`、单独的 `\\r`。\n2. **空行派发一个事件**：把该事件缓冲的若干条 `data` 值用 `\\n` 连接，作为一个结果返回。\n3. 以 `:` 开头的行是注释（网关用它发心跳），整行忽略，且**不算**事件内容。\n4. `field:value`：冒号后**恰好一个**前导空格属于分隔符的一部分，要被剥掉；\n   第二个空格属于值本身（`data:  x` 的值是 `\" x\"`）。\n5. 只有 `data` 字段进入返回值。`event:` / `id:` / `retry:` 等字段本题忽略，\n   而且**只含这些字段的事件不派发**（`data` 缓冲为空 ⇒ 没有内容可给 UI）。\n6. 没有冒号的行（裸 `data`）等价于 `data:`，值是空字符串 —— 它会让事件带一个空 payload 派发。\n7. 输入结束时如果还有**没有被空行收束**的事件，必须**丢弃**：流被截断时不能把半截 token\n   当成一条完整消息渲染（渲染半截 JSON 是这类组件最常见的线上事故）。\n8. `chunks` 为 `null`，或其中某个元素为 `null` ⇒ `throw new Error(...)`。\n   静默把 `null` 当空串处理，会让\"网关挂了\"看起来像\"模型说了个空回复\"。\n\n## 这题真正考的东西\n\n- **chunk 边界**：`'data:tok\\r'` + `'\\n\\r\\n'` 是**一个完整事件**，\n  而按 chunk 各自切行的实现会得到值 `\"tok\\r\"`。\n- **`\\r` 的三种角色**：作为 `\\r\\n` 的一半、作为独立行分隔符、以及被错误地留在值里。\n- **截断语义**：结尾少一个空行 ⇒ 少一个事件。这条在\"用户中途关页面 / 连接被掐\"时才会遇到，\n  所以几乎不会被 happy-path 手测覆盖。\n\n不许引入第三方依赖（`eventsource-parser` 之类不在沙箱里）。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "sse",
+    "streaming",
+    "chunk-boundary",
+    "parser",
+    "modern:llm-streaming"
+  ],
+  "cases": [
+    {
+      "name": "基线：两个完整事件",
+      "input": [
+        [
+          "data:hello\n\ndata:world\n\n"
+        ]
+      ],
+      "expected": [
+        "hello",
+        "world"
+      ],
+      "visible": true
+    },
+    {
+      "name": "CRLF 被劈在两个 chunk 之间：不许留下尾的 \\r",
+      "input": [
+        [
+          "data:tok\r",
+          "\n\r\n"
+        ]
+      ],
+      "expected": [
+        "tok"
+      ],
+      "visible": true
+    },
+    {
+      "name": "注释心跳不产生事件",
+      "input": [
+        [
+          ": keep-alive\n",
+          "data:tok\n\n"
+        ]
+      ],
+      "expected": [
+        "tok"
+      ],
+      "visible": true
+    },
+    {
+      "name": "只剥掉冒号后的一个空格",
+      "input": [
+        [
+          "data:  two-space-start\n\n"
+        ]
+      ],
+      "expected": [
+        " two-space-start"
+      ],
+      "visible": true
+    },
+    {
+      "name": "同一事件里的多条 data 用换行拼接",
+      "input": [
+        [
+          "data:line1\ndata:line2\n\n"
+        ]
+      ],
+      "expected": [
+        "line1\nline2"
+      ],
+      "visible": true
+    },
+    {
+      "name": "结尾没有空行收束的半截事件必须丢弃",
+      "input": [
+        [
+          "data:full\n\ndata:part"
+        ]
+      ],
+      "expected": [
+        "full"
+      ],
+      "visible": true
+    },
+    {
+      "name": "只有 event 字段不构成事件",
+      "input": [
+        [
+          "event:done\nid:7\n\n"
+        ]
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "裸 data 行（没有冒号）派发空字符串",
+      "input": [
+        [
+          "data\n\ndata\n\n"
+        ]
+      ],
+      "expected": [
+        "",
+        ""
+      ],
+      "visible": true
+    },
+    {
+      "name": "单独的 \\r 也是行分隔符",
+      "input": [
+        [
+          "data:part1\rdata:part2\r\r"
+        ]
+      ],
+      "expected": [
+        "part1\npart2"
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何 chunk",
+      "input": [
+        []
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "只有分隔符：零个事件",
+      "input": [
+        [
+          "\n\n\n"
+        ]
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "一个 token 被劈成两半：必须跨 chunk 拼接",
+      "input": [
+        [
+          "data:ab",
+          "cd\n\n"
+        ]
+      ],
+      "expected": [
+        "abcd"
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：chunks 为 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "chunks must be an array"
+    },
+    {
+      "name": "非法：某个 chunk 为 null",
+      "input": [
+        [
+          "data:a\n\n",
+          null
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "chunk must be a string"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n**先拼接、再按状态机切行**：`\\r\\n` / `\\n` / `\\r` 三种行结束符，`\\r` 后面紧跟 `\\n`\n时要一起吃掉（`if (text[i + 1] === '\\n') i++;`）。事件缓冲只在遇到空行时派发，\n输入结束时的残留缓冲直接丢。`O(总字符数)` 时间、`O(最长事件)` 额外空间。\n\n**为什么\"每个 chunk 各自 split\"是错的**（用例「CRLF 被劈在两个 chunk 之间」）：\n`'data:tok\\r'` + `'\\n\\r\\n'` 拼起来是 `data:tok\\r\\n\\r\\n` —— 一个完整事件，值 `\"tok\"`。\n按 chunk 切：第一段 `split('\\n')` 得到 `['data:tok\\r']`，值里带一个 `\\r`；\n第二段得到 `['\\r','\\r','']`，`startsWith('data:')` 不成立 ⇒ 什么都没有。\n于是 UI 上那行文本的尾部多了一个回车 —— 它不会报错，只会在**复制粘贴**或\n`JSON.parse` 增量结果时炸开，也就是\"偶发的、只在部分浏览器/部分网络下\"的线上问题。\n\n**为什么 chunk 边界不该影响语义**（用例「一个 token 被劈成两半」）：\n`'data:ab'` + `'cd\\n\\n'` 必须给 `['abcd']`。逐 chunk 处理的实现这里给 `['ab']` ——\n它把半截事件派发出去了。这正是\"跨 chunk 状态\"必须存在的理由：\n**chunk 是网络的切法，事件是协议的切法，两者没关系。**\n\n**剥空格的细节**（用例「只剥掉冒号后的一个空格」）：\n规范说冒号后的**一个**空格属于分隔符。`data:  x` ⇒ `\" x\"`。\n用 `trim()` 或 `trimStart()` 会把值本身的前导空格吃掉 —— 对代码 token 流来说，\n行首缩进就是内容，这条会静默毁掉模型输出的代码块。\n\n**丢弃半截事件**（用例「结尾没有空行收束的半截事件必须丢弃」）：\n`data:full\\n\\ndata:part` 只给 `['full']`。流被掐断时把 `part` 渲染出去，\n如果客户端在拼 JSON，就得到一个不完整的对象 —— 而它看起来像模型说完了。\n（真实做法：连接中断时显式给 UI 一个\"回复被截断\"状态，而不是悄悄少一段。）\n\n**`null` 要抛错**：`null` chunk 多半意味着上游返回了非 SSE 的响应体（网关 502 页面对方\n是 HTML 或被代理改写成 null）。当成空串处理 = 把\"链路坏了\"渲染成\"模型回了一句空话\"。\n\n**工程延伸（面试追问点）**\n\n1. 这个函数在真流式里怎么改？（变成增量解析器：`feed(chunk): string[]` 内部保留\n   \"最后一个可能不完整的行\"作为 leftover，`\\r` 结尾时还要保留\"下一个字符可能是 `\\n`\"这一个比特的状态。\n   先拼接再切的写法每次 feed 都是 `O(n²)`。这是本题最容易忽略的一点：\n   它把**内存复制**当成了免费的东西，而 token 流的长度是用户输入长度的数倍。）\n2. 为什么不直接用 `EventSource`？（它不能带 `Authorization` 头、不能自定义重连与\n   中断控制、也不能走 fetch 的 `ReadableStream`。生产上的 LLM 客户端一律是自己解析。）\n3. 多字节字符被劈开怎么办？（本题输入已是解码后的字符串，所以不会。真实流式里\n   `TextDecoder` 必须开 `{stream: true}`，否则 UTF-8 的中文字符跨 chunk 会变成 `U+FFFD` ——\n   症状是\"中文偶发乱码\"，和解析器无关，但同一份代码里要一起防。）\n4. `id:` / `retry:` 与 `event:` 的缓冲语义？（规范里它们也参与\"事件是否派发\"的判断，\n   且 `event:` 决定 `MessageEvent.type`。本题为了可判分，简化成\"没有 data 就不派发\" ——\n   面试时说清这个简化，比假装规范就是这样写的更好。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "sse.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { sseFrames } from './Solution';\n\n/**\n * 期望值由 gen.py 里的同一套 SSE 模型算出后**直接写进断言**，\n * 不再手抄一遍 —— 上一批题出现过\"用例名与实际值对不上\"的漂移，单向修等于没修。\n */\ndescribe('sseFrames：跨 chunk 的 SSE 增量解析', () => {\n  it(\"基线：两个完整事件\", () => {\n    expect(sseFrames([\"data:hello\\n\\ndata:world\\n\\n\"])).toEqual([\"hello\", \"world\"]);\n  });\n  it(\"CRLF 被劈在两个 chunk 之间：不许留下尾的 \\\\r\", () => {\n    expect(sseFrames([\"data:tok\\r\", \"\\n\\r\\n\"])).toEqual([\"tok\"]);\n  });\n  it(\"注释心跳不产生事件\", () => {\n    expect(sseFrames([\": keep-alive\\n\", \"data:tok\\n\\n\"])).toEqual([\"tok\"]);\n  });\n  it(\"只剥掉冒号后的一个空格\", () => {\n    expect(sseFrames([\"data:  two-space-start\\n\\n\"])).toEqual([\" two-space-start\"]);\n  });\n  it(\"同一事件里的多条 data 用换行拼接\", () => {\n    expect(sseFrames([\"data:line1\\ndata:line2\\n\\n\"])).toEqual([\"line1\\nline2\"]);\n  });\n  it(\"结尾没有空行收束的半截事件必须丢弃\", () => {\n    expect(sseFrames([\"data:full\\n\\ndata:part\"])).toEqual([\"full\"]);\n  });\n  it(\"只有 event 字段不构成事件\", () => {\n    expect(sseFrames([\"event:done\\nid:7\\n\\n\"])).toEqual([]);\n  });\n  it(\"裸 data 行（没有冒号）派发空字符串\", () => {\n    expect(sseFrames([\"data\\n\\ndata\\n\\n\"])).toEqual([\"\", \"\"]);\n  });\n  it(\"单独的 \\\\r 也是行分隔符\", () => {\n    expect(sseFrames([\"data:part1\\rdata:part2\\r\\r\"])).toEqual([\"part1\\npart2\"]);\n  });\n  it(\"退化：没有任何 chunk\", () => {\n    expect(sseFrames([])).toEqual([]);\n  });\n  it(\"只有分隔符：零个事件\", () => {\n    expect(sseFrames([\"\\n\\n\\n\"])).toEqual([]);\n  });\n  it(\"一个 token 被劈成两半：必须跨 chunk 拼接\", () => {\n    expect(sseFrames([\"data:ab\", \"cd\\n\\n\"])).toEqual([\"abcd\"]);\n  });\n  it(\"非法：chunks 为 null\", () => {\n    expect(() => sseFrames(null as unknown as string[])).toThrow(\"chunks must be an array\");\n  });\n  it(\"非法：某个 chunk 为 null\", () => {\n    expect(() => sseFrames([\"data:a\\n\\n\", null] as unknown as string[])).toThrow(\"chunk must be a string\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "function splitLines(text: string): string[] {\n  const lines: string[] = [];\n  let cur = '';\n  for (let i = 0; i < text.length; i++) {\n    const ch = text[i];\n    if (ch === '\\r') {\n      lines.push(cur);\n      cur = '';\n      if (text[i + 1] === '\\n') i++;      // CRLF 是一行结束，不是两行\n      continue;\n    }\n    if (ch === '\\n') {\n      lines.push(cur);\n      cur = '';\n      continue;\n    }\n    cur += ch;\n  }\n  lines.push(cur);\n  return lines;\n}\n\nexport function sseFrames(chunks: string[]): string[] {\n  if (chunks == null) throw new Error('chunks must be an array');\n  let text = '';\n  for (const chunk of chunks) {\n    if (chunk == null) throw new Error('chunk must be a string');\n    text += chunk;\n  }\n\n  const out: string[] = [];\n  let data: string[] = [];\n  let sawData = false;\n\n  for (const line of splitLines(text)) {\n    if (line === '') {                      // 空行 = 派发\n      if (sawData) out.push(data.join('\\n'));\n      data = [];\n      sawData = false;\n      continue;\n    }\n    if (line.startsWith(':')) continue;     // 心跳注释\n\n    const colon = line.indexOf(':');\n    let field: string;\n    let value: string;\n    if (colon === -1) {\n      field = line;                         // 裸字段名 ⇒ 值为空串\n      value = '';\n    } else {\n      field = line.slice(0, colon);\n      value = line[colon + 1] === ' ' ? line.slice(colon + 2) : line.slice(colon + 1);\n    }\n    if (field === 'data') {\n      data.push(value);\n      sawData = true;\n    }\n  }\n  // 循环结束后剩下的 data 缓冲是**没有被空行收束的半截事件**，按规则丢弃\n  return out;\n}",
+    "naiveSolution": "export function sseFrames(chunks: string[]): string[] {\n  if (chunks == null) throw new Error('chunks must be an array');\n  const out: string[] = [];\n  for (const chunk of chunks) {\n    if (chunk == null) throw new Error('chunk must be a string');\n    // 每个 chunk 各自切行：CRLF 被劈开时留下尾 \\r，跨 chunk 的 token 被当成两个事件\n    for (const line of chunk.split('\\n')) {\n      if (line.startsWith('data:')) {\n        out.push(line.slice(5).replace(/^ /, ''));\n      }\n    }\n  }\n  return out;\n}"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理服务 / 客户端与网关 高级工程师",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#41（原文只答\"SSE 是什么、比 WebSocket 轻\"，未给跨 chunk 解析与截断语义的判分点）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:39:41.578Z"
+  }
+}

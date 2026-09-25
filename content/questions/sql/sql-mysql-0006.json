@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0006",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "JSON 标签打平：空数组、JSON null、类型写错的商品不能凭空消失",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci；JSON 相关函数与 JSON_TABLE 均可用）。\n\n表 product_attr(product_id INT 主键, sku VARCHAR(16), props JSON NOT NULL)。props 的实际形态**不干净**，已知有这几类：\n  {\"tags\":[\"phone\",\"5g\"],\"channel\":\"web\"} / {\"tags\":[],...} / {} / {\"tags\":null,...} / 整个文档是 JSON null / {\"tags\":\"phone\"}（本该是数组却写成了字符串）。\n\n要求输出「商品 × 标签」的关系表，列顺序与别名必须是 product_id, sku, tag, tag_ordinal, channel_label：\n1) 一个 tag 一行，tag_ordinal 是该 tag 在数组里的**下标（从 1 开始）**；\n2) 商品表是主表：**没有任何可用 tag 的商品必须仍然出现一行**（tag 与 tag_ordinal 为 NULL）——包括「tags 缺失」「空数组」「JSON null」「tags 不是数组」四种情况；\n3) channel_label：取 props->>'$.channel'；**缺失 key、JSON null、空字符串**这三种一律记 'unknown'，其余按原值输出；\n4) 同一个 tag 在数组里重复出现就重复输出（本题不去重）；\n5) 判题按行序敏感比对，必须自带 ORDER BY product_id, tag_ordinal。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "json-table",
+    "semi-structured",
+    "left-join-lateral",
+    "null-semantics",
+    "modern:mysql8-json-table"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：四种无 tag 形态都要保留",
+      "input": [],
+      "expected": {
+        "columns": ["product_id", "sku", "tag", "tag_ordinal", "channel_label"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "SKU-A", "phone", 1, "web"],
+          [1, "SKU-A", "5g", 2, "web"],
+          [2, "SKU-B", "phone", 1, "unknown"],
+          [3, "SKU-C", "NULL", "NULL", "unknown"],
+          [4, "SKU-D", "NULL", "NULL", "unknown"],
+          [5, "SKU-E", "NULL", "NULL", "app"],
+          [6, "SKU-F", "5g", 1, "app"],
+          [6, "SKU-F", "iot", 2, "app"],
+          [6, "SKU-F", "phone", 3, "app"],
+          [7, "SKU-G", "NULL", "NULL", "web"],
+          [8, "SKU-H", "NULL", "NULL", "unknown"]
+        ]
+      },
+      "note": "product 2 的 channel 是 JSON null（->> 会给出字符串 'null'），product 7 的 tags 是 JSON null，product 8 的 tags 是字符串。"
+    },
+    {
+      "name": "整个文档是 JSON null 与空串 channel 的边界",
+      "input": [
+        "INSERT INTO product_attr VALUES (9,'SKU-I',CAST('null' AS JSON)),(10,'SKU-J','{\"tags\":[\"iot\",\"iot\"],\"channel\":\"\"}')"
+      ],
+      "expected": {
+        "columns": ["product_id", "sku", "tag", "tag_ordinal", "channel_label"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "SKU-A", "phone", 1, "web"],
+          [1, "SKU-A", "5g", 2, "web"],
+          [2, "SKU-B", "phone", 1, "unknown"],
+          [3, "SKU-C", "NULL", "NULL", "unknown"],
+          [4, "SKU-D", "NULL", "NULL", "unknown"],
+          [5, "SKU-E", "NULL", "NULL", "app"],
+          [6, "SKU-F", "5g", 1, "app"],
+          [6, "SKU-F", "iot", 2, "app"],
+          [6, "SKU-F", "phone", 3, "app"],
+          [7, "SKU-G", "NULL", "NULL", "web"],
+          [8, "SKU-H", "NULL", "NULL", "unknown"],
+          [9, "SKU-I", "NULL", "NULL", "unknown"],
+          [10, "SKU-J", "iot", 1, "unknown"],
+          [10, "SKU-J", "iot", 2, "unknown"]
+        ]
+      }
+    },
+    {
+      "name": "重复 tag 与下标不跳号的边界",
+      "input": [
+        "DELETE FROM product_attr",
+        "INSERT INTO product_attr VALUES (20,'SKU-K','{\"tags\":[\"a\",\"a\",\"b\"],\"channel\":\"web\"}'),(21,'SKU-L','{\"tags\":[\"\"],\"channel\":\"web\"}')"
+      ],
+      "expected": {
+        "columns": ["product_id", "sku", "tag", "tag_ordinal", "channel_label"],
+        "orderSensitive": true,
+        "rows": [
+          [20, "SKU-K", "a", 1, "web"],
+          [20, "SKU-K", "a", 2, "web"],
+          [20, "SKU-K", "b", 3, "web"],
+          [21, "SKU-L", "", 1, "web"]
+        ]
+      },
+      "note": "数组里的空字符串是**合法 tag**，不能被当成缺失（channel 才是需要 unknown 兜底的字段）。"
+    },
+    {
+      "name": "全部商品都没有 tag 的退化边界",
+      "input": [
+        "DELETE FROM product_attr",
+        "INSERT INTO product_attr VALUES (30,'SKU-M','{}'),(31,'SKU-N','{\"tags\":[]}')"
+      ],
+      "expected": {
+        "columns": ["product_id", "sku", "tag", "tag_ordinal", "channel_label"],
+        "orderSensitive": true,
+        "rows": [
+          [30, "SKU-M", "NULL", "NULL", "unknown"],
+          [31, "SKU-N", "NULL", "NULL", "unknown"]
+        ]
+      }
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM product_attr"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nSELECT p.product_id, p.sku, jt.tag, jt.ord1 AS tag_ordinal,\n       CASE WHEN p.props->>'$.channel' IS NULL\n              OR p.props->>'$.channel' = 'null'\n              OR p.props->>'$.channel' = '' THEN 'unknown'\n            ELSE p.props->>'$.channel' END AS channel_label\nFROM product_attr p\nLEFT JOIN JSON_TABLE(\n          p.props, '$.tags[*]'\n          COLUMNS (ord1 FOR ORDINALITY, tag VARCHAR(32) PATH '$')) jt ON TRUE\nORDER BY p.product_id, jt.ord1;\n```\n1) **JSON_TABLE 是「打平器」也是「过滤器」**：路径匹配不到元素时它产出 0 行，所以 `JOIN ... ON TRUE`（内连接）会把「空数组 / 缺失 / JSON null / 类型不对」的商品整行吃掉 —— 报表里商品数莫名变少就是这个原因。必须 LEFT JOIN（JSON_TABLE 隐式 LATERAL，可以直接引用 p.props）。\n2) `FOR ORDINALITY` 给的是**数组下标**，与行号无关；不要试图用 `ROW_NUMBER()` 代替（外层排序键一旦变化，下标就不再等于数组里的位置）。\n3) `->>`（= JSON_UNQUOTE(JSON_EXTRACT(...))）的三种「空」要分清：缺失 key → SQL NULL；JSON null → 字符串 `'null'`（不是 SQL NULL！）；空串 → `''`。所以兜底必须同时判 `IS NULL`、`= 'null'`、`= ''`。副作用：真的叫 \"null\" 的渠道也会被吞 —— 要精确区分得用 `JSON_TYPE(JSON_EXTRACT(props,'$.channel'))` 或 `JSON_VALUE(... RETURNING ... DEFAULT 'unknown' ON EMPTY ON ERROR)`（8.0.21+）。\n4) `IFNULL/COALESCE(props->>'$.channel','unknown')` 是本题最常见的半对答案：它挡得住缺失 key，挡不住 JSON null（结果是 'null'）。\n5) 想按 tag 过滤时 `WHERE props->>'$.tags' LIKE '%phone%'` 是错的（既走不了索引又会误匹配 'smartphone'）；正解是 multi-valued index：`ALTER TABLE product_attr ADD KEY idx_tags ((CAST(props->'$.tags' AS CHAR(32) ARRAY)))`，只有 `JSON_CONTAINS` / `'x' MEMBER OF(...)` / `JSON_OVERLAPS` 能命中；`FOR ORDINALITY` + `ORDER BY` + `LIMIT` 这类打平后过滤是命中不了的。\n\n面试追问：\n- 为什么高频过滤的字段要「提升」成虚拟生成列 + 索引，而不是函数索引？→ 生成列有名字、能进统计信息、能被 `EXPLAIN` 直接看到 key，可读性与可观测性都更好；代价是表结构变更要走 Online DDL。\n- JSON 与关联表（product_tag）怎么选？→ 需要 JOIN、需要唯一约束、需要统计信息、出现在多个查询谓词里 → 拆表；只有「稀疏可变属性」留在 JSON。要能报出「整文档重写」的更新代价与 `JSON_SET` 仍需重建文档这一点。\n- 数据里出现 `{\"tags\":\"phone\"}` 说明什么？→ 写入侧没有校验，应该在库里用 `CHECK (JSON_SCHEMA_VALID(schema, props))` 或生成列 + NOT NULL 把脏数据挡在写入时，而不是每个查询都要防一遍。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS product_attr",
+      "CREATE TABLE product_attr (product_id INT PRIMARY KEY, sku VARCHAR(16) NOT NULL, props JSON NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO product_attr VALUES (1,'SKU-A','{\"tags\":[\"phone\",\"5g\"],\"channel\":\"web\"}'),(2,'SKU-B','{\"tags\":[\"phone\"],\"channel\":null}'),(3,'SKU-C','{\"tags\":[]}'),(4,'SKU-D','{}'),(5,'SKU-E','{\"channel\":\"app\"}'),(6,'SKU-F','{\"tags\":[\"5g\",\"iot\",\"phone\"],\"channel\":\"app\"}'),(7,'SKU-G','{\"tags\":null,\"channel\":\"web\"}'),(8,'SKU-H','{\"tags\":\"phone\"}')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "SELECT p.product_id, p.sku, jt.tag, jt.ord1 AS tag_ordinal,\n       CASE WHEN p.props->>'$.channel' IS NULL\n              OR p.props->>'$.channel' = 'null'\n              OR p.props->>'$.channel' = '' THEN 'unknown'\n            ELSE p.props->>'$.channel' END AS channel_label\nFROM product_attr p\nLEFT JOIN JSON_TABLE(p.props, '$.tags[*]' COLUMNS (ord1 FOR ORDINALITY, tag VARCHAR(32) PATH '$')) jt ON TRUE\nORDER BY p.product_id, jt.ord1",
+    "naiveSolution": "SELECT p.product_id, p.sku, jt.tag, jt.ord1 AS tag_ordinal,\n       COALESCE(p.props->>'$.channel','unknown') AS channel_label\nFROM product_attr p\nJOIN JSON_TABLE(p.props, '$.tags[*]' COLUMNS (ord1 FOR ORDINALITY, tag VARCHAR(32) PATH '$')) jt ON TRUE\nORDER BY p.product_id, jt.ord1"
+  },
+  "estimatedMinutes": 15,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#15-json半结构化的正确姿势",
+    "addedBy": "content-agent-sql"
+  }
+}

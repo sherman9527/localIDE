@@ -1,0 +1,240 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0022",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "埋点下线决策：直接/间接引用闭包 + 近 30 天热度，两笔账都不许算重",
+  "statement": "## 背景\n\n火山引擎 DataFinder 的《一般事件》页把\"埋点血缘\"写成了产品对象【源 S7】：\n血缘关系覆盖**图表 / 看板 / 用户分群**，并且**区分\"直接引用\"与\"间接引用\"**，\n分群血缘还额外带两个消费热度信号：**最新分群用户数**与**近 30 天的查询次数**。\n同一页还有两条必须用上的状态：\n\"**一般事件列表仅展示已验收的事件**\"，以及\"停止采集靠禁用事件或属性、无需改代码\"。\n\nDataFinder 的《全埋点》页则说明成本侧的事实【源 S8】：\n\"无差别全量采集，产生无效数据上报，**浪费流量/存储/计算资源**\"。\n\n素材 §4 考点 4 的【推】结论是本题要落地的东西：\n**下线的判据应当是\"间接闭包内消费为零 + 热度为零 + 保留期外\"，而不是\"没人认领\"。**\n\n## 任务\n\nPySpark 3.5，已注册表：\n\n```\nevent_rows(\n  row_id INT, event_name STRING,\n  is_preset INT,        -- 1 = 预置事件（SDK 自带、由系统统一配置上报时机）\n  verified INT,         -- 1 = 已验收\n  disabled INT,         -- 1 = 已在元数据管理里被禁用\n  direct_refs INT,      -- 直接引用它的事件数（图表/看板/分群）\n  indirect_refs INT,    -- 间接引用（派生链下游）它的事件数\n  queries_30d INT,      -- 近 30 天被查询次数（消费热度）\n  storage_gb BIGINT)\n```\n\n给每个事件判定一个 `action`，然后**按 `action` 聚合**，输出列固定为\n\n```\naction, event_cnt, total_storage_gb, total_queries\n```\n\n按 `action` 升序。**只输出实际出现过的 action**（没有该类事件就不要造一行）。\n\n## `action` 判定（优先级从上到下，命中即止）\n\n| 顺序 | 条件 | action | 依据 |\n| --- | --- | --- | --- |\n| 1 | `is_preset == 1` | `keep-preset` | 预置事件由系统统一配置，不在业务下线范围内 |\n| 2 | `verified == 0` | `block-unverified` | 未验收的事件**不参与**下线评估：先补验收 |\n| 3 | `disabled == 1` | `already-disabled` | 已经停止采集，成本问题已解决，别再报\"可省多少 G\" |\n| 4 | `direct_refs == 0` 且 `indirect_refs == 0` 且 `queries_30d == 0` | `retire` | 闭包内消费为零 |\n| 5 | `direct_refs == 0` 且 `indirect_refs > 0` | `retire-indirect-only` | 只有间接引用 ⇒ 真正被消费的是派生链 |\n| 6 | 其余 | `keep` | |\n\n四条口径纪律：\n\n- **`block-unverified` 排在所有引用判断之前。**\n  未验收事件的血缘**本身不可信**（没人对过口径），\n  拿一份不可信的血缘去做下线决策，等于用猜测定生死。\n- **`already-disabled` 排在引用判断之前。**\n  禁用之后 `queries_30d` 会缓慢归零（缓存、报表还在读旧分区），\n  把它算进\"本次可省 GB\"是把**过去已经省下的钱**再报一次成果。\n- **`retire` 要求三个零同时成立。**\n  只看两个引用数会漏掉\"没人引用但天天被查\"的事件\n  （典型是自助分析里被 `SELECT *` 捞走的明细），\n  而只看热度会漏掉\"建了看板但半年没人看\"的 —— 两个信号正交，缺一不可。\n- **`retire-indirect-only` 不是\"可以下线\"，是\"先断链再下线\"。**\n  素材 §4 考点 4 原话：*\"下游派生链上的'间接'往往是真正被消费的那个\"*。\n  把它和 `retire` 合并成一档，就等于给一次事故开了绿灯。\n\n## 这题真正考的东西\n\n成本治理最容易做的事是\"按采集量排序砍最大的\"，\n而**采集量最大的事件往往正是最常被查的那个**。\n血缘 + 热度这两个信号的作用，是把\"下线一件事\"的依据从\n*问一圈有没有人用* 变成 *闭包基数为 0*。\n写出来之后请顺手回答：**这条判据要成为硬卡口，需要什么机制？**\n（提示：DataLeap 给的答案是\"数据标准 + 字段元数据对标 + 标准监控统计\"【源 S6】\n —— 靠人遵守的规范会在三个月后退化。）",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "tracking-governance",
+    "data-lineage",
+    "cost-governance",
+    "priority-rules",
+    "modern:metadata-workflow"
+  ],
+  "cases": [
+    {
+      "name": "基线：六类决策各一次，按 action 聚合后输出四个计数列",
+      "input": {
+        "view": "event_rows",
+        "schema": "row_id int, event_name string, is_preset int, verified int, disabled int, direct_refs int, indirect_refs int, queries_30d int, storage_gb bigint",
+        "rows": [
+          {
+            "row_id": 1,
+            "event_name": "$page_start",
+            "is_preset": 1,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 40,
+            "indirect_refs": 12,
+            "queries_30d": 9000,
+            "storage_gb": 512
+          },
+          {
+            "row_id": 2,
+            "event_name": "pay_success",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 6,
+            "indirect_refs": 3,
+            "queries_30d": 400,
+            "storage_gb": 128
+          },
+          {
+            "row_id": 3,
+            "event_name": "old_banner_click",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 0,
+            "indirect_refs": 2,
+            "queries_30d": 30,
+            "storage_gb": 64
+          },
+          {
+            "row_id": 4,
+            "event_name": "abandoned_flow",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 1,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 0,
+            "storage_gb": 256
+          },
+          {
+            "row_id": 5,
+            "event_name": "debug_probe",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 0,
+            "storage_gb": 96
+          },
+          {
+            "row_id": 6,
+            "event_name": "new_checkout",
+            "is_preset": 0,
+            "verified": 0,
+            "disabled": 0,
+            "direct_refs": 9,
+            "indirect_refs": 4,
+            "queries_30d": 700,
+            "storage_gb": 80
+          }
+        ]
+      },
+      "expected": [
+        {
+          "action": "already-disabled",
+          "event_cnt": 1,
+          "total_storage_gb": 256,
+          "total_queries": 0
+        },
+        {
+          "action": "block-unverified",
+          "event_cnt": 1,
+          "total_storage_gb": 80,
+          "total_queries": 700
+        },
+        {
+          "action": "keep",
+          "event_cnt": 1,
+          "total_storage_gb": 128,
+          "total_queries": 400
+        },
+        {
+          "action": "keep-preset",
+          "event_cnt": 1,
+          "total_storage_gb": 512,
+          "total_queries": 9000
+        },
+        {
+          "action": "retire",
+          "event_cnt": 1,
+          "total_storage_gb": 96,
+          "total_queries": 0
+        },
+        {
+          "action": "retire-indirect-only",
+          "event_cnt": 1,
+          "total_storage_gb": 64,
+          "total_queries": 30
+        }
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：唯一引用是\"近 30 天查询次数\"而不是引用数 ⇒ 不许进 retire",
+      "input": {
+        "view": "event_rows",
+        "schema": "row_id int, event_name string, is_preset int, verified int, disabled int, direct_refs int, indirect_refs int, queries_30d int, storage_gb bigint",
+        "rows": [
+          {
+            "row_id": 1,
+            "event_name": "solo",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 1,
+            "storage_gb": 7
+          }
+        ]
+      },
+      "expected": [
+        {
+          "action": "keep",
+          "event_cnt": 1,
+          "total_storage_gb": 7,
+          "total_queries": 1
+        }
+      ],
+      "visible": true,
+      "note": "direct=0 且 indirect=0 但 queries_30d=1 ⇒ keep。下线的判据是\"间接闭包内消费为零 **且** 热度为零\""
+    },
+    {
+      "name": "退化：只有可下线的两条 ⇒ 结果里不许凭空出现其它 action 行",
+      "input": {
+        "view": "event_rows",
+        "schema": "row_id int, event_name string, is_preset int, verified int, disabled int, direct_refs int, indirect_refs int, queries_30d int, storage_gb bigint",
+        "rows": [
+          {
+            "row_id": 1,
+            "event_name": "a",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 0,
+            "storage_gb": 5
+          },
+          {
+            "row_id": 2,
+            "event_name": "b",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 0,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 0,
+            "storage_gb": 6
+          },
+          {
+            "row_id": 3,
+            "event_name": "c",
+            "is_preset": 0,
+            "verified": 1,
+            "disabled": 1,
+            "direct_refs": 0,
+            "indirect_refs": 0,
+            "queries_30d": 0,
+            "storage_gb": 7
+          }
+        ]
+      },
+      "expected": [
+        {
+          "action": "already-disabled",
+          "event_cnt": 1,
+          "total_storage_gb": 7,
+          "total_queries": 0
+        },
+        {
+          "action": "retire",
+          "event_cnt": 2,
+          "total_storage_gb": 11,
+          "total_queries": 0
+        }
+      ],
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一条 `when` 链 + 一次 `groupBy`。分数的差别全在**优先级顺序**上：\n把 `already-disabled` 放在第 4 条之后，`abandoned_flow`（disabled=1、三个引用都是 0）\n就会被判成 `retire`，于是这份\"下线可省 256 GB\"的立项材料里，\n**有一笔三年前就已经省下来的钱被重新报了一遍**。\n治理项目的收益账最常见的两种虚高就是这种\"重复计算\"和下面的\"口径漂移\"。\n\n**基线六行聚合成 6 个 action、各 1 条事件**：\n`already-disabled`(1, 256, 0) / `block-unverified`(1, 80, 700) /\n`keep`(1, 128, 400) / `keep-preset`(1, 512, 9000) /\n`retire`(1, 96, 0) / `retire-indirect-only`(1, 64, 30)，按 action 升序。\n注意 `total_queries` 这一列在 `retire` 档恒为 0（判据要求它必须为 0），\n但在 `retire-indirect-only` 档**可以非零**（那条只约束 direct/indirect）——\n30 次查询正是\"先断链\"这件事的成本：下线前要先给这 30 次查询的使用者发通知。\n\n**边界用例（direct=0, indirect=0, queries_30d=1）⇒ `keep`，只出一行。**\n这一条是本题的\"最小可判分反例\"：\n如果实现写的是\"两个引用数都为 0 就 retire\"，它会把这行归进 `retire` ——\n**存储只有 7 GB、却每天被查的事件，恰恰是自助分析在直接读明细。**\n\n**退化用例（两条可下线 + 一条已禁用）⇒ 输出 2 行**，\n不许为未出现的 action 补 0 行。\n用 `spark.createDataFrame(pandas_df)` 或对固定枚举做 `pivot` 的实现最容易在这里多出行 ——\n**多出来的那行 `event_cnt=0` 会让\"下线了 N 类事件\"这句话变成假话。**\n\n**工程延伸（面试追问点）**\n\n1. 只有事件级血缘够不够？（不够。字段级才是事故现场：\n   事件还在上报、但某个属性没人写 ⇒ 属性缺填率异常。\n   素材考点 3 建议的 mysql 版（\"未录入上报 / 未验收 / 已禁用仍在上报 / 属性缺填率异常\"\n   四类违规）就是这一层的对账，本批另有该题。）\n2. `queries_30d` 的时间窗为什么是 30 天？（它必须**长于业务节奏**：\n   季度报表、大促复盘都在 30 天量级之外。窗口一短，\n   低频但关键的事件就会在\"看起来零消费\"的状态下被下线。\n   正确做法是\"热度窗口\"与\"保留期\"分开定义，并把窗口本身作为参数留痕。）\n3. 下线之后怎么回滚？（禁用是元数据动作、不改代码【源 S8】，\n   所以回滚同样是元数据动作 —— **这恰恰说明\"禁用\"不该被当成\"删除\"**。\n   事件定义、属性、历史分区要按保留期留着，否则一次误判就变成永久丢数。）\n4. 怎么防止判据退化？（把三条判据做成**上线闸**而不是报表：\n   新事件必须绑定验收人与下游预期；旧事件下线必须自动跑一次闭包查询并附证据。\n   素材考点 7 那句\"出口一致是平台职责不是文档职责\"在这里同样成立。）",
+  "runner": {
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 90000,
+    "referenceSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    r = spark.table('event_rows')\n    action = (F.when(F.col('is_preset') == 1, F.lit('keep-preset'))\n              .when(F.col('verified') == 0, F.lit('block-unverified'))\n              .when(F.col('disabled') == 1, F.lit('already-disabled'))\n              .when((F.col('direct_refs') == 0) & (F.col('indirect_refs') == 0)\n                    & (F.col('queries_30d') == 0), F.lit('retire'))\n              .when((F.col('direct_refs') == 0) & (F.col('indirect_refs') > 0),\n                    F.lit('retire-indirect-only'))\n              .otherwise(F.lit('keep')))\n    return (r.withColumn('action', action)\n            .groupBy('action')\n            .agg(F.count(F.lit(1)).alias('event_cnt'),\n                 F.sum('storage_gb').alias('total_storage_gb'),\n                 F.sum('queries_30d').alias('total_queries'))\n            .orderBy('action'))",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    # \"没人引用就下线\"版：只看 direct_refs，不看间接闭包、不看热度、不看验收态。\n    # 真实后果是：把一个被三层派生表依赖的事件下线掉，第二天核心报表空一列。\n    r = spark.table('event_rows')\n    action = F.when(F.col('direct_refs') == 0, F.lit('retire')).otherwise(F.lit('keep'))\n    return (r.withColumn('action', action)\n            .groupBy('action')\n            .agg(F.count(F.lit(1)).alias('event_cnt'),\n                 F.sum('storage_gb').alias('total_storage_gb'),\n                 F.sum('queries_30d').alias('total_queries'))\n            .orderBy('action'))"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发（埋点治理与元数据方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 4（埋点血缘与影响分析：区分直接/间接引用、分群血缘带\"最新分群用户数、近 30 天查询次数\"、下线判据应是\"间接闭包内消费为零 + 热度为零 + 保留期外\"，素材标【推】）＋ 考点 3（预置事件 / 验收态 / 禁用即停止上报）＋ 考点 5（全埋点成本劣势原文）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:33:24.467Z"
+  }
+}

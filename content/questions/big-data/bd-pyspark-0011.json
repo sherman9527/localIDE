@@ -1,0 +1,200 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0011",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "半结构化事件落地：异构 JSON 解析、QUARANTINE 隔离与按业务键幂等去重",
+  "statement": "## 背景与数据规模\n`app_clicks_raw` 是网关直投的原始事件（日均 **90 亿行**，schema 由 12 个团队共同贡献，字段不稳定），落到湖里就是一列 `payload STRING`（JSON 文本）+ 一列 `ingest_ts STRING`。\n上周事故：有人用 `FROM_JSON(payload, 'event_id string, user struct<id:string>')` **强类型**解析，遇到 `user.id` 从字符串变成数字的 3 个团队 → 整个 struct 变 NULL，下游静默丢 22% 事件，**没有任何报错**。\n本题要求把「解析 + 隔离 + 去重」写对：坏数据必须被**看见**（QUARANTINE 分组），而不是被静默变成 NULL。\n\n## 输入\n临时视图 `raw_events`（每个用例单独灌入）：`payload STRING, ingest_ts STRING(yyyy-MM-dd HH:mm:ss UTC)`\n\n## 口径定义（必须严格实现）\n1. 用**弱类型**提取（`GET_JSON_OBJECT`）：\n   - `event_id` = `$.event_id`（文本）；`user_id` = `$.user.id`（**数字与字符串都必须原样字符串化**，如 `123` → `'123'`）；\n   - `sku_cnt` = `$.items` 数组中 **`sku` 非 NULL 的元素个数**（`items` 缺失、不是数组、空数组、元素没有 `sku` → 记 0）。\n     陷阱预告：`GET_JSON_OBJECT(payload, '$.items[*].sku')` 在**数组只有一个元素**时返回的是标量 `\"S1\"` 而不是数组 `[\"S1\"]`（Spark 的真实行为），拿它再 `FROM_JSON(..., 'array<string>')` 会得到 NULL，`SIZE(NULL)` 在 3.5 下返回 **-1**——于是「一行一个 sku」的事件反而被算成 -1。稳妥写法是 `FROM_JSON(payload, 'items array<struct<sku:string>>')` 再用高阶函数 `FILTER`/`SIZE` 统计。\n2. **隔离规则**：`payload` 为 NULL、空串、非法 JSON、没有 `event_id` 字段、或 `event_id` 为空串 → 该行 `status='QUARANTINE'`，其 `event_id` 用哨兵 `'__BAD__'`，`user_id` 记 NULL、`sku_cnt` 记 0；其余行 `status='OK'`。\n3. **幂等去重（仅对 OK 行）**：同一 `event_id` 视为 at-least-once 重复投递，按 `ingest_ts DESC, payload DESC` 取第一条；QUARANTINE 行**不参与去重**（每条独立保留，因为我们无法知道它们是不是同一个事件）。\n4. 按 `status` 输出最多两行（没有该 status 的行时**不产出**该行）：\n   - `event_cnt` = 该 status 去重后的事件数\n   - `dup_dropped` = 该 status 内因去重被丢弃的行数\n   - `user_cnt` = 去重后事件中 `user_id` 非 NULL 的**去重**个数\n   - `sku_total` = 去重后事件的 `sku_cnt` 之和\n   - `event_ids` = 去重后事件 `event_id` 升序拼接（`CONCAT_WS(',', SORT_ARRAY(COLLECT_LIST(...)))`）——用来精确核对「哪些事件被保留」，QUARANTINE 组会看到多个 `'__BAD__'`\n\n## 输出\n列**必须严格是** `status, event_cnt, dup_dropped, user_cnt, sku_total, event_ids`。判题按行集合比对（行序不敏感）。\n\n## 约束\n- 只提交**一条** SELECT / WITH 查询。\n- 禁止用 `SPLIT(payload, '\"')` 之类字符串切片「手工解析」（列顺序一变就静默错位）。\n- 追问会让你对比：宽表 vs `JSON 字符串列` vs Spark 4.1+ 的 **VARIANT**（shredded 列式存储）三者的扫描字节、列裁剪、统计可用性与 schema 演进代价；以及为什么「隔离而不是丢弃」是数据可信度的前提（隔离量本身要成为质量指标）。",
+  "judgeKind": "pyspark",
+  "language": "sql",
+  "tags": [
+    "semi-structured-json",
+    "quarantine",
+    "idempotent-dedup",
+    "schema-evolution",
+    "spark-sql",
+    "modern:spark-4-variant"
+  ],
+  "cases": [
+    {
+      "name": "基础：合法事件与一条非法 JSON 被隔离",
+      "input": {
+        "view": "raw_events",
+        "schema": "payload string, ingest_ts string",
+        "rows": [
+          {
+            "payload": "{\"event_id\":\"e1\",\"user\":{\"id\":\"u_a\"},\"items\":[{\"sku\":\"S1\"},{\"sku\":\"S2\"}]}",
+            "ingest_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e2\",\"user\":{\"id\":123},\"items\":[]}",
+            "ingest_ts": "2026-09-01 10:01:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e3\",\"user\":{\"id\":\"u_a\"}}",
+            "ingest_ts": "2026-09-01 10:02:00"
+          },
+          {
+            "payload": "{\"event_id\":",
+            "ingest_ts": "2026-09-01 10:03:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "status": "OK",
+          "event_cnt": 3,
+          "dup_dropped": 0,
+          "user_cnt": 2,
+          "sku_total": 2,
+          "event_ids": "e1,e2,e3"
+        },
+        {
+          "status": "QUARANTINE",
+          "event_cnt": 1,
+          "dup_dropped": 0,
+          "user_cnt": 0,
+          "sku_total": 0,
+          "event_ids": "__BAD__"
+        }
+      ],
+      "note": "e2 的数字 user.id 必须是 '123'（强类型 struct 解析会把它变成 NULL）；e3 无 items → sku_cnt 0。"
+    },
+    {
+      "name": "重复：同 event_id 多次投递只保留最新 ingest 的一条",
+      "input": {
+        "view": "raw_events",
+        "schema": "payload string, ingest_ts string",
+        "rows": [
+          {
+            "payload": "{\"event_id\":\"e1\",\"user\":{\"id\":\"u_a\"},\"items\":[{\"sku\":\"S1\"}]}",
+            "ingest_ts": "2026-09-01 09:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e1\",\"user\":{\"id\":\"u_a\"},\"items\":[{\"sku\":\"S1\"}]}",
+            "ingest_ts": "2026-09-01 11:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e1\",\"user\":{\"id\":\"u_b\"},\"items\":[{\"sku\":\"X1\"},{\"sku\":\"X2\"}]}",
+            "ingest_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e2\",\"user\":{\"id\":\"u_c\"}}",
+            "ingest_ts": "2026-09-01 08:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "status": "OK",
+          "event_cnt": 2,
+          "dup_dropped": 2,
+          "user_cnt": 2,
+          "sku_total": 1,
+          "event_ids": "e1,e2"
+        }
+      ],
+      "note": "e1 保留 ingest 11:00 那条（user u_a、1 个 sku）→ user_cnt 为 u_a/u_c 两个；按「先出现的保留」会算成 u_b。"
+    },
+    {
+      "name": "隔离边界：NULL、空串、缺 event_id 字段、event_id 空串都进 QUARANTINE",
+      "input": {
+        "view": "raw_events",
+        "schema": "payload string, ingest_ts string",
+        "rows": [
+          {
+            "payload": null,
+            "ingest_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "payload": "",
+            "ingest_ts": "2026-09-01 02:00:00"
+          },
+          {
+            "payload": "{\"user\":{\"id\":\"u_z\"}}",
+            "ingest_ts": "2026-09-01 03:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"\",\"user\":{\"id\":\"u_z\"}}",
+            "ingest_ts": "2026-09-01 04:00:00"
+          },
+          {
+            "payload": "{\"event_id\":\"e9\",\"user\":{\"id\":\"u_z\"},\"items\":\"not-an-array\"}",
+            "ingest_ts": "2026-09-01 05:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "status": "OK",
+          "event_cnt": 1,
+          "dup_dropped": 0,
+          "user_cnt": 1,
+          "sku_total": 0,
+          "event_ids": "e9"
+        },
+        {
+          "status": "QUARANTINE",
+          "event_cnt": 4,
+          "dup_dropped": 0,
+          "user_cnt": 0,
+          "sku_total": 0,
+          "event_ids": "__BAD__,__BAD__,__BAD__,__BAD__"
+        }
+      ],
+      "note": "四条隔离行不得因为 event_id 相同而被去重成一条（QUARANTINE 不参与去重）；items 不是数组时 sku_cnt 记 0 而不是让整行失败。"
+    },
+    {
+      "name": "极端：全部是坏数据（OK 分组不得凭空产出一行 0）",
+      "input": {
+        "view": "raw_events",
+        "schema": "payload string, ingest_ts string",
+        "rows": [
+          {
+            "payload": "garbage",
+            "ingest_ts": "2026-09-01 06:00:00"
+          },
+          {
+            "payload": "[1,2,3]",
+            "ingest_ts": "2026-09-01 07:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "status": "QUARANTINE",
+          "event_cnt": 2,
+          "dup_dropped": 0,
+          "user_cnt": 0,
+          "sku_total": 0,
+          "event_ids": "__BAD__,__BAD__"
+        }
+      ]
+    },
+    {
+      "name": "空输入：零事件返回零行",
+      "input": {
+        "view": "raw_events",
+        "schema": "payload string, ingest_ts string",
+        "rows": []
+      },
+      "expected": []
+    }
+  ],
+  "runner": {
+    "entry": "sql",
+    "timeoutMs": 75000,
+    "referenceSolution": "WITH parsed AS (\n  SELECT\n    payload,\n    ingest_ts,\n    CASE\n      WHEN payload IS NULL OR TRIM(payload) = '' THEN NULL\n      ELSE NULLIF(GET_JSON_OBJECT(payload, '$.event_id'), '')\n    END AS event_id,\n    GET_JSON_OBJECT(payload, '$.user.id') AS user_id,\n    FROM_JSON(payload, 'items array<struct<sku:string>>') AS items_p\n  FROM raw_events\n),\ntyped AS (\n  SELECT\n    payload,\n    ingest_ts,\n    event_id,\n    user_id,\n    CASE WHEN items_p.items IS NULL THEN 0\n         ELSE SIZE(FILTER(items_p.items, x -> x.sku IS NOT NULL))\n    END AS sku_cnt\n  FROM parsed\n),\nok_ranked AS (\n  SELECT 'OK' AS status, event_id, user_id, sku_cnt,\n         ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY ingest_ts DESC, payload DESC) AS rn\n  FROM typed\n  WHERE event_id IS NOT NULL\n),\nquarantined AS (\n  SELECT 'QUARANTINE' AS status, '__BAD__' AS event_id, CAST(NULL AS STRING) AS user_id,\n         0 AS sku_cnt, 1 AS rn\n  FROM typed\n  WHERE event_id IS NULL\n),\nranked AS (\n  SELECT * FROM ok_ranked\n  UNION ALL\n  SELECT * FROM quarantined\n)\nSELECT\n  status,\n  SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) AS event_cnt,\n  COUNT(1) - SUM(CASE WHEN rn = 1 THEN 1 ELSE 0 END) AS dup_dropped,\n  COUNT(DISTINCT CASE WHEN rn = 1 AND user_id IS NOT NULL THEN user_id END) AS user_cnt,\n  SUM(CASE WHEN rn = 1 THEN sku_cnt ELSE 0 END) AS sku_total,\n  CONCAT_WS(',', SORT_ARRAY(COLLECT_LIST(CASE WHEN rn = 1 THEN event_id END))) AS event_ids\nFROM ranked\nGROUP BY status",
+    "naiveSolution": "WITH parsed AS (\n  SELECT\n    payload,\n    ingest_ts,\n    GET_JSON_OBJECT(payload, '$.event_id') AS event_id,\n    GET_JSON_OBJECT(payload, '$.user.id') AS user_id,\n    COALESCE(SIZE(FROM_JSON(GET_JSON_OBJECT(payload, '$.items'), 'array<struct<sku:string>>')), 0) AS sku_cnt\n  FROM raw_events\n)\nSELECT\n  'OK' AS status,\n  COUNT(DISTINCT event_id) AS event_cnt,\n  0 AS dup_dropped,\n  COUNT(DISTINCT user_id) AS user_cnt,\n  SUM(sku_cnt) AS sku_total,\n  CONCAT_WS(',', SORT_ARRAY(COLLECT_LIST(event_id))) AS event_ids\nFROM parsed\nGROUP BY status"
+  },
+  "answer": "## 参考要点\n1. 三类语义要分开写清楚：**提取**（弱类型 `GET_JSON_OBJECT` 保证异构 schema 不因单字段漂移而整行失败）、**隔离**（坏数据打上 status 并保留行数，绝不变 NULL 消失）、**幂等**（业务键 `event_id` 去重，QUARANTINE 因无键可去而独立保留）。把这三层混进一个 `FROM_JSON` 强类型解析，就是「静默丢 22%」的成因。\n2. `event_cnt` 与 `COUNT(DISTINCT event_id)` 不是一回事：去重必须**先决定保留哪一行**，再由保留行提供 user_id / sku_cnt（case2 里按最新 ingest 保留的是 u_a/1 个 sku，`count(distinct)` 会把 u_b 也算进去 → user_cnt 3）。这类「聚合口径 vs 行选取口径」的分歧是数据对不上的高频根因，也正是 `event_ids` 这一列存在的理由（把「保留了谁」变成可断言的证据）。\n3. `sku_cnt` 的实现细节：`$.items[*].sku` 返回的是 JSON 数组文本，`FROM_JSON(..., 'array<string>')` + `SIZE` 才统计「有 sku 的元素个数」；直接 `FROM_JSON(payload, 'items array<struct<sku:string>>')` 在 `items` 不是数组时会让整个解析结果为 NULL（case3 的 `\"not-an-array\"` 就会把整行打掉）。\n3b. **两个必须知道的行为差异**：(a) `GET_JSON_OBJECT(payload, '$.items[*].sku')` 在单元素数组时返回标量、多元素时返回数组，用它统计长度必错；(b) `SIZE(NULL)` 在 Spark 3.5 返回 -1 而不是 NULL**（`spark.sql.legacy.sizeOfNull` 默认 true，4.0 起改为 NULL）：直接 `COALESCE(SIZE(x), 0)` 在这个环境下会把「无 items」算成 -1，聚合结果出现负数——这正是「升级 Spark 后指标莫名变小」的真实案例。必须先判空再取长度（或显式设置该配置并在题解里注明）。\n4. 治理与成本：`'\"event_id\":\"'` 这类文本切片解析在字段顺序变化时会静默错位——判题里 case2 的三条 e1 payload 完全同构，手工切片侥幸能过，但线上必然崩，要说清为什么禁止。Spark 4.1+ 的 **VARIANT**（4.2 默认启用）+ shredded 布局是这类负载的正解：既有列裁剪与统计，又能容纳异构字段；代价是超宽 schema 的元数据与首次 shred 的写放大，要用 `variantReadBinaryAsInt64`/inferSchema 策略灰度验证。采集层还要配 Schema Registry（Kafka 4.2 起队列语义与结构化键改进流算子互操作），把「新增枚举值/类型变更」变成 CI 里的契约破坏，而不是下游的静默错分。\n5. 隔离量的可观测：`QUARANTINE` 行占比与按 `ingest_ts` 的分桶趋势要作为一等指标（阈值来自 90 天分布 + 绝对量/相对量双条件），并配自动告警；否则「隔离」会退化成「没人看的第二张表」。\n\n## 追问\n- 「同一 event_id 的两条 payload 冲突（内容不同）怎么办？」→ 说明当前是「按最新 ingest 覆盖」，并给出替代方案：`version`/`event_seq` 字段裁决（见 bd-pyspark-0003），以及为什么 at-least-once 下必须让上游提供可裁决的版本列。\n- 「怎么在不重刷历史的前提下新增一个解析字段？」→ 湖表 schema evolution 加列（Iceberg `ADD COLUMN` 对历史文件是元数据操作）+ 回填写入新列，配 `WITH SCHEMA EVOLUTION`（4.2）；老分区读出来是 NULL，下游要区分「没有值」与「值为 NULL」。\n- 「90 亿行的解析开销怎么降？」→ 把解析结果固化（写一次、读多次）+ 列裁剪 + 谓词下推；只对需要的子集解析（`$.event_id` 用于去重可在网关侧做）；考虑 `try_parse_json` + 分区级并行；不要用 Python 行级 UDF（JVM↔Python 往返），必要时用 4.1 的 Arrow-native UDF。",
+  "estimatedMinutes": 28,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/pyspark-correctness-and-perf.md#pyspark-semantic-traps",
+    "addedBy": "content-agent-bd"
+  }
+}

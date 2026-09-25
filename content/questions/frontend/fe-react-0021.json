@@ -1,0 +1,291 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0021",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "埋点元数据列表的状态视图模型：预置/验收/禁用/全埋点能力四件事不许混成一个徽标",
+  "statement": "## 背景\n\nDataFinder 的《一般事件》页把埋点元数据写成了一组**产品状态与权限**，而不是一句\"上报了就\n有数据\"【源 S7】。可核查的原文事实有五条：\n\n1. 对象分三层：**事件**（用户动作，\"主要通过应用内埋点实现\"）、**事件属性**、\n   以及**预置事件与预置属性**（\"SDK 自带、由系统统一配置上报时机\"）；\n2. \"**一般事件列表仅展示已验收的事件**，未验收事件可点击验收事件查看并完成验收\"；\n3. 建议\"**先查看预置事件是否已满足业务需求，不满足再手动创建自定义事件**\"；\n4. 权限单独授予（\"数据管理-一般事件-可管理\"），**无权限只能看**；\n5. 停止采集的动作是\"在元数据管理中**禁用对应事件或属性**\"或\"项目中心关全埋点开关\"，\n   **无需改代码**【源 S8】。\n\n《全埋点》页另给一条【源 S8】：\"**热力图、圈选事件功能需开启全埋点才可使用**\"。\n\n## 任务\n\n把这五条做成一个前端**视图模型**（不要求渲染组件，只要求纯函数 ——\n判题器用 vitest + jsdom 跑你提交的 `Solution.tsx`）：\n\n```ts\nexport function eventMetaView(row: EventMetaInput): EventMetaView\n```\n\n输入：\n\n```ts\n{\n  eventName: string;\n  status: 'draft' | 'pending' | 'accepted' | 'rejected' | 'disabled';\n  source: 'preset' | 'custom';\n  analysisKind: 'none' | 'click' | 'custom' | 'heatmap' | 'selector';\n  canManage: boolean;        // 是否有\"数据管理-一般事件-可管理\"权限\n  autoTracking: boolean;     // 项目中心的全埋点开关是否已开\n}\n```\n\n输出：\n\n```ts\n{\n  state: string;\n  label: string;\n  tone: 'ok' | 'warn' | 'danger' | 'muted' | 'info';\n  action: string | null;     // 行内主操作；null = 这一行不给动作\n  tooltip: string;\n  governanceBucket: string;  // 治理口径分桶（列表页的筛选与指标都按它统计）\n  countsInAcceptedList: boolean;  // 是否该出现在\"一般事件列表（仅展示已验收）\"里\n}\n```\n\n## 状态判定（**优先级从上到下，命中即止**）\n\n| # | 条件 | `state` | `label` / `tone` | 进已验收列表？ |\n| --- | --- | --- | --- | --- |\n| 1 | `status === 'disabled'` | `disabled` | `已禁用 · 停止上报` / danger | 否 |\n| 2 | `source === 'preset'` | `preset` | `预置事件` / info | **是** |\n| 3 | `status === 'draft'` | `draft` | `草稿 · 未提交` / muted | 否 |\n| 4 | `status === 'pending'` 且 `canManage` | `needs-accept` | `待验收 · 可验收` / warn | 否 |\n| 5 | `status === 'pending'` 且无权限 | `pending-locked` | `待验收 · 只读` / muted | 否 |\n| 6 | `status === 'rejected'` | `rejected` | `验收未通过` / danger | 否 |\n| 7 | `analysisKind` 是 `heatmap`/`selector` 且 `!autoTracking` | `capability-gap` | `需开启全埋点` / warn | **是** |\n| 8 | 其余 | `live` | `可分析` / ok | 是 |\n\n`action` 规则：`needs-accept → 'accept'`、`draft → 'submit'`、`rejected → 'revise'`、\n`disabled → 're-enable'`、`live → 'view'`，`preset` 与 `capability-gap` 与\n`pending-locked` 一律 `null`；并且**前四种状态只在 `canManage` 为真时才给按钮**。\n`tooltip` 固定是 ``事件 ${eventName}：${label}``（无权限时**不许**在 tooltip 里泄漏可操作文案）。\n`governanceBucket` 与 state 同名（`needs-accept` 与 `pending-locked` 都归\n`pending-acceptance` —— 它们是同一个治理待办的两种视图）。\n\n## 校验（抛 `Error`，消息一字不差）\n\n`row must be an object`（整行是 null/undefined）/ `unknown event status` /\n`unknown event source` / `unknown analysis kind`\n\n**`disabled` 必须排在 `preset` 之前**：被禁用的预置事件仍然是\"停止采集\"态，\n把它渲染成\"预置事件\"就等于在一个已经不再产生数据的行上显示\"正常\"。\n**`capability-gap` 必须算\"已验收\"**：事件本身验收过了，缺的是采集能力 ——\n把它归进 `pending-acceptance` 会让催办单流向错误的人\n（该去开项目中心的全埋点开关，而不是去找验收人）。\n\n## 这题真正考的东西\n\n素材 §3 那张\"常见错误答案\"表里有一条：**\"埋点上线后有人反馈不对再改\"**，\n暴露点是\"没有验收/变更历史/血缘三件套\"。\n一个把状态语义渲染正确的列表页，就是这三件套的**入口**：\n按钮只给有权限的人、未验收的东西不许被当成可用、\n\"查不了\"要区分\"没验收\"与\"没采集能力\"。\n\n（注意：本题只把 DataFinder **文档里可核查的产品状态**做成视图模型。\n素材 §7 明确写了字节的客户端/SDK 实现细节没有公开来源，\n所以这里不考 SDK 上报时机、不考埋点代码怎么写。）",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "tracking-metadata",
+    "state-view-model",
+    "permission-aware-rendering",
+    "capability-gap",
+    "modern:data-governance-ui"
+  ],
+  "cases": [
+    {
+      "name": "基线：已验收的自定义事件 ⇒ 可分析，且进\"一般事件列表\"",
+      "input": [
+        {
+          "eventName": "pay_success",
+          "status": "accepted",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "live",
+        "label": "可分析",
+        "tone": "ok",
+        "action": "view",
+        "tooltip": "事件 pay_success：可分析",
+        "governanceBucket": "live",
+        "countsInAcceptedList": true
+      },
+      "visible": true
+    },
+    {
+      "name": "预置事件即使还处于 pending 也不进验收队列（上报时机由系统统一配置）",
+      "input": [
+        {
+          "eventName": "$page_start",
+          "status": "pending",
+          "source": "preset",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "preset",
+        "label": "预置事件",
+        "tone": "info",
+        "action": null,
+        "tooltip": "事件 $page_start：预置事件",
+        "governanceBucket": "preset-owned",
+        "countsInAcceptedList": true
+      },
+      "visible": true
+    },
+    {
+      "name": "待验收 + 有\"可管理\"权限 ⇒ 渲染成可点的验收动作",
+      "input": [
+        {
+          "eventName": "new_checkout",
+          "status": "pending",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "needs-accept",
+        "label": "待验收 · 可验收",
+        "tone": "warn",
+        "action": "accept",
+        "tooltip": "事件 new_checkout：待验收 · 可验收",
+        "governanceBucket": "pending-acceptance",
+        "countsInAcceptedList": false
+      },
+      "visible": true
+    },
+    {
+      "name": "待验收 + 无权限 ⇒ 只读（官方口径：\"无权限只能看\"）",
+      "input": [
+        {
+          "eventName": "new_checkout",
+          "status": "pending",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": false,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "pending-locked",
+        "label": "待验收 · 只读",
+        "tone": "muted",
+        "action": null,
+        "tooltip": "事件 new_checkout：待验收 · 只读",
+        "governanceBucket": "pending-acceptance",
+        "countsInAcceptedList": false
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：已验收但分析类型是热力图、全埋点未开 ⇒ 能力缺口，不算验收问题",
+      "input": [
+        {
+          "eventName": "banner_heat",
+          "status": "accepted",
+          "source": "custom",
+          "analysisKind": "heatmap",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "capability-gap",
+        "label": "需开启全埋点",
+        "tone": "warn",
+        "action": null,
+        "tooltip": "事件 banner_heat：需开启全埋点",
+        "governanceBucket": "capability-gap",
+        "countsInAcceptedList": true
+      },
+      "visible": true,
+      "note": "这一条 countsInAcceptedList 仍是 true：事件本身没问题，缺的是采集能力。把它判成 pending 会让人去催验收人，而真正要开的是项目中心的全埋点开关"
+    },
+    {
+      "name": "边界：被禁用的预置事件 ⇒ disabled 优先于 preset",
+      "input": [
+        {
+          "eventName": "$AppClick",
+          "status": "disabled",
+          "source": "preset",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "disabled",
+        "label": "已禁用 · 停止上报",
+        "tone": "danger",
+        "action": "re-enable",
+        "tooltip": "事件 $AppClick：已禁用 · 停止上报",
+        "governanceBucket": "stopped",
+        "countsInAcceptedList": false
+      },
+      "visible": true
+    },
+    {
+      "name": "退化：草稿态不给任何\"可分析\"承诺",
+      "input": [
+        {
+          "eventName": "wip_event",
+          "status": "draft",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": false,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "draft",
+        "label": "草稿 · 未提交",
+        "tone": "muted",
+        "action": null,
+        "tooltip": "事件 wip_event：草稿 · 未提交",
+        "governanceBucket": "draft",
+        "countsInAcceptedList": false
+      },
+      "visible": true
+    },
+    {
+      "name": "边界：验收未通过 ⇒ danger 但不进\"停止采集\"桶",
+      "input": [
+        {
+          "eventName": "bad_event",
+          "status": "rejected",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": {
+        "state": "rejected",
+        "label": "验收未通过",
+        "tone": "danger",
+        "action": "revise",
+        "tooltip": "事件 bad_event：验收未通过",
+        "governanceBucket": "rejected",
+        "countsInAcceptedList": false
+      },
+      "visible": true
+    },
+    {
+      "name": "非法：整行是 null",
+      "input": [
+        null
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "row must be an object"
+    },
+    {
+      "name": "非法：未知事件状态",
+      "input": [
+        {
+          "eventName": "x",
+          "status": "archived",
+          "source": "custom",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown event status"
+    },
+    {
+      "name": "非法：未知事件来源（预置与自定义之外没有第三种）",
+      "input": [
+        {
+          "eventName": "x",
+          "status": "accepted",
+          "source": "imported",
+          "analysisKind": "none",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown event source"
+    },
+    {
+      "name": "非法：未知分析类型（它决定要不要全埋点，不许猜）",
+      "input": [
+        {
+          "eventName": "x",
+          "status": "accepted",
+          "source": "custom",
+          "analysisKind": "funnel",
+          "canManage": true,
+          "autoTracking": false
+        }
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "Error",
+      "throwMessage": "unknown analysis kind"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n一张**优先级表**加两张映射表（文案/tone、action），判分点全在顺序与\"谁不该看到按钮\"上。\n\n**最值钱的一条是 `capability-gap` 仍 `countsInAcceptedList: true`。**\n用例「边界：已验收但分析类型是热力图、全埋点未开」的期望是\n`state='capability-gap'`、`bucket='capability-gap'`、`action=null`、`countsInAcceptedList=true`。\n它的理由是官方那句\"热力图、圈选事件**功能**需开启全埋点才可使用\"【源 S8】 ——\n被限制的是**分析功能**，不是事件的验收状态。\n把它并进 `pending-acceptance` 的后果很具体：控制台把两类待办混在一个筛选里，\n于是有人去催验收人签一个已经签过的字，而真正该开的开关三年没人碰。\n\n**`disabled` 压过 `preset`**（用例「边界：被禁用的预置事件」⇒ `state='disabled'`、\n`action='re-enable'`）：顺序反过来会得到 `state='preset'` + `action=null`，\n即\"一个不再产生数据的行显示为正常的预置事件，而且不给恢复按钮\" ——\n这是**双重静默降级**（状态错 + 无路可走），也是这类列表页最常见的真实 bug。\n\n**权限只能影响 `action`，不许影响 `label`。**\n用例「待验收 + 无权限」期望 `tone='muted'` 而**不是** `'warn'`：\n对一个没有权限的人标黄报警，等于让他为一件他做不了的事焦虑。\n`tooltip` 也必须跟随 `label`，否则\"只读\"的行会 hover 出\"点击完成验收\"。\n\n**朴素解挂在哪**：它只看 `status === 'accepted'` 二分。于是\n预置事件被判成 `pending-locked`（明明不需要验收）、\n被禁用的事件给出 `action='accept'`（一个\"验收\"按钮去恢复一个被禁用的事件）、\n`capability-gap` 完全不存在。**四格里挂三格**，\n而每一格都对应一类会真的发出来的工单。\n\n**工程延伸（面试追问点）**\n\n1. 为什么这些要放前端而不是后端返回一个字符串？（**必须**后端返回同一份语义，\n   前端只做渲染 —— 但这题考的是\"你有没有一份可测的映射\"。\n   正确工程是：状态机在服务端，前端有一张同样的 label/tone 表并被单测钉住，\n   两边不一致时先红的是测试。把判定写在 JSX 里 = 每个调用点各猜一次。）\n2. `governanceBucket` 与 `state` 为什么不同？（一个是**视图**、一个是**统计口径**。\n   两者独立之后，改版式不会改变指标；反过来（用 state 当统计维度）\n   每加一个徽标就会把\"已验收事件数\"这个指标挪一次。）\n3. 为什么 `pending-locked` 与 `needs-accept` 要拆两个 state？（`action` 与 `tone` 都不同，\n   合并会让\"按钮只在有权限时出现\"这件事变成散在各处的 `if`。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "eventMeta.test.ts",
+        "content": "import { describe, expect, it } from 'vitest';\nimport { eventMetaView } from './Solution';\n\n/**\n * 断言由 gen.py 里同一个 Python 模型生成，不手抄 ——\n * react-vitest 题的判分事实来源就是这份文件，抄错一次就永久错一次。\n * 契约型用例断言到**消息**：只写 .toThrow() 会让几条\"都该抛错\"的用例收敛成同一条。\n */\ndescribe('eventMetaView：埋点元数据状态语义', () => {\n  it(\"基线：已验收的自定义事件 ⇒ 可分析，且进\\\"一般事件列表\\\"\", () => {\n    expect(eventMetaView({\"eventName\": \"pay_success\", \"status\": \"accepted\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"live\", \"label\": \"可分析\", \"tone\": \"ok\", \"action\": \"view\", \"tooltip\": \"事件 pay_success：可分析\", \"governanceBucket\": \"live\", \"countsInAcceptedList\": true});\n  });\n  it(\"预置事件即使还处于 pending 也不进验收队列（上报时机由系统统一配置）\", () => {\n    expect(eventMetaView({\"eventName\": \"$page_start\", \"status\": \"pending\", \"source\": \"preset\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"preset\", \"label\": \"预置事件\", \"tone\": \"info\", \"action\": null, \"tooltip\": \"事件 $page_start：预置事件\", \"governanceBucket\": \"preset-owned\", \"countsInAcceptedList\": true});\n  });\n  it(\"待验收 + 有\\\"可管理\\\"权限 ⇒ 渲染成可点的验收动作\", () => {\n    expect(eventMetaView({\"eventName\": \"new_checkout\", \"status\": \"pending\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"needs-accept\", \"label\": \"待验收 · 可验收\", \"tone\": \"warn\", \"action\": \"accept\", \"tooltip\": \"事件 new_checkout：待验收 · 可验收\", \"governanceBucket\": \"pending-acceptance\", \"countsInAcceptedList\": false});\n  });\n  it(\"待验收 + 无权限 ⇒ 只读（官方口径：\\\"无权限只能看\\\"）\", () => {\n    expect(eventMetaView({\"eventName\": \"new_checkout\", \"status\": \"pending\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": false, \"autoTracking\": false})).toEqual({\"state\": \"pending-locked\", \"label\": \"待验收 · 只读\", \"tone\": \"muted\", \"action\": null, \"tooltip\": \"事件 new_checkout：待验收 · 只读\", \"governanceBucket\": \"pending-acceptance\", \"countsInAcceptedList\": false});\n  });\n  it(\"边界：已验收但分析类型是热力图、全埋点未开 ⇒ 能力缺口，不算验收问题\", () => {\n    expect(eventMetaView({\"eventName\": \"banner_heat\", \"status\": \"accepted\", \"source\": \"custom\", \"analysisKind\": \"heatmap\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"capability-gap\", \"label\": \"需开启全埋点\", \"tone\": \"warn\", \"action\": null, \"tooltip\": \"事件 banner_heat：需开启全埋点\", \"governanceBucket\": \"capability-gap\", \"countsInAcceptedList\": true});\n  });\n  it(\"边界：被禁用的预置事件 ⇒ disabled 优先于 preset\", () => {\n    expect(eventMetaView({\"eventName\": \"$AppClick\", \"status\": \"disabled\", \"source\": \"preset\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"disabled\", \"label\": \"已禁用 · 停止上报\", \"tone\": \"danger\", \"action\": \"re-enable\", \"tooltip\": \"事件 $AppClick：已禁用 · 停止上报\", \"governanceBucket\": \"stopped\", \"countsInAcceptedList\": false});\n  });\n  it(\"退化：草稿态不给任何\\\"可分析\\\"承诺\", () => {\n    expect(eventMetaView({\"eventName\": \"wip_event\", \"status\": \"draft\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": false, \"autoTracking\": false})).toEqual({\"state\": \"draft\", \"label\": \"草稿 · 未提交\", \"tone\": \"muted\", \"action\": null, \"tooltip\": \"事件 wip_event：草稿 · 未提交\", \"governanceBucket\": \"draft\", \"countsInAcceptedList\": false});\n  });\n  it(\"边界：验收未通过 ⇒ danger 但不进\\\"停止采集\\\"桶\", () => {\n    expect(eventMetaView({\"eventName\": \"bad_event\", \"status\": \"rejected\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toEqual({\"state\": \"rejected\", \"label\": \"验收未通过\", \"tone\": \"danger\", \"action\": \"revise\", \"tooltip\": \"事件 bad_event：验收未通过\", \"governanceBucket\": \"rejected\", \"countsInAcceptedList\": false});\n  });\n  it(\"非法：整行是 null\", () => {\n    expect(() => eventMetaView(null)).toThrow(\"row must be an object\");\n  });\n  it(\"非法：未知事件状态\", () => {\n    expect(() => eventMetaView({\"eventName\": \"x\", \"status\": \"archived\", \"source\": \"custom\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toThrow(\"unknown event status\");\n  });\n  it(\"非法：未知事件来源（预置与自定义之外没有第三种）\", () => {\n    expect(() => eventMetaView({\"eventName\": \"x\", \"status\": \"accepted\", \"source\": \"imported\", \"analysisKind\": \"none\", \"canManage\": true, \"autoTracking\": false})).toThrow(\"unknown event source\");\n  });\n  it(\"非法：未知分析类型（它决定要不要全埋点，不许猜）\", () => {\n    expect(() => eventMetaView({\"eventName\": \"x\", \"status\": \"accepted\", \"source\": \"custom\", \"analysisKind\": \"funnel\", \"canManage\": true, \"autoTracking\": false})).toThrow(\"unknown analysis kind\");\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 60000,
+    "referenceSolution": "export interface EventMetaInput {\n  eventName: string;\n  status: 'draft' | 'pending' | 'accepted' | 'rejected' | 'disabled';\n  source: 'preset' | 'custom';\n  analysisKind: 'none' | 'click' | 'custom' | 'heatmap' | 'selector';\n  canManage: boolean;\n  autoTracking: boolean;\n}\n\nexport interface EventMetaView {\n  state: string;\n  label: string;\n  tone: string;\n  action: string | null;\n  tooltip: string;\n  governanceBucket: string;\n  countsInAcceptedList: boolean;\n}\n\nconst TEXT: Record<string, [string, string]> = {\n  disabled: ['已禁用 · 停止上报', 'danger'],\n  preset: ['预置事件', 'info'],\n  draft: ['草稿 · 未提交', 'muted'],\n  'needs-accept': ['待验收 · 可验收', 'warn'],\n  'pending-locked': ['待验收 · 只读', 'muted'],\n  rejected: ['验收未通过', 'danger'],\n  'capability-gap': ['需开启全埋点', 'warn'],\n  live: ['可分析', 'ok'],\n};\n\nconst BUCKET: Record<string, string> = {\n  disabled: 'stopped',\n  preset: 'preset-owned',\n  draft: 'draft',\n  'needs-accept': 'pending-acceptance',\n  'pending-locked': 'pending-acceptance',\n  rejected: 'rejected',\n  'capability-gap': 'capability-gap',\n  live: 'live',\n};\n\nconst ACTION: Record<string, string | null> = {\n  disabled: 're-enable',\n  preset: null,\n  draft: 'submit',\n  'needs-accept': 'accept',\n  'pending-locked': null,\n  rejected: 'revise',\n  'capability-gap': null,\n  live: 'view',\n};\n\nconst STATUS = ['draft', 'pending', 'accepted', 'rejected', 'disabled'];\nconst SOURCE = ['preset', 'custom'];\nconst KIND = ['none', 'click', 'custom', 'heatmap', 'selector'];\nconst NEEDS_AUTO = ['heatmap', 'selector'];\n// 只有\"事件本身没问题\"的三种形态才算进\"一般事件列表（仅展示已验收的事件）\"\nconst ACCEPTED_LIKE = ['preset', 'capability-gap', 'live'];\n\nexport function eventMetaView(row: EventMetaInput): EventMetaView {\n  if (row === null || row === undefined || typeof row !== 'object') {\n    throw new Error('row must be an object');\n  }\n  if (STATUS.indexOf(row.status) < 0) throw new Error('unknown event status');\n  if (SOURCE.indexOf(row.source) < 0) throw new Error('unknown event source');\n  if (KIND.indexOf(row.analysisKind) < 0) throw new Error('unknown analysis kind');\n\n  let state: string;\n  if (row.status === 'disabled') state = 'disabled';\n  else if (row.source === 'preset') state = 'preset';\n  else if (row.status === 'draft') state = 'draft';\n  else if (row.status === 'pending') state = row.canManage ? 'needs-accept' : 'pending-locked';\n  else if (row.status === 'rejected') state = 'rejected';\n  else if (NEEDS_AUTO.indexOf(row.analysisKind) >= 0 && !row.autoTracking) state = 'capability-gap';\n  else state = 'live';\n\n  const managed = ['disabled', 'draft', 'rejected', 'needs-accept'].indexOf(state) >= 0;\n  const action = managed ? (row.canManage ? ACTION[state] : null) : ACTION[state];\n  const label = TEXT[state][0];\n  return {\n    state,\n    label,\n    tone: TEXT[state][1],\n    action,\n    tooltip: `事件 ${row.eventName ?? '?'}：${label}`,\n    governanceBucket: BUCKET[state],\n    countsInAcceptedList: ACCEPTED_LIKE.indexOf(state) >= 0,\n  };\n}",
+    "naiveSolution": "export function eventMetaView(row: any): any {\n  // \"状态字段直接渲染\"版：把 pending 一律显示成\"待验收\"、\n  // 把\"没开全埋点\"和\"没验收\"混成同一句文案，也不区分有没有权限。\n  // 症状：数据同学天天去催验收，其实要开的是项目中心的全埋点开关；\n  // 而无权限的人看到一个点不动的\"验收\"按钮，报上来的单子是\"按钮坏了\"。\n  const accepted = row.status === 'accepted';\n  const label = accepted ? '可分析' : row.status === 'disabled' ? '已禁用' : '待验收';\n  return {\n    state: accepted ? 'live' : 'pending-locked',\n    label,\n    tone: accepted ? 'ok' : 'warn',\n    action: accepted ? 'view' : 'accept',\n    tooltip: '事件 ' + (row.eventName ?? '?') + '：' + label,\n    governanceBucket: accepted ? 'live' : 'pending-acceptance',\n    countsInAcceptedList: accepted,\n  };\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "ByteDance",
+    "role": "数据研发 / 数据平台前端（埋点与元数据控制台方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-data-and-recommendation.md#4 考点 3（埋点契约与元数据工作流：预置事件/属性、\"一般事件列表仅展示已验收的事件\"、\"数据管理-一般事件-可管理\"权限、禁用事件或属性即停止上报）＋ 考点 5（\"热力图、圈选事件功能需开启全埋点才可使用\"）。素材 §7 声明字节的前端/SDK 实现无官方来源，故本题只渲染产品文档里的状态语义",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:33:24.469Z"
+  }
+}

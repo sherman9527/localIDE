@@ -1,0 +1,106 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0003",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "最长连续活跃段（同日多条必须先折叠成一天）",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表 user_active(uid INT, active_date DATE, src VARCHAR(10))：一行 = 一次活跃打点，**同一天同一 uid 可能有多行**（app/web/push 各上报一次），没有主键，可能有完全重复的行。\n\n要求：对每个 uid 输出它的**最长「连续日历天」活跃段**，列顺序与别名必须是 uid, seg_start, seg_days：\n1) 先按 (uid, active_date) 去重（一天只算一天），再判定「连续」：相邻两天差 1 天算连续，差 0 天（同日重复）不算新段也不算续接；\n2) seg_days = 段内的**天数**（不是行数）；seg_start = 段首日；\n3) 如果一个 uid 有多段并列最长，**全部输出**；\n4) 必须自带全序 ORDER BY uid, seg_start —— 判题按行序敏感比对。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。不许依赖日历表；日历不连续的地方（月末、2 月末、跨年）就是本题的得分点。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "gaps-and-islands",
+    "window-functions",
+    "date-arithmetic",
+    "dedup-before-aggregate",
+    "modern:mysql8-window-functions"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：同日重复、跨月、跨年",
+      "input": [],
+      "expected": {
+        "columns": ["uid", "seg_start", "seg_days"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "2026-03-01", 3],
+          [2, "2026-01-30", 3],
+          [2, "2026-03-10", 3],
+          [3, "2026-06-18", 1],
+          [4, "2026-12-30", 4],
+          [5, "2026-05-04", 4]
+        ]
+      },
+      "note": "uid 2 两段都是 3 天必须都给出；uid 4 跨年 2026-12-30→2027-01-02 是 4 天；uid 1 的 03-01 有两条打点。"
+    },
+    {
+      "name": "补一条数据把两段接起来（边界续接）",
+      "input": ["INSERT INTO user_active VALUES (5,'2026-05-03','app')"],
+      "expected": {
+        "columns": ["uid", "seg_start", "seg_days"],
+        "orderSensitive": true,
+        "rows": [
+          [1, "2026-03-01", 3],
+          [2, "2026-01-30", 3],
+          [2, "2026-03-10", 3],
+          [3, "2026-06-18", 1],
+          [4, "2026-12-30", 4],
+          [5, "2026-05-01", 7]
+        ]
+      }
+    },
+    {
+      "name": "2 月末与闰日边界",
+      "input": [
+        "DELETE FROM user_active",
+        "INSERT INTO user_active VALUES (8,'2026-02-26','app'),(8,'2026-02-27','web'),(8,'2026-03-01','app'),(9,'2028-02-27','app'),(9,'2028-02-28','app'),(9,'2028-02-29','app'),(9,'2028-03-01','web'),(9,'2028-02-29','push')"
+      ],
+      "expected": {
+        "columns": ["uid", "seg_start", "seg_days"],
+        "orderSensitive": true,
+        "rows": [
+          [8, "2026-02-26", 2],
+          [9, "2028-02-27", 4]
+        ]
+      },
+      "note": "2026 不是闰年，02-27 与 03-01 之间有缺口；2028 是闰年，2 月 29 日存在所以 4 天连续。"
+    },
+    {
+      "name": "只有一个用户一条打点的退化边界",
+      "input": [
+        "DELETE FROM user_active",
+        "INSERT INTO user_active VALUES (42,'2026-09-19','app'),(42,'2026-09-19','web')"
+      ],
+      "expected": {
+        "columns": ["uid", "seg_start", "seg_days"],
+        "orderSensitive": true,
+        "rows": [[42, "2026-09-19", 1]]
+      }
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM user_active"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nWITH d AS (SELECT DISTINCT uid, active_date FROM user_active),\ng AS (\n  SELECT uid, active_date,\n         DATE_SUB(active_date,\n                  INTERVAL ROW_NUMBER() OVER (PARTITION BY uid ORDER BY active_date) DAY) AS grp\n  FROM d\n),\ns AS (SELECT uid, grp, MIN(active_date) AS seg_start, COUNT(*) AS seg_days FROM g GROUP BY uid, grp),\nr AS (SELECT uid, seg_start, seg_days, RANK() OVER (PARTITION BY uid ORDER BY seg_days DESC) rk FROM s)\nSELECT uid, seg_start, seg_days FROM r WHERE rk = 1 ORDER BY uid, seg_start;\n```\n1) **先 DISTINCT 再编号**是这题的生死线：ROW_NUMBER 的行号必须等于「已经过了几天」，同日多条会把行号抬高、伪分组键被打散（本例第 1 个用例用未去重的写法会得到 uid 1 两条 seg_days=3 的重复行）。\n2) 分组键 `date - INTERVAL rn DAY` 的原理：连续日期段内 date 与 rn 同步 +1，差值恒定；一旦断档差值跳变。用 `DATEDIFF` 自连接是 O(n²) 的反例。\n3) `DATE_SUB(..., INTERVAL n DAY)` 天然处理月末/闰年/跨年（`2026-12-30 - INTERVAL 3 DAY` 与 `2026-03-01 - INTERVAL 2 DAY` 都正确），这就是为什么不能用 `date + 0 - rn` 这种整数减法（DATE 转数字后 20261230-3 = 20261227 是合法数字但不是合法日期，闰年/月末必错）。\n4) 「并列最长都要」= `RANK() ... = 1`；`ROW_NUMBER()=1` 会随机丢掉一段。\n5) 窗口不能出现在 WHERE，必须再包一层 CTE。\n\n面试追问：\n- 会话切分（相邻事件间隔 > 30 分钟算新会话）怎么做？→ `LAG(ts) OVER (PARTITION BY uid ORDER BY ts, id)` 判新段起点，再 `SUM(is_new) OVER (uid ORDER BY ts, id)` 造段号 —— 与本题的差值法是两种范式；ORDER BY 必须带 id 这种决定性列，否则并列秒的段号不可复现。\n- 5 亿行怎么跑？→ 按 uid 分片（同一 uid 必须落在同一批）+ 预聚合到「日活表」（本题 DISTINCT 的那一步），把窗口跑在日活表上而不是原始打点表上；日活表还能增量维护。\n- 「连续 N 天奖励」的实时口径与本题差异：需要处理迟到数据回补（同一天的旧段可能被后面的事件接上），所以段号不能物化后就不再重算。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS user_active",
+      "CREATE TABLE user_active (uid INT NOT NULL, active_date DATE NOT NULL, src VARCHAR(10) NOT NULL, KEY idx_uid_date (uid, active_date)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO user_active VALUES (1,'2026-03-01','app'),(1,'2026-03-01','web'),(1,'2026-03-02','app'),(1,'2026-03-03','push'),(1,'2026-03-05','app'),(1,'2026-03-06','web'),(2,'2026-01-30','app'),(2,'2026-01-31','app'),(2,'2026-02-01','push'),(2,'2026-03-10','app'),(2,'2026-03-11','web'),(2,'2026-03-12','web'),(3,'2026-06-18','push'),(4,'2026-12-30','app'),(4,'2026-12-31','app'),(4,'2027-01-01','web'),(4,'2027-01-02','app'),(4,'2027-01-04','app'),(5,'2026-05-01','app'),(5,'2026-05-02','web'),(5,'2026-05-04','app'),(5,'2026-05-05','app'),(5,'2026-05-05','web'),(5,'2026-05-06','push'),(5,'2026-05-07','app')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH d AS (SELECT DISTINCT uid, active_date FROM user_active),\ng AS (\n  SELECT uid,\n         active_date,\n         DATE_SUB(active_date, INTERVAL ROW_NUMBER() OVER (PARTITION BY uid ORDER BY active_date) DAY) AS grp\n  FROM d\n),\ns AS (\n  SELECT uid, grp, MIN(active_date) AS seg_start, COUNT(*) AS seg_days\n  FROM g\n  GROUP BY uid, grp\n),\nr AS (\n  SELECT uid, seg_start, seg_days, RANK() OVER (PARTITION BY uid ORDER BY seg_days DESC) AS rk\n  FROM s\n)\nSELECT uid, seg_start, seg_days\nFROM r\nWHERE rk = 1\nORDER BY uid, seg_start",
+    "naiveSolution": "WITH g AS (\n  SELECT uid,\n         active_date,\n         DATE_SUB(active_date, INTERVAL ROW_NUMBER() OVER (PARTITION BY uid ORDER BY active_date) DAY) AS grp\n  FROM user_active\n),\ns AS (\n  SELECT uid, grp, MIN(active_date) AS seg_start, COUNT(*) AS seg_days\n  FROM g\n  GROUP BY uid, grp\n),\nr AS (\n  SELECT uid, seg_start, seg_days, ROW_NUMBER() OVER (PARTITION BY uid ORDER BY seg_days DESC) AS rk\n  FROM s\n)\nSELECT uid, seg_start, seg_days\nFROM r\nWHERE rk = 1\nORDER BY uid, seg_start"
+  },
+  "estimatedMinutes": 18,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#13-四类必考查询模式",
+    "addedBy": "content-agent-sql"
+  }
+}

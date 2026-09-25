@@ -1,0 +1,265 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0044",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "库存是商家的镜像：占用同步、回补与商家下调异步，算出\"假有货\"峰值与超卖件数",
+  "statement": "## 背景（这家公司的库存不是你的库存）\n\n平台侧**不持有库存**：商品由第三方商家供货，商家随时可以通过开放平台接口改库存与价格。\n所以平台扣的不是真库存，而是商家系统的一份**投影**。投影靠同步通道更新，同步通道有滞后。\n\n于是有一类事故是构造性的：**占用走同步、回补与商家下调走异步**，两条时间线一错位，\n投影就会大于商家真库存 —— 屏幕上是\"有货\"，货架上是没有的。这叫**假有货**，\n它比假缺货贵得多：假缺货只是少卖，假有货是收了钱发不出货（还要按 48 小时发货承诺赔付）。\n\n## 你要实现的入口\n\n```java\npublic static int[] phantomStock(int stock, int lag, int[][] ops)\n```\n\n返回 `int[]{假有货峰值, 超卖件数, 被拒占用次数}`（按这个顺序，三个都是 `int`）。\n\n## 模型（照这些算，别自己发明）\n\n初始时刻商家真库存 `real` 与平台投影 `proj` 都等于 `stock`。\n`ops[i] = [kind, qty]` 按数组下标 `i` 当作第 `i` 个事件时刻，四种事件：\n\n| kind | 事件 | 对真库存 `real` | 对投影 `proj` |\n| --- | --- | --- | --- |\n| 1 | 下单占用 `qty` | 立刻 `-= qty` | **立刻** `-= qty`（同步扣镜像） |\n| 2 | 团失败回补 `qty` | 立刻 `+= qty` | 在 `i + lag` 时刻才 `+= qty` |\n| 3 | 商家下调 `qty` | 立刻 `-= qty` | 在 `i + lag` 时刻才 `-= qty` |\n| 4 | 商家库存同步为 `qty` | 立刻 `= qty` | 在 `i + lag` 时刻才 `= qty` |\n\n每个事件时刻 `i` 的处理顺序是固定的：\n\n1. 先把所有 `apply_index <= i` 的**待落地异步更新**落到投影上；\n2. 再执行本事件（真库存立刻变；kind=1 投影立刻变，其余排入 `i + lag`）；\n3. 再落一次 `apply_index <= i`（这样 `lag == 0` 表示同步通道零延迟，同一时刻就落地）；\n4. 用这一步结束后的 `proj - real` 更新峰值。\n\n**只在这条事件流的时间线内统计**：`i + lag` 超出数组长度的异步更新不会落地，也不参与统计\n（那就是\"同步通道还没追上，作业先结束了\"——真实系统里由下一轮对账兜底）。\n\n三个输出的定义：\n\n- **假有货峰值** = 所有事件时刻结束后的 `max(0, proj - real)` 的最大值；\n- **超卖件数**：kind=1 只在 `proj >= qty` 时被接受。接受后，\n  这笔里有 `qty - min(qty, max(real, 0))` 件是**真库存撑不住的**，累加进这个数\n  （注意 `real` 可以为负 —— 那是\"平台欠商家的货\"，不许夹到 0）；\n- **被拒占用次数** = 因为 `proj < qty` 而被挡下的 kind=1 事件条数。\n  被拒的占用**不改**任何库存。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- `ops` 里某行不是恰好 2 列 ⇒ `op must be [kind, qty]`\n- `kind` 不在 1..4 ⇒ `unknown op kind`\n- `qty < 0` ⇒ `negative qty`\n- `lag < 0` ⇒ `negative lag`\n- `stock < 0` ⇒ `negative initial stock`\n\n校验顺序就按上面这个先后（先列数、再 kind、再 qty）；`stock`/`lag` 在进循环之前查。\n\n## 复杂度\n\n`O(n + 事件数)`，不许嵌套扫描整个 pending（用\"到期即落地\"的过滤即可）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "inventory-projection",
+    "async-sync-lag",
+    "oversell-detection",
+    "dual-ledger",
+    "modern:data-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：商家把库存同步成 0 而同步通道滞后 2 步 ⇒ 假有货峰值 15",
+      "input": [
+        20,
+        2,
+        [
+          [
+            1,
+            5
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            1,
+            4
+          ],
+          [
+            1,
+            3
+          ]
+        ]
+      ],
+      "expected": [
+        15,
+        4,
+        1
+      ],
+      "visible": true,
+      "note": "t1 商家改库存为 0：真库存立刻归零，投影还要等 2 步 ⇒ proj-real=15 就是峰值；t2 那笔 4 件没有真库存支撑 ⇒ 超卖 4；t3 时同步终于落地（proj 归 0）⇒ 这笔被挡下，被拒 1 条"
+    },
+    {
+      "name": "全是团失败回补：只造成假缺货，假有货峰值必须是 0",
+      "input": [
+        10,
+        3,
+        [
+          [
+            1,
+            6
+          ],
+          [
+            2,
+            4
+          ],
+          [
+            1,
+            5
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "回补让 real 立刻回来、proj 滞后 ⇒ proj-real 不为正。\"异步一定会超卖\"在这里被证伪；被拒的那 1 条就是假缺货的症状"
+    },
+    {
+      "name": "边界：lag=0 表示通道同刻落地，下调当场就反映到投影 ⇒ 峰值 0",
+      "input": [
+        20,
+        0,
+        [
+          [
+            3,
+            15
+          ],
+          [
+            1,
+            5
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：投影不足时占用被拒，且不许改动任何库存",
+      "input": [
+        5,
+        2,
+        [
+          [
+            1,
+            6
+          ],
+          [
+            1,
+            5
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "第一笔 proj(5) < 6 ⇒ 拒绝且不扣；第二笔正好扣光 ⇒ 峰值 0、超卖 0"
+    },
+    {
+      "name": "退化：没有任何事件 ⇒ 三个数都是 0",
+      "input": [
+        100,
+        2,
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "商家绝对值同步（kind=4）把投影拉回真值，之后放行不再造成超卖",
+      "input": [
+        30,
+        1,
+        [
+          [
+            1,
+            10
+          ],
+          [
+            3,
+            12
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            4,
+            10
+          ],
+          [
+            1,
+            6
+          ]
+        ]
+      ],
+      "expected": [
+        12,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "滞后期内峰值 12；同步落地后投影从 0 回到 10 ⇒ 最后那笔 6 件有真货撑着"
+    },
+    {
+      "name": "非法：事件不是 [kind, qty] 两列",
+      "input": [
+        10,
+        1,
+        [
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "op must be [kind, qty]"
+    },
+    {
+      "name": "非法：未知事件类型",
+      "input": [
+        10,
+        1,
+        [
+          [
+            7,
+            3
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown op kind"
+    },
+    {
+      "name": "非法：数量为负",
+      "input": [
+        10,
+        1,
+        [
+          [
+            1,
+            -2
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative qty"
+    },
+    {
+      "name": "非法：滞后期数为负",
+      "input": [
+        10,
+        -1,
+        [
+          [
+            1,
+            2
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative lag"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两条账本 + 一个待落地队列。核心不是算术，是**承认投影和真库存是两个变量**：\n占用打在投影上（同步），商家侧的变化打在真库存上（立刻）并排队等 `lag` 个事件才落到投影。\n`proj - real` 的最大值就是要找的\"假有货件数\"。\n\n**为什么 kind=3（商家下调）会造出假有货**：商家把真库存改小这一刻，真库存立刻掉，\n但镜像要等同步通道。这段时间里投影比货架多，多出来的部分会被占用事件**当成真货卖掉** ——\n`超卖件数` 这一列量的是同一件事的事后代价。\n基线用例「基线：商家把库存同步成 0 而同步通道滞后 2 步」量的就是这条链：\n`t1` 商家把库存同步成 0 ⇒ 真库存立刻归零、投影还要等 2 步 ⇒ `proj - real = 15` 成为峰值；\n`t2` 那笔 4 件占用完全落在这 15 件假货上 ⇒ 超卖 4；\n`t3` 同步终于落地（投影归 0）⇒ 这笔被挡下，被拒 1 条。**三个输出各自盯住事故的一环。**\n\n**为什么 kind=2（团失败回补）单向造成假缺货**：回补让真库存立刻回来，投影滞后 ⇒ `proj < real`，\n`proj - real` 不为正 ⇒ 峰值不涨。这是**安全方向**的误差（少卖），所以本题的峰值只对\nkind=3/4 敏感。用例「全是团失败回补：只造成假缺货，假有货峰值必须是 0」专门钉这一点：\n峰值 0，但被拒占用是 1 —— 那 1 条就是\"假缺货\"唯一的可见症状。\n\n**`lag == 0` 不等于\"没有异步通道\"**（用例「边界：lag=0 表示通道同刻落地」）：它是\"通道足够快，\n同一事件时刻内就落地\"。实现里必须在事件处理**之后再 flush 一次**，否则 `apply_index == i`\n的更新永远等不到（因为下一轮 flush 只处理 `<= i+1`，看起来也落了 —— 但 kind=4 的覆盖顺序会不同步）。\n这类\"边界上少跑一次\"的 bug 不会报错，只会让峰值偏小。\n\n**被拒占用不改任何库存**（用例「边界：投影不足时占用被拒」）：`proj < qty` 时既不扣投影也不扣真库存，\n只把计数器加一。实现里如果\"先扣再判\"就会把真库存扣成负的、还漏记一次拒绝 ——\n这正好对应真实事故里最难查的一种：**下单失败率涨了，而库存对账说一切正常**。\n\n**工程延伸（面试追问点）**\n\n1. 为什么\"宁可假缺货也不能假有货\"？（假缺货的成本是少卖，可度量、可追回；\n   假有货的成本是收钱不发货 ⇒ 触发 48 小时发货赔付 + 缺货处置流程 + 消费者投诉，\n   且**发现时刻远晚于发生时刻**。所以投影的偏差要按方向分别设阈值。）\n2. `lag` 怎么量出来？（它是同步通道的端到端滞后分布，不是常数：\n   用\"调整单受理时刻 → 投影生效时刻\"的差值分位数，按商家分桶（大商家的队列更长）。\n   题面把它写成一个常数**是出题假设**，真实系统里它必须是个分布 + 上界告警。）\n3. 只有这两个账本够吗？（不够。还需要**第三条**：商家 ERP 的口径快照。\n   两本账对不上只能知道\"有偏差\"，三本账才能定位是\"同步没到\"还是\"商家改了没上报\"。\n   这就是官方为什么给调整单（`move_order_sn` 唯一）而不只给一个库存查询接口。）\n4. 怎么在不放宽窗口的前提下把偏差压小？（把占用做成\"预扣 + 最后一步确认前再校验一次真库存\"：\n   校验失败的单走缺货处置而不是硬发。代价是每单多一次读，收益是假有货被挡在支付前。）\n5. 这个 SLI 该挂在哪？（挂成两个数：**投影准确率**（`|proj-real| / real` 的分布）\n   与**发货前重算拦截率**。前者是通道健康度，后者是止损有效性 ——\n   只看第一个会漏掉\"偏差一直在但从来没被拦住\"。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] phantomStock(int stock, int lag, int[][] ops)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  public static int[] phantomStock(int stock, int lag, int[][] ops) {\n    if (stock < 0) throw new IllegalArgumentException(\"negative initial stock\");\n    if (lag < 0) throw new IllegalArgumentException(\"negative lag\");\n\n    List<long[]> pending = new ArrayList<>();   // [applyIndex, kind, qty]\n    long real = stock, proj = stock;\n    long peak = 0, oversold = 0;\n    int rejected = 0;\n\n    for (int i = 0; i < ops.length; i++) {\n      int[] op = ops[i];\n      if (op == null || op.length != 2) throw new IllegalArgumentException(\"op must be [kind, qty]\");\n      int kind = op[0];\n      long qty = op[1];\n      if (kind < 1 || kind > 4) throw new IllegalArgumentException(\"unknown op kind\");\n      if (qty < 0) throw new IllegalArgumentException(\"negative qty\");\n\n      proj = flush(pending, i, proj);           // 1) 到期的异步更新先落到投影\n\n      if (kind == 1) {                          // 2) 占用：同步扣镜像\n        if (proj < qty) {\n          rejected++;\n        } else {\n          long backed = Math.min(qty, Math.max(real, 0));\n          oversold += qty - backed;\n          proj -= qty;\n          real -= qty;\n        }\n      } else {\n        if (kind == 2) real += qty;\n        else if (kind == 3) real -= qty;\n        else real = qty;\n        pending.add(new long[] {(long) i + lag, kind, qty});\n      }\n\n      proj = flush(pending, i, proj);           // 3) lag == 0 时同一时刻就要落地\n      peak = Math.max(peak, proj - real);       // 4) 假有货峰值\n    }\n    return new int[] {(int) peak, (int) oversold, rejected};\n  }\n\n  /** 把 apply_index <= at 的异步更新落到投影上，返回新的 proj；没到期的留在队列里。 */\n  private static long flush(List<long[]> pending, int at, long proj) {\n    List<long[]> keep = new ArrayList<>();\n    for (long[] p : pending) {\n      if (p[0] <= at) {\n        int kind = (int) p[1];\n        long qty = p[2];\n        if (kind == 2) proj += qty;\n        else if (kind == 3) proj -= qty;\n        else proj = qty;                        // kind == 4：绝对值覆盖\n      } else {\n        keep.add(p);\n      }\n    }\n    pending.clear();\n    pending.addAll(keep);\n    return proj;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"把投影当库存\"版：只维护一个数，异步通道 = 不存在。\n  // 症状是\"我们库存扣得好好的，怎么会超卖\"—— 因为屏幕上的数从来不是货架上的数。\n  public static int[] phantomStock(int stock, int lag, int[][] ops) {\n    long proj = stock;\n    int rejected = 0;\n    for (int[] op : ops) {\n      long qty = op[1];\n      if (op[0] == 1) {\n        if (proj < qty) rejected++;\n        else proj -= qty;\n      } else if (op[0] == 2) {\n        proj += qty;\n      } else if (op[0] == 3) {\n        proj -= qty;\n      } else {\n        proj = qty;\n      }\n    }\n    return new int[] {0, 0, rejected};   // 假有货与超卖永远是 0：这道题根本没建模真库存\n  }\n}"
+  },
+  "estimatedMinutes": 26,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（交易/库存方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制（\"平台不控制商品，库存是商家系统的镜像\"＋`pdd.stock.ware.move` 的 `move_direction=3 库存同步` 官方枚举＋考点 1「投影落后于真库存时宁可假缺货不能假有货」；素材只给结论，未给可判分的双账本模型）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.108Z"
+  }
+}

@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0010",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实现不可能表达非法状态的 Result 工具层",
+  "statement": "## 场景\n\n支付网关的调用层今天长这样：`{ success?: boolean; data?: any; message?: string }`——三个可选字段互相矛盾（`success: true` 却带 `message`），全链路到处 `if (res.data)`。有次线上事故是**金额为 0 的合法结果**被当成失败（真值判断），另一类是 `Promise.reject(undefined)` 直接把 `message` 读崩。你要把它换成不可能表达非法状态的建模，并把工具函数写全。\n\n## 契约（提交写在 `Solution.tsx`；本题纯逻辑，不渲染 DOM）\n\n```tsx\nexport interface Ok<T> { readonly ok: true; readonly value: T }\nexport interface Err<E> { readonly ok: false; readonly error: E }\nexport type Result<T, E> = Ok<T> | Err<E>;\n\nexport interface NormalizedError {\n  readonly kind: 'error' | 'value' | 'unknown';\n  readonly message: string;\n  readonly raw: unknown;\n}\n\nexport function ok<T>(value: T): Ok<T>;\nexport function err<E>(error: E): Err<E>;\nexport function unwrapOr<T, E>(res: Result<T, E>, fallback: T): T;\nexport function map<T, U, E>(res: Result<T, E>, fn: (value: T) => U): Result<U, E>;\nexport function andThen<T, U, E>(res: Result<T, E>, fn: (value: T) => Result<U, E>): Result<U, E>;\nexport function combineAll<T, E>(list: readonly Result<T, E>[]): Result<T[], E>;\nexport function fromPromise<T>(promise: Promise<T>): Promise<Result<T, NormalizedError>>;\nexport function matchResult<T, E, R>(res: Result<T, E>, arms: { ok: (value: T) => R; err: (error: E) => R }): R;\n```\n\n## 逐条要求（判题只跑运行时，但请把类型按上面的签名写对——类型是这份代码的文档）\n\n1. **判别式唯一**：分支只看 `ok === true / false`，绝不用 `value` 的真假。`ok(0)`、`ok('')`、`ok(null)`、`ok(undefined)` 都是成功。\n2. `combineAll`：空数组 → `ok([])`；否则**按序**收集 value，遇到第一个 Err **立刻返回**，不许再读后面的元素（测试用 getter 探针监视越界访问，读一次就判负）。\n3. `map` / `andThen` 对 Err 直通（把**同一个** Err 对象原样返回，不许重新包一层——测试断言引用相等）。\n4. `fromPromise`：成功 → `ok(value)`；失败 → `err(normalize(raw))`，`raw` 是抛出的原值（`toBe` 断言）。归一化规则：`Error` 实例 → `kind: 'error'`、`message = raw.message || raw.name`；`undefined`/`null` → `kind: 'unknown'`、`message = 'unknown rejection'`；字符串 → `kind: 'value'`、`message` 就是它本身；其它对象若有字符串 `message` 用它，否则 `String(raw)`。**绝不许 `reason.message` 直接取值**。\n5. `matchResult`：两个分支都调对应回调；若传进来的 `ok` 字段不是布尔（说明上游契约破了），返回字符串 `unreachable`（类型层请用 `x satisfies never` 兜底，运行时也必须可观察）。\n\n## 不许做什么\n\n- 不许用 `any`、`as`（`as const` 除外）、非空断言 `!` 来绕过判别式；\n- 不许引入 zod/neverthrow 等库（沙箱不 `npm install`）；\n- 不许把 `combineAll` 写成 `Promise.all` 风格的全遍历（短路是判分点）；\n- 不许用异常表达业务失败（`throw` 只留给程序性 bug）。\n\n## 判分\n\n7 个用例：零值/空值成功分支、空数组 combineAll、短路探针、超大列表保序与引用不变、Err 直通与错误原值、reject 归一化三分支、matchResult 穷尽与 unreachable。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:ts-strict-modeling",
+    "discriminated-union",
+    "totality",
+    "error-normalization",
+    "pure-functions"
+  ],
+  "cases": [
+    {
+      "name": "空与零值成功分支仍算成功",
+      "input": {
+        "oks": [
+          0,
+          "",
+          null
+        ]
+      },
+      "expected": "unwrapOr 分别返回 0 / '' / null；map(ok(0), n=>n+1) = {ok:true,value:1}",
+      "note": "真值判断代替判别式是最常见的错法"
+    },
+    {
+      "name": "combineAll 空数组返回 ok 空数组",
+      "input": {
+        "list": []
+      },
+      "expected": "ok=true 且 value.length=0；[ok(1),ok(2)] 也返回 ok"
+    },
+    {
+      "name": "combineAll 短路且不再读后续元素",
+      "input": {
+        "list": [
+          "ok(1)",
+          "err('first')",
+          "getter 探针",
+          "err('third')"
+        ]
+      },
+      "expected": "返回 err('first')，探针数组为 []（第 3 项的 getter 一次都没被读）"
+    },
+    {
+      "name": "超大列表 combineAll 保序且引用不变",
+      "input": {
+        "oks": 1000,
+        "plusTailErr": true
+      },
+      "expected": "value.length=1000 且元素引用与输入一致；尾部塞一个 Err 时返回该 Err"
+    },
+    {
+      "name": "失败原因原样透传且 andThen 对 Err 直通",
+      "input": {
+        "err": {
+          "code": "RATE_LIMITED"
+        }
+      },
+      "expected": "andThen(err, fn) 返回同一个对象（toBe），回调未被调用；ok 分支正常链式"
+    },
+    {
+      "name": "reject undefined 时归一化且不含 undefined 文案",
+      "input": {
+        "rejects": [
+          "undefined",
+          "'boom-string'",
+          "new Error(\"real one\")"
+        ]
+      },
+      "expected": "kind 分别 unknown/value/error，message 分别 'unknown rejection'/'boom-string'/'real one'，raw toBe 原值"
+    },
+    {
+      "name": "matchResult 按判别式穷尽两个分支",
+      "input": {
+        "illegal": "{ ok: \"not-a-boolean\" }"
+      },
+      "expected": "ok/err 分支各自命中；非法判别式返回 'unreachable'"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "result.test.tsx",
+        "content": "import { vi } from 'vitest';\nimport { expect, it } from 'vitest';\nimport { andThen, combineAll, err, fromPromise, map, ok, unwrapOr } from './Solution';\nimport { matchResult } from './Solution';\n\nit('空与零值成功分支仍算成功', () => {\n  expect(unwrapOr(ok(0), -1)).toBe(0);\n  expect(unwrapOr(ok(''), 'fallback')).toBe('');\n  expect(unwrapOr(ok(null), 'fallback')).toBe(null);\n  expect(unwrapOr(err('nope'), 'fallback')).toBe('fallback');\n  expect(map(ok(0), (n) => n + 1)).toEqual({ ok: true, value: 1 });\n});\n\nit('combineAll 空数组返回 ok 空数组', () => {\n  const res = combineAll([]);\n  expect(res.ok).toBe(true);\n  expect(res.ok ? res.value.length : -1).toBe(0);\n  expect(combineAll([ok(1), ok(2)]).ok).toBe(true);\n});\n\nit('combineAll 短路且不再读后续元素', () => {\n  const probes: number[] = [];\n  const lazy = {\n    get ok() {\n      probes.push(1);\n      return false;\n    },\n    get error() {\n      probes.push(2);\n      return 'never';\n    },\n  };\n  const list = [ok(1), err('first'), lazy, err('third')];\n  const res = combineAll(list);\n  expect(res.ok).toBe(false);\n  expect(!res.ok ? res.error : null).toBe('first');\n  expect(probes).toEqual([]);\n});\n\nit('超大列表 combineAll 保序且引用不变', () => {\n  const items = Array.from({ length: 1000 }, (_unused, i) => ok({ id: i }));\n  const res = combineAll(items);\n  expect(res.ok).toBe(true);\n  if (res.ok) {\n    expect(res.value.length).toBe(1000);\n    expect(res.value[999]).toBe(items[999].ok ? items[999].value : null);\n  }\n  const withErr = items.slice(0, 999).concat([err('tail')]);\n  const res2 = combineAll(withErr);\n  expect(!res2.ok ? res2.error : null).toBe('tail');\n});\n\nit('失败原因原样透传且 andThen 对 Err 直通', () => {\n  const marker = { code: 'RATE_LIMITED', retryable: true };\n  const res = andThen(err(marker), vi.fn(() => ok(1)));\n  expect(res.ok).toBe(false);\n  expect(!res.ok ? res.error : null).toBe(marker);\n  expect(andThen(ok(2), (n) => ok(n * 10))).toEqual({ ok: true, value: 20 });\n  expect(andThen(ok(2), () => err('stop')).ok).toBe(false);\n});\n\nit('reject undefined 时归一化且不含 undefined 文案', async () => {\n  const res = await fromPromise(Promise.reject(undefined));\n  expect(res.ok).toBe(false);\n  if (!res.ok) {\n    expect(res.error.kind).toBe('unknown');\n    expect(res.error.message).toBe('unknown rejection');\n    expect(res.error.raw).toBe(undefined);\n  }\n  const res2 = await fromPromise(Promise.reject('boom-string'));\n  if (!res2.ok) {\n    expect(res2.error.kind).toBe('value');\n    expect(res2.error.message).toBe('boom-string');\n  }\n  const res3 = await fromPromise(Promise.reject(new Error('real one')));\n  if (!res3.ok) {\n    expect(res3.error.kind).toBe('error');\n    expect(res3.error.message).toBe('real one');\n  }\n  const res4 = await fromPromise(Promise.resolve(42));\n  expect(res4.ok ? res4.value : null).toBe(42);\n});\n\nit('matchResult 按判别式穷尽两个分支', () => {\n  const arms = { ok: (v: number) => 'ok:' + v, err: (e: string) => 'err:' + e };\n  expect(matchResult(ok(7), arms)).toBe('ok:7');\n  expect(matchResult(err('bad'), arms)).toBe('err:bad');\n  expect(\n    matchResult({ ok: 'not-a-boolean' } as never, arms),\n  ).toBe('unreachable');\n});\n"
+      }
+    ],
+    "timeoutMs": 30000,
+    "referenceSolution": "/**\n * Result 建模：ok 字段是唯一判别式（不是\"有没有 value\"），\n * 所以 ok(null) / ok(0) / ok('') 都是成功分支。\n */\nexport interface Ok<T> {\n  readonly ok: true;\n  readonly value: T;\n}\n\nexport interface Err<E> {\n  readonly ok: false;\n  readonly error: E;\n}\n\nexport type Result<T, E> = Ok<T> | Err<E>;\n\nexport interface NormalizedError {\n  readonly kind: 'error' | 'value' | 'unknown';\n  readonly message: string;\n  readonly raw: unknown;\n}\n\nexport const ok = <T,>(value: T): Ok<T> => ({ ok: true, value });\n\nexport const err = <E,>(error: E): Err<E> => ({ ok: false, error });\n\nexport function unwrapOr<T, E>(res: Result<T, E>, fallback: T): T {\n  return res.ok ? res.value : fallback;\n}\n\nexport function map<T, U, E>(res: Result<T, E>, fn: (value: T) => U): Result<U, E> {\n  return res.ok ? ok(fn(res.value)) : res;\n}\n\nexport function andThen<T, U, E>(res: Result<T, E>, fn: (value: T) => Result<U, E>): Result<U, E> {\n  return res.ok ? fn(res.value) : res;\n}\n\n/** 顺序短路：遇到第一个 Err 立刻返回，绝不读后续元素（getter 探针会抓到越界访问）。 */\nexport function combineAll<T, E>(list: readonly Result<T, E>[]): Result<T[], E> {\n  const values: T[] = [];\n  for (const item of list) {\n    if (!item.ok) return item;\n    values.push(item.value);\n  }\n  return ok(values);\n}\n\n/** catch 到的永远是 unknown：不许当 Error 用，也不许把 undefined 写成 message。 */\nexport function normalizeError(raw: unknown): NormalizedError {\n  if (raw instanceof Error) return { kind: 'error', message: raw.message || raw.name, raw };\n  if (raw === undefined || raw === null) return { kind: 'unknown', message: 'unknown rejection', raw };\n  if (typeof raw === 'string') return { kind: 'value', message: raw, raw };\n  const maybe = raw as { message?: unknown };\n  if (typeof maybe.message === 'string') return { kind: 'value', message: maybe.message, raw };\n  return { kind: 'value', message: String(raw), raw };\n}\n\nexport function fromPromise<T>(promise: Promise<T>): Promise<Result<T, NormalizedError>> {\n  return promise.then(\n    (value) => ok(value),\n    (reason: unknown) => err(normalizeError(reason)),\n  );\n}\n\ntype Arms<T, E, R> = { ok: (value: T) => R; err: (error: E) => R };\n\n/** 穷尽：两个分支都必须给；判别式不是 boolean 时走 unreachable（配 satisfies never 在类型层兜底）。 */\nexport function matchResult<T, E, R>(res: Result<T, E>, arms: Arms<T, E, R>): R {\n  const flag = (res as { ok?: unknown }).ok;\n  if (flag === true) return arms.ok((res as Ok<T>).value);\n  if (flag === false) return arms.err((res as Err<E>).error);\n  const exhausted: never = flag as never;\n  void exhausted;\n  return 'unreachable' as unknown as R;\n}\n",
+    "naiveSolution": "export const ok = (value) => ({ ok: true, value });\nexport const err = (error) => ({ ok: false, error });\n\nexport function unwrapOr(res, fallback) {\n  // 用真值判断代替判别式：ok(0) / ok('') / ok(null) 全被误判为失败\n  return res.value ? res.value : fallback;\n}\n\nexport function map(res, fn) {\n  return res.value ? ok(fn(res.value)) : res;\n}\n\nexport function andThen(res, fn) {\n  return res.value ? fn(res.value) : res;\n}\n\nexport function combineAll(list) {\n  const values = [];\n  let firstError = null;\n  for (const item of list) {\n    if (item.value === undefined) {\n      if (!firstError) firstError = err(item.error);\n    } else {\n      values.push(item.value);\n    }\n  }\n  return firstError ?? ok(values);\n}\n\nexport function fromPromise(promise) {\n  return promise.then((value) => ok(value), (reason) => err({ kind: 'error', message: reason.message, raw: reason }));\n}\n\nexport function matchResult(res, arms) {\n  return res.value !== undefined ? arms.ok(res.value) : arms.err(res.error);\n}\n"
+  },
+  "answer": "参考要点：\n- 建模的收益是\"少一个状态\"：4 个 boolean 有 16 种组合，`Ok | Err` 只有 2 种；可选字段的组合爆炸会在调用处变成一堆 `if`，而且每处都可以写错（`res.value ? ...` 就是把 0/''/null 当失败的那一类）。\n- `combineAll` 的短路要用 `for...of` + 提前 `return`，`Array.prototype.every` 也行；`map/filter` 一定遍历完（getter 探针会立刻暴露）。为什么要紧：错误对象常带副作用（已发起的请求、日志计数）。\n- `catch` 到的值是 `unknown`（TS 4.4+ 的 `useUnknownInCatchVariables`）：`reason.message` 直接取会在 `Promise.reject(undefined)` 上崩，这正是线上那类二次事故。归一化要保留 `raw`，否则排障时丢失业务码。\n- 穷尽性靠类型层（`satisfies never` + 分支返回）+ 运行时兜底（返回 'unreachable' 或抛契约错误）两层；只写前者在 JS 边界（后端脏数据、第三方库）会漏。\n- TS 5.7+ 的 `noUncheckedIndexedAccess` 会改变 `values[i]` 的类型；这套工具里任何下标访问都该走 `for...of` 或显式判空。\n\n面试追问：\n1. 为什么 `err` 也要 `toBe` 同一对象引用而不是重建？（重建会丢 `raw` 的引用相等、且让错误对象上的堆栈/业务码失效）\n2. `Result<T, E>` 的 E 要不要固定成 `NormalizedError`？（不固定：不同层的错误语义不同；跨边界才归一化）\n3. 想要\"多个错误一起返回\"怎么改 combineAll？（加 `combineSettled`/`validateAll` 变体，别改语义已定死的短路版）\n4. 这套东西 React 19 里怎么用？（`fromPromise` 的结果交给 `use()`：reject 冒泡到边界，`ok/err` 的判别式决定降级 UI，见 0003/0009）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/typescript-strict-modeling.md#12-建模判别联合优先于旗标",
+    "addedBy": "content-agent-fe"
+  }
+}

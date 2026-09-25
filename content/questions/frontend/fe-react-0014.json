@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0014",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "同比徽章：分母为 0、本期归零与缺失，三件事不许渲染成同一个样子",
+  "statement": "## 背景\n\n指标卡旁边那个\"同比 +12.5%\"的小徽章，是看板事故率最高的组件之一 —— 因为它的分母经常是 0。\n\n你要实现 `DeltaBadge`：给定本期值与上期值，渲染变化幅度。\n\n## 契约\n\n```tsx\nexport interface DeltaBadgeProps {\n  current: number | null;    // null = 这一期没有数据\n  previous: number | null;   // null = 上期没有数据\n}\n\nexport function DeltaBadge(props: DeltaBadgeProps): JSX.Element;\n```\n\n根元素必须是 `<span data-testid=\"delta-badge\" data-kind=\"…\">`，`data-kind` 只能取\n`missing` / `flat` / `new` / `dropped` / `change` 五个值之一；文本规则如下：\n\n| 条件（按顺序匹配） | `data-kind` | 文本 |\n| --- | --- | --- |\n| 任一为 `null` | `missing` | `无对比` |\n| `current === previous`（含两者都是 0） | `flat` | `持平` |\n| `previous === 0`（本期非 0） | `new` | `新增` |\n| `current === 0`（上期非 0） | `dropped` | `-100%` |\n| 其余 | `change` | 带符号、保留 1 位小数的百分比，如 `+12.5%` / `-8.3%` |\n\n## 这题真正考的东西\n\n1. **除零不能露到界面上**。`(current - previous) / previous` 在 `previous === 0` 时给出\n   `Infinity` 或 `NaN`，`toFixed` 会老老实实渲染成 `Infinity%` / `NaN%`。\n   但\"上期是 0\"在遥测里是常态（新指标、新地区、刚上线的功能），\n   它表达的是**新增**，不是\"无穷倍增长\" —— 后者会让人对数据失去信任。\n2. **本期归零是有效信号，不是缺失**。`current === 0` 必须走 `dropped` 分支显示 `-100%`；\n   写成 `if (!current)` 的实现会把它当成\"没数据\"渲染成\"无对比\" ——\n   于是\"服务全天不可用\"这种最该被看见的事实在看板上长得像\"还没出数\"。\n3. **`null` 与 `0` 是两件事**（与本题的 `dropped` 分支互为对照）：\n   `null` 走 `missing`，`0` 走 `dropped`/`flat`。\n4. **舍入位数是口径**：要求 1 位小数，`-8.3%` 不许被 `toFixed(0)` 抹成 `-8%`。\n   同比数字被截到整数后，\"跌幅 0.4%\"这类慢变化在看板上永远看不见。\n\n不许引入第三方依赖。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "divide-by-zero",
+    "null-vs-zero",
+    "metric-presentation",
+    "rendering-contract",
+    "modern:observability-ui"
+  ],
+  "cases": [
+    {
+      "name": "正常增长渲染带符号的一位小数",
+      "input": {
+        "current": 112.5,
+        "previous": 100
+      },
+      "expected": "data-kind='change'，文本 '+12.5%'",
+      "visible": true
+    },
+    {
+      "name": "正常下降保留一位小数",
+      "input": {
+        "current": 91.7,
+        "previous": 100
+      },
+      "expected": "data-kind='change'，文本 '-8.3%'（不是 -8%）",
+      "visible": true,
+      "note": "toFixed(0) 的实现会把它抹成 -8%，慢变化就此隐形"
+    },
+    {
+      "name": "持平：两期相等，含两期都是 0",
+      "input": [
+        {
+          "current": 100,
+          "previous": 100
+        },
+        {
+          "current": 0,
+          "previous": 0
+        }
+      ],
+      "expected": "两种都 data-kind='flat'、文本 '持平'",
+      "visible": true,
+      "note": "分支顺序错了会把 (0,0) 判成\"新增\""
+    },
+    {
+      "name": "上期为 0 是\"新增\"，不许渲染成 Infinity%",
+      "input": {
+        "current": 7,
+        "previous": 0
+      },
+      "expected": "data-kind='new'，文本 '新增'",
+      "visible": true
+    },
+    {
+      "name": "本期归零是 -100%，不许当成缺失",
+      "input": {
+        "current": 0,
+        "previous": 50
+      },
+      "expected": "data-kind='dropped'，文本 '-100%'",
+      "visible": true,
+      "note": "if (!current) 的写法会把\"全天不可用\"显示成\"还没出数\""
+    },
+    {
+      "name": "任一缺失渲染无对比，不参与算术",
+      "input": [
+        {
+          "current": null,
+          "previous": 50
+        },
+        {
+          "current": 50,
+          "previous": null
+        }
+      ],
+      "expected": "两种都 data-kind='missing'、文本 '无对比'",
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案要点\n\n五分支顺序匹配：`null` → 相等 → 上期为 0 → 本期为 0 → 正常百分比。\n关键点不在代码量，而在**每一条分支都对应一种\"数字不该出现\"的情形**。\n\n**为什么分支顺序不能换**：`current === previous` 必须排在 `previous === 0` 之前，\n否则 `(0, 0)` 会被判成\"新增\"—— 而它的意思是\"两期都没有\"。这类边界顺序在评审里几乎看不出，\n只有把规则写成表、再逐条测才能钉住。\n\n**`Infinity` 与 `NaN` 为什么会活下来**：`toFixed` 对它们不报错，直接输出字符串。\n所以\"渲染没崩\"不等于\"数字对\" —— 这也是本题用 `data-kind` 而不是只测文本的原因：\n断言文本会漏掉\"看起来像那么回事但语义错了\"的实现。\n\n**为什么 `current === 0` 不能走 `missing`**：`if (!current)` 是最顺手的写法，\n它把\"全天零可用\"和\"还没出数\"合并成同一个显示。真实事故里这两种情况的操作完全不同\n（前者拉告警，后者等管道），合并等于把最严重的信号降级成\"再等等看\"。\n\n**工程延伸（面试追问点）**\n\n1. 上期是 0 但本期也是 0，指标其实\"从未上线\" —— 界面上该区分吗？（该，但那不是这个组件的职责：\n   \"有没有历史\"是元数据，应该由数据层带下来。把元数据塞进算术分支会让两者都无法单测。）\n2. 大分母下 1 位小数够吗？（`previous = 1` 时 `+300.0%` 有意义；`previous = 1e9` 时\n   `+0.0%` 会掩盖真实存在的 12 万增量。生产做法是**按相对量级切换精度**，\n   或者同时给出绝对差值 —— 只给百分比的看板一定会误导人。）\n3. 同比 vs 环比 vs 基线？（三个不同的参照系，混用是\"数字对不上\"的头号来源。\n   组件应该只接两个数，参照系由上层算好传进来 —— 本题的契约正是为此而窄。）\n4. 怎么防止这类组件被各团队重写一遍？（把它做成设计系统里的唯一出口，\n   并把上面那张分支表变成共享测试夹具 —— 重复实现的代价不是工作量，是口径漂移。）",
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "delta-badge.test.tsx",
+        "content": "import { render, screen } from '@testing-library/react';\nimport { describe, expect, it } from 'vitest';\nimport { DeltaBadge } from './Solution';\n\nconst badge = () => screen.getByTestId('delta-badge');\nconst kind = () => badge().getAttribute('data-kind');\nconst text = () => badge().textContent;\n\ndescribe('DeltaBadge：除零、归零与缺失必须是三种不同的样子', () => {\n  it('正常增长渲染带符号的一位小数', () => {\n    render(<DeltaBadge current={112.5} previous={100} />);\n    expect(kind()).toBe('change');\n    expect(text()).toBe('+12.5%');\n  });\n\n  it('正常下降保留一位小数', () => {\n    render(<DeltaBadge current={91.7} previous={100} />);\n    expect(kind()).toBe('change');\n    expect(text()).toBe('-8.3%');\n  });\n\n  it('持平：两期相等，含两期都是 0', () => {\n    const { unmount } = render(<DeltaBadge current={100} previous={100} />);\n    expect(kind()).toBe('flat');\n    expect(text()).toBe('持平');\n    unmount();\n    render(<DeltaBadge current={0} previous={0} />);\n    expect(kind()).toBe('flat');\n    expect(text()).toBe('持平');\n  });\n\n  it('上期为 0 是\"新增\"，不许渲染成 Infinity%', () => {\n    render(<DeltaBadge current={7} previous={0} />);\n    expect(kind()).toBe('new');\n    expect(text()).toBe('新增');\n  });\n\n  it('本期归零是 -100%，不许当成缺失', () => {\n    render(<DeltaBadge current={0} previous={50} />);\n    expect(kind()).toBe('dropped');\n    expect(text()).toBe('-100%');\n  });\n\n  it('任一缺失渲染无对比，不参与算术', () => {\n    const { unmount } = render(<DeltaBadge current={null} previous={50} />);\n    expect(kind()).toBe('missing');\n    expect(text()).toBe('无对比');\n    unmount();\n    render(<DeltaBadge current={50} previous={null} />);\n    expect(kind()).toBe('missing');\n    expect(text()).toBe('无对比');\n  });\n});"
+      }
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 45000,
+    "referenceSolution": "interface DeltaBadgeProps {\n  current: number | null;\n  previous: number | null;\n}\n\nexport function DeltaBadge(props: DeltaBadgeProps) {\n  const { current, previous } = props;\n\n  // 顺序很重要：先判缺失，再判相等（含 0/0），最后才碰除零的两个特例\n  if (current === null || previous === null) {\n    return <span data-testid=\"delta-badge\" data-kind=\"missing\">无对比</span>;\n  }\n  if (current === previous) {\n    return <span data-testid=\"delta-badge\" data-kind=\"flat\">持平</span>;\n  }\n  if (previous === 0) {\n    return <span data-testid=\"delta-badge\" data-kind=\"new\">新增</span>;\n  }\n  if (current === 0) {\n    return <span data-testid=\"delta-badge\" data-kind=\"dropped\">-100%</span>;\n  }\n  const pct = ((current - previous) / previous) * 100;\n  return (\n    <span data-testid=\"delta-badge\" data-kind=\"change\">\n      {`${pct > 0 ? '+' : ''}${pct.toFixed(1)}%`}\n    </span>\n  );\n}",
+    "naiveSolution": "function DeltaBadge({ current, previous }: any) {\n  const pct = ((current - previous) / previous) * 100;\n  return <span data-testid=\"delta-badge\">{`${pct.toFixed(0)}%`}</span>;\n}\n\nexport { DeltaBadge };"
+  },
+  "estimatedMinutes": 16,
+  "source": {
+    "company": "Apple",
+    "role": "前端平台 / 数据可视化 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/apple-telemetry-pipelines.md §1.2 与 §9.2.2（非可加指标与\"给我三个数字\"）；手册未把\"除零与归零的呈现口径\"做成可判分契约",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T13:44:55.023Z"
+  }
+}

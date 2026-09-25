@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 1,
+  "id": "sys-rubric-0001",
+  "category": "system-design",
+  "difficulty": "principal",
+  "title": "对话与批量混跑的推理集群：PD 分离还是加机器",
+  "statement": "## 场景\n\n你在负责一个日均 20 亿次调用的大模型推理集群，模型是 600B 级 MoE、上下文常见 32K、\n线上同时跑**对话**（TTFT 敏感，P99 要求 < 1.5s）与**批量离线生成**（吞吐敏感，延迟不敏感）。\n\n当前是 colocated 部署：prefill 与 decode 在同一批 GPU 上，用 chunked prefill 混跑。\n监控显示两个症状同时恶化：\n\n- 对话请求的 TTFT P99 从 1.2s 涨到 4.8s；\n- 集群整体吞吐（token/s per GPU）只涨了 6%，远达不到业务方预期的\"加机器就线性扩\"。\n\n业务方给了两个选项让你拍板：**A. 全面改 PD 分离**（prefill 与 decode 各占独立 GPU 池，\n中间用高速网络传 KV）；**B. 继续 colocated，只加机器 + 调 chunk 大小**。\n\n## 请回答\n\n1. 你选哪个？给出**判断依据**而不是立场 —— 什么信号出现时 A 对、什么信号出现时 B 对。\n2. 如果选 A：KV 传输会成为新瓶颈。请**定量**估算一次 32K 上下文的 KV 有多大、\n   走什么网络能不被传输拖死，说清你的算法。\n3. 如果选 A：池间容量配比怎么定？随流量结构变化怎么调？\n4. 两种方案各自的**故障模式**是什么（选 A 之后新出现的、B 下就有的），以及怎么提前发现。",
+  "judgeKind": "llm-rubric",
+  "tags": [
+    "llm-inference",
+    "gpu-scheduling",
+    "capacity-planning",
+    "quantitative-reasoning",
+    "modern:pd-disaggregation"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "瓶颈假设验证",
+        "weight": 3,
+        "criteria": "是否先给出\"如何证明 prefill/decode 互相阻塞是当前瓶颈\"的可执行判据（如把 chunked prefill 预算调 0 复测），而不是直接选边"
+      },
+      {
+        "label": "选型判据完整",
+        "weight": 2,
+        "criteria": "是否分别给出该选 A 与该选 B 的信号，且包含\"网络不具备条件则方案不成立\"这类否决项"
+      },
+      {
+        "label": "KV 量级估算",
+        "weight": 3,
+        "criteria": "是否写出 KV 字节数公式并算到 32K 上下文 GB 量级，再换算到具体网络带宽下的耗时；数量级正确即可，配置假设合理即可"
+      },
+      {
+        "label": "配比与弹性",
+        "weight": 1,
+        "criteria": "是否说明池间比例随流量结构漂移、借用粒度受并行度整除约束"
+      },
+      {
+        "label": "新故障模式与可观测",
+        "weight": 1,
+        "criteria": "是否点出跨池部分失败这一 A 特有的难查问题及其观测手段"
+      }
+    ],
+    "notes": "量化部分只看数量级与算法，不要求精确到小数；若只背概念、无任何数字，第 3 项按 0 分。"
+  },
+  "answer": "## 参考答案要点\n\n**1. 选型判据（考的是\"用信号决策\"而不是背概念）**\n\nPD 分离的收益本质来自一件事：**prefill 是算力密集（compute-bound）、decode 是带宽密集（memory-bound），\n两者混跑时互相拖累** —— 一个长 prefill 会把同批 decode step 拖慢（TTFT 抖动的直接来源），\n而 decode 的低算术强度又让 SM 利用率在上一个 prefill 到来前空转。\n\n- 该选 **A** 的信号：TTFT 与 TPOT 的**相关性高**（说明互相阻塞）；prefill token 数方差大（长文档混短对话）；\n  有明确的 SLO 分层（对话/批量混跑）；单池 GPU 利用率已经高但吞吐不再涨。\n- 该选 **B** 的信号：请求长度分布很窄（没有大 prefill 拖尾）；集群规模小（分离后两池各自主张\n  并行度，小池子会因为无法整除 TP 度数而浪费）；**网络不具备 RDMA/高带宽条件** —— 这一条常常是否决项；\n  或者瓶颈其实在调度/显存碎片而非 prefill-decode 互相阻塞（此时分离不解决问题，只是把瓶颈搬了个家）。\n\n关键：**先证明\"互相阻塞\"确实是当前瓶颈**，再谈分离。判据是看 decode step 时间的分布是否被\nprefill 批次大小显著解释（把 chunked prefill 的 token 预算调到 0 再测一次 TTFT/TPOT，\n若立刻改善，则阻塞假设成立）。跳过这一步直接上分离，是这类项目最常见的失败方式。\n\n**2. KV 传输量的定量估算（考\"能不能现场算数量级\"）**\n\n算法：`KV 字节 ≈ 2(K 与 V) × 层数 × KV head 数 × head 维度 × 序列长度 × 字节数`。\n以 600B 级 MoE 常见的 GQA 配置为例（61 层、KV head 8、head dim 128、FP16）：\n\n- 每 token 每层 K+V = 2 × 8 × 128 × 2B = 4096 B = 4KB\n- 每 token 全层 = 4KB × 61 ≈ **244KB**\n- 32K 上下文 ≈ 244KB × 32768 ≈ **8GB**\n\n8GB 走什么网络：25GbE（≈3GB/s）要 2.7s —— 比省下的排队时间还多，**方案直接不成立**；\n100GbE 单向 ≈12GB/s → 0.67s，勉强；**400Gb/s 级 RoCE/IB** ≈ 50GB/s → 0.16s，可接受。\n所以\"PD 分离能不能上\"的第一道硬门槛是**网络代际**，不是调度器写得多好。\n\n加分点：① MLA 这类低秩 KV 压缩能把上面的 244KB/token 显著压低（DeepSeek-V2/V3 的路线），\n传输可行性直接受益 —— 说明\"模型结构选择\"与\"系统架构选择\"不是独立决策；\n② 分层传输（先传 prompt 前缀的块、边算边传）与复用已有 prefix cache 可以只传增量；\n③ 若两阶段在同一台机器的不同 GPU 上，走 NVLink 比走网络低一个数量级，这是\"同机分离\"\n比\"跨机分离\"容易落地的根本原因。\n\n**3. 池间配比**\n\n配比由 `prefill 算力需求 : decode 带宽需求` 决定，而这个比例**随流量结构漂移**\n（产品上线一个长文档功能，prefill 侧需求可能一夜翻倍）。所以：\n- 冷启动用离线回放压测标定\"每万 QPS 对话流量需要多少 prefill 卡 / 多少 decode 卡\"；\n- 在线用两池队列长度做反馈（prefill 队列堆积 → 从 decode 池借卡），**但借用单位必须是\n  可整除的最小并行度**（TP 度数），否则借来的卡跑不了这个模型；\n- 设冷却窗口与最小保有量，避免震荡；批量离线任务是最好的\"缓冲垫\"——它可以被随时挤压来吸收波动。\n\n**4. 故障模式对比**\n\n| | colocated（B） | PD 分离（A）新增 |\n| --- | --- | --- |\n| 典型故障 | 一个大 prefill 拖垮全批 TTFT；chunk 大小两难 | KV 传输失败/超时 → 请求半路死；两池配比失衡 → 一侧空转一侧排队 |\n| 隐蔽性 | 症状直接（TTFT 抖） | **跨池故障难归因**：prefill 成功、decode 收到坏 KV 块，表现为输出乱码而非报错 |\n| 提前发现 | 按 prompt 长度分桶看 TTFT/TPOT；decode step 时间分布 | 给 KV 传输加**校验和与序号**；单独埋点\"传输耗时/传输失败率/池间队列\"；混沌测试注入传输超时 |\n\nA 引入的最难查的一类问题：**部分失败**。prefill 池算完、传输中断、decode 池已占资源等待，\n请求既不成功也不失败地挂着。必须有端到端的租约/超时收敛机制，而不是靠两侧各自超时。\n\n**评分时最看重**：是否先验证瓶颈假设（而不是直接给立场）、KV 大小能否算对量级、\n是否点出\"网络代际是否决项\"、是否说清 A 的新故障模式。",
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "DeepSeek",
+    "role": "推理平台 技术专家 / Principal",
+    "location": "shanghai",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/DeepSeek后端Agent面试102题.txt#36,#37,#83（原文只讲静态 vs 连续批处理与网关分层，未覆盖 PD 分离这一 2025-2026 主线）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-20T16:17:14.754Z"
+  }
+}

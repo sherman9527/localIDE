@@ -1,0 +1,630 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0030",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "预订闸门：区间锁的归属、租约到期与 fencing token",
+  "statement": "## 背景\n\n旺季某城市出现超卖：同一个 `[入住, 退房)` 被两单占用。事后复盘发现写路径是\n**\"先查可订 → 再创建预订\"**，两步之间没有任何约束 —— 这是 TOCTOU 竞态的教科书形状。\n修复方向也是教科书的两句话：\n\n> **锁只是降低失败率的手段，正确性必须落在存储侧的约束上。**\n\n本题就考这两句话：你要实现一个单 listing 日历上的**区间锁 + 提交闸门**，\n按顺序重放一串操作，返回每个操作的成功/失败（`1` / `0`）。\n\n## 你要实现的入口\n\n```java\npublic static int[] replay(long[] nowSec, int[] op, int[] fromDay, int[] toDay,\n                           int[] reqId, int[] arg)\n```\n\n六个数组**按下标对齐**，`op` 取值：\n\n| op | 含义 | `arg` |\n| --- | --- | --- |\n| `0` LOCK | 尝试锁住 `[fromDay, toDay)` | 租约秒数，必须 `> 0` |\n| `1` RELEASE | 释放 `[fromDay, toDay)` 上自己持有的锁 | 必须 `0` |\n| `2` COMMIT | 用 `arg` 作为 fencing token 提交这一单 | token，`>= 0` |\n\n日期是\"第几天\"的整数下标，区间一律 **`[fromDay, toDay)` 半开**：\n`[10,15)` 与 `[15,20)` **不**重叠，`[10,15)` 与 `[14,16)` 重叠。\n\n## 闸门规则（逐条都是判分点）\n\n1. **处理第 i 个操作之前**，先丢弃所有 `expiry <= nowSec[i]` 的锁。\n   也就是说\"恰好在这一刻到期\"的锁**已经不算持有**。\n2. **LOCK**：\n   - 若本 `reqId` 已经持有一把与请求区间**重叠**的活锁 ⇒ **重入**：不新建锁，\n     而是把本方所有重叠锁的到期时刻续到 `nowSec + arg`，返回 `1`；\n   - 否则若**任何人**的活锁与之重叠 ⇒ `0`；\n   - 否则若与之重叠的区间里**已有成交**（committed booking）⇒ `0`（成交永久挡住新锁）；\n   - 否则登记一把新锁，到期时刻 `nowSec + arg`，返回 `1`。\n3. **RELEASE** 只准摘掉**本 `reqId` 自己**的锁：删除本方所有与请求区间重叠的活锁；\n   删掉了至少一把返回 `1`，一把都没删（例如区间里只有别人的锁）返回 `0`。\n   **任何情况下都不许动别人的锁，也不许动已成交的预订。**\n4. **COMMIT** 要同时满足两条才成功：\n   - 本 `reqId` 持有**一把**活锁**完整覆盖** `[fromDay, toDay)`\n     （`lock.from <= fromDay && toDay <= lock.to`）—— 两把相邻的锁**不算**覆盖；\n   - `arg` **严格大于**历史上已经提交过的最大 token（初始最大 token 视为 `0`）。\n   成功时：登记成交、摘掉本方所有与它重叠的活锁、把最大 token 更新为 `arg`、返回 `1`。\n   失败时：**什么都没发生** —— 不登记成交、不释放锁、不更新 token，返回 `0`。\n5. 输入非法一律抛 `IllegalArgumentException`：数组长度不一致、`nowSec` 逆序、\n   `reqId <= 0`、`fromDay >= toDay`（空区间是调用方的 bug，不是\"锁不住任何一天\"）、\n   未知 `op`、LOCK 的 `arg <= 0`、RELEASE 的 `arg != 0`、COMMIT 的 `arg < 0`。\n   六个数组都为空 ⇒ 返回空数组。\n\n## 这题真正考的东西\n\n- **\"先查再写\"不是解法**：本题没有查询接口，一切判定都必须在写的那一刻做出结论。\n- **锁的归属**：`RELEASE` 不带 owner 校验，就是把别人的锁删掉 —— 而它**不会报错**，\n  只会让超卖照旧发生、监控上锁一切正常。\n- **fencing token 不是可选装饰**：只判\"锁还在不在\"，挡不住\n  \"一个进程在锁里 GC 停顿、租约到期、别人接手成交之后它才醒来提交\"。\n- **提交失败必须是纯失败**：顺手把锁释放掉的实现，会把重试方永久挡在门外。\n\n不许引入第三方依赖。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "interval-lock",
+    "fencing-token",
+    "toctou",
+    "half-open-interval",
+    "modern:marketplace-integrity"
+  ],
+  "cases": [
+    {
+      "name": "基线：不重叠可并行，重叠即互斥",
+      "input": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          15,
+          12
+        ],
+        [
+          15,
+          20,
+          16
+        ],
+        [
+          1,
+          1,
+          2
+        ],
+        [
+          100,
+          100,
+          100
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "[10,15) 与 [15,20) 半开不相交；r2 的 [12,16) 撞 r1"
+    },
+    {
+      "name": "重入续期不新建：别人进不来",
+      "input": [
+        [
+          0,
+          0,
+          50,
+          70
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          15,
+          15,
+          15,
+          15
+        ],
+        [
+          1,
+          1,
+          1,
+          2
+        ],
+        [
+          60,
+          60,
+          60,
+          60
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "第 3 条把到期推到 110 ⇒ 70 时刻 r2 仍被挡（不续期的话 60 就放开了）"
+    },
+    {
+      "name": "租约正好到期：旧主提交失败，新主能锁能成交",
+      "input": [
+        [
+          0,
+          100,
+          100,
+          100
+        ],
+        [
+          0,
+          2,
+          0,
+          2
+        ],
+        [
+          10,
+          10,
+          10,
+          10
+        ],
+        [
+          15,
+          15,
+          15,
+          15
+        ],
+        [
+          1,
+          1,
+          2,
+          2
+        ],
+        [
+          100,
+          7,
+          100,
+          9
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        1,
+        1
+      ],
+      "visible": true,
+      "note": "expiry==100 ⇒ r1 在 100 时刻已经不算持有；用 < 的实现这里会给 1"
+    },
+    {
+      "name": "释放只动自己的锁：删不掉别人的，返回 0",
+      "input": [
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          1,
+          1,
+          2
+        ],
+        [
+          10,
+          20,
+          20,
+          10,
+          20
+        ],
+        [
+          15,
+          25,
+          25,
+          15,
+          25
+        ],
+        [
+          1,
+          2,
+          1,
+          1,
+          2
+        ],
+        [
+          100,
+          100,
+          0,
+          0,
+          4
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        1,
+        1
+      ],
+      "visible": true,
+      "note": "第 3 条 r1 去删 r2 的 [20,25) ⇒ 0，且 r2 随后仍能成交"
+    },
+    {
+      "name": "token 不增就被拒，而且失败必须是纯失败",
+      "input": [
+        [
+          0,
+          0,
+          0,
+          0,
+          5
+        ],
+        [
+          0,
+          0,
+          2,
+          2,
+          2
+        ],
+        [
+          10,
+          20,
+          10,
+          20,
+          20
+        ],
+        [
+          15,
+          25,
+          15,
+          25,
+          25
+        ],
+        [
+          1,
+          2,
+          1,
+          2,
+          2
+        ],
+        [
+          100,
+          100,
+          9,
+          4,
+          11
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        1,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "r2 用 token 4 提交失败（最大已是 9），锁留着 ⇒ 第二次用 11 还能成功"
+    },
+    {
+      "name": "已成交的区间永久挡住新锁",
+      "input": [
+        [
+          0,
+          0,
+          5,
+          5
+        ],
+        [
+          0,
+          2,
+          0,
+          0
+        ],
+        [
+          10,
+          10,
+          10,
+          20
+        ],
+        [
+          15,
+          15,
+          12,
+          25
+        ],
+        [
+          1,
+          1,
+          2,
+          3
+        ],
+        [
+          100,
+          3,
+          100,
+          100
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "r2 想锁 [10,12) 撞已成交 ⇒ 0；r3 的 [20,25) 不受影响 ⇒ 1"
+    },
+    {
+      "name": "相邻两把锁不能合并提交",
+      "input": [
+        [
+          0,
+          0,
+          5
+        ],
+        [
+          0,
+          0,
+          2
+        ],
+        [
+          10,
+          12,
+          10
+        ],
+        [
+          12,
+          15,
+          15
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          100,
+          100,
+          3
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "必须是\"一把锁完整覆盖\"，否则\"锁什么时候失效\"无法回答"
+    },
+    {
+      "name": "释放之后不许再提交",
+      "input": [
+        [
+          0,
+          0,
+          1
+        ],
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          10,
+          10,
+          10
+        ],
+        [
+          15,
+          15,
+          15
+        ],
+        [
+          1,
+          1,
+          1
+        ],
+        [
+          100,
+          0,
+          3
+        ]
+      ],
+      "expected": [
+        1,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "锁是提交资格的来源之一；删了就是放弃了这一单"
+    },
+    {
+      "name": "退化：没有任何操作",
+      "input": [
+        [],
+        [],
+        [],
+        [],
+        [],
+        []
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "非法：数组长度不一致",
+      "input": [
+        [
+          0,
+          1
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          1
+        ],
+        [
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：时间倒流",
+      "input": [
+        [
+          10,
+          5
+        ],
+        [
+          0,
+          0
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          15,
+          15
+        ],
+        [
+          1,
+          1
+        ],
+        [
+          100,
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：空日期区间",
+      "input": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          15
+        ],
+        [
+          15
+        ],
+        [
+          1
+        ],
+        [
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "from>=to 是调用方 bug，不是\"锁不住任何一天\""
+    },
+    {
+      "name": "非法：LOCK 的 ttl 为 0",
+      "input": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：RELEASE 带了 arg",
+      "input": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          1
+        ],
+        [
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "note": "RELEASE 没有参数位 —— 传了数说明调用方理解错了协议"
+    },
+    {
+      "name": "非法：未知 op",
+      "input": [
+        [
+          0
+        ],
+        [
+          7
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          1
+        ],
+        [
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：reqId 为 0",
+      "input": [
+        [
+          0
+        ],
+        [
+          0
+        ],
+        [
+          10
+        ],
+        [
+          15
+        ],
+        [
+          0
+        ],
+        [
+          100
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三份状态：活锁表 `[(reqId, from, to, expiry)]`、成交表 `[(reqId, from, to)]`、\n以及\"已提交过的最大 token\"。每个操作先做**到期回收**（`expiry <= t` 就没了），\n再按 op 走条件写。核心子程序只有一个：半开区间重叠判定\n`aFrom < bTo && bFrom < aTo` —— 全部三条规则都建立在它上面。\n\n**为什么\"到期 == 此刻\"必须算已失效**：锁的持有区间是 `[取得时刻, 取得时刻+ttl)`，\n和预订占用日期一样是半开的。写成 `expiry < t` 的实现，在\"租约正好走完\"那一毫秒\n会让前一个持有者以为自己还在锁里 —— 而真实事故里 GC 停顿、网络重传消耗掉的\n恰好就是这点余量。用例「租约正好到期：旧主提交失败，新主能锁能成交」打的就是这一条。\n\n**`RELEASE` 不校验 owner 的后果**（用例「释放只动自己的锁：删不掉别人的，返回 0」）：\n按区间删除时，`[20,25)` 上属于别人的锁会被一起摘掉。线上表现是\n\"两个人都以为自己有锁\"，而锁的**存在性指标完全正常**。\n所以 `RELEASE` 的语义必须是\"本方的、重叠的、活锁\"三个条件同时成立才删，\n一把都没删到就返回 `0`（这是调用方该报警的信号，不是可以忽略的失败）。\n\n**fencing token 挡的是哪一种事故**（用例「token 不增就被拒，而且失败必须是纯失败」）：\n经典时序是 —— 进程 A 拿到锁 → 进入长时间停顿 → 租约到期 → 进程 B 拿锁并成交（token 9）\n→ A 醒来，它\"手里有锁\"的内存快照还在，于是提交 token 4。\n只有\"锁还在\"这个条件是挡不住的，因为 A 检查的锁早已被 B 换掉了；\n必须要求 **token 严格大于已提交的最大值**。\n另外这条用例还检查一件事：提交被拒之后 A 的锁**不许被顺手释放** ——\n否则重试方 A 再试时连锁都没了，会被 B 之后的请求永久挡在外面。\n\n**重入为什么不新建锁**（用例「重入续期不新建：别人进不来」）：\n如果同一方对同一区间登记了两把锁，`RELEASE` 只摘掉重叠的一把\n（其实两把都摘，但 `COMMIT` 之后残留的语义就乱了），而\"我到底还持不持有\"\n在日志里变成两行。重入的正确形状是**原地续期**，永远让一方在一个区间上最多一把锁。\n\n**两把相邻的锁不算覆盖**（用例「相邻两把锁不能合并提交」）：\n`[10,12)` 与 `[12,15)` 合起来确实覆盖了 `[10,15)`，但本题**故意**不认。\n理由是可解释性：一把锁对应一段租约，两把锁的到期时刻可以差很远，\n\"合并提交\"等价于用两个短租约换一次长占用，这让\"锁什么时候失效\"变成不可回答的问题。\n要提交 `[10,15)` 就先去锁 `[10,15)`。真实系统里这条通常表述为\n**\"一次预订 = 一次锁定 = 一次提交\"，禁止拼装**。\n\n**工程延伸（面试追问点）**\n\n1. 为什么这题仍然\"不是正确性来源\"？（整个过程假设单实例、按序重放。真集群里\n   `nowSec` 来自各机器时钟、`maxToken` 要在存储侧原子递增 —— 所以最终仍需\n   `listing_occupancy(listing_id, stay_date)` 的主键约束做兜底，\n   锁与 token 只是把冲突提前暴露、把失败率压下来。）\n2. `COMMIT` 为什么要顺手释放自己的锁？（成交之后锁已经没有意义，留着会挡住改期路径。\n   但\"释放锁\"和\"登记成交\"必须是**一个原子动作** —— 中间断开就会出现\"已成交但没有占用记录\"。）\n3. 取消/改期怎么进这套状态？（改期是\"新区间先 COMMIT 成功，再释放旧区间的占用\"，\n   顺序反了就会两边都没房；这需要第四种操作 `REPLACE`，并且它的失败路径要能补偿 —— 这就是 1.1 里说的组合状态。）\n4. 提前预订窗口、最小住期这些规则放哪？（**放在 LOCK 之前**，作为\"请求合法性\"检查，\n   不要混进闸门：闸门只管并发正确性，规则管业务许可。混在一起的代价是规则一改就要重放全部并发用例。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] replay(long[] nowSec, int[] op, int[] fromDay, int[] toDay, int[] reqId, int[] arg)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  private static final int LOCK = 0, RELEASE = 1, COMMIT = 2;\n\n  public static int[] replay(long[] nowSec, int[] op, int[] fromDay, int[] toDay,\n                             int[] reqId, int[] arg) {\n    int n = nowSec.length;\n    if (n != op.length || n != fromDay.length || n != toDay.length\n        || n != reqId.length || n != arg.length) {\n      throw new IllegalArgumentException(\"length mismatch\");\n    }\n    List<long[]> locks = new ArrayList<>();   // {reqId, from, to, expiry}\n    List<long[]> booked = new ArrayList<>();  // {reqId, from, to}\n    long maxToken = 0;\n    int[] out = new int[n];\n\n    for (int i = 0; i < n; i++) {\n      long t = nowSec[i];\n      int kind = op[i], from = fromDay[i], to = toDay[i], req = reqId[i], a = arg[i];\n      if (i > 0 && t < nowSec[i - 1]) throw new IllegalArgumentException(\"time goes backwards\");\n      if (req <= 0) throw new IllegalArgumentException(\"reqId must be positive\");\n      if (from >= to) throw new IllegalArgumentException(\"empty date range\");\n      if (kind != LOCK && kind != RELEASE && kind != COMMIT) {\n        throw new IllegalArgumentException(\"unknown op: \" + kind);\n      }\n\n      // 到期先处理：expiry == t 的锁已经不成立了\n      locks.removeIf(l -> l[3] <= t);\n\n      if (kind == LOCK) {\n        if (a <= 0) throw new IllegalArgumentException(\"ttl must be positive\");\n        boolean own = false;\n        for (long[] l : locks) {\n          if (l[0] == req && overlaps(l[1], l[2], from, to)) {\n            l[3] = t + a;                     // 重入：只续期，不新建\n            own = true;\n          }\n        }\n        if (own) {\n          out[i] = 1;\n          continue;\n        }\n        for (long[] l : locks) {\n          if (overlaps(l[1], l[2], from, to)) {\n            out[i] = 0;\n            own = true;                        // 复用 own 当\"已被拒\"的标记\n            break;\n          }\n        }\n        if (own) continue;\n        for (long[] b : booked) {\n          if (overlaps(b[1], b[2], from, to)) {\n            out[i] = 0;\n            own = true;\n            break;\n          }\n        }\n        if (own) continue;\n        locks.add(new long[] {req, from, to, t + a});\n        out[i] = 1;\n      } else if (kind == RELEASE) {\n        if (a != 0) throw new IllegalArgumentException(\"RELEASE takes no arg\");\n        int before = locks.size();\n        locks.removeIf(l -> l[0] == req && overlaps(l[1], l[2], from, to));\n        out[i] = locks.size() < before ? 1 : 0;\n      } else {\n        if (a < 0) throw new IllegalArgumentException(\"token must be >= 0\");\n        boolean covered = false;\n        for (long[] l : locks) {\n          if (l[0] == req && l[1] <= from && to <= l[2]) {\n            covered = true;\n            break;\n          }\n        }\n        if (!covered || a <= maxToken) {\n          out[i] = 0;                          // 纯失败：不登记、不释放、不改 token\n          continue;\n        }\n        booked.add(new long[] {req, from, to});\n        locks.removeIf(l -> l[0] == req && overlaps(l[1], l[2], from, to));\n        maxToken = a;\n        out[i] = 1;\n      }\n    }\n    return out;\n  }\n\n  /** 半开区间重叠：[aFrom,aTo) 与 [bFrom,bTo)。 */\n  private static boolean overlaps(long aFrom, long aTo, int bFrom, int bTo) {\n    return aFrom < bTo && bFrom < aTo;\n  }\n}",
+    "naiveSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  // 上线前那一版：锁只看区间、释放只看区间、提交只看\"锁还在不在\"\n  public static int[] replay(long[] nowSec, int[] op, int[] fromDay, int[] toDay,\n                             int[] reqId, int[] arg) {\n    int n = nowSec.length;\n    if (n != op.length || n != fromDay.length || n != toDay.length\n        || n != reqId.length || n != arg.length) {\n      throw new IllegalArgumentException(\"length mismatch\");\n    }\n    List<long[]> locks = new ArrayList<>();\n    List<long[]> booked = new ArrayList<>();\n    int[] out = new int[n];\n\n    for (int i = 0; i < n; i++) {\n      long t = nowSec[i];\n      int from = fromDay[i], to = toDay[i], req = reqId[i], a = arg[i];\n      if (req <= 0) throw new IllegalArgumentException(\"reqId must be positive\");\n      if (from >= to) throw new IllegalArgumentException(\"empty date range\");\n      if (a < 0) throw new IllegalArgumentException(\"negative arg\");\n      locks.removeIf(l -> l[3] < t);            // 错 0：用 < 而不是 <=，到期那一刻还当作持有\n\n      if (op[i] == 0) {\n        boolean blocked = false;\n        for (long[] l : locks) {\n          if (l[0] != req && l[1] < to && from < l[2]) {\n            blocked = true;\n            break;\n          }\n        }\n        for (long[] b : booked) {\n          if (b[1] < to && from < b[2]) {\n            blocked = true;\n            break;\n          }\n        }\n        out[i] = blocked ? 0 : 1;\n        if (!blocked) locks.add(new long[] {req, from, to, t + a});   // 错 1：重入也再登记一把\n      } else if (op[i] == 1) {\n        int before = locks.size();\n        locks.removeIf(l -> l[1] < to && from < l[2]);                 // 错 2：不看 owner\n        out[i] = locks.size() < before ? 1 : 0;\n      } else {\n        boolean held = false;\n        for (long[] l : locks) {\n          if (l[0] == req && l[1] < to && from < l[2]) {\n            held = true;\n            break;\n          }\n        }\n        boolean overlapsBooking = false;\n        for (long[] b : booked) {\n          if (b[1] < to && from < b[2]) {\n            overlapsBooking = true;\n            break;\n          }\n        }\n        out[i] = held && !overlapsBooking ? 1 : 0;                     // 错 3：完全不比 token\n        if (held) {\n          booked.add(new long[] {req, from, to});\n          locks.removeIf(l -> l[1] < to && from < l[2]);\n        }\n      }\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 32,
+  "source": {
+    "company": "Airbnb",
+    "role": "Booking / Marketplace Integrity 高级工程师",
+    "location": "us",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/airbnb-marketplace-booking.md §1.1、§4 题面草稿 A（素材给了\"锁不是正确性来源\"的结论与操作清单，未做成可判分状态机）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T14:43:58.284Z"
+  }
+}

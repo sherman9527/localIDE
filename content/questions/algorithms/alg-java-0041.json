@@ -1,0 +1,333 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0041",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "券批次发行量与商品库存是两套池子：分开计数，算出\"券够货不够\"的乘积区",
+  "statement": "## 背景\n\n拼多多的优惠券是**批次**模型，官方接口就三个动作：\n`pdd.promotion.goods.coupon.create`（创建无门槛商品券批次）、\n`pdd.promotion.coupon.quantity.add`（**增加优惠券发行数量**）、`pdd.promotion.coupon.close`（**关闭批次**）。\n\n\"发行数量可加、批次可关\"这两件事的存在说明：**券的发行额度与商品库存是两套独立额度**。\n事故几乎都发生在两套额度的**乘积区**：券够货不够（消费者抢到券下不了单），\n或货够券被加超（商家被履约义务套住）。\n而且**已发出去的券不可回收** —— 兑现承诺只能由保证金兜底，所以关掉批次不等于止损结束。\n\n## 你要实现的入口\n\n```java\npublic static int[] couponQuota(int issueTotal, int stock, int[][] ops)\n```\n\n返回 `int[]{已发放, 已核销, 因额度不足被拒, 因缺货被拒, 因批次已关闭被拒, 无货可兑的券数}`。\n\n## 模型\n\n初始：发行额度 `quotaLeft = issueTotal`、可售库存 `stockLeft = stock`、`issued = redeemed = 0`、批次未关闭。\n`ops[i] = [kind, qty]` 按顺序执行：\n\n| kind | 事件 | 规则 |\n| --- | --- | --- |\n| 1 | 领券 `qty` 张 | 批次已关闭 ⇒ **因关闭被拒** +1，不占用任何额度；否则 `quotaLeft < qty` ⇒ **因额度不足被拒** +1；否则 `quotaLeft -= qty`、`issued += qty` |\n| 2 | 核销 `qty` 张（下单用券，一件货一张券） | 先要券：`issued - redeemed < qty` ⇒ **因额度不足被拒** +1；再要货：`stockLeft < qty` ⇒ **因缺货被拒** +1，**券保持未用**（有货了还能兑）；两者都够 ⇒ `redeemed += qty`、`stockLeft -= qty` |\n| 3 | 追加发行量 `qty` | 批次**已关闭 ⇒ 抛错**；否则 `quotaLeft += qty`（`issued` 不变） |\n| 4 | 关闭批次（`qty` 必须是 0） | 已经关闭过 ⇒ **抛错**；否则置为已关闭 |\n\n三个\"被拒\"计数器统计的是**事件条数**，不是张数。\n被拒的事件一律**不改动任何额度**（不许\"先扣再判\"）。\n\n最后一个输出 `无货可兑的券数 = max(0, (issued − redeemed) − stockLeft)`，在**全部事件跑完之后**算。\n它就是\"乘积区\"的度量：已发未用的券比剩下的货还多 ⇒ 这批券里注定有一部分兑不出去。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- `ops[i]` 不是恰好 2 列 ⇒ `op must be [kind, qty]`\n- `kind` 不在 1..4 ⇒ `unknown op kind`\n- `qty < 0` ⇒ `negative qty`\n- kind=4 且 `qty != 0` ⇒ `close must carry qty 0`\n- 对**已关闭**的批次执行 kind=3 ⇒ `closed batch cannot be extended`\n- 重复执行 kind=4 ⇒ `batch already closed`\n- `issueTotal < 0` ⇒ `negative initial issue total`\n- `stock < 0` ⇒ `negative initial stock`\n\n初始值（`issueTotal` / `stock`）在进循环之前查；事件内部的校验顺序就按上面列出的先后，\n其中\"关闭批次/追加发行量\"这两个业务错误发生在**通过格式校验之后**。\n\n## 这题真正考的东西\n\n三个\"被拒\"必须**分开计**：合成一个数就只能知道\"有人失败了\"，\n而这三类失败的**责任人与止损动作完全不同**（额度不足 ⇒ 追加发行量或限领；\n缺货 ⇒ 补货或改期；批次关闭 ⇒ 前端还挂着入口，那是配置问题）。\n最后的\"乘积区\"是这题唯一要求你**主动建模**的地方。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "coupon-batch",
+    "quota-governance",
+    "two-ledger",
+    "oversell-liability",
+    "modern:marketing-integrity"
+  ],
+  "cases": [
+    {
+      "name": "基线：券够货不够 ⇒ 2 张已发未用的券注定无货可兑",
+      "input": [
+        5,
+        3,
+        [
+          [
+            1,
+            5
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            2,
+            2
+          ]
+        ]
+      ],
+      "expected": [
+        5,
+        3,
+        0,
+        1,
+        0,
+        2
+      ],
+      "visible": true,
+      "note": "issued 5、redeemed 3、缺货被拒 1 条；已发未用 2 而库存 0 ⇒ 乘积区 2"
+    },
+    {
+      "name": "货够券不够 ⇒ 追加发行量解开瓶颈（先被拒一次，再加量）",
+      "input": [
+        2,
+        10,
+        [
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            3
+          ]
+        ]
+      ],
+      "expected": [
+        5,
+        5,
+        1,
+        0,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "额度只剩 0 时那笔 3 张的领券被拒 1 条；quantity.add 之后才发得出去。最终 5 张全部核销、库存还剩 5 ⇒ 乘积区归零"
+    },
+    {
+      "name": "批次关闭后已发未用的券仍可核销（承诺不可回收）",
+      "input": [
+        4,
+        4,
+        [
+          [
+            1,
+            4
+          ],
+          [
+            4,
+            0
+          ],
+          [
+            1,
+            2
+          ],
+          [
+            2,
+            4
+          ]
+        ]
+      ],
+      "expected": [
+        4,
+        4,
+        0,
+        0,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "关闭之后那次领券被拒 1 条，但已发的 4 张照样兑得掉 —— close 不是作废"
+    },
+    {
+      "name": "边界：正好把发行额度领光，下一张就被拒",
+      "input": [
+        3,
+        9,
+        [
+          [
+            1,
+            3
+          ],
+          [
+            1,
+            1
+          ]
+        ]
+      ],
+      "expected": [
+        3,
+        0,
+        1,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：没有任何操作 ⇒ 六个数都是 0",
+      "input": [
+        10,
+        10,
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "核销被缺货挡下时券必须留着，之后还能兑",
+      "input": [
+        6,
+        1,
+        [
+          [
+            1,
+            6
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            2,
+            1
+          ]
+        ]
+      ],
+      "expected": [
+        6,
+        1,
+        0,
+        1,
+        0,
+        5
+      ],
+      "visible": true,
+      "note": "第二次核销因缺货被拒 ⇒ 券仍是未用状态；这条钉住\"不许先扣再判\""
+    },
+    {
+      "name": "非法：对已关闭批次追加发行量（调用方以为自己还能发券）",
+      "input": [
+        5,
+        5,
+        [
+          [
+            4,
+            0
+          ],
+          [
+            3,
+            5
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "closed batch cannot be extended"
+    },
+    {
+      "name": "非法：重复关闭批次",
+      "input": [
+        5,
+        5,
+        [
+          [
+            4,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "batch already closed"
+    },
+    {
+      "name": "非法：关闭批次却带了数量",
+      "input": [
+        5,
+        5,
+        [
+          [
+            4,
+            3
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "close must carry qty 0"
+    },
+    {
+      "name": "非法：事件不是 [kind, qty] 两列",
+      "input": [
+        5,
+        5,
+        [
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "op must be [kind, qty]"
+    },
+    {
+      "name": "非法：未知操作类型",
+      "input": [
+        5,
+        5,
+        [
+          [
+            9,
+            1
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown op kind"
+    },
+    {
+      "name": "非法：数量为负",
+      "input": [
+        5,
+        5,
+        [
+          [
+            1,
+            -2
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative qty"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n两套额度 + 一个\"已发未用\"的中间量。真正要建模的是最后那个数：\n`无货可兑的券数 = max(0, (issued − redeemed) − stockLeft)`。\n它是**乘积区**的度量 —— 前五个数各自只说一件事，只有这个数把两套池子放在一起看。\n\n**基线用例的手算**（用例「基线：券够货不够」）：\n发行额度 5、库存 3；领 5 张 ⇒ `issued=5`、额度归零；核销 3 张成功 ⇒ `redeemed=3`、库存归零；\n再核销 2 张 ⇒ 券够但货不够 ⇒ **因缺货被拒 1 条**（券保持未用）；\n此时\"已发未用 = 5 − 3 = 2\"而库存 0 ⇒ `无货可兑 = 2`。\n**这个 2 就是商家被套住的那部分履约义务**，只能由保证金兜底。\n\n**券留着是对的（这是本题最容易写反的一条）**：\n核销因缺货被拒时**不许把券消耗掉**。券消耗了却没发货，等于把\"额度问题\"升级成\"资金问题\"\n（要退款、要赔付、要客服）。素材里 `stock_out_handle_status` 之所以是显式三态状态机，\n就是因为这条链必须走正式流程而不是靠扣券止血。\n\n**批次关闭 ≠ 停止兑现**：`close` 之后领券一律被拒（`因批次已关闭被拒`），\n但已发未用的券仍然可以核销 —— 用例「批次关闭后已发未用的券仍可核销」专门钉这条。\n把 close 实现成\"整批失效\"是最危险的错误：它看起来在止损，实际是**单方面撕掉承诺**，\n换来的是投诉与商家纠纷，而且不可回滚。\n\n**追加发行量与关闭批次必须抛错**（而不是计入\"被拒\"）：\n`quantity.add` 打在已关闭的批次上，说明**调用方以为自己还能发券** —— 这是配置或代码错误，\n计入业务拒绝就等于把它藏进正常流量里。重复 `close` 同理。\n这条\"报错换静默\"的判据值得在面试里主动说：**能自愈的是业务，不能自愈的是契约。**\n\n**三个被拒计数器不许合并**：额度不足 ⇒ 追加发行量或限购；缺货 ⇒ 补货/改期/走缺货赔付；\n批次关闭还在被调用 ⇒ 前端入口没摘干净（配置问题）。\n合成一个数的看板只能得出\"有人在失败\"，得不出该派谁去处理。\n\n**工程延伸（面试追问点）**\n\n1. 为什么发行量要能加？（活动加码是常态。但加量必须与\"已发未用券的兑现承诺\"一起看，\n   所以 `无货可兑` 应该是加量接口的**前置校验**，而不是事后指标。）\n2. 高并发领券怎么实现不超发？（Redis 侧用集合而不是计数器：`ZADD batch:codes <seq> <code>`\n   天然幂等，`ZCARD` 就是已发数，超发在数据结构层不可能发生；\n   `DECR` 计数器 + 判负是另一条路，但它依赖\"读到负数后回滚\"，中断就会漏。\n   这题是模型层，那题（`sql-redis-*`）是落地层，正好配成一对。）\n3. 券的钱算谁的？（官方收入确认段给了判据：是否存在**替商家履行的明示或默示义务** ⇒\n   收入抵减 / 代商家负债 / 市场费用三种落点。所以\"出资方 + 义务性质\"必须是批次的一等属性，\n   否则商家账单里的 `platform_discount` 与 `seller_discount` 分不干净。）\n4. 可提现红包能走同一个池子吗？（不能。官方写明部分激励可以 \"to redeem for cash from us\"，\n   它必须与下单抵扣券分属两套资产账户，混用直接开出套现通道。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] couponQuota(int issueTotal, int stock, int[][] ops)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int[] couponQuota(int issueTotal, int stock, int[][] ops) {\n    if (issueTotal < 0) throw new IllegalArgumentException(\"negative initial issue total\");\n    if (stock < 0) throw new IllegalArgumentException(\"negative initial stock\");\n    long quotaLeft = issueTotal, stockLeft = stock;\n    long issued = 0, redeemed = 0;\n    int rejectedQuota = 0, rejectedStock = 0, rejectedClosed = 0;\n    boolean closed = false;\n\n    for (int[] op : ops) {\n      if (op == null || op.length != 2) throw new IllegalArgumentException(\"op must be [kind, qty]\");\n      int kind = op[0];\n      long qty = op[1];\n      if (kind < 1 || kind > 4) throw new IllegalArgumentException(\"unknown op kind\");\n      if (qty < 0) throw new IllegalArgumentException(\"negative qty\");\n      if (kind == 4 && qty != 0) throw new IllegalArgumentException(\"close must carry qty 0\");\n\n      if (kind == 1) {                                   // 领券：只动发行额度\n        if (closed) rejectedClosed++;\n        else if (quotaLeft < qty) rejectedQuota++;\n        else { quotaLeft -= qty; issued += qty; }\n      } else if (kind == 2) {                            // 核销：先要券，再要货\n        if (issued - redeemed < qty) rejectedQuota++;\n        else if (stockLeft < qty) rejectedStock++;       // 券保持未用\n        else { redeemed += qty; stockLeft -= qty; }\n      } else if (kind == 3) {                            // 追加发行量\n        if (closed) throw new IllegalArgumentException(\"closed batch cannot be extended\");\n        quotaLeft += qty;\n      } else {                                           // 关闭批次\n        if (closed) throw new IllegalArgumentException(\"batch already closed\");\n        closed = true;\n      }\n    }\n    long unbacked = (issued - redeemed) - stockLeft;\n    return new int[] {(int) issued, (int) redeemed, rejectedQuota, rejectedStock, rejectedClosed,\n                      (int) Math.max(0, unbacked)};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"券和库存是同一个东西\"版：一个池子扣两次，于是永远不会出现\"乘积区\"。\n  // 症状是运营看板说\"券还剩很多\"，消费者却在下不了单 —— 因为货早就没了。\n  public static int[] couponQuota(int issueTotal, int stock, int[][] ops) {\n    long left = Math.min(issueTotal, stock);\n    long issued = 0, redeemed = 0, rejected = 0;\n    for (int[] op : ops) {\n      if (op[0] == 1) {\n        if (left < op[1]) rejected++;\n        else { left -= op[1]; issued += op[1]; }\n      } else if (op[0] == 2) {\n        if (issued - redeemed < op[1]) rejected++;\n        else { redeemed += op[1]; issued -= op[1]; }     // 错：核销把额度也\"还\"了回去\n      } else if (op[0] == 3) {\n        left += op[1];\n      }\n    }\n    return new int[] {(int) issued, (int) redeemed, (int) rejected, 0, 0, 0};\n  }\n}"
+  },
+  "estimatedMinutes": 24,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（营销/券与活动方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 7（`pdd.promotion.goods.coupon.create` / `.quantity.add` / `.close` 三个官方动作＝批次是独立额度对象）＋ 考点 7「事故发生在两套额度的乘积区」；素材只给了结论，未给可判分的双池模型",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.105Z"
+  }
+}

@@ -1,0 +1,476 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-pyspark-0003",
+  "category": "big-data",
+  "difficulty": "senior",
+  "title": "版本化 upsert：迟到旧版本不许把已落库值倒回去（CDC 合并与幂等重跑）",
+  "statement": "## 背景与数据规模\n商品主数据落 Lakehouse 主键表（生产规模：**8 亿 SKU、日均 1.6 亿条变更**，上游是 MySQL 分库分表 CDC + 人工修数回填双通道）。\n两条通道并发写同一批 key：**回填通道的数据更「全」但 version 更旧**，一旦让它覆盖线上，就会出现「昨天还好好的价格今天退回三个月前」的严重事故。同时 CDC 是 at-least-once，同一条变更会重复到达。\n本题在内存表上复刻主键表的合并语义（判题不要求真实 catalog/事务）。\n\n## 输入\n1. 临时视图 `product_base`（建表阶段灌入，全题固定，代表已落库状态）：\n   `id STRING, name STRING, amount DECIMAL(18,2), base_version BIGINT`\n2. 临时视图 `changes`（每个用例单独灌入，`spark.table('changes')`）：\n2. 临时视图 `changes`（每个用例单独灌入，`spark.table('changes')`）：\n   `id STRING, name STRING(可能 NULL), amount STRING(上游以十进制文本投递，如 '\"88.00\"'，也可能 NULL), version BIGINT(可能 NULL), op STRING('I'|'U'|'D'), event_ts STRING(yyyy-MM-dd HH:mm:ss UTC)`\n   `product_base.amount` 是 `DECIMAL(18,2)` 而 `changes.amount` 是 `STRING`——**必须先显式 `cast` 成 `DECIMAL(18,2)` 再参与合并**（Spark 4.0 起 ANSI 默认开启，隐式 cast 脏值会直接抛异常；而按浮点合并会产出 10.5999999999999996 这类金额）。`amount` 列的两种 NULL 语义要分清：NULL = 该字段不更新（R3），空串/非法文本在生产里应隔离，本题数据保证不出现。\n\n## 合并规则（必须严格实现）\n- **R1 候选裁决**：每个 `id` 只看 `op ∈ (I,U,D)` 且 `version IS NOT NULL` 的变更，按 `version DESC → event_ts DESC → op 字典序 ASC` 取**唯一一条**候选变更。`version` 为 NULL 的变更整条丢弃。\n- **R2 版本不倒退**：`product_base` 里已存在的 `id`，候选变更必须满足 `version > base_version` 才生效；否则整条忽略（保留 base 现值）——注意是「严格大于」，`version == base_version` 的重复投递不许改任何东西（重跑幂等）。\n- **R3 部分更新**：生效的 `I/U` 变更中，`name`/`amount` 为 NULL 表示「本次不更新该字段」，沿用 `product_base` 的值（base 里没有这个 id 时结果就是 NULL）。`op='D'` 不改任何业务字段。\n- **R4 新 key**：`product_base` 里不存在的 `id`，只有候选变更是 `op='I'` 时才新增；候选是 `U`/`D` 的（改了不存在的东西）整条忽略，**不得凭空造行**。\n- **R5 tombstone**：`op='D'` 生效时该行**不删除**，输出 `is_deleted=true`、业务字段取 base 现值、`version` 取该 D 行的 version（供下游重放与二次投递）。之后若有更高 `version` 的 `I/U` 到达，则复活为 `is_deleted=false`。\n\n## 输出\nDataFrame，列**必须严格是** `id, name, amount, version, is_deleted`；`version` = 生效变更的 version，无生效变更时为 `base_version`；`is_deleted` 为布尔。判题按行集合比对（行序不敏感），生产写法请 `orderBy('id')`。\n`product_base` 中未被任何变更命中的 id **必须照常输出**（结果是集表的完整当前态）。\n\n## 约束\n- 禁止 `collect()`/`toPandas()`；禁止用非确定的 `first()`/`last()`（无 order 的 `last()` 每次跑结果不同）。可用 `row_number()` 窗口或 `max(struct(...))` 预聚合，两者都要写出**完整**裁决键。\n- 不要用 `dropDuplicates(['id'])` 代替版本裁决：它只保证「一行一 key」，不保证「取的是生效版本」。\n- 真实链路上线时还要能回答：为什么不能用 `max(updated_at)` 做增量（源库时钟回拨、批量修数带旧时间、丢删除事件）。",
+  "judgeKind": "pyspark",
+  "language": "python",
+  "tags": [
+    "cdc-upsert",
+    "idempotent-backfill",
+    "version-arbitration",
+    "partial-update",
+    "pyspark",
+    "modern:paimon-1.4"
+  ],
+  "cases": [
+    {
+      "name": "基础：等值 version 的重复投递不得改动任何字段",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P1",
+            "name": "Alpha-V2",
+            "amount": null,
+            "version": 5,
+            "op": "U",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P2",
+            "name": "Beta-HACK",
+            "amount": "1.00",
+            "version": 9,
+            "op": "U",
+            "event_ts": "2026-09-01 02:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha-V2",
+          "amount": 10.5,
+          "version": 5,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 9,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ],
+      "note": "P2 的变更 version == base_version → 整条忽略（幂等重跑）；P1 amount 为 NULL → 沿用 base 的 10.50。"
+    },
+    {
+      "name": "边界：旧 version 迟到被忽略 + 同 version 并列取 event_ts 最大",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P1",
+            "name": "Ancient",
+            "amount": "3.00",
+            "version": 3,
+            "op": "U",
+            "event_ts": "2026-09-01 00:00:00"
+          },
+          {
+            "id": "P1",
+            "name": "SixA",
+            "amount": null,
+            "version": 6,
+            "op": "U",
+            "event_ts": "2026-09-01 08:00:00"
+          },
+          {
+            "id": "P1",
+            "name": "SixB",
+            "amount": "66.00",
+            "version": 6,
+            "op": "U",
+            "event_ts": "2026-09-01 09:00:00"
+          },
+          {
+            "id": "P1",
+            "name": "NullVer",
+            "amount": null,
+            "version": null,
+            "op": "U",
+            "event_ts": "2026-09-01 10:00:00"
+          },
+          {
+            "id": "P3",
+            "name": null,
+            "amount": "1.00",
+            "version": 2,
+            "op": "U",
+            "event_ts": "2026-09-01 07:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "SixB",
+          "amount": 66,
+          "version": 6,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 9,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 1,
+          "version": 2,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ],
+      "note": "version=3 的迟到行必须被 version=6 击败且被 R2 拦住；null version 整条丢弃不得参与排序。"
+    },
+    {
+      "name": "删除 tombstone 与更高版本复活；改不存在的 key 不得造行",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P9",
+            "name": null,
+            "amount": null,
+            "version": 10,
+            "op": "D",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P9",
+            "name": null,
+            "amount": "9.99",
+            "version": 11,
+            "op": "U",
+            "event_ts": "2026-09-01 02:00:00"
+          },
+          {
+            "id": "P2",
+            "name": "ShouldNotApply",
+            "amount": "5.00",
+            "version": 12,
+            "op": "D",
+            "event_ts": "2026-09-01 03:00:00"
+          },
+          {
+            "id": "PX",
+            "name": "Ghost",
+            "amount": "1.00",
+            "version": 50,
+            "op": "D",
+            "event_ts": "2026-09-01 04:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha",
+          "amount": 10.5,
+          "version": 4,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 12,
+          "is_deleted": true
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 9.99,
+          "version": 11,
+          "is_deleted": false
+        }
+      ],
+      "note": "PX 不在 base 且 op=D → 整条忽略，结果里绝不能出现 PX；P2 的 D 行不改 name/amount 但 version 前进且打 tombstone。"
+    },
+    {
+      "name": "新增 key：只有 I 能凭空造行，U 命中缺失 key 必须忽略",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P7",
+            "name": "New1",
+            "amount": "1.00",
+            "version": 1,
+            "op": "I",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P7",
+            "name": "New2",
+            "amount": null,
+            "version": 2,
+            "op": "I",
+            "event_ts": "2026-09-01 02:00:00"
+          },
+          {
+            "id": "P8",
+            "name": "Orphan",
+            "amount": "2.00",
+            "version": 7,
+            "op": "U",
+            "event_ts": "2026-09-01 03:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha",
+          "amount": 10.5,
+          "version": 4,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 9,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P7",
+          "name": "New2",
+          "amount": null,
+          "version": 2,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ],
+      "note": "P8 不得出现；P7 取 version=2 那条，其 amount 为 NULL 且 base 无值 → 结果为 NULL。"
+    },
+    {
+      "name": "重复：同一条变更投递三次，重跑结果必须完全一致",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P1",
+            "name": "Alpha-V5",
+            "amount": "88.00",
+            "version": 5,
+            "op": "U",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P1",
+            "name": "Alpha-V5",
+            "amount": "88.00",
+            "version": 5,
+            "op": "U",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P1",
+            "name": "Alpha-V5",
+            "amount": "88.00",
+            "version": 5,
+            "op": "U",
+            "event_ts": "2026-09-01 01:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha-V5",
+          "amount": 88,
+          "version": 5,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 9,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ],
+      "note": "at-least-once 直投：三条完全相同的变更只能生效一次。"
+    },
+    {
+      "name": "空变更集：结果等于 base 当前态（不得清空任何行）",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": []
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha",
+          "amount": 10.5,
+          "version": 4,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 9,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ]
+    },
+    {
+      "name": "极端：name 与 amount 全为 NULL 的部分更新，只前进版本号",
+      "input": {
+        "view": "changes",
+        "schema": "id string, name string, amount string, version bigint, op string, event_ts string",
+        "rows": [
+          {
+            "id": "P2",
+            "name": null,
+            "amount": null,
+            "version": 10,
+            "op": "U",
+            "event_ts": "2026-09-01 01:00:00"
+          },
+          {
+            "id": "P2",
+            "name": null,
+            "amount": null,
+            "version": 9,
+            "op": "U",
+            "event_ts": "2026-09-01 02:00:00"
+          }
+        ]
+      },
+      "expected": [
+        {
+          "id": "P1",
+          "name": "Alpha",
+          "amount": 10.5,
+          "version": 4,
+          "is_deleted": false
+        },
+        {
+          "id": "P2",
+          "name": "Beta",
+          "amount": 20,
+          "version": 10,
+          "is_deleted": false
+        },
+        {
+          "id": "P3",
+          "name": "Gamma",
+          "amount": 0,
+          "version": 1,
+          "is_deleted": false
+        },
+        {
+          "id": "P9",
+          "name": "Ghost",
+          "amount": 7.25,
+          "version": 3,
+          "is_deleted": false
+        }
+      ],
+      "note": "第二条 event_ts 更大但 version 更小——必须先按 version 裁决，不能被时间带偏。"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "timeoutMs": 70000,
+    "setup": [
+      "CREATE OR REPLACE TEMP VIEW product_base AS SELECT * FROM VALUES ('P1','Alpha',CAST(10.50 AS DECIMAL(18,2)),CAST(4 AS BIGINT)), ('P2','Beta',CAST(20.00 AS DECIMAL(18,2)),CAST(9 AS BIGINT)), ('P3','Gamma',CAST(0.00 AS DECIMAL(18,2)),CAST(1 AS BIGINT)), ('P9','Ghost',CAST(7.25 AS DECIMAL(18,2)),CAST(3 AS BIGINT)) AS t(id, name, amount, base_version)"
+    ],
+    "referenceSolution": "import pyspark.sql.functions as F\nfrom pyspark.sql import Window\n\n\ndef solve(spark):\n    base = spark.table('product_base').select(\n        'id',\n        F.col('name').alias('base_name'),\n        F.col('amount').alias('base_amount'),\n        'base_version',\n        F.lit(1).alias('in_base'),\n    )\n    win = Window.partitionBy('id').orderBy(\n        F.col('version').desc(), F.col('event_ts').desc(), F.col('op').asc()\n    )\n    top = (\n        spark.table('changes')\n        .filter(F.col('op').isin('I', 'U', 'D') & F.col('version').isNotNull())\n        .withColumn('amount', F.col('amount').cast('decimal(18,2)'))\n        .withColumn('rk', F.row_number().over(win))\n        .filter(F.col('rk') == 1)\n        .select(\n            'id',\n            'op',\n            'version',\n            F.col('name').alias('chg_name'),\n            F.col('amount').alias('chg_amount'),\n        )\n    )\n    return (\n        base.join(top, 'id', 'full_outer')\n        .withColumn(\n            'applied',\n            F.col('op').isNotNull()\n            & (F.col('in_base').isNull() | (F.col('version') > F.col('base_version')))\n            & (F.col('in_base').isNotNull() | (F.col('op') == 'I')),\n        )\n        .filter(F.col('applied') | F.col('in_base').isNotNull())\n        .select(\n            'id',\n            F.when(F.col('applied') & (F.col('op') != 'D'), F.coalesce(F.col('chg_name'), F.col('base_name')))\n             .otherwise(F.col('base_name')).alias('name'),\n            F.when(F.col('applied') & (F.col('op') != 'D'), F.coalesce(F.col('chg_amount'), F.col('base_amount')))\n             .otherwise(F.col('base_amount')).alias('amount'),\n            F.when(F.col('applied'), F.col('version')).otherwise(F.col('base_version')).alias('version'),\n            F.when(F.col('applied') & (F.col('op') == 'D'), F.lit(True)).otherwise(F.lit(False)).alias('is_deleted'),\n        )\n        .orderBy('id')\n    )\n",
+    "naiveSolution": "import pyspark.sql.functions as F\n\n\ndef solve(spark):\n    base = spark.table('product_base')\n    ch = spark.table('changes').filter(F.col('op').isin('I', 'U', 'D'))\n    latest = ch.groupBy('id').agg(\n        F.first('name').alias('chg_name'),\n        F.first(F.col('amount').cast('decimal(18,2)')).alias('chg_amount'),\n        F.max('version').alias('new_version'),\n        F.first('op').alias('op'),\n    )\n    return (\n        base.join(latest, 'id', 'full_outer')\n        .select(\n            'id',\n            F.coalesce('chg_name', 'name').alias('name'),\n            F.coalesce('chg_amount', 'amount').alias('amount'),\n            F.coalesce('new_version', 'base_version').alias('version'),\n            F.lit(False).alias('is_deleted'),\n        )\n    )\n"
+  },
+  "answer": "## 参考要点\n1. 合并的正确骨架是「**先在变更侧做单 key 裁决 → 再与 base 做 full_outer → 按规则逐列合成**」，而不是先 join 再窗口（先 join 会把行数放大到 |base|×|changes| 的量级，且破坏裁决域的独立性）。裁决键必须三级写全：`version DESC, event_ts DESC, op ASC`。\n2. **R2 是本题的生死线**：`version > base_version` 严格大于，才能在回填通道和线上通道并发时防止旧值倒灌。等价的生产做法是主键表的 `sequence.field = version`（Paimon）或 `MERGE INTO ... WHEN MATCHED AND s.version > t.version`；只按 `event_ts`/`updated_at` 裁决会被源库时钟回拨与批量修数（带旧时间）击穿。\n3. NULL 的两种语义必须分开：`name IS NULL` = 「不更新该字段」（部分更新，对应 Paimon partial-update 合并引擎 / Iceberg v3 的列级 MERGE），而「整条丢弃」是 `version IS NULL`（R1）。把它们混成一种写法，重跑就会把值刷成 NULL。\n4. tombstone（R5）为什么不能真删：湖表上真删要靠 deletion vector / `MERGE DELETE`，但**下游还在流读 changelog** 时必须留下可重放的删除事件；同时「删除后更高版本复活」在业务上真实存在（误删恢复），所以删除语义必须参与同一个 version 裁决域。\n5. 幂等性来自「结果是输入集合的函数」：同一批变更重放 N 次结果一致（本实现里 `version == base_version` 被 R2 拦住即成立）。这条应该写成 DQC 断言：重跑分区后 `count`、`sum(amount)`、主键集合与校验和三项不变。\n6. 大规模下的代价：`row_number` 会引入一次按 id 的 shuffle（线上 8 亿 key），`max(struct(version, event_ts, op, name, amount))` 预聚合是同一语义、少一次排序，但 struct 里字段顺序即裁决顺序，写错就静默取到旧版本——这是常见的 code review 事故点。\n\n## 追问\n- 「同一条变更 version 相同但 op 分别是 U 和 D 怎么定？」→ 本题按 op 字典序（D<I<U）取 D；真实系统里这是**上游契约违规**，应该在采集层加唯一约束（`id, version`）并隔离，而不是靠下游排序键兜底。\n- 「如何验证端到端 exactly-once？」→ 故障注入（kill executor / checkpoint 回滚）后比对主键集合与校验和；要知道 exactly-once 挡不住「上游把同一业务事件发两次」，那必须靠 id+version 幂等键。\n- 「Spark 4.2 上这段能简化吗？」→ `SELECT ... FROM t CHANGES BETWEEN ...` 读行级变更 + 声明式管道的 Auto CDC（SCD1 upsert / SCD2 拉链）能把 R2 的版本守卫变成表属性；但要能说清它仍然不解决「回填通道的旧 version」问题，`sequence.field` 或 MERGE 条件仍要显式给。",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/streaming-lakehouse-flink-paimon-iceberg.md#backfill-reprocessing",
+    "addedBy": "content-agent-bd"
+  }
+}

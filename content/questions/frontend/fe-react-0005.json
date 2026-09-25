@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0005",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "用 useActionState + useFormStatus 实现串行排队的昵称表单",
+  "statement": "## 场景\n\n个人主页的\"昵称\"设置表单，四个反复被投诉的点：① 保存中还能继续点，后端收到两笔写；② 提交前不做非空校验，打到服务端才报 422，错误文案还显示不出来；③ 校验器读到的是**过期的 attempts**（闭包里旧的 state），埋点数字永远偏小；④ 提交按钮的 pending 态写在父组件，别的表单复用这个按钮组件时状态串味。\n\nReact 19 的 Actions 三件套正好逐个解决：`useActionState` 的 **action 队列是串行的**（后一次 dispatch 必须等前一次完成，`previousState` 才是准的），`useFormStatus` 让按钮自己从**所属表单**取 pending，可预期的失败用 `return` 表达而不是 throw。\n\n## 契约（提交写在 `Solution.tsx`）\n\n```tsx\nexport interface FormState {\n  attempts: number;\n  error: string | null;\n  saved: string | null;\n}\n\nexport interface NicknameFormProps {\n  check: (name: string, previous: FormState) => Promise<FormState>;\n}\n\nexport function NicknameForm(props: NicknameFormProps): JSX.Element;\n```\n\nDOM 契约（测试按这些 testid 断言；初始 state 是 `{ attempts: 0, error: null, saved: null }`）：\n\n- `data-testid=\"form\"`：表单本体，测试会对它派发 submit；\n- `data-testid=\"nickname\"`：`name=\"nickname\"` 的输入框（**非受控**即可，别为了读值再写一份 state）；\n- `data-testid=\"error\"` / `\"saved\"`：分别渲染 `state.error ?? ''` 与 `state.saved ?? ''`；\n- `data-testid=\"attempts\"`：渲染 `state.attempts`；\n- `data-testid=\"submit\"`：提交按钮，必须是**表单的子组件**里用 `useFormStatus()` 拿到 pending 来渲染，pending 时 `disabled` 且文案 `保存中`，空闲时文案 `保存`。\n\n## 硬性要求\n\n1. action 签名 `(previousState, payload)`，payload 用表单原生提交的 `FormData`（渐进增强：JS 没 hydrate 时也能提交）；`name` 取 `payload.get('nickname')` 并 `trim()`。\n2. 空昵称必须在前端拦下：`return { ...previous, error: '请输入昵称' }`，**不得调用 `check`**，也不得改 `attempts`。\n3. 排队语义要靠 React 的 action 队列，不要自己写互斥锁；因此第二次提交的 `previous.attempts` 必须是第一次 action 返回值里的 `attempts`（用例断言 `prevAttempts === 1`）。\n4. 任何时刻 `check` 的并发数必须为 1（用例记录 inflight 峰值）。\n5. 校验失败（`error` 非空）不是异常：把它写回 state 渲染，不许 throw（throw 会被错误边界接管，本页没有边界 → 直接崩）。\n\n## 不许做什么\n\n- 不许 `onSubmit={(e) => { e.preventDefault(); 手动 setState }}` 那套老写法（这正是本题要换掉的）；\n- 不许把 pending 提到父组件用 `useState` 传给按钮（`useFormStatus` 的意义就是让按钮自取所属表单状态）；\n- 不许引入第三方表单库（沙箱不 `npm install`）；jsdom 里也没有 `AbortSignal.any` / `structuredClone`。\n\n## 判分\n\n6 个用例：初始态、单次提交 pending 的按钮态、空值前端拦截、失败回显与 attempts 累加、重复提交串行排队、成功收敛。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:react19-actions",
+    "forms",
+    "use-form-status",
+    "concurrency",
+    "error-state"
+  ],
+  "cases": [
+    {
+      "name": "初始无错误无已保存文案且按钮可用",
+      "input": {
+        "attempts": 0
+      },
+      "expected": "error=''、saved=''、attempts='0'、按钮文案 '保存' 且未禁用、check 调用 0 次"
+    },
+    {
+      "name": "单次提交期间按钮禁用且子组件文案变保存中",
+      "input": {
+        "name": "ada",
+        "beforeResolve": true
+      },
+      "expected": "check 收到 'ada'，按钮文案 '保存中' 且 disabled=true，收敛后回到 '保存'"
+    },
+    {
+      "name": "空昵称被前端拦截不发请求",
+      "input": {
+        "name": ""
+      },
+      "expected": "check 调用 0 次，error='请输入昵称'，attempts 仍为 0",
+      "note": "空值边界：不能打到服务端"
+    },
+    {
+      "name": "校验失败回显服务端错误并累加 attempts",
+      "input": {
+        "resolve": {
+          "attempts": 1,
+          "error": "昵称已被占用"
+        }
+      },
+      "expected": "error='昵称已被占用'、saved=''、attempts='1'"
+    },
+    {
+      "name": "重复提交排队串行不并发且 previousState 链正确",
+      "input": {
+        "submits": [
+          "ada",
+          "bob"
+        ]
+      },
+      "expected": "第二次 submit 时 check 仍未被调用；第一次 resolve 后才发生，seen[1].prevAttempts=1，inflight 峰值=1",
+      "note": "action 队列串行是本题核心判分点"
+    },
+    {
+      "name": "保存成功后展示 saved 且按钮恢复可用",
+      "input": {
+        "resolve": {
+          "attempts": 1,
+          "saved": "ada"
+        }
+      },
+      "expected": "saved='ada'、error=''、按钮未禁用"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "nickname.test.tsx",
+        "content": "import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';\nimport { expect, it } from 'vitest';\nimport { NicknameForm } from './Solution';\n\ninterface FormState {\n  attempts: number;\n  error: string | null;\n  saved: string | null;\n}\n\n/** 受控校验器：什么时候放行由用例决定，顺便量出\"有没有并发\"。 */\nfunction makeChecker() {\n  const seen: { name: string; prevAttempts: number }[] = [];\n  const inflight = { now: 0, max: 0 };\n  const deferreds: { resolve: (v: FormState) => void }[] = [];\n  const check = (name: string, previous: FormState) => {\n    seen.push({ name, prevAttempts: previous ? previous.attempts : -1 });\n    inflight.now += 1;\n    inflight.max = Math.max(inflight.max, inflight.now);\n    return new Promise<FormState>((resolve) => {\n      deferreds.push({\n        resolve: (v: FormState) => {\n          inflight.now -= 1;\n          resolve(v);\n        },\n      });\n    });\n  };\n  const type = (value: string) => {\n    fireEvent.change(screen.getByTestId('nickname'), { target: { value } });\n  };\n  /** 状态更新要等 React 提交；判分只看提交后的 DOM，不猜微任务时序。 */\n  const text = async (testid: string, value: string) => {\n    await waitFor(() => expect(screen.getByTestId(testid).textContent).toBe(value));\n  };\n  const submit = () => {\n    fireEvent.submit(screen.getByTestId('form'));\n  };\n  return { check, seen, inflight, deferreds, type, submit, text };\n}\n\nit('初始无错误无已保存文案且按钮可用', () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  expect(screen.getByTestId('error').textContent).toBe('');\n  expect(screen.getByTestId('saved').textContent).toBe('');\n  expect(screen.getByTestId('attempts').textContent).toBe('0');\n  expect(screen.getByTestId('submit').textContent).toBe('保存');\n  expect(screen.getByTestId('submit').hasAttribute('disabled')).toBe(false);\n  expect(c.seen.length).toBe(0);\n});\n\nit('单次提交期间按钮禁用且子组件文案变保存中', async () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  c.type('ada');\n  c.submit();\n  expect(c.seen.length).toBe(1);\n  expect(c.seen[0].name).toBe('ada');\n  expect(screen.getByTestId('submit').textContent).toBe('保存中');\n  expect(screen.getByTestId('submit').hasAttribute('disabled')).toBe(true);\n  await act(async () => {\n    c.deferreds[0].resolve({ attempts: 1, error: null, saved: 'ada' });\n    await new Promise((r) => setTimeout(r, 0));\n  });\n  expect(screen.getByTestId('submit').textContent).toBe('保存');\n  expect(screen.getByTestId('submit').hasAttribute('disabled')).toBe(false);\n});\n\nit('空昵称被前端拦截不发请求', async () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  c.submit();\n  expect(c.seen.length).toBe(0);\n  await c.text('error', '请输入昵称');\n  expect(screen.getByTestId('attempts').textContent).toBe('0');\n});\n\nit('校验失败回显服务端错误并累加 attempts', async () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  c.type('ada');\n  c.submit();\n  await act(async () => {\n    c.deferreds[0].resolve({ attempts: 1, error: '昵称已被占用', saved: null });\n    await new Promise((r) => setTimeout(r, 0));\n  });\n  await c.text('error', '昵称已被占用');\n  expect(screen.getByTestId('saved').textContent).toBe('');\n  expect(screen.getByTestId('attempts').textContent).toBe('1');\n  expect(screen.getByTestId('submit').hasAttribute('disabled')).toBe(false);\n});\n\nit('重复提交排队串行不并发且 previousState 链正确', async () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  c.type('ada');\n  c.submit();\n  c.type('bob');\n  c.submit();\n  expect(c.seen.length).toBe(1);\n  await act(async () => {\n    c.deferreds[0].resolve({ attempts: 1, error: null, saved: 'ada' });\n    await new Promise((r) => setTimeout(r, 0));\n  });\n  await waitFor(() => expect(c.seen.length).toBe(2));\n  expect(c.seen[1].name).toBe('bob');\n  expect(c.seen[1].prevAttempts).toBe(1);\n  expect(c.inflight.max).toBe(1);\n  // 收尾：把队列里第二次 action 结掉，别把未完成的 Action 留给下一个用例\n  act(() => c.deferreds[1].resolve({ attempts: 2, error: null, saved: 'bob' }));\n  await c.text('saved', 'bob');\n});\n\nit('保存成功后展示 saved 且按钮恢复可用', async () => {\n  const c = makeChecker();\n  render(<NicknameForm check={c.check} />);\n  c.type('ada');\n  c.submit();\n  await act(async () => {\n    c.deferreds[0].resolve({ attempts: 1, error: null, saved: 'ada' });\n    await new Promise((r) => setTimeout(r, 0));\n  });\n  await c.text('saved', 'ada');\n  expect(screen.getByTestId('attempts').textContent).toBe('1');\n  expect(screen.getByTestId('error').textContent).toBe('');\n  expect(screen.getByTestId('error').textContent).toBe('');\n  expect(screen.getByTestId('submit').hasAttribute('disabled')).toBe(false);\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { useActionState } from 'react';\nimport { useFormStatus } from 'react-dom';\nimport type { ReactNode } from 'react';\n\nexport interface FormState {\n  attempts: number;\n  error: string | null;\n  saved: string | null;\n}\n\nexport interface NicknameFormProps {\n  check: (name: string, previous: FormState) => Promise<FormState>;\n}\n\nconst IDLE: FormState = { attempts: 0, error: null, saved: null };\n\n/** useFormStatus 只有在 <form> 的后代组件里才拿得到本表单状态。 */\nfunction SubmitButton() {\n  const { pending } = useFormStatus();\n  return (\n    <button data-testid=\"submit\" type=\"submit\" disabled={pending}>\n      {pending ? '保存中' : '保存'}\n    </button>\n  );\n}\n\nexport function NicknameForm({ check }: NicknameFormProps): ReactNode {\n  const [state, dispatch] = useActionState(async (previous: FormState, payload: FormData) => {\n    const name = String(payload.get('nickname') ?? '').trim();\n    // 可预期的校验失败要 return 进 state，不要用 throw 表达业务分支\n    if (!name) return { ...previous, error: '请输入昵称' };\n    const next = await check(name, previous);\n    return { ...next, error: next.error ?? null };\n  }, IDLE);\n\n  return (\n    <form data-testid=\"form\" action={dispatch as unknown as (payload: FormData) => void}>\n      <input data-testid=\"nickname\" name=\"nickname\" defaultValue=\"\" />\n      <span data-testid=\"error\">{state.error ?? ''}</span>\n      <span data-testid=\"saved\">{state.saved ?? ''}</span>\n      <span data-testid=\"attempts\">{state.attempts}</span>\n      <SubmitButton />\n    </form>\n  );\n}\n",
+    "naiveSolution": "import { useState } from 'react';\n\nexport function NicknameForm({ check }) {\n  const [attempts, setAttempts] = useState(0);\n  const [error, setError] = useState('');\n  const [saved, setSaved] = useState('');\n  const [saving, setSaving] = useState(false);\n\n  async function onSubmit(event) {\n    event.preventDefault();\n    setSaving(true);\n    const name = new FormData(event.currentTarget).get('nickname');\n    setAttempts((n) => n + 1);\n    const next = await check(name, { attempts, error: null, saved: null });\n    setSaving(false);\n    setError(next.error ?? '');\n    setSaved(next.saved ?? '');\n  }\n\n  return (\n    <form data-testid=\"form\" onSubmit={onSubmit}>\n      <input data-testid=\"nickname\" name=\"nickname\" defaultValue=\"\" />\n      <span data-testid=\"error\">{error}</span>\n      <span data-testid=\"saved\">{saved}</span>\n      <span data-testid=\"attempts\">{attempts}</span>\n      <button data-testid=\"submit\" type=\"submit\" disabled={saving}>\n        {saving ? '保存中' : '保存'}\n      </button>\n    </form>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- `useActionState` 的 dispatch 组成的队列是**串行**的：同一次表单连续两次提交，第二次 action 只有在第一次 resolve 后才执行，因而 `previousState` 有意义（埋点 attempts 不会丢）。自己写 `useState` + async onSubmit 的实现里，两次 action 并发跑，闭包里的 `attempts` 都是旧值。\n- action 抛错会跳过队列里的后续 action 并冒泡到 Error Boundary：所以「昵称被占用」这类可预期失败必须 `return` 到 state，而不是 throw。\n- `useFormStatus` 读的是**所属表单**的状态，只能作为 `<form>` 的后代组件调用；把 pending 提升到父级 `useState` 会导致复用串味，也让按钮在服务端渲染/未 hydrate 时失去语义。\n- `form action={fn}` 取代 `onSubmit + preventDefault`：附带两个好处——payload 天然是 `FormData`（可用 `permalink` 做渐进增强），以及 action 完成后 React 会**自动重置非受控表单**（测试不依赖这点，但要知道）。\n- 幂等仍要在服务端：排队只保证「同一浏览器实例内串行」，多标签页/多设备还是要 `Idempotency-Key`（见 fe-react-0002 的幂等矩阵）。\n\n面试追问：\n1. 想在 pending 期间禁止输入框被改动，怎么做才对？（`readOnly`/`aria-busy` 由同一个 useFormStatus 的子组件给出，而不是禁用 form）\n2. 如果 check 抛了异常，队列里的下一次提交会怎样？（被跳过并冒泡到边界，需要边界 reset 才能恢复）\n3. 为什么第二次提交的 payload 是 'bob' 而不是被重置后的空值？（dispatch 时已捕获 FormData 快照）\n4. 乐观更新（先显示新昵称）该叠在哪一层？（`useOptimistic`，见 fe-react-0004）",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/react19-concurrency.md#13-actionsuseactionstate-useformstatus-useoptimistic",
+    "addedBy": "content-agent-fe"
+  }
+}

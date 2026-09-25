@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0003",
+  "category": "frontend",
+  "difficulty": "principal",
+  "title": "用 use() 实现可缓存、抗竞态、可恢复的用户卡片",
+  "statement": "## 场景\n\n一个 React 19 的详情页：顶部 `Suspense`，中间是用户卡片，右上角有\"刷新\"。老代码是 `useEffect + setUser` 的手写取数，线上有三个老毛病：切人时**旧请求后到把人换成上一个**、刷新会**把子树重挂**（表单里填到一半的内容丢了）、接口挂了以后**错误边界接不住**（因为错误是在 effect 里抛的，不在渲染阶段）。产品还提了一条：同一条数据被同屏两个卡片各请求一次，浪费带宽。\n\n## 契约\n\n提交写在 **`Solution.tsx`**，导出一个组件：\n\n```tsx\nexport interface User { id: string; name: string }\n\nexport function UserCard(props: {\n  userId: string;\n  fetchUser: (id: string) => Promise<User>;\n}): ReactNode;\n```\n\n测试侧提供 `<Boundary>`（class 错误边界，`getDerivedStateFromError` 后渲染 `data-testid=\"reset\"` 按钮）与 `<Suspense fallback={<span data-testid=\"fb\">loading</span>}>`，**这两样都由测试写好**，你只管卡片。渲染要求：\n\n- `data-testid=\"name\"`：用户姓名；`userId` 为空串时渲染 `not-found` 且**不发请求**；\n- `data-testid=\"local\"`：组件内部一个自增计数；`data-testid=\"bump\"` 按钮点击 +1（用来验证\"刷新有没有重挂子树\"）；\n- `data-testid=\"refresh\"`：按钮，点击后重新拉当前 `userId`，**不得重挂子树**（`local` 必须保留），刷新期间旧数据继续可见。\n\n## 硬性要求\n\n1. 用 **`use(promise)`** 读取数据，让挂起发生在渲染阶段（这是错误边界能接住的前提）。因此 `fetchUser` 的返回值必须先经过一层缓存：同一 `(fetchUser, cacheKey)` 在**任意次 render、任意个组件实例**之间必须是**同一个 promise 实例**——否则 `use()` 会反复挂起并重复请求。\n2. **失败也属于该 key 的结果**：把已 reject 的 promise 留在缓存里（连同 id/version 一起），恢复只能靠换 key（切 id 或刷新 version）。绝不允许出现\"渲染时发现缓存没有条目就再发一次\"——React 在 promise settle 后会重跑挂起的那次 render，那样就是请求风暴。\n3. 切换 `userId` 时，晚到的旧响应不得进入界面（缓存 key 含 id 天然解决；不要用\"最后一个 resolve 的赢\"这种写法）。\n4. 刷新走 Action（`useTransition` 的 `start` 或 `useActionState` 的 dispatch）+ **换 promise 实例**（把 version 之类拼进 cacheKey）：在同一个 Action 里先把新 promise 拉到就绪、再换 key，于是整棵树**从不退回 fallback**，`local` 计数与 DOM 内部状态都保得住。不许用 `key` 重挂整棵子树，也不许在 `useEffect` 里 `setState` 假装刷新。\n\n## 不许做什么\n\n- 不许用 `useEffect` + `setState` 做取数（错误就不会冒泡到边界，刷新也就无法保持挂起态）；\n- 不许把 `use()` 包在 `try/catch` 里（`use` 是 throw 语义，包不住），也不要 `catch(() => null)` 把失败咽掉；\n- 不许在事件回调里调用 `use()`；\n- 不许用 `setTimeout` 猜时序；测试只等真实提交（`waitFor`）；\n- 判题容器是 jsdom：没有 `AbortSignal.any`、`structuredClone`、`ResizeObserver`，也不会有 `npm install`。\n\n## 判分\n\n6 个用例：单实例去重、多实例共享 promise、乱序竞态、刷新保状态、边界捕获后 reset 恢复、空 id 短路。全部由 `user-card.test.tsx` 断言 DOM 文本与 `fetchUser` 的调用次数/顺序（`expected`/`actual` 可读）。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:react19-use",
+    "suspense",
+    "error-boundary",
+    "race-condition",
+    "caching"
+  ],
+  "cases": [
+    {
+      "name": "同一 id 重复渲染只请求一次",
+      "input": {
+        "userId": "u1",
+        "rerenders": 8
+      },
+      "expected": "fetchUser 调用 1 次；name 收敛为 Ada；DOM 里 name 节点恰好 1 个",
+      "note": "重复 render 不允许重复请求，也不允许反复挂起"
+    },
+    {
+      "name": "两个实例共享同一条 promise 不各发一次",
+      "input": {
+        "cards": 2,
+        "userId": "u1"
+      },
+      "expected": "fetchUser 调用 1 次，两个卡片的 name 都是 'Ada'",
+      "note": "跨实例 single-flight：缓存必须挂在组件外面"
+    },
+    {
+      "name": "切换 id 时旧响应晚到不脏渲染",
+      "input": {
+        "flow": "u1 已返回 -> 切 u2（未返回）-> 切回 u1 -> u2 这时才返回"
+      },
+      "expected": "切回 u1 不产生第 3 次请求；u2 的晚到响应不改写界面，name 始终是 'Ada'",
+      "note": "竞态判分点"
+    },
+    {
+      "name": "刷新换 promise 实例但保留子树状态",
+      "input": {
+        "bump": 1,
+        "thenClickRefresh": true
+      },
+      "expected": "刷新后 fetchUser 共 2 次；刷新瞬间 name 仍是 'Ada'（旧数据可见、无 fallback）；新值到达后 name='Ada Lee' 且 local 仍为 '1'（未重挂）"
+    },
+    {
+      "name": "失败冒泡到错误边界且不触发自动重试风暴",
+      "input": {
+        "reject": "Error(500)"
+      },
+      "expected": "边界渲染 reset=caught，且 fetchUser 仍只有 1 次（失败不自动重发）；reset 后换到新 id 才发第 2 次请求并正常渲染",
+      "note": "渲染期抛错才进得来边界；失败缓存不能变成请求风暴"
+    },
+    {
+      "name": "空 id 不发请求直接渲染 not-found",
+      "input": {
+        "userId": ""
+      },
+      "expected": "fetchUser 调用 0 次，name=not-found"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "user-card.test.tsx",
+        "content": "import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';\nimport { Component, Suspense } from 'react';\nimport { expect, it } from 'vitest';\nimport { UserCard } from './Solution';\n\ninterface User {\n  id: string;\n  name: string;\n}\n\n/** 受控 API 替身：谁先返回由用例决定，因此能构造\"先发后到\"。 */\nfunction makeApi() {\n  const pending: { id: string; resolve: (u: User) => void; reject: (e: unknown) => void }[] = [];\n  const fetchUser = (id: string): Promise<User> => {\n    let resolve: (u: User) => void = () => undefined;\n    let reject: (e: unknown) => void = () => undefined;\n    const p = new Promise<User>((res, rej) => {\n      resolve = res;\n      reject = rej;\n    });\n    p.catch(() => undefined);\n    pending.push({ id, resolve: (u) => resolve(u), reject: (e) => reject(e) });\n    return p;\n  };\n  return { pending, fetchUser };\n}\n\nclass Boundary extends Component<{ children: React.ReactNode }, { err: unknown }> {\n  state = { err: null as unknown };\n  static getDerivedStateFromError(error: unknown) {\n    return { err: error };\n  }\n  render() {\n    if (this.state.err !== null) {\n      return <button data-testid=\"reset\" onClick={() => this.setState({ err: null })}>caught</button>;\n    }\n    return this.props.children;\n  }\n}\n\nfunction App({ userId, api }: { userId: string; api: ReturnType<typeof makeApi> }) {\n  return (\n    <Boundary>\n      <Suspense fallback={<span data-testid=\"fb\">loading</span>}>\n        <UserCard userId={userId} fetchUser={api.fetchUser} />\n      </Suspense>\n    </Boundary>\n  );\n}\n\n/**\n * 用例驱动工具。两个测试环境细节写在测试侧，与考生实现无关：\n * 1) prime()：jsdom 里 React 调度没有 MessageChannel，挂起中的 boundary 需要\"再跑一轮 render +\n *    让出一个宏任务\"才会把已解析的 promise 提交上屏；until() 就是把这个动作做成有界轮询；\n * 2) 收敛一律靠轮询真实 DOM/调用次数，不猜墙钟。\n */\nfunction mount(userId: string) {\n  const api = makeApi();\n  const tree = (id: string) => <App userId={id} api={api} />;\n  let current = userId;\n  const { rerender } = render(tree(current));\n  const prime = (times = 1) => {\n    for (let i = 0; i < times; i += 1) rerender(tree(current));\n  };\n  const spin = async () => {\n    await act(async () => {\n      await new Promise((r) => setTimeout(r, 0));\n    });\n  };\n  const until = async (check: () => boolean) => {\n    for (let i = 0; i < 30; i += 1) {\n      prime();\n      await spin();\n      if (check()) return;\n    }\n  };\n  const go = async (id: string) => {\n    current = id;\n    rerender(tree(current));\n    await spin();\n  };\n  const settle = async (index: number, user: User) => {\n    act(() => api.pending[index].resolve(user));\n    await spin();\n  };\n  const fail = async (index: number, error: unknown) => {\n    act(() => api.pending[index].reject(error));\n    await spin();\n  };\n  const shown = async (text: string) => {\n    await until(() => screen.queryByTestId('name')?.textContent === text);\n    expect(screen.getByTestId('name').textContent).toBe(text);\n  };\n  const requests = async (count: number) => {\n    await until(() => api.pending.length === count);\n    expect(api.pending.length).toBe(count);\n  };\n  const caught = async () => {\n    await until(() => screen.queryByTestId('reset')?.textContent === 'caught');\n    expect(screen.getByTestId('reset').textContent).toBe('caught');\n  };\n  return { api, prime, spin, go, settle, fail, shown, requests, caught };\n}\n\nit('同一 id 重复渲染只请求一次', async () => {\n  const h = mount('u1');\n  h.prime(4);\n  expect(h.api.pending.length).toBe(1);\n  await h.settle(0, { id: 'u1', name: 'Ada' });\n  await h.shown('Ada');\n  h.prime(4);\n  expect(h.api.pending.length).toBe(1);\n  expect(screen.getAllByTestId('name').length).toBe(1);\n});\n\nit('两个实例共享同一条 promise 不各发一次', async () => {\n  const api = makeApi();\n  const pair = () => (\n    <div>\n      <App userId=\"u1\" api={api} />\n      <App userId=\"u1\" api={api} />\n    </div>\n  );\n  const { rerender } = render(pair());\n  rerender(pair());\n  expect(api.pending.length).toBe(1);\n  act(() => api.pending[0].resolve({ id: 'u1', name: 'Ada' }));\n  for (let i = 0; i < 30; i += 1) {\n    rerender(pair());\n    await act(async () => {\n      await new Promise((r) => setTimeout(r, 0));\n    });\n    if (screen.queryAllByTestId('name').length === 2) break;\n  }\n  expect(screen.getAllByTestId('name').map((el) => el.textContent)).toEqual(['Ada', 'Ada']);\n  expect(api.pending.length).toBe(1);\n});\n\nit('切换 id 时旧响应晚到不脏渲染', async () => {\n  const h = mount('u1');\n  await h.settle(0, { id: 'u1', name: 'Ada' });\n  await h.shown('Ada');\n  await h.go('u2');\n  await h.requests(2);\n  expect(h.api.pending[1].id).toBe('u2');\n  await h.go('u1');\n  expect(h.api.pending.length).toBe(2);\n  await h.shown('Ada');\n  await h.settle(1, { id: 'u2', name: 'Grace' });\n  await h.shown('Ada');\n});\n\nit('刷新换 promise 实例但保留子树状态', async () => {\n  const h = mount('u1');\n  await h.settle(0, { id: 'u1', name: 'Ada' });\n  await h.shown('Ada');\n  fireEvent.click(screen.getByTestId('bump'));\n  expect(screen.getByTestId('local').textContent).toBe('1');\n  fireEvent.click(screen.getByTestId('refresh'));\n  await h.spin();\n  expect(screen.getByTestId('name').textContent).toBe('Ada');\n  await h.requests(2);\n  await h.settle(1, { id: 'u1', name: 'Ada Lee' });\n  await h.shown('Ada Lee');\n  expect(screen.getByTestId('local').textContent).toBe('1');\n});\n\nit('失败冒泡到错误边界且不触发自动重试风暴', async () => {\n  const h = mount('u1');\n  await h.fail(0, new Error('500'));\n  await h.caught();\n  expect(h.api.pending.length).toBe(1);\n  await h.go('u2');\n  fireEvent.click(screen.getByTestId('reset'));\n  await h.requests(2);\n  await h.settle(1, { id: 'u2', name: 'Grace' });\n  await h.shown('Grace');\n});\n\nit('空 id 不发请求直接渲染 not-found', () => {\n  const h = mount('');\n  expect(h.api.pending.length).toBe(0);\n  expect(screen.getByTestId('name').textContent).toBe('not-found');\n});\n"
+      }
+    ],
+    "timeoutMs": 50000,
+    "referenceSolution": "import { use, useState, useTransition } from 'react';\nimport type { ReactNode } from 'react';\n\nexport interface User {\n  id: string;\n  name: string;\n}\n\ntype FetchUser = (id: string) => Promise<User>;\n\n/**\n * promise 缓存以 fetchUser 函数身份为第一层 key（WeakMap 不泄漏），\n * 第二层是 id + \"@\" + version。失败结果同样留在这一格里（渲染路径绝不自动重发），\n * 恢复靠换 key：切 id 或刷新 version。\n */\nconst cache = new WeakMap<FetchUser, Map<string, Promise<User>>>();\n\nfunction cachedPromise(fetchUser: FetchUser, id: string, cacheKey: string): Promise<User> {\n  let byKey = cache.get(fetchUser);\n  if (!byKey) {\n    byKey = new Map();\n    cache.set(fetchUser, byKey);\n  }\n  const hit = byKey.get(cacheKey);\n  if (hit) return hit;\n  // 失败也留在这一格缓存里：渲染路径绝不\"发现没有就再发一次\"，否则 wake 之后就是请求风暴。\n  // 恢复靠换 key（切 id / 刷新 version），不靠自动重试。\n  const p = fetchUser(id);\n  byKey.set(cacheKey, p);\n  return p;\n}\n\nexport function UserCard({ userId, fetchUser }: { userId: string; fetchUser: FetchUser }): ReactNode {\n  const [version, setVersion] = useState(0);\n  const [local, setLocal] = useState(0);\n  const [isPending, startRefresh] = useTransition();\n\n  if (!userId) return <span data-testid=\"name\">not-found</span>;\n\n  const cacheKey = userId + '@' + version;\n  // use() 幂等：同一个 cacheKey 反复 render 读到的是同一 promise 实例，不会反复挂起\n  const user = use(cachedPromise(fetchUser, userId, cacheKey));\n\n  return (\n    <>\n      <span data-testid=\"name\">{user.name}</span>\n      <span data-testid=\"local\">{local}</span>\n      <span data-testid=\"refreshing\">{isPending ? 'yes' : 'no'}</span>\n      <button data-testid=\"bump\" onClick={() => setLocal((n) => n + 1)}>bump</button>\n      <button\n        data-testid=\"refresh\"\n        onClick={() => {\n          startRefresh(async () => {\n            const next = version + 1;\n            // 先把新 promise 拉到就绪再换 key：整棵树不退回 fallback，本地状态与 DOM 内部状态都保住\n            await cachedPromise(fetchUser, userId, userId + '@' + next);\n            setVersion(next);\n          });\n        }}\n      >\n        refresh\n      </button>\n    </>\n  );\n}\n",
+    "naiveSolution": "import { useEffect, useState } from 'react';\n\nexport function UserCard({ userId, fetchUser }: { userId: string; fetchUser: (id: string) => Promise<{ id: string; name: string }> }) {\n  const [user, setUser] = useState(null);\n  const [local, setLocal] = useState(0);\n  useEffect(() => {\n    fetchUser(userId).then((u) => setUser(u));\n  }, [userId, fetchUser]);\n  return (\n    <>\n      <span data-testid=\"name\">{user ? user.name : 'loading'}</span>\n      <span data-testid=\"local\">{local}</span>\n      <button data-testid=\"bump\" onClick={() => setLocal((n) => n + 1)}>bump</button>\n      <button data-testid=\"refresh\">refresh</button>\n    </>\n  );\n}\n"
+  },
+  "answer": "参考要点：\\n- `use(promise)` 把取数变成渲染阶段行为：可被 `Suspense` 接住、可被错误边界接住、可以被 `startTransition` 降级为可丢弃更新。代价是 promise 身份必须稳定——每次 render 新建一条就会无限挂起 + 重复请求。\\n- 缓存 key 必须包含影响结果的全部输入：`(fetchUser 身份, id, version)`。第一层用 `WeakMap`，避免模块级 Map 把测试之间的缓存串味（也避免内存泄漏）。\\n- 失败也属于该 key 的结果：已 reject 的 promise 留在缓存里，恢复靠换 key（切 id / 刷新 version）。渲染路径里绝不能「发现缓存空了就再发一次」——React 在 promise settle 后会重跑那次挂起的 render，那样就是请求风暴（用例专门数 fetchUser 次数）。\\n- 刷新在 Action 里先把新 promise await 到就绪、再换 key：整棵树从不退回 fallback，因此 `local` 计数与 DOM 内部状态（输入框内容、滚动位置）都不丢；用 `key` 重挂虽然也能刷新，但会丢状态且不降优先级。\\n- 竞态在这套模型里是结构性消失的：不同 id 是不同 cacheKey，旧 promise 的 resolve 只会填它自己的 key，污染不到界面。\\n- 判题环境（jsdom）里 React 调度没有 MessageChannel：挂起中的 boundary 需要「再跑一轮 render + 让出一个宏任务」才会提交，测试侧已用 prime + waitFor 轮询处理，与实现的正确性无关。\\n\\n面试追问：\\n1. 为什么不直接 `const [p] = useState(() => fetchUser(id))`？（render 期新建 promise，React 重试挂起渲染时又生成一条新的，界面永远停在 fallback——出题时踩过这个坑）\\n2. 多个订阅者共享同一条 promise 时，谁能取消它？（引用计数 + 由缓存层持有 AbortController；单个消费者卸载不许 abort 共享请求）\\n3. 刷新期间用户又切了 id，界面会怎样？（transition 被打断/丢弃，新 id 的渲染优先级更高，这正是可丢弃更新的语义）\\n4. 怎么测「脏帧没出现」？（`<Profiler onRender>` 抓每次 commit 的 DOM 快照 + 断言 name 节点唯一；`getByTestId` 命中多个会直接抛错，是很好的护栏）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/react19-concurrency.md#12-use把-promise-当资源",
+    "addedBy": "content-agent-fe"
+  }
+}

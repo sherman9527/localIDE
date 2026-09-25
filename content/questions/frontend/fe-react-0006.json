@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0006",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "用 useDeferredValue 把列表过滤降级为恰好一帧滞后",
+  "statement": "## 场景\n\n商品目录页顶部一个搜索框，下面挂着 3000 行可过滤列表。指标看板上 LCP 很漂亮，但 p75 INP 640ms：每次敲键，React 都要**同步**重算过滤 + 重排整张表，输入框因此掉字（打字延迟 = event dispatch + render + commit）。\n\n正确的拆法是把工作分成两类：**正确性关键**的（输入框的值——被丢弃用户就看到错字符）必须每帧跟手；**可丢弃**的（过滤结果、图表重算——晚一帧只是\"还没变准\"）降级成 transition。`useDeferredValue` 正是干这个的：本轮先用旧值渲染，之后再补一帧新值。\n\n## 契约（提交写在 `Solution.tsx`）\n\n```tsx\nexport interface FilterListProps { rows: string[] }\n\nexport function FilterList(props: FilterListProps): JSX.Element;\n```\n\nDOM 契约（测试按 testid 抓每一帧的快照）：\n\n- `data-testid=\"query\"`：受控输入框，`value` 必须是**用户刚敲进去的原始值**（不许对它做防抖/降级）；\n- `data-testid=\"applied\"`：本帧真正用于过滤的 query；\n- `data-testid=\"highlight\"`：本帧用于高亮的 query；\n- `data-testid=\"rows\"`：`<ul>`，每个命中行一个 `<li>`；无命中时渲染 0 个 `li`（不要渲染占位行）。\n\n过滤规则：`row.toLowerCase().includes(applied.trim().toLowerCase())`，`applied` 为空白时返回全部行（**大小写不敏感、两端去空白**）。行内容用 `row` 本身做 key（不许用 index）。\n\n## 硬性要求（判题逐条对应）\n\n1. **滞后恰好一帧**：输入后必须存在一帧满足 `input === 新值` 且 `applied` 仍是旧值、`rows` 还是旧结果；随后一帧收敛。同步过滤（没有降级）与把输入框也降级都判负。\n2. **禁止混合帧**：任何一帧里 `applied === highlight` 且 `rows === 按该帧 applied 过滤出来的行数`。也就是不许\"高亮用新 query、数据用旧结果\"。\n3. 输入框每帧跟手：每次输入之后 `input` 必须立刻等于已敲入值。\n4. 提交次数受控：3000 行、三次输入，总 commit 数 ≤ 10（`<Profiler onRender>` 计数，见测试里的帧探针）。\n\n## 不许做什么\n\n- 不许用 `setTimeout`/防抖库自己实现\"延迟\"：本题考的是优先级，不是时间；也不许引入第三方库（沙箱不会 `npm install`）。\n- 不许用 `useDeferredValue(query)` 之后再写 `const value = deferred` 把输入框也降级（会丢字）。\n- 不许在 `useEffect` 里 `setState` 做过滤（多一帧且闪烁）；派生值请在渲染里算 + `useMemo`。\n- 不许断言墙钟耗时（判题环境 jsdom 无布局/绘制，`performance.now` 之类一律不作为通过条件）。\n\n## 判分\n\n6 个用例：首帧基线、单次输入滞后帧、下一帧收敛、连续输入的自洽帧序列（禁混合帧）、超大列表提交预算、清空与无匹配边界。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:react19-transition",
+    "render-performance",
+    "inp",
+    "large-list",
+    "profiler"
+  ],
+  "cases": [
+    {
+      "name": "无数据输入时首帧渲染全部行且 applied 为空串",
+      "input": {
+        "rows": 5
+      },
+      "expected": "frames[0] = {input:'', applied:'', highlight:'', rows:5}"
+    },
+    {
+      "name": "单次输入的第一帧列表仍是旧结果",
+      "input": {
+        "type": "li"
+      },
+      "expected": "存在一帧 input=li、applied=''、rows=5（滞后帧）",
+      "note": "同步过滤的实现没有这一帧，判负"
+    },
+    {
+      "name": "下一帧收敛到新结果且 input 始终跟手",
+      "input": {
+        "type": "li",
+        "settle": true
+      },
+      "expected": "最后一帧 = {input:'li', applied:'li', highlight:'li', rows:2}"
+    },
+    {
+      "name": "重复输入三帧里每帧 rows 都与本帧 applied 自洽（禁混合帧）",
+      "input": {
+        "types": [
+          "a",
+          "ap",
+          "a"
+        ]
+      },
+      "expected": "不满足 applied===highlight && rows===countFor(applied) 的帧为 []"
+    },
+    {
+      "name": "超大列表 3000 行时每次输入只多一帧且首帧滞后",
+      "input": {
+        "rows": 3000,
+        "types": [
+          "row 299",
+          "row 2999",
+          "row 1"
+        ]
+      },
+      "expected": "三次输入各有滞后帧；总 commit ≤ 10；最后一帧 rows 与 query 自洽",
+      "note": "不卡时间、只卡提交次数"
+    },
+    {
+      "name": "清空与无匹配都只渲染自洽帧",
+      "input": {
+        "types": [
+          "zz",
+          ""
+        ]
+      },
+      "expected": "先 {applied:'zz',rows:0} 再 {applied:'',rows:5}，全程无混合帧"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "filter-list.test.tsx",
+        "content": "import { act, fireEvent, render } from '@testing-library/react';\nimport { Profiler } from 'react';\nimport { expect, it } from 'vitest';\nimport { FilterList } from './Solution';\n\ninterface Frame {\n  input: string;\n  applied: string;\n  highlight: string;\n  rows: number;\n}\n\nconst ROWS = ['apple pie', 'banana split', 'avocado toast', 'cherry lime', 'lime sorbet'];\n\nconst countFor = (query: string, rows: string[] = ROWS) =>\n  rows.filter((row) => row.toLowerCase().includes(query.toLowerCase())).length;\n\n/**\n * 帧探针：Profiler 的 onRender 在 commit 之后触发，此时读 DOM 拿到的就是\"这一帧真正提交的内容\"。\n * jsdom 没有布局与绘制，所以判\"卡不卡\"只能看提交序列与提交次数，绝不看墙钟耗时。\n */\nfunction mount(rows: string[]) {\n  const frames: Frame[] = [];\n  const q = <T extends Element>(testid: string) => document.querySelector('[data-testid=' + testid + ']') as T | null;\n  const record = () => {\n    frames.push({\n      input: q<HTMLInputElement>('query')?.value ?? '?',\n      applied: q('applied')?.textContent ?? '?',\n      highlight: q('highlight')?.textContent ?? '?',\n      rows: q('rows')?.querySelectorAll('li').length ?? -1,\n    });\n  };\n  render(\n    <Profiler id=\"filter-list\" onRender={() => record()}>\n      <FilterList rows={rows} />\n    </Profiler>,\n  );\n  const spin = async () => {\n    await act(async () => {\n      await new Promise((r) => setTimeout(r, 0));\n    });\n  };\n  /** 输入后轮询到\"新值已提交\"为止：deferred 帧什么时候落地由 React 决定，不猜墙钟。 */\n  const type = async (value: string) => {\n    fireEvent.change(document.querySelector('[data-testid=query]') as HTMLInputElement, { target: { value } });\n    for (let i = 0; i < 20; i += 1) {\n      await spin();\n      const f = frames[frames.length - 1];\n      if (f && f.applied === value && f.rows === countFor(value, rows)) return;\n    }\n  };\n  const last = (): Frame => frames[frames.length - 1];\n  /** 滞后帧 = 这一帧 input 已经是新值、applied 还是旧值。 */\n  const lagFrames = (value: string) => frames.filter((f) => f.input === value && f.applied !== value);\n  const input = () => document.querySelector('[data-testid=query]') as HTMLInputElement;\n  return { frames, input, type, last, lagFrames };\n}\n\nit('无数据输入时首帧渲染全部行且 applied 为空串', () => {\n  const m = mount(ROWS);\n  expect(m.frames.length).toBe(1);\n  expect(m.last()).toEqual({ input: '', applied: '', highlight: '', rows: 5 });\n});\n\nit('单次输入的第一帧列表仍是旧结果', () => {\n  const m = mount(ROWS);\n  fireEvent.change(m.input(), { target: { value: 'li' } });\n  expect(m.lagFrames('li').length).toBeGreaterThanOrEqual(1);\n  expect(m.frames.some((f) => f.input === 'li' && f.applied === '' && f.rows === 5)).toBe(true);\n});\n\nit('下一帧收敛到新结果且 input 始终跟手', async () => {\n  const m = mount(ROWS);\n  await m.type('li');\n  expect(m.last().input).toBe('li');\n  expect(m.last().applied).toBe('li');\n  expect(m.last().highlight).toBe('li');\n  expect(m.last().rows).toBe(countFor('li'));\n});\n\nit('重复输入三帧里每帧 rows 都与本帧 applied 自洽（禁混合帧）', async () => {\n  const m = mount(ROWS);\n  await m.type('a');\n  await m.type('ap');\n  await m.type('a');\n  const bad = m.frames.filter((f) => f.applied !== f.highlight || f.rows !== countFor(f.applied));\n  expect(bad).toEqual([]);\n  expect(m.frames.length).toBeGreaterThanOrEqual(4);\n});\n\nit('超大列表 3000 行时每次输入只多一帧且首帧滞后', async () => {\n  const big = Array.from({ length: 3000 }, (_unused, i) => 'row ' + i + ' apple');\n  const m = mount(big);\n  await m.type('row 299');\n  await m.type('row 2999');\n  await m.type('row 1');\n  const inputs = ['row 299', 'row 2999', 'row 1'];\n  const lagged = inputs.filter((query) => m.lagFrames(query).length >= 1).length;\n  expect(lagged).toBe(3);\n  expect(m.frames.length).toBeLessThanOrEqual(12);\n  expect(m.last().rows).toBe(countFor('row 1', big));\n});\n\nit('清空与无匹配都只渲染自洽帧', async () => {\n  const m = mount(ROWS);\n  await m.type('zz');\n  expect(m.last().applied).toBe('zz');\n  expect(m.last().rows).toBe(0);\n  await m.type('');\n  expect(m.last().applied).toBe('');\n  expect(m.last().rows).toBe(5);\n  const bad = m.frames.filter((f) => f.applied !== f.highlight || f.rows !== countFor(f.applied));\n  expect(bad).toEqual([]);\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { useDeferredValue, useMemo, useState } from 'react';\n\nexport interface FilterListProps {\n  rows: string[];\n}\n\nexport function FilterList({ rows }: FilterListProps) {\n  const [query, setQuery] = useState('');\n  /**\n   * query：正确性关键（输入框的值），必须每帧跟手；\n   * applied：可丢弃（列表过滤），允许先渲染旧值再补一帧。\n   */\n  const applied = useDeferredValue(query);\n  const visible = useMemo(() => {\n    const needle = applied.trim().toLowerCase();\n    return needle ? rows.filter((row) => row.toLowerCase().includes(needle)) : rows;\n  }, [rows, applied]);\n\n  return (\n    <div>\n      <input data-testid=\"query\" value={query} onChange={(event) => setQuery(event.target.value)} />\n      <span data-testid=\"applied\">{applied}</span>\n      <span data-testid=\"highlight\">{applied}</span>\n      <ul data-testid=\"rows\">\n        {visible.map((row) => (\n          <li key={row}>{row}</li>\n        ))}\n      </ul>\n    </div>\n  );\n}\n",
+    "naiveSolution": "import { useState } from 'react';\n\nexport function FilterList({ rows }: { rows: string[] }) {\n  const [query, setQuery] = useState('');\n  const needle = query.trim().toLowerCase();\n  const visible = needle ? rows.filter((row) => row.toLowerCase().includes(needle)) : rows;\n  return (\n    <div>\n      <input data-testid=\"query\" value={query} onChange={(event) => setQuery(event.target.value)} />\n      <span data-testid=\"applied\">{query}</span>\n      <span data-testid=\"highlight\">{query}</span>\n      <ul data-testid=\"rows\">\n        {visible.map((row) => (\n          <li key={row}>{row}</li>\n        ))}\n      </ul>\n    </div>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- 划分标准只有一句：**这个更新被丢弃会不会让用户看到错误结果？** 输入框的值会（丢字），列表过滤不会（只是晚一帧变准）→ 只降级后者。\n- `useDeferredValue` 的机制：urgent render 里 deferred 值仍是旧的，于是那一帧的 DOM 是「新 input + 旧列表」；React 随后用新 deferred 值再补一次低优先级 render。这解释了为什么「滞后帧恰好一帧」。\n- 混合帧是真实事故：高亮用 urgent query、数据用 deferred query → 用户看到\"高亮了 apple 但列表还是全量\"。修法是**同一个 deferred 值贯穿到派生数据与所有展示位**（本题的 applied/highlight 都读同一个值）。\n- 判分口径：jsdom 没有布局与绘制，任何 `< 16ms` 之类墙钟断言都必然 flaky；确定性的性能护栏是 **Profiler 提交序列 + commit 次数**（也是编译器上线后防性能回归的做法）。\n- `useMemo` 在这里是让旧值帧别白算一遍 3000 行；不是「加了就快」的护身符——真正省掉重算的是优先级。\n- 再进一步：`content-visibility: auto` + `contain-intrinsic-size` 可以不虚拟化就跳过屏外绘制；真正 10k+ 行才上虚拟化，且要补 `aria-setsize/aria-posinset` 与键盘语义（见 fe-react-0012）。\n\n面试追问：\n1. 为什么不能对输入框的值用 `useDeferredValue`？（丢字 = 正确性问题；INP 的\"processing\"段省了但结果错了）\n2. 如果过滤是异步的（要查后端），这套降级还成立吗？（要换成\"请求随 deferred key 发起 + transition + 缓存 promise\"，见 0001/0003）\n3. 你怎么在 CI 里守住\"commit 次数\"这条预算？（Profiler 计数快照 + 阈值断言，超预算阻断发布）\n4. React Compiler 之后还需要手写这层降级吗？（编译器只做 memo，不改变优先级；降级仍要人来判断）",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/render-performance.md#11-一次卡的完整拆解inp-口径",
+    "addedBy": "content-agent-fe"
+  }
+}

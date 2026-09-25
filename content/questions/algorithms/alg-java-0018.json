@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0018",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "特征平台表达式 DSL 的逆波兰求值与溢出契约",
+  "statement": "## 背景\n\n特征平台允许业务方写四则运算表达式（离线口径与在线口径必须**逐位一致**）。表达式以**逆波兰（RPN）** token 串下发：空格分隔，token 是整数字面量、`$i`（引用 `vars[i]`）或运算符 `+ - * /`。\n\n这题的区分度全在**数值语义**：`/` 的取整方向、`long` 溢出、以及\"溢出必须显式失败而不是回绕\"。\n\n## 入口\n\n```java\npublic static long evalRpn(String rpn, int[] vars)\n```\n\n- token 语义：`$i` 入栈 `vars[i]`；数字按 `long` 解析入栈；运算符弹出**栈顶为右操作数 b、次顶为左操作数 a**，按 `a op b` 计算后入栈；\n- 求值结束必须只剩一个值，返回它；\n- `rpn` 为 `null` 或全空白 → 返回 `0`。\n\n## 不变式与硬约束\n\n1. `/` 必须是 **`Math.floorDiv`（向下取整）**语义：`-7 / 2` 结果是 `-4`，不是 Java 内建 `/` 的 `-3`。离线（Python/Hive 的 floor 除法）与在线（Java `/` 截断）不一致会造成训练/服务偏斜 —— 这是本题的真实工程背景。\n2. `+ - *` 必须用 `Math.addExact / subtractExact / multiplyExact`：**溢出时抛 `ArithmeticException`**，不许回绕成负数（回绕的分数会被写进特征表，事后无法定位）。\n3. `Long.MIN_VALUE / -1` 在 `floorDiv` 下会静默回绕（`Math.floorDivExact` 在 JDK 17 里不存在）—— 必须显式判定并抛 `ArithmeticException`。\n4. 除数为 `0` → 抛 `ArithmeticException`；`$i` 越界或不是非负十进制 → 抛 `IllegalArgumentException`；token 数不足以完成运算（栈下溢）或结束时残留多个值 → 抛 `IllegalArgumentException`。\n5. **只能用显式栈**（`long[]` + 栈指针），不许递归下降、不许 `Stack<Integer>`（遗留同步类）、不许 `IntStream` 折叠。表达式可以很长（token 数 ≤ 5000），递归会 `StackOverflowError`。\n6. 整数字面量可以远超 `int`（判分含 `9000000000000000`）→ 必须 `Long.parseLong`；`Integer.parseInt` 直接抛 `NumberFormatException`，`(int)` 截断则静默给出错误值。\n\n## 输出契约\n\n返回 `long`。不要用装箱返回，也不要返回字符串。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "stack-evaluation",
+    "rpn",
+    "overflow-contract",
+    "floor-division",
+    "modern:feature-dsl"
+  ],
+  "cases": [
+    {
+      "name": "空表达式返回 0",
+      "input": [
+        "",
+        [
+          1
+        ]
+      ],
+      "expected": 0
+    },
+    {
+      "name": "单常量直接返回",
+      "input": [
+        "42",
+        [
+          1
+        ]
+      ],
+      "expected": 42
+    },
+    {
+      "name": "负值除法必须用 floor 语义",
+      "input": [
+        "-7 2 /",
+        [
+          1,
+          2,
+          3
+        ]
+      ],
+      "expected": -4
+    },
+    {
+      "name": "乘加嵌套按栈序求值",
+      "input": [
+        "1 2 3 + 4 * +",
+        []
+      ],
+      "expected": 21
+    },
+    {
+      "name": "变量表按下标引用",
+      "input": [
+        "$1 $0 * 5 +",
+        [
+          2,
+          3
+        ]
+      ],
+      "expected": 11
+    },
+    {
+      "name": "极长表达式只用显式栈",
+      "input": [
+        "1 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 +",
+        [
+          1
+        ]
+      ],
+      "expected": 20
+    },
+    {
+      "name": "字面量超出 int 也必须能解析",
+      "input": [
+        "9000000000000000 1 +",
+        [
+          1
+        ]
+      ],
+      "expected": 9000000000000001
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "long evalRpn(String rpn, int[] vars)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 显式栈的 RPN 求值：long[] 当栈，sp 是栈大小（半开区间 [0, sp)）。\n   * 数值语义钉死三件事：\n   *  1) 加减乘走 Math.*Exact —— 溢出抛 ArithmeticException，绝不回绕；\n   *  2) 除法用 Math.floorDiv（向下取整），与离线口径一致；\n   *  3) JDK17 没有 floorDivExact，所以 Long.MIN_VALUE / -1 要显式判溢出。\n   */\n  public static long evalRpn(String rpn, int[] vars) {\n    if (rpn == null || rpn.trim().isEmpty()) return 0L;\n    String[] tokens = rpn.trim().split(\" +\");\n    long[] stack = new long[tokens.length];\n    int sp = 0;\n    for (String token : tokens) {\n      if (token.equals(\"+\") || token.equals(\"-\") || token.equals(\"*\") || token.equals(\"/\")) {\n        if (sp < 2) throw new IllegalArgumentException(\"rpn stack underflow\");\n        long b = stack[--sp];\n        long a = stack[--sp];\n        long value;\n        if (token.equals(\"+\")) {\n          value = Math.addExact(a, b);\n        } else if (token.equals(\"-\")) {\n          value = Math.subtractExact(a, b);\n        } else if (token.equals(\"*\")) {\n          value = Math.multiplyExact(a, b);\n        } else {\n          if (a == Long.MIN_VALUE && b == -1L) throw new ArithmeticException(\"long overflow\");\n          value = Math.floorDiv(a, b);\n        }\n        stack[sp++] = value;\n      } else if (token.charAt(0) == '$') {\n        int pos;\n        try {\n          pos = Integer.parseInt(token.substring(1));\n        } catch (NumberFormatException bad) {\n          throw new IllegalArgumentException(\"bad variable token: \" + token);\n        }\n        if (pos < 0 || pos >= vars.length) throw new IllegalArgumentException(\"unknown variable: \" + token);\n        stack[sp++] = vars[pos];\n      } else {\n        try {\n          stack[sp++] = Long.parseLong(token);\n        } catch (NumberFormatException bad) {\n          throw new IllegalArgumentException(\"bad literal: \" + token);\n        }\n      }\n    }\n    if (sp != 1) throw new IllegalArgumentException(\"expression must leave exactly one value\");\n    return stack[0];\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：ArrayDeque<Integer> 当栈 + Java 内建 / 截断除法。\n  // 两处必错：(1) 与离线口径不一致（-7/2 得 -3 而不是 -4）；\n  //           (2) 中间量按 int 计算 —— 大数相加回绕成负数，静默写进特征表。\n  public static long evalRpn(String rpn, int[] vars) {\n    if (rpn == null || rpn.trim().isEmpty()) return 0L;\n    String[] tokens = rpn.trim().split(\" +\");\n    java.util.ArrayDeque<Integer> stack = new java.util.ArrayDeque<>();\n    for (String token : tokens) {\n      switch (token) {\n        case \"+\": {\n          int b = stack.pop();\n          int a = stack.pop();\n          stack.push(a + b);\n          break;\n        }\n        case \"-\": {\n          int b = stack.pop();\n          int a = stack.pop();\n          stack.push(a - b);\n          break;\n        }\n        case \"*\": {\n          int b = stack.pop();\n          int a = stack.pop();\n          stack.push(a * b);\n          break;\n        }\n        case \"/\": {\n          int b = stack.pop();\n          int a = stack.pop();\n          stack.push(a / b);\n          break;\n        }\n        default:\n          if (token.charAt(0) == '$') {\n            stack.push(vars[Integer.parseInt(token.substring(1))]);\n          } else {\n            stack.push((int) Long.parseLong(token));\n          }\n      }\n    }\n    return stack.pop();\n  }\n}\n"
+  },
+  "answer": "**思路**：显式 `long[]` 栈跑 RPN。弹出顺序必须是\"先右后左\"（`b` 顶、`a` 次顶），减法与除法的方向就靠这一句钉死；结束时 `sp != 1` 直接报错，防\"多余操作数/token 不足\"两类脏表达式。\n\n**数值语义（本题的全部区分度）**：\n1. `/` 用 `Math.floorDiv`：Java 内建 `/` 是**截断取整**（向零），`-7 / 2 == -3`，而 Hive/Spark/Python 的整数除法是**向下取整** `-4`。在线用 `/`、离线用 floor → 训练/服务偏斜，模型上线效果莫名其妙掉点，且只在负值特征上出现（极难排查）。判分的 `-7 2 /` 就是在测你有没有意识到\"取整方向也是契约\"。\n2. `+ - *` 用 `Math.addExact/subtractExact/multiplyExact`：溢出抛 `ArithmeticException`，而不是回绕成负数。回绕的特征值会静默进入特征表。\n3. `Long.MIN_VALUE / -1`：`floorDiv` 会**静默**返回 `Long.MIN_VALUE`（数学上是 `2^63`，超出 long）；JDK 17 没有 `floorDivExact`，所以要手写判定。能说出\"JDK 里哪些 Exact 变体存在、哪些没有\"就是语言深度（`addExact/subtractExact/multiplyExact/negateExact` 有，除法没有）。\n4. 字面量必须 `Long.parseLong`（判分含 `9000000000000000`）；朴素解把栈开成 `Integer`，`(int) Long.parseLong(...)` 把大数截断成低 32 位（`9000000000000000L` 的低 32 位是 `0xCADD4000`，截断后是 `-889552896`）→ 结果完全错，而且**不抛异常**。\n\n**为什么禁止递归**：RPN 没有递归下降的必要；如果实现成\"递归解析中缀树\"，深度可达 token 数（\"1 1 + 1 + ...\" 的退化形状），5000 层在 `-Xss` 受限的容器里就是 `StackOverflowError`（而且是 `VirtualMachineError`，catch 不可靠）。显式栈把深度变成堆上的 `long[]`。\n\n**复杂度**：O(tokens) 时间、O(tokens) 空间（栈上界就是 token 数）。\n\n**面试追问**：\n1. 为什么要\"sealed interface + record + `switch` 模式匹配\"来写 AST 求值？（新增节点类型（如 `Mul`）时，穷尽的 `switch` 表达式**编译失败**，漏分支被机器发现；`instanceof` 链 + `default: throw` 只会运行时炸。这是 Java 21 的正解（判分镜像 17，所以参考解用显式栈；17 等价写法是 `sealed interface` + 手工 cast + 不带 `default` 的 `switch`，或干脆用枚举 op 表）。）\n2. 除法溢出为什么不能靠 `try { Math.floorDivExact(...) }`？（`Math.divideExact / floorDivExact / ceilDivExact` 是 **JDK 18** 才加入的；判分镜像是 17，只有 `addExact / subtractExact / multiplyExact / negateExact`（JDK 8）可用，除法溢出必须手写 `a == Long.MIN_VALUE && b == -1` 特判。版本口径要答准，别编 API —— 同类陷阱还有 `STR.\"...\"`（String Templates 已撤回）与 `StructuredTaskScope`（25 仍是预览）。）\n3. 表达式重复求值上百万次（每次打分都要算）怎么优化？（编译成字节码/`MethodHandle` 组合，或压平成 RPN 数组后免去 token 解析；`String.split` 每次都要分配数组，热路径上应缓存编译结果——这是\"DSL 编译一次、执行多次\"的标准工程答案。）\n4. 如何测这套求值？（固定 seed 的 `SplittableRandom` 生成合法 RPN 与\"朴素 long 无限精度（`BigInteger`）\"对拍，只在溢出用例上断言抛异常；再加边界：`Long.MIN_VALUE/-1`、`x/0`、单 token、多余 token、`$` 越界。）",
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#1-核心机制",
+    "addedBy": "content-agent-alg"
+  }
+}

@@ -1,0 +1,398 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0035",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "堆积不是\"最大位点减消费位点\"：强制纠正、位点重置与已被清理的三段要分开报，追赶窗口向上取整",
+  "statement": "## 背景\n\nApache RocketMQ 5.0《消费进度管理》给了三条最容易被写错的事实【源 S6】：\n\n> 队列的堆积量 = **`MaxOffset − ConsumerOffset`**；\n> 有效消费位点必须满足 `ConsumerOffset >= MinOffset`，\n> \"**若历史位点已过期被删除，服务端会将消费位点强制纠正到合法的消息位点**\"；\n> \"消费位点由服务端存储……和任何消费者无关，因此支持跨消费者恢复消费进度\"。\n\n《消息存储和过期清理机制》补了另一半【源 S7】：清理**以存储时长为依据**、\n\"**无论消息是否被消费**\"、并且\"**按存储节点粒度**而非 topic/queue 管理\"。\n《发送重试和流控》再补一条【源 S2】：堆积超阈值会触发服务端**反向流控**\n（`reply-code 530 TOO_MANY_REQUESTS` + 客户端指数退避）。\n\n把这三条合起来，\"堆积\"就不是一个数，而是**三种不同的数**：\n还能追回来的、已经被清掉的、以及位点被重置所以根本说不清的。\n素材 §4 考点 6 的出题建议正是\"给 offset 快照表算每组堆积、追赶速率、预计清空时间与\nSLA 违约标记\"，本题把它做成一张两个时点的快照表。\n\n## 表\n\n```\noffset_snap(snapshot_seq INT, node INT, topic VARCHAR(16), queue_id INT,\n            min_off BIGINT, max_off BIGINT, cons_off BIGINT, ts_sec INT,\n            PRIMARY KEY (snapshot_seq, node, topic, queue_id))\n   -- snapshot_seq = 1 是上一个采集周期（t0），= 2 是当前周期（t1）\n   -- node 就是\"存储节点粒度\"：清理时长按它算，所以分组必须带上它\n```\n\n## 任务\n\n只交**一条 SELECT**（可用 `WITH`），按 `(node, topic)` 分组输出**一行一组**，\n列固定为 12 列：\n\n`node, topic, queues, dropped_queues, backlog, corrected_queues, reset_queues, lost_gap,\nconsumed_win, produced_win, windows_to_clear, sla_breach`\n\n按 `node` 升序、再按 `topic` 升序。\n\n## 判分契约（前三条逐字来自官方描述，其余是本题设定）\n\n| 列 | 定义 |\n| --- | --- |\n| `queues` | 该组在 **t1** 出现的队列数（**含**下面被剔除的） |\n| `dropped_queues` | 不可信队列数：只在 t1 出现（t0 没有这条队列）**或** `cons_off > max_off` **或** `min_off > max_off` |\n| `backlog` | 可信队列的 `Σ GREATEST(max_off − GREATEST(cons_off, min_off), 0)`（t1）—— **用有效位点**，不许出负 |\n| `corrected_queues` | t1 里 `cons_off < min_off` 的可信队列数（位点已被服务端强制纠正过的现场） |\n| `reset_queues` | t1 里 `cons_off < cons0` 的可信队列数（位点回退 = 重置过，官方三场景里的\"业务回溯纠正处理\"） |\n| `lost_gap` | `Σ GREATEST(min1 − cons1, 0)`：这段消息**已经没了**，重置位点也救不回来 |\n| `consumed_win` | `Σ GREATEST(effective1 − effective0 − lost_gap, 0)`，位点回退的队列按 **0** 计 |\n| `produced_win` | `Σ GREATEST(max1 − max0, 0)` |\n| `windows_to_clear` | 见下面三条 |\n| `sla_breach` | `windows_to_clear = −1` 或 `> 2` ⇒ 1，否则 0（**2 是本题设定的 SLA 窗口数**） |\n\n`windows_to_clear` 的三条（顺序就是判据顺序）：\n\n1. 该组**没有任何可信队列** ⇒ `-1`（不可估。给 0 等于宣布\"已经追平\"）；\n2. `backlog = 0` ⇒ `0`；\n3. 否则若 `reset_queues > 0` **或** `consumed_win − produced_win <= 0` ⇒ `-1`；\n   再否则 `CEIL(backlog / (consumed_win − produced_win))` —— **向上取整**，\n   因为\"3.2 个窗口清空\"在业务上就是\"第 4 个窗口才干净\"。\n\n**不许输出负数**：任何一列都不行。堆积算出负数说明你在用被纠正过、或被重置过的位点。\n\n只允许一条 `SELECT`。\n\n## 说明\n\n素材 §7 第 1 条明确\"没有任何官方文档给出交易线上的实测数字\"，\n所以题面里**不出现** TPS、消息条数上限、真实 SLA 时长；\n`2` 这个窗口数与\"两个快照相隔 30 秒\"都只是本题设定。\n",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "peak-shaving-backlog",
+    "consumer-offset-semantics",
+    "silent-message-loss",
+    "offset-reset",
+    "catch-up-estimate",
+    "modern:messaging"
+  ],
+  "cases": [
+    {
+      "name": "基线：三组队列，一组已追平、一组纠正过位点、一组重置过位点",
+      "input": [],
+      "expected": {
+        "columns": [
+          "node",
+          "topic",
+          "queues",
+          "dropped_queues",
+          "backlog",
+          "corrected_queues",
+          "reset_queues",
+          "lost_gap",
+          "consumed_win",
+          "produced_win",
+          "windows_to_clear",
+          "sla_breach"
+        ],
+        "rows": [
+          [
+            1,
+            "cart",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            860,
+            490,
+            0,
+            0
+          ],
+          [
+            1,
+            "order",
+            3,
+            0,
+            800,
+            1,
+            0,
+            200,
+            1700,
+            1500,
+            4,
+            1
+          ],
+          [
+            2,
+            "order",
+            2,
+            0,
+            3000,
+            0,
+            1,
+            0,
+            100,
+            600,
+            -1,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "(1,cart) 两个队列都追平 ⇒ backlog=0、windows=0、breach=0；(1,order) 队列 2 的 t1 位点 2400 低于 min 2600 ⇒ corrected=1、lost_gap=200、堆积按有效位点算是 400（不是 600）；(2,order) 队列 1 位点从 3800 退到 1500 ⇒ reset=1、该组 windows=-1"
+    },
+    {
+      "name": "边界：把那条 min_off 降回 2000（其实没过期）⇒ 纠正归零，堆积反而多 200",
+      "input": [
+        "UPDATE offset_snap SET min_off = 2000 WHERE snapshot_seq = 2 AND node = 1 AND topic = 'order' AND queue_id = 2"
+      ],
+      "expected": {
+        "columns": [
+          "node",
+          "topic",
+          "queues",
+          "dropped_queues",
+          "backlog",
+          "corrected_queues",
+          "reset_queues",
+          "lost_gap",
+          "consumed_win",
+          "produced_win",
+          "windows_to_clear",
+          "sla_breach"
+        ],
+        "rows": [
+          [
+            1,
+            "cart",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            860,
+            490,
+            0,
+            0
+          ],
+          [
+            1,
+            "order",
+            3,
+            0,
+            1000,
+            0,
+            0,
+            0,
+            1700,
+            1500,
+            5,
+            1
+          ],
+          [
+            2,
+            "order",
+            2,
+            0,
+            3000,
+            0,
+            1,
+            0,
+            100,
+            600,
+            -1,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "位点没被纠正 ⇒ lost_gap=0、corrected=0，有效位点变成客户端上报的 2400，所以 (1,order) 的堆积从 800 涨到 1000、净消耗仍是 200 ⇒ windows 从 4 变 5。**\"少算丢失\"会让堆积与追赶时间一起被低估**"
+    },
+    {
+      "name": "边界：把重置那条改成正常推进到 3900 ⇒ reset 归零，但净消耗仍是负的、仍不可估",
+      "input": [
+        "UPDATE offset_snap SET cons_off = 3900 WHERE snapshot_seq = 2 AND node = 2 AND topic = 'order' AND queue_id = 1"
+      ],
+      "expected": {
+        "columns": [
+          "node",
+          "topic",
+          "queues",
+          "dropped_queues",
+          "backlog",
+          "corrected_queues",
+          "reset_queues",
+          "lost_gap",
+          "consumed_win",
+          "produced_win",
+          "windows_to_clear",
+          "sla_breach"
+        ],
+        "rows": [
+          [
+            1,
+            "cart",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            860,
+            490,
+            0,
+            0
+          ],
+          [
+            1,
+            "order",
+            3,
+            0,
+            800,
+            1,
+            0,
+            200,
+            1700,
+            1500,
+            4,
+            1
+          ],
+          [
+            2,
+            "order",
+            2,
+            0,
+            600,
+            0,
+            0,
+            0,
+            200,
+            600,
+            -1,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "(2,order)：reset=0、堆积 600、净消耗 200 − 600 = −400 ⇒ windows 仍是 −1；这条说明\"重置过\"与\"追不上\"是**两个独立的否决理由**，把它们合成一个布尔就会漏掉后者"
+    },
+    {
+      "name": "非法形态：把一条位点写到最大位点之后 ⇒ 整条剔除，(1,order) 从 4 个窗口变成不可估",
+      "input": [
+        "UPDATE offset_snap SET cons_off = 999 WHERE snapshot_seq = 2 AND node = 1 AND topic = 'order' AND queue_id = 3"
+      ],
+      "expected": {
+        "columns": [
+          "node",
+          "topic",
+          "queues",
+          "dropped_queues",
+          "backlog",
+          "corrected_queues",
+          "reset_queues",
+          "lost_gap",
+          "consumed_win",
+          "produced_win",
+          "windows_to_clear",
+          "sla_breach"
+        ],
+        "rows": [
+          [
+            1,
+            "cart",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            860,
+            490,
+            0,
+            0
+          ],
+          [
+            1,
+            "order",
+            3,
+            1,
+            800,
+            1,
+            0,
+            200,
+            1100,
+            1500,
+            -1,
+            1
+          ],
+          [
+            2,
+            "order",
+            2,
+            0,
+            3000,
+            0,
+            1,
+            0,
+            100,
+            600,
+            -1,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "队列 3 的 t1 位点 999 > max_off 900 ⇒ 这行快照不可信：dropped_queues=1，它不许被算成\"堆积 0 的正常队列\"。剔掉它之后 (1,order) 的净消耗从 1700 掉到 1100 < 生产 1500 ⇒ windows=-1"
+    },
+    {
+      "name": "退化：一组里两条快照全都不可信 ⇒ 该组仍出行，但窗口是 -1 而不是 0",
+      "input": [
+        "UPDATE offset_snap SET cons_off = 999 WHERE snapshot_seq = 2 AND node = 1 AND topic = 'cart' AND queue_id = 1",
+        "UPDATE offset_snap SET cons_off = 999 WHERE snapshot_seq = 2 AND node = 1 AND topic = 'cart' AND queue_id = 2"
+      ],
+      "expected": {
+        "columns": [
+          "node",
+          "topic",
+          "queues",
+          "dropped_queues",
+          "backlog",
+          "corrected_queues",
+          "reset_queues",
+          "lost_gap",
+          "consumed_win",
+          "produced_win",
+          "windows_to_clear",
+          "sla_breach"
+        ],
+        "rows": [
+          [
+            1,
+            "cart",
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            -1,
+            1
+          ],
+          [
+            1,
+            "order",
+            3,
+            0,
+            800,
+            1,
+            0,
+            200,
+            1700,
+            1500,
+            4,
+            1
+          ],
+          [
+            2,
+            "order",
+            2,
+            0,
+            3000,
+            0,
+            1,
+            0,
+            100,
+            600,
+            -1,
+            1
+          ]
+        ],
+        "orderSensitive": true
+      },
+      "visible": true,
+      "note": "queues=2、dropped=2、其余全 0，windows=-1、breach=1 —— \"一个可信队列都没有\"与\"全都追平了\"在数字上都可能是 0，只有窗口这一列能分开它们"
+    },
+    {
+      "name": "空结果：删掉第二个快照 ⇒ 没有可比较的时点，一行都不许出",
+      "input": [
+        "DELETE FROM offset_snap WHERE snapshot_seq = 2"
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "只剩 t0 时\"堆积\"根本没有定义；把 t0 的位点直接当成\"当前堆积\"会给出一个看起来能看的数字，而它其实是三十秒前的"
+    }
+  ],
+  "answer": "## 参考答案\n\n`t0` / `t1` 两个 CTE + `LEFT JOIN` 定出\"可信队列\"，`per` 逐队列算六个数，\n最后一层 `GROUP BY node, topic` 汇总并按三条顺序判 `windows_to_clear`。\n\n**基线十二列**（三行）：\n\n| node | topic | queues | dropped | backlog | corrected | reset | lost | consumed | produced | windows | breach |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n| 1 | cart | 2 | 0 | 0 | 0 | 0 | 0 | 860 | 490 | 0 | 0 |\n| 1 | order | 3 | 0 | 800 | 1 | 0 | 200 | 1700 | 1500 | 4 | 1 |\n| 2 | order | 2 | 0 | 3000 | 0 | 1 | 0 | 100 | 600 | −1 | 1 |\n\n**(1,order) 的 800 才是这道题的核心一格**：队列 2 的 t1 位点是 2400、`min_off` 已经涨到 2600，\n按官方那句\"服务端会将消费位点强制纠正到合法的消息位点\"，\n**有效位点是 2600**，所以堆积 = 3000 − 2600 = 400；加上队列 1 的 400 ⇒ 800。\n朴素解用 `max − cons` 会给出 600 + 400 = **1000**，\n即把已经被按存储时长清掉的 200 条算成\"还能消费的堆积\"。\n症状不是数字偏一点，而是**追赶计划永远做不完**：那 200 条永远不会再投递，\n但报表每天都在等它。`lost_gap = 200` 这一列就是那 200 条的墓碑。\n\n**用例「把那条 min_off 降回 2000」**是同一机制的反向对照：位点没被纠正 ⇒ `corrected` 与\n`lost_gap` 归零，有效位点退回客户端上报的 2400 ⇒ 堆积 800 → **1000**、\n`windows` 4 → **5**。同一条 SQL 两种数据都判得对，才算真的理解\"有效位点\"而不是\"背了个公式\"。\n\n**重置与追不上是两个独立的否决理由**（用例「把重置那条改成正常推进到 3900」）：\n(2,order) 的 `reset` 从 1 变 0，但队列 1 只前进 100 而生产了 500 ⇒\n净消耗 200 − 600 = −400 ⇒ `windows` 仍是 −1。\n合成一个布尔就会把\"净消耗是负的\"这类**最常见的洪峰现场**报成\"可估\"。\n基线里它被 `reset` 先挡住，所以两条必须各测一次。\n\n**用例「把一条位点写到最大位点之后」**考 `dropped_queues`：\n队列 3 的 t1 位点 999 > `max_off` 900，这行快照本身不可信 ⇒ 整条剔除。\n剔除之后 (1,order) 的 `consumed` 从 1700 掉到 1100，小于 `produced` 1500 ⇒\n`windows` 从 4 变成 −1（`dropped_queues=1`）。\n**不能把它算成\"堆积 0 的正常队列\"** —— 那是把一个数据事故读成一条好消息。\n\n**用例「一组里两条快照全都不可信」**是全题最容易写错的一格：\n(1,cart) 变成 `queues=2、dropped=2`，其余六列全 0，而 `windows` 必须是 **−1**、`breach=1`。\n\"一个可信队列都没有\"和\"全都追平了\"在堆积上都是 0，\n**只有窗口这一列能把它们分开** —— 判据顺序（先查可信队列数为 0，再查 backlog=0）不能反。\n\n**朴素解挂六列**：`backlog` 用 `max − cons`（1000 而不是 800）、\n`corrected/reset/lost_gap` 三列直接写 0、`consumed` 用 `cons1 − cons0`\n（重置那条给出 −2300 这样的负数）、`windows` 用 `FLOOR`（3.2 → 3，提前一个窗口宣布追平）且\n净消耗 ≤ 0 时给 0 而不是 −1、`sla_breach` 写死 0。\n\n**工程延伸（面试追问点）**\n\n1. 为什么按 `node` 分组？（官方把清理时长定义在**存储节点粒度**而非 topic/queue【源 S7】：\n   同一 topic 的两个队列可能挂在不同节点上，过期节奏不同。跨节点平均出来的\"堆积\"没有意义。）\n2. 位点被纠正怎么变成可监控的指标？（把 `lost_gap > 0` 当成一条**质量规则**而不是运维事件 ——\n   素材 §3 把它列在\"回溯随时能做\"的反面：不是没消费，是没了。）\n3. 为什么净消耗 ≤ 0 时要给 −1 而不是\"永远追不上\"？（快照只有两个时点，\n   负净消耗也可能是这一周期正好赶上洪峰。`−1` 的语义是\"不可估\"，逼着人去看第三个周期。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DROP TABLE IF EXISTS `offset_snap`",
+      "CREATE TABLE offset_snap (snapshot_seq INT NOT NULL, node INT NOT NULL, topic VARCHAR(16) NOT NULL, queue_id INT NOT NULL, min_off BIGINT NOT NULL, max_off BIGINT NOT NULL, cons_off BIGINT NOT NULL, ts_sec INT NOT NULL, PRIMARY KEY (snapshot_seq, node, topic, queue_id)) ENGINE=InnoDB",
+      "INSERT INTO offset_snap VALUES (1, 1, 'order', 1, 1000, 5000, 4800, 0), (1, 1, 'order', 2, 2000, 2500, 2100, 0), (1, 1, 'order', 3, 300, 900, 300, 0), (1, 1, 'cart', 1, 0, 500, 500, 0), (1, 1, 'cart', 2, 10, 410, 40, 0), (1, 2, 'order', 1, 1000, 4000, 3800, 0), (1, 2, 'order', 2, 0, 200, 200, 0), (2, 1, 'order', 1, 1000, 6000, 5600, 30), (2, 1, 'order', 2, 2600, 3000, 2400, 30), (2, 1, 'order', 3, 300, 900, 900, 30), (2, 1, 'cart', 1, 0, 900, 900, 30), (2, 1, 'cart', 2, 10, 500, 500, 30), (2, 2, 'order', 1, 1000, 4500, 1500, 30), (2, 2, 'order', 2, 0, 300, 300, 30)"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 20000,
+    "referenceSolution": "WITH t0 AS (\n  SELECT node, topic, queue_id, min_off, max_off, cons_off FROM offset_snap WHERE snapshot_seq = 1\n),\nt1 AS (\n  SELECT node, topic, queue_id, min_off, max_off, cons_off FROM offset_snap WHERE snapshot_seq = 2\n),\nj AS (\n  SELECT b.node, b.topic, b.queue_id,\n         b.min_off AS min1, b.max_off AS max1, b.cons_off AS cons1,\n         a.min_off AS min0, a.max_off AS max0, a.cons_off AS cons0,\n         CASE WHEN a.queue_id IS NULL OR b.cons_off > b.max_off OR b.min_off > b.max_off\n              THEN 1 ELSE 0 END AS dropped\n  FROM t1 b LEFT JOIN t0 a\n    ON a.node = b.node AND a.topic = b.topic AND a.queue_id = b.queue_id\n),\nper AS (\n  SELECT node, topic, dropped,\n         IF(dropped = 1, 0, GREATEST(max1 - GREATEST(cons1, min1), 0))                        AS backlog,\n         IF(dropped = 1, 0, IF(cons1 < min1, 1, 0))                                           AS corrected,\n         IF(dropped = 1, 0, IF(cons1 < cons0, 1, 0))                                          AS reset,\n         IF(dropped = 1, 0, GREATEST(min1 - cons1, 0))                                        AS lost_gap,\n         IF(dropped = 1, 0, IF(cons1 < cons0, 0,\n             GREATEST(GREATEST(cons1, min1) - GREATEST(cons0, min0)\n                      - GREATEST(min1 - cons1, 0), 0)))                                       AS consumed,\n         IF(dropped = 1, 0, GREATEST(max1 - max0, 0))                                         AS produced\n  FROM j\n)\nSELECT node, topic,\n       COUNT(*)                                    AS queues,\n       SUM(dropped)                                AS dropped_queues,\n       SUM(backlog)                                AS backlog,\n       SUM(corrected)                              AS corrected_queues,\n       SUM(reset)                                  AS reset_queues,\n       SUM(lost_gap)                               AS lost_gap,\n       SUM(consumed)                               AS consumed_win,\n       SUM(produced)                               AS produced_win,\n       CASE WHEN SUM(1 - dropped) = 0 THEN -1\n            WHEN SUM(backlog) <= 0 THEN 0\n            WHEN SUM(reset) > 0 OR SUM(consumed) - SUM(produced) <= 0 THEN -1\n            ELSE CEIL(SUM(backlog) / (SUM(consumed) - SUM(produced))) END AS windows_to_clear,\n       CASE WHEN SUM(1 - dropped) = 0 THEN 1\n            WHEN SUM(backlog) <= 0 THEN 0\n            WHEN SUM(reset) > 0 OR SUM(consumed) - SUM(produced) <= 0 THEN 1\n            WHEN CEIL(SUM(backlog) / (SUM(consumed) - SUM(produced))) > 2 THEN 1\n            ELSE 0 END AS sla_breach\nFROM per\nGROUP BY node, topic\nORDER BY node, topic",
+    "naiveSolution": "SELECT b.node, b.topic,\n       COUNT(*)                                              AS queues,\n       0                                                     AS dropped_queues,\n       SUM(b.max_off - b.cons_off)                           AS backlog,\n       0                                                     AS corrected_queues,\n       0                                                     AS reset_queues,\n       0                                                     AS lost_gap,\n       SUM(b.cons_off - a.cons_off)                          AS consumed_win,\n       SUM(b.max_off - a.max_off)                            AS produced_win,\n       CASE WHEN SUM(b.cons_off - a.cons_off) - SUM(b.max_off - a.max_off) <= 0 THEN 0\n            ELSE FLOOR(SUM(b.max_off - b.cons_off)\n                       / (SUM(b.cons_off - a.cons_off) - SUM(b.max_off - a.max_off))) END\n                                                            AS windows_to_clear,\n       0                                                     AS sla_breach\nFROM offset_snap b JOIN offset_snap a\n  ON a.snapshot_seq = 1 AND b.snapshot_seq = 2\n AND a.node = b.node AND a.topic = b.topic AND a.queue_id = b.queue_id\nGROUP BY b.node, b.topic\nORDER BY b.node, b.topic"
+  },
+  "estimatedMinutes": 34,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（消息与削峰治理方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 6（削峰填谷与堆积治理：堆积 = MaxOffset − ConsumerOffset、\"若历史位点已过期被删除，服务端会将消费位点强制纠正到合法的消息位点\"、位点由服务端存储支持跨消费者恢复、重置位点三场景与\"只能重置对消费者可见的消息\"【源 S6】；清理以存储时长为依据、无论是否消费都按存储节点粒度管理【源 S7】；堆积超阈值触发服务端反向流控 530 + 指数退避【源 S2】。素材该考点的出题建议正是\"给 offset 快照表算每组堆积、追赶速率、预计清空时间与SLA 违约标记\"。三段口径的拆分与\"向上取整 + 不可估用 −1\"是【推】，题面已写成契约；素材 §7 第 1 条禁止的实测量级数字题面一个都没用）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T16:22:31.959Z"
+  }
+}

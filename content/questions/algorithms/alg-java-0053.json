@@ -1,0 +1,314 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0053",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "RocketMQ 顺序消息的放置问题：组到队列必须是纯函数，否则顺序静默失效",
+  "statement": "## 背景\n\nApache RocketMQ 5.0《顺序消息》把\"顺序\"写成了一个**放置问题**而不是一个开关【源 S14】：\n\n- 顺序的判定单位是 **消息组（MessageGroup）**：\"相同消息组的多条消息之间遵循先进先出，\n  不同消息组、无消息组的消息之间不涉及顺序性\"；\n- 生产侧两个硬条件：**单一生产者 + 串行发送**\n  （\"不同生产者分布在不同的系统……无法判定先后\"、\"多线程并行发送则无法判定先后\"）；\n- 服务端存储语义：\"相同消息组的消息按先后顺序存储在同一个队列；\n  **不同消息组的消息可以混合在同一队列中，且不保证连续**\"；\n- 建议\"按照业务逻辑做细粒度拆分，在满足业务局部顺序的前提下提高并行度和吞吐\"。\n\n消费侧另有一条隐藏前提【源 S12】：**顺序处理要求遵循同步提交原则**，\n业务自定义异步分发就无法保证顺序；而队列粒度的分配保证\"每个队列仅支持被一个消费者消费\"【源 S3】。\n\n## 任务\n\n实现 `public static int[] fifoQueuePlacement(int queueCount, int sendMode, int[] groupOfMessage, int[] consumerOfQueue)`。\n\n- `groupOfMessage[i]` = 第 `i` 条消息的消息组键（**下标 `i` 就是业务顺序**，即发送到达顺序）；\n- `sendMode`：`0` = 按消息组哈希投队列（官方语义）、`1` = 按到达序号轮询投队列（常见错法），\n  即 `queue = groupOfMessage[i] % queueCount`（mode 0）或 `queue = i % queueCount`（mode 1）；\n- `consumerOfQueue[q]` = 队列 `q` 当前由哪个消费者占用，`-1` = 没人占用。\n\n返回六个计数：\n\n```\n{同组最大跨队列数, 被拆到多个消费者上的组数, 组内乱序对数, 不可投递消息数, 组数, 用到的队列数}\n```\n\n## 观察顺序怎么定义（**照这段实现，不要自由发挥**）\n\n判\"组内是否乱序\"要有一个可比较的观察序。规则：\n\n1. 一条消息的观察键 = `(占用它的消费者编号, 队列编号, 它在该队列内的第几条)`；\n2. **未占用队列上的消息不参与观察序**（它们根本没被消费，只计入 `undeliverable`）；\n3. 把所有可观察消息按这个键升序排，得到观察序；\n4. 对每个组，取它在观察序里的子序列，数**逆序对**：\n   若到达序号 `i < j` 而同组的两条消息在观察序里 `j` 排在 `i` 前面，就算一对。\n\n第 1 条里\"消费者编号优先\"是本题的关键设定：**不同消费者之间没有全局顺序可言**，\n所以同一个组只要被分到两个消费者身上，它的顺序就已经不存在了。\n\n## 为什么 `mode 0` 一定给 0（这正是官方设计的动机）\n\n`queue = group % queueCount` 是一个**纯函数**：同一个组永远落同一个队列，\n于是它永远由同一个消费者按队列内 FIFO 顺序消费 ⇒ 跨队列数 1、逆序对 0。\n**重平衡换了消费者也不破坏顺序**（用例「重平衡」给的是同一件事的另一半：\n多个组挤在同一队列时，组间不保证连续，但组内仍然全序）；\n顺序性由\"队列\"这个载体保证，不由进程保证。\n\n而 `mode 1`（轮询）把组打散：组内相邻两条落到不同队列、甚至不同消费者，\n逆序对立刻出现。这就是官方为什么写\"用普通消息可能导致状态混乱、与预期操作结果不符\"【源 S14】。\n\n## 参数校验（抛 `IllegalArgumentException`，消息一字不差）\n\n| 条件 | 消息 |\n| --- | --- |\n| `queueCount <= 0` | `queue count must be positive` |\n| `sendMode` 不是 0/1 | `unknown send mode` |\n| `consumerOfQueue` 为 null 或长度不等于 `queueCount` | `consumer array length mismatch` |\n| `groupOfMessage` 为 null | `group array must not be null` |\n| 某个 `consumerOfQueue[q] < -1` | `negative consumer index` |\n| 某个 `groupOfMessage[i] < 0` | `negative group key` |\n\n**组键必须非负**：Java 的 `%` 对负数返回负余数，\n`groupOfMessage[i] % queueCount` 会算出 `-1` 这种队列下标 ——\n要么数组越界（判题结果是 `error`），要么被人\"顺手 `Math.abs`\"掉\n（于是 `-1` 与 `1` 变成同一个组，**两个业务实体的顺序被错误地绑在一起**）。\n后者比崩溃严重得多，所以要在门口拒掉。\n\n## 这题真正考的东西\n\n素材 §4 考点 8 的追问是\"消费者扩容时顺序怎么保\"。这题把它变成一个可读的数字：\n**只要组到队列的映射是纯函数，扩容改变的是\"谁在消费\"，不改变\"谁和谁在一起\"**；\n反过来，任何\"按负载挑空闲队列\"的发送策略都是在改写这个纯函数，\n它的代价不是吞吐，而是**顺序悄悄失效**（没有异常、没有报错，只有下游状态错）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "rocketmq",
+    "fifo-message",
+    "message-group",
+    "queue-placement",
+    "rebalance-safety",
+    "modern:messaging"
+  ],
+  "cases": [
+    {
+      "name": "基线：按消息组哈希投队列 ⇒ 同组同队列，跨消费者与乱序都是 0",
+      "input": [
+        4,
+        0,
+        [
+          1,
+          2,
+          1,
+          3,
+          4,
+          1,
+          2
+        ],
+        [
+          0,
+          0,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        4,
+        4
+      ],
+      "visible": true,
+      "note": "组 1→队列 1、组 2→队列 2、组 3→队列 3、组 4→队列 0：每组恰好一个队列 ⇒ 观察序就是到达序"
+    },
+    {
+      "name": "反例：按到达序号轮询投队列（忽略消息组）⇒ 组被拆散、乱序成对出现",
+      "input": [
+        4,
+        1,
+        [
+          1,
+          2,
+          1,
+          3,
+          4,
+          1,
+          2
+        ],
+        [
+          0,
+          0,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        3,
+        2,
+        1,
+        0,
+        4,
+        4
+      ],
+      "visible": true,
+      "note": "这就是\"用普通消息发顺序业务\"的量化后果"
+    },
+    {
+      "name": "边界：只有一个队列 ⇒ 轮询发送恰好等价于按组发送（乱序为 0）",
+      "input": [
+        1,
+        1,
+        [
+          1,
+          2,
+          1,
+          3
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        3,
+        1
+      ],
+      "visible": true,
+      "note": "单队列时两种策略给出同一个队列下标 —— 所以\"我轮询也没出事\"在单队列集群上不构成证据"
+    },
+    {
+      "name": "边界：某个队列没有消费者占用 ⇒ 那些消息不可投，也不许被别的消费者抢走",
+      "input": [
+        4,
+        0,
+        [
+          1,
+          2,
+          1,
+          3
+        ],
+        [
+          0,
+          -1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        2,
+        3,
+        3
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：不同组键映射到同一队列（重平衡之后也一样）⇒ 组间不保证连续、组内仍全序",
+      "input": [
+        4,
+        0,
+        [
+          1,
+          5,
+          1,
+          5,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        2,
+        1
+      ],
+      "visible": true,
+      "note": "组 1 与组 5 都落在队列 1 ⇒ usedQueues=1 而 groupCount=2；官方那句\"不同消息组可以混合在同一队列中，且不保证连续\"就是这个形状"
+    },
+    {
+      "name": "退化：一条消息都没有 ⇒ 六个计数全 0",
+      "input": [
+        4,
+        0,
+        [],
+        [
+          0,
+          0,
+          1,
+          1
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：全部消息同组、被轮询拆到三个队列（同一消费者）⇒ 逆序对非 0",
+      "input": [
+        3,
+        1,
+        [
+          7,
+          7,
+          7,
+          7
+        ],
+        [
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        3,
+        0,
+        2,
+        0,
+        1,
+        3
+      ],
+      "visible": true,
+      "note": "跨消费者为 0 但逆序对是 2 —— 顺序丢了不需要\"两个消费者\"这个条件"
+    },
+    {
+      "name": "非法：队列数为 0",
+      "input": [
+        0,
+        0,
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "queue count must be positive"
+    },
+    {
+      "name": "非法：发送模式不是 0/1",
+      "input": [
+        2,
+        5,
+        [
+          1
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "unknown send mode"
+    },
+    {
+      "name": "非法：消费者分配表长度与队列数不一致",
+      "input": [
+        4,
+        0,
+        [
+          1
+        ],
+        [
+          0,
+          1
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "consumer array length mismatch"
+    },
+    {
+      "name": "非法：消息组键为负（取模会落到负下标）",
+      "input": [
+        4,
+        0,
+        [
+          -1
+        ],
+        [
+          0,
+          0,
+          1,
+          1
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative group key"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n三步：算队列 ⇒ 算观察键 ⇒ 按组数逆序对。全部逻辑都在\"观察键的字典序\"里：\n**消费者优先**，所以跨消费者必然乱序；队列其次，所以同消费者但跨队列也可能乱序；\n队列内位置最后，这就是\"同一个队列内一定有序\"。\n\n**基线（queueCount=4、mode 0、groups=[1,2,1,3,4,1,2]、占用=[0,0,1,1]）⇒ `{1, 0, 0, 0, 4, 4}`**：\n组 1→队列 1、组 2→队列 2、组 3→队列 3、组 4→队列 0，每组只占一个队列\n⇒ 跨队列数 1、跨消费者组 0、逆序对 0、不可投 0、4 个组、4 个队列都用上了。\n\n**同一个输入换成 `mode 1`（轮询）⇒ `{3, 2, 1, 0, 4, 4}`**：\n组 1 的三条消息在下标 0/2/5 ⇒ 队列 0/2/1（三条被拆到三个队列，\n其中两条归消费者 0、一条归消费者 1）⇒ 跨队列数 3、被拆到多个消费者上的组数 2、\n逆序对 1（观察序里第 6 条挤到了第 3 条前面）。\n**这两个用例是同一批数据、同一批消费者，只差发送时怎么取队列** ——\n这就是\"顺序丢了\"最小的证伪实验：不改业务、不改消费端，只改放置策略。\n注意 `inversions` 只有 1 而不是很大：**乱序不会尖叫**。\n一个组的三条消息拆到三个队列，仍然可能有两条保持相对顺序 ——\n所以线上绝不能用\"看起来顺序对\"判定策略安全，要判的就是这一列不等于 0。\n\n**用例「边界：全部消息同组、被轮询拆到三个队列（同一消费者）」⇒ `{3, 0, 2, 0, 1, 3}`**：\n一个组、三个队列、同一个消费者，逆序对 2 而 `crossConsumerGroups = 0`。\n它把上一段的两件事拆开：**跨队列本身就足以毁掉顺序，不需要跨消费者** ——\n同一个消费者读三个队列时也必须选一个先后，这个先后就是逆序对的来源。\n（用例「边界：只有一个队列」给出 `{1, 0, 0, 0, 3, 1}`：`queueCount = 1` 时轮询与按组取模\n**落在同一个队列 0** 上，于是逆序对 0。这条是故意放的\"看似反例\"：\n它说明\"我用轮询也没出事\"这类经验在单队列集群上不构成证据。\n要证明放置策略安全，得在多队列、组数与队列数互质的场景下测 ——\n`usedQueues` 与 `groupCount` 的比值就是\"这个测试覆盖到了没有\"的指标。）\n\n**用例「边界：某个队列没有消费者占用」⇒ `{1, 0, 0, 2, 3, 3}`**（组 2 落在无人占用的队列 1 上）：\n`undeliverable = 2`，而那组的 `inversions` 与 `crossConsumerGroups` 都是 0 ——\n因为该组压根没进观察序。这不是漏判，恰恰是三件事的分工：\n**\"没人消费\"是堆积问题（`undeliverable`）、\"顺序破了\"是放置问题（`inversions`）**，\n并成一列就会在监控里丢掉一整类故障（有堆积没乱序 / 有乱序没堆积）。\n真实系统里这一步的止损是把队列重新分配出去，而不是让别的消费者插进来读\n（官方在队列粒度上的保证正是\"每个队列仅支持被一个消费者消费\"【源 S3】——\n一借用，就是两个消费者同时读同一个队列，比乱序更糟）。\n\n**为什么 `inversions` 不用\"最终落库顺序\"来判**：\n落库顺序里混着消费耗时，而素材【源 S12】点名的错法正是\n\"在监听器里把消息分发到自定义线程并提前返回\" —— 那种情况下**服务端一切正常、顺序已经没了**。\n所以观察序必须在\"分配\"这一层定义，而不是\"执行\"那一层。\n\n**工程延伸（面试追问点）**\n\n1. 分组键怎么选？（选**业务实体的主键**：撮合场景是订单号、增量同步场景是\"表 + 主键\"。\n   官方把\"数据库变更增量同步 → 下游搜索系统按序还原\"列为典型场景【源 S14】，\n   这里的天然分组键就是行主键 —— 同主键必须同队列，不同主键要能打散。）\n2. 组太细/太粗各是什么代价？（组数远大于队列数 ⇒ 同队列里混排很多组，\n   \"不保证连续\"意味着一条慢消息会挡住同队列其他组；\n   组太粗（例如整表一个组）⇒ 并行度被压成 1。\n   素材那句\"在满足业务局部顺序的前提下提高并行度\"说的就是这两个数要一起定。）\n3. 扩容瞬间会不会乱序？（不会改变组→队列的映射，所以不会。\n   真正的风险窗口是\"旧消费者还在处理队列 A 的消息、新消费者已经开始读 A\"，\n   官方靠**队列粒度的锁**（消息粒度则是单条加锁）保证不重叠【源 S3】，\n   而实现要跟着承诺\"消费完成前不释放\"，否则锁形同不存在。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] fifoQueuePlacement(int queueCount, int sendMode, int[] groupOfMessage, int[] consumerOfQueue)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.HashMap;\nimport java.util.HashSet;\nimport java.util.List;\nimport java.util.Map;\nimport java.util.Set;\nimport java.util.TreeMap;\n\npublic class Solution {\n  public static int[] fifoQueuePlacement(int queueCount, int sendMode, int[] groupOfMessage,\n                                         int[] consumerOfQueue) {\n    if (queueCount <= 0) throw new IllegalArgumentException(\"queue count must be positive\");\n    if (sendMode != 0 && sendMode != 1) throw new IllegalArgumentException(\"unknown send mode\");\n    if (consumerOfQueue == null || consumerOfQueue.length != queueCount) {\n      throw new IllegalArgumentException(\"consumer array length mismatch\");\n    }\n    if (groupOfMessage == null) throw new IllegalArgumentException(\"group array must not be null\");\n    for (int q = 0; q < queueCount; q++) {\n      if (consumerOfQueue[q] < -1) throw new IllegalArgumentException(\"negative consumer index\");\n    }\n    int m = groupOfMessage.length;\n    int[] queueOf = new int[m];\n    for (int i = 0; i < m; i++) {\n      if (groupOfMessage[i] < 0) throw new IllegalArgumentException(\"negative group key\");\n      queueOf[i] = sendMode == 0 ? Math.floorMod(groupOfMessage[i], queueCount) : i % queueCount;\n    }\n\n    Map<Integer, Integer> seen = new HashMap<>();\n    int[] consumerOf = new int[m];\n    int[][] sortKey = new int[m][];\n    int undeliverable = 0;\n    for (int i = 0; i < m; i++) {\n      int q = queueOf[i];\n      int pos = seen.getOrDefault(q, 0);\n      seen.put(q, pos + 1);\n      consumerOf[i] = consumerOfQueue[q];\n      sortKey[i] = consumerOf[i] < 0 ? null : new int[] {consumerOf[i], q, pos};\n      if (consumerOf[i] < 0) undeliverable++;\n    }\n    List<Integer> observed = new ArrayList<>();\n    for (int i = 0; i < m; i++) if (sortKey[i] != null) observed.add(i);\n    observed.sort((a, b) -> {\n      int[] ka = sortKey[a], kb = sortKey[b];\n      for (int d = 0; d < 3; d++) if (ka[d] != kb[d]) return Integer.compare(ka[d], kb[d]);\n      return Integer.compare(a, b);\n    });\n\n    Map<Integer, List<Integer>> byGroup = new TreeMap<>();\n    for (int i = 0; i < m; i++) byGroup.computeIfAbsent(groupOfMessage[i], k -> new ArrayList<>()).add(i);\n    Set<Integer> usedQueues = new HashSet<>();\n    for (int q : queueOf) usedQueues.add(q);\n\n    int spannedMax = 0, crossConsumer = 0, inversions = 0;\n    for (Map.Entry<Integer, List<Integer>> e : byGroup.entrySet()) {\n      Set<Integer> queues = new HashSet<>(), consumers = new HashSet<>();\n      for (int i : e.getValue()) { queues.add(queueOf[i]); consumers.add(consumerOf[i]); }\n      spannedMax = Math.max(spannedMax, queues.size());\n      if (consumers.size() > 1) crossConsumer++;\n      Set<Integer> members = new HashSet<>(e.getValue());\n      List<Integer> seq = new ArrayList<>();\n      for (int i : observed) if (members.contains(i)) seq.add(i);\n      for (int a = 0; a < seq.size(); a++) {\n        for (int b = a + 1; b < seq.size(); b++) if (seq.get(a) > seq.get(b)) inversions++;\n      }\n    }\n    return new int[] {spannedMax, crossConsumer, inversions, undeliverable,\n                      byGroup.size(), usedQueues.size()};\n  }\n}",
+    "naiveSolution": "import java.util.HashSet;\nimport java.util.Set;\n\npublic class Solution {\n  // \"队列只是并行度，顺序由消费端排序兜住\"版：发送一律轮询，并且宣称逆序对恒为 0。\n  // 官方两条硬条件（同组同队列、单一生产者 + 串行发送）被当成实现细节忽略掉了。\n  public static int[] fifoQueuePlacement(int queueCount, int sendMode, int[] groupOfMessage,\n                                         int[] consumerOfQueue) {\n    if (queueCount <= 0) throw new IllegalArgumentException(\"queue count must be positive\");\n    if (sendMode != 0 && sendMode != 1) throw new IllegalArgumentException(\"unknown send mode\");\n    if (consumerOfQueue == null || consumerOfQueue.length != queueCount) {\n      throw new IllegalArgumentException(\"consumer array length mismatch\");\n    }\n    if (groupOfMessage == null) throw new IllegalArgumentException(\"group array must not be null\");\n    int undeliverable = 0;\n    Set<Integer> groups = new HashSet<>();\n    Set<Integer> used = new HashSet<>();\n    int m = groupOfMessage.length;\n    for (int i = 0; i < m; i++) {\n      if (groupOfMessage[i] < 0) throw new IllegalArgumentException(\"negative group key\");\n      int q = i % queueCount;\n      used.add(q);\n      if (consumerOfQueue[q] < 0) undeliverable++;\n      groups.add(groupOfMessage[i]);\n    }\n    return new int[] {used.size(), 0, 0, undeliverable, groups.size(), used.size()};\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "Alibaba",
+    "role": "服务端研发（消息中间件与数据同步链路方向） 高级工程师",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-transactions-and-middleware.md#4 考点 8（顺序消息【源 S14】：MessageGroup 是顺序判定单位、单一生产者 + 串行发送、\"相同消息组按序存储在同一队列、不同组可混排且不保证连续\"、细粒度分组换并行度；＋ §1.3【源 S3】\"每个队列仅支持被一个消费者消费\"、【源 S12】顺序消费的同步提交原则。\"观察顺序\"的定义与逆序对度量是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T13:41:46.490Z"
+  }
+}

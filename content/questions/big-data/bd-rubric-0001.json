@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0001",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Flink 2.x 状态、checkpoint 与端到端 exactly-once：把「不重不丢」讲成可验证的工程",
+  "statement": "## 场景（Apple / Airbnb 级别的实时平台面试，40 分钟）\n你负责一个 Flink 实时平台：**1400 个流作业、日均处理 2.6 万亿条事件**，版本分布为 1.17（30%）、1.20（45%）、2.x（25%，2.1/2.2/2.3 混跑）。\n近半年三类反复发生的事故：\n1. 某「实时 GMV + 取消回溯」作业 checkpoint 时长从 32 秒恶化到 **9 分钟**，`tolerable-failed-checkpoints` 打满后整条链路回滚重放，看板数字**往回跳**；\n2. 一次 TM 被抢占（K8s spot，日抢占率 7%）后恢复耗时 22 分钟，期间反压传导到 Kafka，消费者 lag 峰值 4 亿条；\n3. 下游是 Iceberg/Paimon 主键表 + 一个外部 webhook。**复盘发现「我们以为端到端 exactly-once」实际只在 Flink 内部成立**：webhook 被重复触发 1.7 万次，湖表也出现过同一 key 的重复行。\n同时老板要求把 1.17/1.20 长尾作业迁到 2.x，并把 24 个「伪实时」（5 分钟微批就够了）作业降级省成本。\n\n## 请回答（按下面 6 个小问组织，每题都要给判据和数字，不要只给参数清单）\n1. **状态与存算分离**：HashMap / RocksDB / 2.x 的分离式状态后端（ForSt 类）各自的延迟与成本画像；你在什么指标出现什么信号时会切后端？切换的验证方案是什么？\n2. **checkpoint 恶化到 9 分钟的定位顺序**：aligned vs unaligned 的真实代价、对齐时间/快照大小/上传带宽/RocksDB compaction 争抢怎么分离测量、增量 checkpoint 与 `maxParallelism` 的相互约束、以及为什么「开 unaligned 治反压」是错的。\n3. **端到端 exactly-once 的边界**：源可重放 + 两阶段提交 + 湖表主键 upsert 三者分别保证什么；哪些情况 EOS 挡不住（上游业务重复、committer 与 reader 可见性、非事务 sink 的外部副作用）；你怎么**用故障注入证明**它成立？\n4. **恢复与扩缩容**：22 分钟恢复怎么压到可接受范围（本地恢复、快照/增量、state 大小估算方法、`maxParallelism` 预留策略、rescaling 的状态倾斜）；savepoint 跨 1.17→2.x 的兼容风险与你的迁移验证矩阵。\n5. **watermark / 迟到 / 反压的可观测**：你怎么测量「迟到程度分布」并据此定 `allowedLateness`、侧输出与回填窗口？多流 join/union 的 watermark 卡住如何自动发现？per-operator busy/backpressure 指标怎么变成告警而不是靠人看 UI？\n6. **哪些指标你明确不做实时**：给出判据（状态规模、回溯深度、不可加指标、成本），并把「降级为 5 分钟微批」的作业挑选与验收标准写清楚。",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "flink-state",
+    "checkpoint-recovery",
+    "exactly-once",
+    "backpressure",
+    "realtime-platform",
+    "modern:flink-2.3"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "notes": "评分看「是否有可验证的判据与量级」而非名词堆砌。任一小问只给参数清单（如 checkpoint.interval=60s）而没有测量方法/因果链，该考点最多给一半分。",
+    "points": [
+      {
+        "label": "状态后端与存算分离的取舍（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：说清三类后端的画像差异（堆内 HashMap 低延迟但受 heap 限制、RocksDB 堆外大状态 + 增量 checkpoint + 序列化/磁盘 IO 与 read/write amplification、2.x 分离式状态把状态放远端对象存储 + 本地缓存使 checkpoint 变成「刷盘 + 提交清单」从而把恢复时长与状态大小解耦），并给出**切换判据**（如 state 大小/heap 占比、p99 延迟与本地盘 IO、恢复时长目标、对象存储请求费）；能指出分离式的代价是 p99 抖动与缓存未命中放大。只说「大状态用 RocksDB」不给判据、或不知道 2.x 的存算分离改变了什么，最多 1 分。"
+      },
+      {
+        "label": "checkpoint 恶化的分层定位（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：给出**顺序**且每层有指标证据——先看是否反压（per-operator busy/backpressure、record rate 断崖）→ 拆分 checkpoint 时长为 sync 阶段/对齐等待/异步快照/上传（alignment duration、state size、upload throughput、delta 累积）→ 再看 RocksDB compaction 与磁盘争抢、`minPauseBetweenCheckpoints`/`tolerable-failed-checkpoints` 与并发 checkpoint 的互相放大 → 最后才调参。明确回答「unaligned 只是让 checkpoint 不再被对齐卡住，不解决下游容量不足，且会写入 in-flight 缓冲使状态变大、恢复变慢」。把 9 分钟归因到「加并行度」或「调大 timeout」不给证据的，最多 1 分。"
+      },
+      {
+        "label": "exactly-once 的成立条件与边界（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：拆出三件事并说明各自保证范围——源侧 offset 进 checkpoint（可重放）、Flink 内部快照一致性（barrier + 状态）、sink 侧两阶段提交/事务（且提交必须**跟随 checkpoint 完成**，否则故障窗口内出现已写未提交或已提交未记录）；明确说出 EOS **挡不住**上游把同一业务事件发两次（需要 `event_id + version` 幂等键）、挡不住非事务外部副作用（webhook 必须自有幂等键 + 去重表 + 与外部系统对账），并解释湖表「主键 upsert = 效果一次」与「事务可见性」的差别（reader 是否会看到部分提交、committable 与 snapshot 的对应）。能主动提到「重复 1.7 万次」正是 sink 无事务 + 无业务幂等键的组合后果，给满分。"
+      },
+      {
+        "label": "故障恢复与扩缩容工程（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：能把 22 分钟拆开归因（状态总量、恢复是下载全量 snapshot 还是增量、本地恢复是否开启、key group 重分布、冷启动缓存）并给出可执行手段（local recovery/增量 + 预热的组合、state 规模估算 = key 数 × 平均状态 × 窗口倍数、`maxParallelism` 必须预留余量且**改不了**需重建状态、rescaling 后热点 key 的倾斜检查）；提出跨版本迁移的验证矩阵（savepoint 兼容到具体小版本要核实、序列化器漂移、不兼容状态用双跑切换或自定义迁移、回滚点）。只说「用 savepoint 恢复即可」的给 1 分以下。"
+      },
+      {
+        "label": "事件时间、迟到分布与可观测（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：给出「用数据测迟到」的方法（事件时间与摄入时间/处理时间的差值直方图 p50/p99/max、按分片/来源分区看乱序程度、DST 与日切对分布的影响），据此定 watermark 延迟 + `allowedLateness` + 侧输出 + 回填窗口四件套；说明多流 join/union 后 watermark 取最小、一条 idle 流会卡住整体（`withIdleness` 必须配）；把「窗口是否还在触发、迟到率、late-drop 计数」做成指标与告警。默认「watermark 5 分钟」而无分布依据，本考点 0 分。"
+      },
+      {
+        "label": "范围收敛：哪些不做实时 + 降级验收（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：给出可复用的判据（不可加/高基数去重指标需要长回溯窗口 → 状态成本爆炸；财务/合规口径要求「可重算 + 可审计」而非新鲜；跨日回溯深度 > 状态 TTL → 必然不等价），并明确「降级为 5 分钟微批」的选择与验收（按查询消费方的真实新鲜度需求分级、用双跑对账差异率与延迟分位数验证、SLA 用 p95 新鲜度而非均值、成本口径写成常驻资源 + state 存储 + 对象存储请求费）。只会答「全部做实时」或「都不做实时」不给判据的 0 分。"
+      }
+    ]
+  },
+  "answer": "## 参考要点（评分时对照）\n1. **状态画像是可测的**：堆内 HashMap 受 heap 限制、恢复要重放；RocksDB 用序列化与磁盘换内存容量，瓶颈常在 compaction 与本地盘 IO；Flink 2.x 的分离式状态（ForSt 方向）把状态放远端、checkpoint 变成提交清单，恢复时长不再随状态线性增长，代价是访问延迟抖动与远端请求成本。切换判据要落到指标：state size / managed memory 占比、checkpoint 时长构成、p99 处理延迟、恢复时长目标、对象存储请求费用。\n2. **checkpoint 时长 = 反压的放大镜**：定位顺序是「有没有反压 → 卡在哪个阶段（对齐等待 / 同步快照 / 异步上传 / RocksDB compaction 抢 IO）→ 参数是否互相放大」。unaligned 把 in-flight 数据也写进快照，能解「对齐被卡」但增大状态、拉长恢复，对下游容量不足毫无帮助——这是最高频的错误答案。\n3. **EOS 的三段论 + 两类挡不住**：源可重放、内部一致性快照、sink 两阶段提交（提交必须与 checkpoint 绑定，并确认引擎/湖表 catalog 的原子性语义，例如多分区提交是否原子、reader 是否可能看到部分 snapshot）；挡不住「业务级重复」与「外部副作用」，所以 webhook/第三方写必须自有幂等键 + 对账，湖表要主键 + `sequence.field`/version 裁决（呼应 bd-pyspark-0003）。\n4. **验证方式**（这是 senior/principal 的分水岭）：故障注入用例——在 checkpoint 边界 kill TM、在 committer 前抛异常、重放同一段 Kafka、上游故意发重复 event_id；断言为「主键集合一致 + 关键指标校验和一致 + 无部分可见快照」，而不是「跑完没报错」。\n5. **恢复与扩缩容**：`maxParallelism` 决定 key group 数且不可改（改需状态重分布/重建），必须在建作业时就按未来并行度预留；本地恢复 + 增量 checkpoint + 预热缓存能把 22 分钟压到分钟级；rescaling 后要看 state 分布是否倾斜。跨大版本（1.17→2.x）需重编译、Scala 内部 API 收敛、savepoint 兼容性必须逐小版本核实，用「双跑 + 切换 + 回滚点」而不是原地升级。\n6. **迟到与 watermark 由分布决定**：测「事件时间 − 摄入时间」的分位数与按分片/来源的乱序程度，据此定 watermark 延迟、`allowedLateness`、侧输出（超迟落地待回填）与批式滚动重算窗口（滚动 N 天重算，与 sink 的幂等写配套）。多流 union/join 的 watermark 取最小 → 必须配 idle 检测，否则一条停滞流让全局卡住。\n7. **明确不实时**：高基数精确去重（UV/留存）需要长窗口状态，成本与新鲜度不成比例；财务口径要的是可重算 + 可审计，实时反而危险（数字会往回跳）。把这 24 个作业降级为微批，用「p95 新鲜度、双跑差异率、常驻资源成本」三项验收。\n\n## 追问\n- 「checkpoint 从 30 秒涨到 8 分钟，但吞吐没变，最可能是什么？」→ 状态变大（RocksDB 增量链过长 / 窗口累积 / 迟到数据把状态撑大）或下游 sink 变慢导致的对齐等待；用 alignment duration 与 state size 增长曲线区分。\n- 「Flink 2.x 里你会不会改用物化表 / AdaptiveScheduler？」→ 需要给出小版本可用性与团队运维能力评估，并承认「生态与引擎版本兼容矩阵必须实测」，不能宣称都支持。\n- 「反压到 Kafka 之后 lag 4 亿条，恢复顺序是什么？」→ 先解除上游影响（限流/降级非核心作业、扩 sink 容量），再谈追赶（提高并行度 + `fetch` 批量 + 临时放宽 checkpoint 频率），最后复盘容量模型。\n- 「如果只能再省 30% 成本，你砍哪部分？」→ 先砍伪实时常驻资源（错峰到批）、再砍 state 规模（窗口收敛、近似去重）、最后才谈换引擎；给出量化区间与风险。",
+  "estimatedMinutes": 35,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/big-data/streaming-lakehouse-flink-paimon-iceberg.md#flink-state-runtime",
+    "addedBy": "content-agent-bd"
+  }
+}

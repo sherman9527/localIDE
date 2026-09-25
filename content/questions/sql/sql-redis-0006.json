@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0006",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "缓存三防：慢请求的旧值不能盖回来，空值要缓存，锁只能靠租约过期",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7）。**判题器禁用 `EVAL`/`FCALL`/`SCRIPT`，也禁用 `TIME`**：所有时间基准由题面给定。\n\n逻辑时钟基准：`now = 1988150400`（2033-01-01T00:00:00Z，故意设在远未来，保证判题期间键不会真的过期）。所有过期时间必须用**绝对时间 `EXAT`** 表达，便于验证。\n\n口径（键名、值、过期时刻全部固定，判题按这些常量断言）：\n- 商品缓存 `product:42`：本次回源拿到的**新值**是 `product-A-v3`；另有一个**慢请求**带着旧值 `product-A-v2` 晚到，它必须**不能**覆盖。缓存基线 TTL 300 秒，加 **+7 秒抖动**（防雪崩）→ 过期时刻 = 1988150400 + 307 = **1988150707**。\n- 重建互斥锁 `lock:product:42`：holder 分别是 `builder-1` / `builder-2`，租约 5 秒 → 过期时刻 **1988150405**。第二个发现未命中的请求必须拿不到锁；**并且整个过程都不许删这把锁**（无脚本时无法校验持有者，`DEL` 就是删别人的锁），只能让租约自然到期。\n- 穿透防护：查不存在的商品 `product:999`，DB 返回空 → 必须缓存**哨兵值** `__NOCACHE__`，短 TTL 60 秒 **+3 秒抖动** → 过期时刻 **1988150463**。\n- 会话 `sess:abc`（setup 已写入值 `user-42`，过期时刻 1988150600）：读一次并**滑动续期**到 1800 秒后 → 过期时刻必须是 **1988152200**。\n\n按时间线顺序提交命令序列（每行一条）：\n  t1 未命中 → 抢重建锁（holder `builder-1`，租约到 1988150405，只有拿到锁才回源）\n  t2 另一个并发请求也发现未命中 → 抢锁（holder `builder-2`），必须失败且**不得改动锁的归属**\n  t3 首个请求回源得到 v3 → 回填缓存（**不得覆盖已存在的更新值**），用带抖动的绝对过期\n  t4 慢请求带着 v2 到达 → 尝试回填，必须被拒绝\n  t5 查不存在的 999 → 缓存哨兵值（短 TTL + 抖动）\n  t6 读会话并滑动续期（**必须一条命令同时完成读与续期**）\n\n禁止 KEYS/FLUSHALL/EVAL/SCRIPT/OBJECT/SORT/DEBUG；不许 `DEL lock:product:42`。",
+  "judgeKind": "redis",
+  "tags": [
+    "cache-aside",
+    "breakdown-protection",
+    "penetration-protection",
+    "ttl-jitter",
+    "modern:redis7-getex"
+  ],
+  "cases": [
+    {
+      "name": "慢请求的旧值没有盖回新值",
+      "input": ["GET product:42"],
+      "expected": "product-A-v3",
+      "note": "无条件 SET 的实现这里会是 product-A-v2 —— 这就是「回填必须用 NX/版本比较」的原因。"
+    },
+    {
+      "name": "TTL 抖动写进绝对过期时刻",
+      "input": ["EXPIRETIME product:42"],
+      "expected": 1988150707,
+      "note": "判题器读不到可靠相对 TTL（跨秒会少 1），所以要求 EXAT；正好抓「所有键同一秒集体过期」的雪崩写法。"
+    },
+    {
+      "name": "空值必须被缓存（穿透防护）",
+      "input": ["EXISTS product:999", "GET product:999"],
+      "expected": [1, "__NOCACHE__"]
+    },
+    {
+      "name": "空值缓存的 TTL 必须更短（退化数据边界）",
+      "input": ["EXPIRETIME product:999"],
+      "expected": 1988150463
+    },
+    {
+      "name": "第二个重建者拿不到锁且没顶掉持有者",
+      "input": ["GET lock:product:42"],
+      "expected": "builder-1"
+    },
+    {
+      "name": "锁不许被无条件删除（持有者校验缺失的边界）",
+      "input": ["EXISTS lock:product:42", "TYPE lock:product:42"],
+      "expected": [1, "string"],
+      "note": "键必须还在（靠租约到期）。用 DEL 释放锁的实现这里会返回 0。"
+    },
+    {
+      "name": "会话读时滑动续期边界",
+      "input": ["GET sess:abc", "EXPIRETIME sess:abc"],
+      "expected": ["user-42", 1988152200]
+    },
+    {
+      "name": "缓存键类型正确",
+      "input": ["TYPE product:42", "TYPE product:999"],
+      "expected": ["string", "string"]
+    }
+  ],
+  "answer": "参考解：\n```\nSET lock:product:42 builder-1 NX EXAT 1988150405   # t1 只有 NX 成功者回源\nSET lock:product:42 builder-2 NX EXAT 1988150405   # t2 -> nil，直接返回降级值\nSET product:42 product-A-v3 NX EXAT 1988150707     # t3 回填；NX 保证不覆盖更新值\nSET product:42 product-A-v2 NX EXAT 1988150707     # t4 -> nil（旧值被拒）\nSET product:999 __NOCACHE__ NX EXAT 1988150463     # t5 空值短 TTL + 抖动\nGET sess:abc                                        # t6 读\nGETEX sess:abc EXAT 1988152200                      # 读并续期 = 一条命令\n```\n要点：\n1) **击穿（单热点过期）**：`SET lock NX EX` 的返回值就是「谁去回源」的唯一裁决；等待者不能回源，否则 1 万个并发请求同时打 DB。这里不能用 `EXISTS` + `SET`（两条命令之间有窗口）。\n2) **回填为什么用 NX**：Cache-Aside 里「先更 DB 再删缓存」之后，仍可能有旧的回填请求晚到；`SET ... NX` 让它必然失败（first-writer-wins）。真正的 last-writer-wins 需要**版本号**：7.2 只有 `SET ... NX/XX`，带通用版本号的 `SET key val VER n`（以及 `IDLE`）是 **Redis 8.0** 才有的能力；没有它就必须把版本比较下沉到 DB（`UPDATE ... WHERE version < ?`）或用 Lua/Function。\n3) **穿透（查不存在的数据）**：必须缓存「不存在」这个事实（空值串/哨兵 + 短 TTL），否则每次都打 DB；短 TTL + 抖动是因为空值集合常常是被扫描出来的（`id=1..100000` 全不存在）。布隆过滤器是另一档方案，但它**不支持删除**，所以新增数据有延迟可见窗口 —— 要能说清这个取舍。哨兵值不要用字符串 `\"null\"`：它与真实值 \"null\" 无法区分，判题里也会与 Redis 的 nil 回复混作一谈。\n4) **雪崩**：TTL 必须带抖动（这里是 +7s / +3s），并且用绝对 `EXAT` 表达；「所有 key 同一秒集体过期」是能把 DB 打挂的事故。判题器为什么不用 `TTL` 断言：判题是两次往返，跨秒就会少 1，任何精确相对值断言都不稳定（本仓库判题器对 Redis 用严格相等比较）→ 改成 `EXPIRETIME` 断言绝对时刻，或 `EXPIRE key n XX` 断言「有没有设过 TTL」。\n5) **释放锁**：没有脚本 → 无法「校验 holder 再删」→ 只能靠租约到期（这也是题目禁止 DEL 的原因）。真正的释放要靠 token 校验 + 原子脚本，或者把互斥下沉到 DB。\n6) **`GETEX`（6.2+）**把「读 + 设过期」合成一条命令，是会话滑动续期最省 RTT 也最不容易做错的写法；7.4 起有字段级 TTL（`HEXPIRE`/`HGETEX`）可以做「同一 Hash 里 token 短、profile 长」，判题容器是 7.2 所以本题不用。\n\n追问：\n- 一致性怎么**度量**？→ 不是「应该没问题」：影子读比对（同 key 同时读缓存与 DB 打点，采样 1%）→ `staleness = 不一致读比例` + `p99 陈旧时长`；再加上「缓存删除失败重试队列深度」。这是 principal 必答项。\n- 为什么不「更新缓存」而「删缓存」？→ 并发写下更新缓存无法保证顺序（谁后落库谁的值未必赢），删除则把下一次读变成回源；两者都要配合延迟双删/CDC 订阅 binlog 失效，而延迟双删的正确性依赖「延迟 > 主从复制与读路径耗时」，必须给出实测上界才成立。\n- 客户端侧缓存失效（`CLIENT TRACKING` + RESP3）适合什么场景？→ 读放大极高且能容忍短暂陈旧的配置类数据；它把失效推送给客户端，但推送不可靠，必须配 TTL 兜底。",
+  "runner": {
+    "setup": [
+      "DEL product:42",
+      "DEL product:999",
+      "DEL lock:product:42",
+      "SET sess:abc user-42 EXAT 1988150600"
+    ],
+    "timeoutMs": 10000,
+    "referenceSolution": "SET lock:product:42 builder-1 NX EXAT 1988150405\nSET lock:product:42 builder-2 NX EXAT 1988150405\nSET product:42 product-A-v3 NX EXAT 1988150707\nSET product:42 product-A-v2 NX EXAT 1988150707\nSET product:999 __NOCACHE__ NX EXAT 1988150463\nGET sess:abc\nGETEX sess:abc EXAT 1988152200",
+    "naiveSolution": "SET product:42 product-A-v2 EXAT 1988150700\nSET lock:product:42 builder-2 EXAT 1988150405\nDEL lock:product:42\nGET sess:abc"
+  },
+  "estimatedMinutes": 16,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#14-一致性缓存与-db-的四种失效策略",
+    "addedBy": "content-agent-sql"
+  }
+}

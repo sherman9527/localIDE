@@ -1,0 +1,412 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0048",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "动态配置下发：版本与内容双重比对、schema 前置拦截、灰度失败自动回退",
+  "statement": "## 背景\n\nCloudWeGo 的 configmanager 把动态配置下发的机制写清了三层【源 S12】：\n**周期性加载 → 比对两个版本的差异 → 只有差异才通知注册的 listener**，\n另有 `Refresh` / `RefreshAndWait` / dump。配合 Kitex 的配置中心扩展\n（etcd / Apollo / Nacos / File / ZK / Consul）与\n`Updater.UpdateLimit`、`UpdateServiceCBConfig` 完成阈值热更【源 S2/S3/S6】。\n\n**灰度下发、schema 校验、失败自动回退这三件事官方文档没写**，\n本文件把它们标成【推】—— 所以本题把全部规则**写成题面契约**，\n不声称\"字节官方这么做\"。你要考的是：**能不能把一条配置变更通道\n设计成\"坏配置进不来、进来了能自己退回去、退了以后还能说清楚退到哪\"。**\n\n## 任务\n\n```java\npublic static int[] configRollout(int thresholdBps, int minSample, int[][] pushes)\n```\n\n`pushes` 按到达顺序，每条是一个六元组\n`[version, contentHash, valid, applyPercent, failCount, totalCount]`：\n\n- `valid`：客户端侧 schema 校验结果（`0` = 不合格）；\n- `applyPercent`：本次下发的生效比例（100 = 全量）；\n- `failCount / totalCount`：**上一条已生效配置**在这个观测窗口里的失败计数\n  （也就是\"配置随轮询带回上一窗口的健康报告\"这一常见形态）。\n\n返回八个整数：\n`{生效次数, 其中灰度生效次数, 因版本不递增被忽略次数, 因 schema 不合格被拒次数,\n  因内容未变而跳过回调次数, 自动回退次数, 结束时的当前版本, 结束时的稳定版本}`。\n\n## 每条推送按此顺序处理（**顺序就是考点**）\n\n| 步 | 规则 | 计数 |\n| --- | --- | --- |\n| 1 | **先体检当前生效版本**：`curVersion != 0` 且 `totalCount >= minSample`\n      且 `failCount * 10000 >= thresholdBps * totalCount` 且 `stableVersion != curVersion`\n      ⇒ 回退到稳定版（连同内容哈希一起退） | `rolledBack++` |\n| 2 | `valid == 0` ⇒ 拒绝，**不进入比对、不改任何状态** | `rejectedInvalid++` |\n| 3 | `version <= curVersion` ⇒ 忽略（老配置重放不许把新配置顶掉） | `ignoredStale++` |\n| 4 | `contentHash == curHash` ⇒ **不通知 listener**（只有差异才回调） | `skippedNoDiff++` |\n| 5 | 生效：`curVersion/curHash` 更新；`applyPercent < 100` 记灰度 | `applied++`，另记 `partialApplied++` |\n| 6 | **只有全量生效（`applyPercent == 100`）才把它设为新的稳定版** | 更新 `stableVersion` |\n\n四条设计理由，答题必须命中：\n\n- **schema 校验排在比对之前**：一条坏配置如果被记成 `ignoredStale`，\n  监控上就看不出\"有人在推坏东西\"，而它是唯一能区分\"网络重放\"与\"内容错误\"的信号。\n- **回退判据要 `minSample`**：理由和熔断器的 `MinSample=200` 一模一样 ——\n  低峰期一个窗口只有几次调用，一次失败就是 100% 错误率 ⇒ 全局回退。\n- **只有全量生效才算稳定版**：否则\"灰度 A 没达标 → 退回 A\"会变成\n  把 A 认定为稳定基线，回退等于把灰度推成全量。\n- **回退要连 contentHash 一起退**：只回版本号会让第 4 步把\n  \"重放同一个内容\"判成\"内容未变 ⇒ 不回调\"，而 listener 手里的值其实已经是新的了。\n\n## 合法性（`IllegalArgumentException`，消息一字不差）\n\n`thresholdBps out of range` / `minSample must be positive` / `pushes must not be null` /\n`each push must be [version, hash, valid, applyPercent, fail, total]` /\n`version must be non-negative` / `hash must be non-negative` /\n`valid must be 0 or 1` / `applyPercent must be in [1,100]` /\n`fail and total must be non-negative` / `fail must not exceed total`\n\n**整批推送先全部校验再开始改状态**：否则一条格式错的第 50 行会让前 49 行已经生效，\n\"解析失败 ⇒ 保持旧值\"这条契约就破了。\n\n## 这题真正考的东西\n\n`skippedNoDiff` 那个计数是本题唯一\"纯送分\"的一格，也是**唯一没人答对的一格**：\n配置通道每 30 秒拉一次，绝大多数轮次内容根本没变。\n若\"每次拉到都回调\"，listener 里的 map 会被反复原地重写 ——\n读侧看到的就是**读到一半被改掉**的配置（素材 §2 追问 9 的\"撕裂读\"）。\n\"只有差异才回调\"不是为了省 CPU，是让回调成为一个**真的发生了变更**的事件。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "config-distribution",
+    "version-diff",
+    "gray-release",
+    "auto-rollback",
+    "modern:service-governance"
+  ],
+  "cases": [
+    {
+      "name": "基线：全量 → 灰度 → 灰度期越界回退 → 新内容继续生效",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            10,
+            1,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            20,
+            2,
+            1,
+            20,
+            1,
+            100
+          ],
+          [
+            30,
+            3,
+            1,
+            100,
+            8,
+            10
+          ],
+          [
+            40,
+            4,
+            1,
+            100,
+            0,
+            50
+          ]
+        ]
+      ],
+      "expected": [
+        4,
+        1,
+        0,
+        0,
+        0,
+        1,
+        40,
+        40
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：版本号递增但内容哈希没变 ⇒ 一次回调都不许发（只有差异才通知）",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            7,
+            3,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            8,
+            3,
+            1,
+            100,
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        0,
+        0,
+        1,
+        0,
+        7,
+        7
+      ],
+      "visible": true,
+      "note": "configmanager 的公开语义就是\"周期性加载 → 比对两版差异 → 只有差异才通知 listener\""
+    },
+    {
+      "name": "非法配置要在比对之前挡掉：坏配置不生效也不进历史",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            5,
+            1,
+            0,
+            100,
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：没有可退的稳定版 ⇒ 越界也不许凭空造一次回退",
+      "input": [
+        1000,
+        10,
+        [
+          [
+            9,
+            1,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            10,
+            2,
+            1,
+            100,
+            9,
+            10
+          ]
+        ]
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        10,
+        10
+      ],
+      "visible": true
+    },
+    {
+      "name": "灰度中的版本不是稳定版：回退要退到上一个全量版本",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            10,
+            1,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            20,
+            2,
+            1,
+            50,
+            0,
+            0
+          ],
+          [
+            15,
+            3,
+            1,
+            100,
+            8,
+            10
+          ]
+        ]
+      ],
+      "expected": [
+        3,
+        1,
+        0,
+        0,
+        0,
+        1,
+        15,
+        15
+      ],
+      "visible": true
+    },
+    {
+      "name": "样本不足时不许回退（和熔断的 MinSample 是同一个教训）",
+      "input": [
+        5000,
+        200,
+        [
+          [
+            10,
+            1,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            20,
+            2,
+            1,
+            100,
+            9,
+            20
+          ]
+        ]
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        20,
+        20
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：重放同一个版本号 ⇒ 忽略，旧配置不许把新配置顶掉",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            10,
+            1,
+            1,
+            100,
+            0,
+            0
+          ],
+          [
+            10,
+            2,
+            1,
+            100,
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        1,
+        0,
+        0,
+        0,
+        10,
+        10
+      ],
+      "visible": true
+    },
+    {
+      "name": "退化：一次推送都没有 ⇒ 八个计数全零，当前版本仍是 0",
+      "input": [
+        5000,
+        10,
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：灰度比例为 0（等于悄悄关掉下发）",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            1,
+            1,
+            1,
+            0,
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "applyPercent must be in [1,100]"
+    },
+    {
+      "name": "非法：推送行不是六个字段",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            1,
+            1,
+            1,
+            100,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "each push must be [version, hash, valid, applyPercent, fail, total]"
+    },
+    {
+      "name": "非法：失败数大于总数",
+      "input": [
+        5000,
+        10,
+        [
+          [
+            1,
+            1,
+            1,
+            100,
+            9,
+            8
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "fail must not exceed total"
+    },
+    {
+      "name": "非法：最小样本门槛为 0（会让单点噪声触发全局回退）",
+      "input": [
+        5000,
+        0,
+        [
+          [
+            1,
+            1,
+            1,
+            100,
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "minSample must be positive"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n**基线 `[5000, 10, 四条推送]` 逐步走：**\n\n| 推送 | 第 1 步（体检当前版本） | 第 2~4 步 | 生效结果 |\n| --- | --- | --- | --- |\n| v10 全量 | `curV==0` ⇒ 跳过体检 | 通过 | applied=1，stable=10 |\n| v20 灰度 20% | 窗口 `1/100` 未越界 | 通过 | applied=2，partial=1，stable 仍 10 |\n| v30 全量 | 当前是 v20，`8/10 = 8000bps >= 5000bps` 且 `stable(10) != cur(20)` ⇒ **回退到 10** | v30 > 10 ⇒ 通过 | applied=3，rolled=1，stable=30 |\n| v40 全量 | `0/50` 未越界 | 通过 | applied=4，stable=40 |\n\n⇒ 返回 `{4, 1, 0, 0, 0, 1, 40, 40}`。\n第三条推送到达时 `curV` 是灰度中的 20，窗口 `(8, 10)` 满足\n\"样本达标且失败率万分比 8000 越过阈值 5000\"，且稳定版是 10 ≠ 20 ⇒ 先回退；\n紧接着这条推送自己 `v30 > curV(10)`、内容哈希也不同 ⇒ 立刻又以全量身份生效。\n这条序列是本题最有教育意义的一格：\n**回退和采纳可以在同一个轮次里连续发生** —— 先退回稳定版，再接纳这次下发的新内容。\n把它实现成\"回退了就不再处理这条推送\"的系统，会漏掉\"下一次修复正是这次推送\"的情况。\n\n**用例「边界：版本号递增但内容哈希没变」⇒ `{1, 0, 0, 0, 1, 0, 7, 7}`**：\n版本 7→8 递增、内容完全相同 ⇒ 生效 1 次、跳过回调 1 次、`curVersion` 停在 7。\n**这是 `skippedNoDiff` 的全部意义**：版本号是\"我重发了\"，内容哈希才是\"变了\"。\n只做版本比对的实现（configmanager 的第一层）会在这里回调 listener ——\n而回调一次就是让所有 listener 原地重写一次自己正在被读的 map。\n\n**用例「样本不足时不许回退」⇒ `{2, 0, 0, 0, 0, 0, 20, 20}`**：\n`minSample=200` 而窗口只有 20 次 ⇒ 9 个失败（45% 错误率）也不回退。\n看起来\"该退没退\"，但这与熔断器的 `MinSample=200` 是同一个判断：\n**回退是自动动作，自动动作的前提是证据充分**。\n小窗口要自动回退，等价于把整条链路的稳定性押在一次网络抖动上。\n\n**用例「非法配置要在比对之前挡掉」⇒ `{0, 0, 0, 1, 0, 0, 0, 0}`**：\n坏配置不进历史、不改 `curVersion`（仍是 0）——\n这就是\"schema 校验排在比对之前\"的可断言形式。\n若把它记成 `ignoredStale`，\"有人推了个格式错的东西\"和\"网络重放\"就共用一个指标。\n\n**朴素解挂在哪**：它不比内容哈希、不拦坏配置、不回退，\n于是基线用例给出 `{4, 0, 0, 0, 0, 0, 40, 40}` ——\n`partial`/`invalid`/`noDiff`/`rolled` 四格全零。\n**这是它最可怕的地方**：一个\"看起来一直在正常工作\"的配置通道，\n指标上却完全无法区分\"变更\"与\"重放\"，也无法证明\"出过事之后回到了哪里\"。\n\n**工程延伸（面试追问点）**\n\n1. 回调里怎么改才不撕裂？（**换指针不换内容**：新配置构造成一个不可变对象，\n   原子替换引用。原地改 map 会让读侧看到\"一半新一半旧\"，\n   而两个阈值之间有大小关系约束时（例如重试阈值必须小于熔断阈值），\n   撕裂读能直接构造出非法组合。）\n2. `Refresh` 与 `RefreshAndWait` 的差别？（后者保证\"返回时所有 listener 已生效\"，\n   适合发布前对齐；前者只触发一轮拉取，生效时机不确定。）\n3. 坏配置的放大半径怎么控？（schema 校验只能挡格式，挡不了语义\n   （\"把限流阈值配成 1\"格式完全合法）。所以要么加**取值域与变化幅度**约束\n   （单次变更超过 N 倍 ⇒ 需人工确认），要么把灰度比例本身当成校验手段：\n   本题的 `applyPercent` + 失败回退就是这条。）\n4. 为什么 Fallback 不在可热更清单里？（Kitex 文档明写 Fallback\n   \"涉及业务逻辑，只支持代码配置\"【源 S7】。\n   **能热改的是阈值和开关，不能热改的是行为** —— 一条配置通道\n   能改多少东西，取决于那些东西有没有代码路径。这题的 `valid` 位之所以够用，\n   正是因为被下发的只是数值。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] configRollout(int thresholdBps, int minSample, int[][] pushes)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static int[] configRollout(int thresholdBps, int minSample, int[][] pushes) {\n    if (thresholdBps <= 0 || thresholdBps > 10000)\n      throw new IllegalArgumentException(\"thresholdBps out of range\");\n    if (minSample <= 0) throw new IllegalArgumentException(\"minSample must be positive\");\n    if (pushes == null) throw new IllegalArgumentException(\"pushes must not be null\");\n    for (int[] p : pushes) {\n      if (p == null || p.length != 6)\n        throw new IllegalArgumentException(\n            \"each push must be [version, hash, valid, applyPercent, fail, total]\");\n      if (p[0] < 0) throw new IllegalArgumentException(\"version must be non-negative\");\n      if (p[1] < 0) throw new IllegalArgumentException(\"hash must be non-negative\");\n      if (p[2] != 0 && p[2] != 1) throw new IllegalArgumentException(\"valid must be 0 or 1\");\n      if (p[3] < 1 || p[3] > 100) throw new IllegalArgumentException(\"applyPercent must be in [1,100]\");\n      if (p[4] < 0 || p[5] < 0) throw new IllegalArgumentException(\"fail and total must be non-negative\");\n      if (p[4] > p[5]) throw new IllegalArgumentException(\"fail must not exceed total\");\n    }\n\n    int curV = 0, curH = 0, stableV = 0, stableH = 0;\n    int applied = 0, partial = 0, stale = 0, invalid = 0, noDiff = 0, rolled = 0;\n    for (int[] p : pushes) {\n      int v = p[0], h = p[1], valid = p[2], pct = p[3], fail = p[4], total = p[5];\n      if (curV != 0 && total >= minSample\n          && (long) fail * 10000L >= (long) thresholdBps * total\n          && stableV != curV) {\n        rolled++;\n        curV = stableV;\n        curH = stableH;\n      }\n      if (valid == 0) { invalid++; continue; }\n      if (v <= curV) { stale++; continue; }\n      if (h == curH) { noDiff++; continue; }\n      curV = v;\n      curH = h;\n      applied++;\n      if (pct < 100) { partial++; } else { stableV = v; stableH = h; }\n    }\n    return new int[] {applied, partial, stale, invalid, noDiff, rolled, curV, stableV};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"配置中心就是 KV 存储\"版：来一条改一条、每次都要回调 listener（不比内容）、\n  // 不做坏配置拦截、更没有回滚 —— 一条坏配置会被下发到全部实例。\n  public static int[] configRollout(int thresholdBps, int minSample, int[][] pushes) {\n    if (thresholdBps <= 0 || thresholdBps > 10000)\n      throw new IllegalArgumentException(\"thresholdBps out of range\");\n    if (minSample <= 0) throw new IllegalArgumentException(\"minSample must be positive\");\n    if (pushes == null) throw new IllegalArgumentException(\"pushes must not be null\");\n    for (int[] p : pushes) {\n      if (p == null || p.length != 6)\n        throw new IllegalArgumentException(\n            \"each push must be [version, hash, valid, applyPercent, fail, total]\");\n      if (p[0] < 0) throw new IllegalArgumentException(\"version must be non-negative\");\n      if (p[1] < 0) throw new IllegalArgumentException(\"hash must be non-negative\");\n      if (p[2] != 0 && p[2] != 1) throw new IllegalArgumentException(\"valid must be 0 or 1\");\n      if (p[3] < 1 || p[3] > 100) throw new IllegalArgumentException(\"applyPercent must be in [1,100]\");\n      if (p[4] < 0 || p[5] < 0) throw new IllegalArgumentException(\"fail and total must be non-negative\");\n      if (p[4] > p[5]) throw new IllegalArgumentException(\"fail must not exceed total\");\n    }\n    int curV = 0, applied = 0;\n    for (int[] p : pushes) {\n      if (p[0] > curV) { curV = p[0]; applied++; }\n    }\n    return new int[] {applied, 0, 0, 0, 0, 0, curV, curV};\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "ByteDance",
+    "role": "服务端研发（Go 微服务治理与基础架构方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-backend-and-infrastructure.md#4 考点 8（动态配置下发的一致性与原子生效：周期刷新、两版本比对、仅差异回调 listener、Refresh/dump、Updater 热更接口；\"回调里的旧对象是否还在被使用/撕裂读\"与\"坏配置拦截与回滚\"标为【推】，题面已改写成本题设定的契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:20:38.822Z"
+  }
+}

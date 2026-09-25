@@ -1,0 +1,205 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0027",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "Airflow 的 data interval：run 在区间结束才触发，那个 +1 会覆盖未关闭的分区",
+  "statement": "## 背景\n\n一条批管道每天从 `scheduleStart` 起按固定粒度跑，用 Airflow 的语义描述就是：\n数据区间是 `[scheduleStart + k·g, scheduleStart + (k+1)·g)`，`k = 0, 1, 2, …`。\n\n关键约定（也是这题最容易做错的一点）：**一个区间的 run 在区间结束那一刻才可触发**。\n`logical_date` 是区间**起点**，但触发时刻是区间**终点** —— 因为数据要等窗口关闭才完整。\n\n给你当前时刻 `now`，要求列出到此为止**所有已经可以触发**的区间。\n\n## 规则\n\n- 可触发判据：`now >= scheduleStart + (k+1)·g`（区间已经关闭）。\n- `catchup = true`：返回全部可触发的区间，按时间升序。\n- `catchup = false`：只返回**最后一个**可触发的区间（没有则返回空）。\n- 返回 `long[k][2]`，每行是 `[dataIntervalStart, dataIntervalEnd]`。\n- `now < scheduleStart`（时钟回拨、或 `start_date` 设在未来）返回**空数组，不抛异常**。\n- `granularitySec <= 0` 抛 `IllegalArgumentException`。\n\n## 这题真正考的东西\n\n最顺手的写法是 `n = (now - start) / g + 1` —— 那个 `+1` 排的是**当前还没关闭的区间**。\n它会在 `now` 落在区间中间时多跑一个 run，而这个 run 的 `data_interval_end` 在未来：\n\n- 它按\"现在\"去读分区，读到的是一份**还在写入的数据**，于是当天指标偏低且每天偏低一点点；\n- 更糟的是回填（backfill）时它会**覆盖一个尚未关闭的分区**，把已经发布的数据改成残缺版本。\n\n这类 bug 不会报错，只会让数字\"差一点\"，所以它能在生产里活很多个季度。\n另一个常见错法是 `catchup=false` 时返回**最早**那个区间（把\"只跑最新一次\"理解成\"从头补一个\"），\n结果管道永远停在第一天，看起来\"在跑\"，实际再没前进过。\n\n## 复杂度要求\n\n`O(k)` 输出规模；不许用循环里的浮点除法算边界（全部整数运算）。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "scheduler-semantics",
+    "backfill",
+    "off-by-one",
+    "batch-pipeline",
+    "modern:orchestration-contract"
+  ],
+  "cases": [
+    {
+      "name": "三个区间恰好关闭：now 落在边界上就是 3 个，不是 4 个",
+      "input": [
+        0,
+        3600,
+        10800,
+        true
+      ],
+      "expected": [
+        [
+          0,
+          3600
+        ],
+        [
+          3600,
+          7200
+        ],
+        [
+          7200,
+          10800
+        ]
+      ],
+      "visible": true,
+      "note": "那个 +1 的写法在这里会给出 4 个区间，最后一个的 end 在未来"
+    },
+    {
+      "name": "now 落在第 4 个区间中间：仍然只有 3 个可触发",
+      "input": [
+        0,
+        3600,
+        12600,
+        true
+      ],
+      "expected": [
+        [
+          0,
+          3600
+        ],
+        [
+          3600,
+          7200
+        ],
+        [
+          7200,
+          10800
+        ]
+      ],
+      "visible": true
+    },
+    {
+      "name": "catchup=false 要最新那个区间，不是最早那个",
+      "input": [
+        0,
+        3600,
+        36005,
+        false
+      ],
+      "expected": [
+        [
+          32400,
+          36000
+        ]
+      ],
+      "visible": true,
+      "note": "返回最早区间会让管道永远停在第一天，而面板上看着\"每天都有成功 run\""
+    },
+    {
+      "name": "退化：一个区间都没关闭（now = g-1）返回空",
+      "input": [
+        0,
+        3600,
+        3599,
+        true
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "退化：now 恰好等于 start 返回空",
+      "input": [
+        0,
+        3600,
+        0,
+        true
+      ],
+      "expected": [],
+      "visible": true
+    },
+    {
+      "name": "时钟回拨：now 早于 start 返回空而不是抛异常",
+      "input": [
+        1000,
+        3600,
+        500,
+        true
+      ],
+      "expected": [],
+      "visible": true,
+      "note": "抛异常会把一次 NTP 抖动放大成管道故障"
+    },
+    {
+      "name": "真实时间戳：按天粒度跑三天",
+      "input": [
+        1700000000,
+        86400,
+        1700259200,
+        true
+      ],
+      "expected": [
+        [
+          1700000000,
+          1700086400
+        ],
+        [
+          1700086400,
+          1700172800
+        ],
+        [
+          1700172800,
+          1700259200
+        ]
+      ],
+      "visible": true
+    },
+    {
+      "name": "catchup=false 且只有一个区间关闭：返回那一个",
+      "input": [
+        0,
+        3600,
+        3600,
+        false
+      ],
+      "expected": [
+        [
+          0,
+          3600
+        ]
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：粒度为 0",
+      "input": [
+        0,
+        0,
+        100,
+        true
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    },
+    {
+      "name": "非法：粒度为负",
+      "input": [
+        0,
+        -60,
+        100,
+        true
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException"
+    }
+  ],
+  "answer": "**思路**：可触发的充要条件是区间已关闭，即 `start + (k+1)·g <= now`，\n所以 `k+1 <= (now-start)/g` ⇒ **可触发个数 = `(now - start) / g`（整数除法）**，\n不需要 `+1`。`catchup=false` 取最后一个，即下标 `closed-1`。\n\n**两个 `+1` 的诱惑**：`(now-start)/g + 1` 看起来\"更完整\"，因为它把当前正在积累的区间也算上了。\n但那个区间的 `data_interval_end` 在 `now` 之后 —— 拿它去读数据会读到半份，\n回填时更会把已发布分区覆盖成残缺版本。判分点用例 1/2/4/5 全在打这一下：\n`now` 恰好等于边界（3·g）时正确答案是 3 个而不是 4 个，`now` 在区间中间时同样是 3 个。\n\n**为什么 `now < start` 不抛异常**：时钟回拨与\"`start_date` 设在未来\"都是可恢复的常态，\n抛异常会让调度器把一次时间同步抖动变成管道故障。返回空数组 = \"这一轮无事可做\"，语义正确。\n\n**`catchup=false` 的第二个错法**：返回最早那个区间。症状极其隐蔽 —— 面板上显示\"有 run 成功\"，\n但数据永远停在第一天。判分点用例 3 专门打它（`now=10g+5` 时必须返回第 10 个区间）。\n\n**工程延伸（面试追问点）**：\n1. 为什么要区分 `logical_date` 与触发时刻？（因为\"数据属于哪一天\"和\"什么时候数据齐了\"是两件事。\n   把两者混成一个字段，是所有\"回填污染已发布分区\"类事故的共同根因。）\n2. `catchup=false` 适合什么场景？（只关心最新状态的实时性管道。但要注意它会**静默跳过**积压的区间，\n   所以必须配一个\"被跳过区间数\"的指标，否则停机一周后你不会知道那一周的数据永远没了。）\n3. 粒度不固定（cron 表达式）怎么办？（`data_interval` 由 cron 的相邻两次触发时刻决定，\n   月末/闰年/DST 会让区间长度不等 —— 这时\"用除法算个数\"根本不成立，必须逐个生成并判断关闭时刻。\n   这也是本题限定固定粒度的原因：固定粒度下才有闭式解。）\n4. 回填的正确姿势？（只允许回填 `end <= 水位线` 的区间，且写入走\"新分区替换\"而不是原地覆盖；\n   水位线本身要持久化，否则回填过程中重启会重放已完成的区间。）\n5. 怎么防住那个 `+1`？（给管道加一条断言：任何 run 的 `data_interval_end <= 当前时间`。\n   把它做成调度层的不变量，而不是靠 review 时肉眼盯 —— 这类 off-by-one 在 code review 里几乎必漏。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "long[][] scheduledIntervals(long scheduleStart, long granularitySec, long now, boolean catchup)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  public static long[][] scheduledIntervals(long scheduleStart, long granularitySec, long now, boolean catchup) {\n    if (granularitySec <= 0) throw new IllegalArgumentException(\"granularity must be positive\");\n    long elapsed = now - scheduleStart;\n    if (elapsed < granularitySec) {\n      // 包含 now < scheduleStart（时钟回拨 / start_date 在未来）：没有任何区间关闭过\n      return new long[0][];\n    }\n    // 只有 end <= now 的区间才可触发 ⇒ 可触发个数 = elapsed / granularity（整数除法天然向下取整）\n    long closed = elapsed / granularitySec;\n    long first = catchup ? 0 : closed - 1;          // catchup=false 只要最新那一个\n    int size = (int) (catchup ? closed : 1);\n    long[][] out = new long[size][];\n    for (int i = 0; i < size; i++) {\n      long start = scheduleStart + (first + i) * granularitySec;\n      out[i] = new long[] { start, start + granularitySec };\n    }\n    return out;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  public static long[][] scheduledIntervals(long scheduleStart, long granularitySec, long now, boolean catchup) {\n    if (granularitySec <= 0) throw new IllegalArgumentException(\"granularity must be positive\");\n    if (now < scheduleStart) return new long[0][];\n    // 错处一：+1 把还没关闭的当前区间也排进去了\n    long n = (now - scheduleStart) / granularitySec + 1;\n    // 错处二：catchup=false 时取了最早的区间，于是管道永远停在第一天\n    int size = (int) (catchup ? n : 1);\n    long[][] out = new long[size][];\n    for (int i = 0; i < size; i++) {\n      long start = scheduleStart + (long) i * granularitySec;\n      out[i] = new long[] { start, start + granularitySec };\n    }\n    return out;\n  }\n}"
+  },
+  "estimatedMinutes": 20,
+  "source": {
+    "company": "Apple",
+    "role": "数据平台 / 编排与回填 高级工程师",
+    "location": "other",
+    "origin": "history",
+    "jds": [],
+    "knowledgeRef": "data/kb-txt/Apple面试准备手册.txt §13.2（logical_date 是区间起点、运行发生在窗口结束之后）；手册给了结论但未做成可判分要求；bd-pyspark-0008 只考回填的结果侧不考调度语义",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-22T13:44:55.020Z"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0005",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "签到位图：offset 是「日-1」，不是把 20260503 当数字塞进去",
+  "statement": "基线：Redis 7.2（判题容器实测 7.2.7）。位图是字符串对象，`SETBIT` 会按 `offset/8` 分配连续内存 —— 这是本题的核心陷阱。\n\n要做两张位图（键名与下标口径固定，判题只按这些常量断言）：\n1. **用户月位图** `sign:7:202605`：记录 uid 7 在 2026 年 5 月的签到日。bit 下标 = **当月日序号 - 1**（1 号 → 0，31 号 → 30）。要标记的日期：3、4、5、10、26、31 号。\n2. **反向日位图** `signers:20260503`：记录 5 月 3 号签到的用户，bit 下标 = uid。当天签到用户为 7、8、9。\n\n要求：\n- 每张位图都必须是**位图**（字符串类型），不能退化成 SET/ZSET/每天一个键；\n- 月位图的总长度必须只有 4 字节（31 天 = 4 字节），不许出现大 key；\n- 重复签到必须是幂等的（同一个 bit 打两次不产生第二条记录）；\n- 禁止 KEYS/FLUSHALL/EVAL/SCRIPT/OBJECT/SORT/DEBUG；不许调用 `TIME`。\n\n提交命令序列（每行一条），把上述两张位图写出来。",
+  "judgeKind": "redis",
+  "tags": [
+    "bitmap",
+    "check-in",
+    "memory-bound",
+    "byte-offset-semantics",
+    "modern:redis7-bitmap"
+  ],
+  "cases": [
+    {
+      "name": "当月签到天数",
+      "input": ["BITCOUNT sign:7:202605"],
+      "expected": 6
+    },
+    {
+      "name": "位图内存上界（大 key 边界）",
+      "input": ["STRLEN sign:7:202605"],
+      "expected": 4,
+      "note": "31 天只需要 4 字节。把日期数字 `20260503` 当 offset 的实现会分配 2.5MB 并当场暴露。"
+    },
+    {
+      "name": "BITCOUNT 的范围参数是字节不是位（区间边界）",
+      "input": ["BITCOUNT sign:7:202605 0 1"],
+      "expected": 4,
+      "note": "字节 0..1 = bit 0..15 = 1~16 号 → 3、4、5、10 号共 4 天。"
+    },
+    {
+      "name": "月末字节窗口边界",
+      "input": ["BITCOUNT sign:7:202605 3 3"],
+      "expected": 2,
+      "note": "字节 3 = bit 24..31 = 25~32 号 → 只有 26 号(offset 25) 与 31 号(offset 30)。"
+    },
+    {
+      "name": "已签与未签的具体位",
+      "input": ["GETBIT sign:7:202605 2", "GETBIT sign:7:202605 1"],
+      "expected": [1, 0]
+    },
+    {
+      "name": "重复签到的幂等边界（SETBIT 返回旧值）",
+      "input": ["SETBIT sign:7:202605 2 1", "BITCOUNT sign:7:202605"],
+      "expected": [1, 6],
+      "note": "旧值必须是 1（说明 5 月 3 号确实落在 offset 2），且总天数不变。"
+    },
+    {
+      "name": "反向索引当天人数",
+      "input": ["BITCOUNT signers:20260503", "TYPE signers:20260503"],
+      "expected": [3, "string"]
+    },
+    {
+      "name": "月位图键类型正确",
+      "input": ["TYPE sign:7:202605"],
+      "expected": "string"
+    }
+  ],
+  "answer": "参考解：\n```\nDEL sign:7:202605\nSETBIT sign:7:202605 2 1\nSETBIT sign:7:202605 3 1\nSETBIT sign:7:202605 4 1\nSETBIT sign:7:202605 9 1\nSETBIT sign:7:202605 25 1\nSETBIT sign:7:202605 30 1\nDEL signers:20260503\nSETBIT signers:20260503 7 1\nSETBIT signers:20260503 8 1\nSETBIT signers:20260503 9 1\n```\n要点：\n1) **offset 语义决定内存**：位图按 `max(offset)/8` 分配连续字符串，`SETBIT k 20260503 1` 会吃掉 2.5MB；正确做法是「键里带日期粒度、offset 只用小下标」（月位图 31 bit = 4 字节，一年 12 键 = 不到 50 字节/人）。判题用 `STRLEN` 精确断言这一点（`MEMORY USAGE` 依赖版本与分配器，不适合做期望值；`OBJECT ENCODING` 被判题器禁用）。\n2) `BITCOUNT key start end` 的 start/end 是**字节**下标（还可以加 `BIT` 参数按位算，8.0 起有 `BITCOUNT key s e BIT`，7.2 判题里不要依赖）；`GETRANGE`/`SETRANGE` 同理。按「上半月/下半月」统计时算错位是常见 bug。\n3) 正反向两张位图对应两类查询：「某人这个月签了几天」→ 正向 `BITCOUNT`；「某天有多少人签到」→ 反向 `BITCOUNT`。只留正向的话，日维度统计要遍历所有用户键（生产上必死）。这也解释了为什么两套下标口径不同（日-1 vs uid）。\n4) 「连续 7 天」的判定在位图上怎么做？→ 按月窗口逐字节比对：`BITCOUNT key b b == 8` 只能说明某个字节内全 1，跨字节要 `GETRANGE` 取两字节 + 位移，或者直接把这个判断挪到 `BITFIELD`/应用层；纯命令层没有「连续段」原语 —— 能说出「所以我把连续判定放在日终离线，Redis 只存事实位图」是加分项。\n5) `SETBIT` 返回**旧值**，所以它天然是「今天是否首次签到」的判定（返回 0 = 首次），可以替代 `INCR` 计数；重复写不改变基数（幂等）—— 这是本题用 `SETBIT` 而不是 `SADD` 的原因之一。\n6) 位图不能删除单个用户当天的记录用于「撤销签到」吗？→ 可以 `SETBIT key offset 0`（HLL 不行，见追问），但**反向索引必须一起改**，否则两边基数不一致；这类「同一事实的两份索引」在无 Lua 时没有原子性，必须讨论补偿路径。\n\n追问：\n- 为什么不用 HyperLogLog 做日活 UV？→ `PFCOUNT` 是估算（判题容器实测 300 个元素返回 302），不能做精确断言、也**不支持删除**（`PFADD` 只能加与 `PFMERGE` 合并）；要「可减」就得换 SET/位图。基数统计与精确去重是两个问题。\n- 热 key：全站「今日签到人数」的反向位图是单键热点 → 分片 `signers:20260503:{0..15}` + `BITOP` 归并或客户端求和；注意 `BITOP` 会分配与最长键等长的结果键，别在高峰跑超大位图。\n- 大 key 删除用 `UNLINK`；盘点用 `SCAN` + `MEMORY USAGE` 抽样，绝不允许 `KEYS`（判题器也直接禁用）。",
+  "runner": {
+    "setup": ["DEL sign:7:202605", "DEL signers:20260503"],
+    "timeoutMs": 10000,
+    "referenceSolution": "DEL sign:7:202605\nSETBIT sign:7:202605 2 1\nSETBIT sign:7:202605 3 1\nSETBIT sign:7:202605 4 1\nSETBIT sign:7:202605 9 1\nSETBIT sign:7:202605 25 1\nSETBIT sign:7:202605 30 1\nDEL signers:20260503\nSETBIT signers:20260503 7 1\nSETBIT signers:20260503 8 1\nSETBIT signers:20260503 9 1",
+    "naiveSolution": "DEL sign:7:202605\nSETBIT sign:7:202605 20260503 1\nSETBIT sign:7:202605 20260504 1\nSETBIT sign:7:202605 20260505 1\nSETBIT sign:7:202605 20260510 1\nSETBIT sign:7:202605 20260526 1\nSETBIT sign:7:202605 20260531 1\nDEL signers:20260503\nSETBIT signers:20260503 20260503 1"
+  },
+  "estimatedMinutes": 14,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/redis-patterns.md#12-过期驱逐与内存账",
+    "addedBy": "content-agent-sql"
+  }
+}

@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0042",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "倒序分页为什么防漏单：把官方\"窗口≤30 分钟 + 按 updated_at + 必须倒序\"跑成一次模拟",
+  "statement": "## 背景\n\n`pdd.order.number.list.increment.get` 的参数注释里写着三句话：\n\n1. 按**最后更新时间**（`updated_at`）切片，**开始时间结束时间间距不超过 30 分钟**；\n2. 注释原文：**\"必须采用倒序的分页方式（从最后一页往回取）才能避免漏单问题\"**；\n3. `order_status` 只有 `1 待发货 / 2 已发货待签收 / 3 已签收 / 5 全部`。\n\n前两句话合起来就是一道题：**为什么正序会漏单，倒序又解决了什么、没解决什么。**\n这题把那三句话变成一个可以精确模拟的模型，跑一遍你就知道两种翻页各漏几条。\n\n## 你要实现的入口\n\n```java\npublic static int[] windowMiss(int windowSeconds, int initialRows, int pageSize,\n                               int totalSteps, int[][] drift)\n```\n\n返回 `int[]{正序漏单数, 倒序漏单数, 正序安全前缀, 倒序安全前缀}`。\n\n## 模型（照这些算）\n\n- 窗口里的行按 `updated_at` **升序**排列。行的身份就是它在作业开始时刻的位置编号\n  `0 .. initialRows-1`；运行中新进窗口的行拿到递增的新编号（新 `updated_at` 一定更大 ⇒ 排在**队尾**）。\n- 作业一共跑 `totalSteps` 步，每步只做两件事：\n  1. **先施加这一步的漂移** `drift[s] = [dropFront, addTail]`：\n     从**队头**丢掉 `dropFront` 行（窗口左边界向前推进 ⇒ 这些行掉出窗口，本次作业再也查不到它们），\n     再在**队尾**加入 `addTail` 行（有新的 `updated_at` 落进窗口右半边）。\n  2. **再读一页**：\n     - 正序：读当前列表的下标区间 `[s × pageSize, (s+1) × pageSize)`；\n     - 倒序：读**从队尾数第 `s` 页**，即下标区间\n       `[max(0, n − (s+1) × pageSize), max(0, n − s × pageSize))`，`n` 是**当前**列表长度。\n- 一页读了几行算几行；同一行被读到多次只算\"读到过\"。\n- `totalSteps == 0` 时不施加任何漂移也不读页，列表保持初始状态。\n\n两个输出列的定义（**都只针对作业结束时仍在窗口里的那批行**）：\n\n- **漏单数** = 结束时还在窗口内、但整个作业一次都没读到的行数；\n- **安全前缀** = 从结束时的**队头**开始，连续被读到过的行数（遇到第一个没读到的就停）。\n  它是\"水位线能推到哪儿\"：只有安全前缀覆盖到的那段，才允许把 `updated_at` 推过去。\n\n掉出窗口的那些行**不计入漏单数**（它们不该由这次作业负责 —— 但也不会凭空消失：\n真实系统必须靠\"按成交时间的全量集合差集\"补拉，这题只量化翻页方式本身造成的差别）。\n\n## 必须抛 `IllegalArgumentException` 的情况（消息文本要一致）\n\n- `windowSeconds <= 0` ⇒ `window must be positive`\n- `windowSeconds > 1800` ⇒ `window exceeds 1800 seconds`（**官方 30 分钟硬上限**）\n- `initialRows < 0` ⇒ `negative initial rows`\n- `pageSize <= 0` ⇒ `page size must be positive`\n- `totalSteps < 0` ⇒ `negative steps`\n- `drift.length != totalSteps` ⇒ `drift length must equal steps`\n- `drift[s]` 不是 2 列 ⇒ `drift must be [dropFront, addTail]`\n- 漂移值为负 ⇒ `negative drift`\n\n参数校验就按这个顺序，先标量、再 `drift` 的长度、最后逐行。\n\n## 这题真正考的东西\n\n想清楚\"为什么倒序不跳过\"只需要一个不变量：**队头掉行时，每一行\"从队尾数的位置\"不变，\n而从队头数的位置全体左移。** 正序用的坐标会漂，倒序用的坐标不漂 —— 就这么简单。\n反过来，倒序会把风险挪到**窗口左边界**上：等你读到队头时它可能已经掉出去了。\n所以官方那三句话必须一起用（窗口不能宽、必须倒序、还要有差集补拉），少一条都不成立。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "incremental-sync",
+    "reverse-pagination",
+    "watermark",
+    "missed-record",
+    "modern:data-consistency"
+  ],
+  "cases": [
+    {
+      "name": "基线：窗口左边界每步推进，正序漏 2 条、倒序一条不漏",
+      "input": [
+        1800,
+        6,
+        2,
+        3,
+        [
+          [
+            0,
+            0
+          ],
+          [
+            1,
+            0
+          ],
+          [
+            1,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        4
+      ],
+      "visible": true,
+      "note": "正序漏单 2 / 安全前缀 0；倒序漏单 0 / 安全前缀 4（结束时窗口只剩 4 行）"
+    },
+    {
+      "name": "反方向：每步往队尾加一行，正序漏 2 条、倒序漏 4 条",
+      "input": [
+        1800,
+        6,
+        2,
+        3,
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            1
+          ],
+          [
+            0,
+            1
+          ]
+        ]
+      ],
+      "expected": [
+        2,
+        4,
+        6,
+        0
+      ],
+      "visible": true,
+      "note": "倒序从队尾读，反复读到刚进来的新行，把队头的老行饿死"
+    },
+    {
+      "name": "非法：窗口超过官方 30 分钟上限，必须拒绝而不是截断",
+      "input": [
+        1860,
+        6,
+        2,
+        1,
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "window exceeds 1800 seconds"
+    },
+    {
+      "name": "退化：一步都不跑 ⇒ 一行都没读到，漏单数等于结束时窗口行数",
+      "input": [
+        1800,
+        3,
+        1,
+        0,
+        []
+      ],
+      "expected": [
+        3,
+        3,
+        0,
+        0
+      ],
+      "visible": true,
+      "note": "totalSteps=0 ⇒ 不读任何页；漏单 3 对 3、安全前缀 0 对 0"
+    },
+    {
+      "name": "边界：步数刚好覆盖初始行数且窗口不动 ⇒ 两种翻页都不漏",
+      "input": [
+        1800,
+        4,
+        2,
+        2,
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        4,
+        4
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：掉出窗口的行不计入漏单（它们该由差集补拉负责）",
+      "input": [
+        1800,
+        5,
+        2,
+        2,
+        [
+          [
+            3,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": [
+        0,
+        0,
+        2,
+        2
+      ],
+      "visible": true
+    },
+    {
+      "name": "非法：drift 条数与步数不一致",
+      "input": [
+        1800,
+        5,
+        2,
+        3,
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "drift length must equal steps"
+    },
+    {
+      "name": "非法：漂移不是 [dropFront, addTail] 两列",
+      "input": [
+        1800,
+        5,
+        2,
+        1,
+        [
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "drift must be [dropFront, addTail]"
+    },
+    {
+      "name": "非法：负漂移值",
+      "input": [
+        1800,
+        5,
+        2,
+        1,
+        [
+          [
+            -1,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "negative drift"
+    },
+    {
+      "name": "非法：页大小为 0",
+      "input": [
+        1800,
+        5,
+        0,
+        1,
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "page size must be positive"
+    },
+    {
+      "name": "非法：窗口秒数为 0",
+      "input": [
+        0,
+        5,
+        2,
+        1,
+        [
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "window must be positive"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n模型只有三行：施加漂移 ⇒ 按各自坐标取一页 ⇒ 结束时对着窗口算两个数。\n真正要想清楚的是**倒序为什么不跳过**：\n\n> 队头掉行时，每行\"从队尾数的位置\"不变；而\"从队头数的位置\"全体左移。\n\n正序用的坐标会漂，所以第 `s` 页取到的永远是\"比预期靠后 `已掉出行数` 行\"的内容 ——\n被跨过去的那几行既没被读到，也不会再出现在任何后续页里。倒序用的坐标不漂，\n所以窗口内一定读全，代价是队头那些行可能在轮到它之前就掉出去了（不计入漏单，但必须补拉）。\n\n**基线（用例「基线：窗口左边界每步推进」）手算**：6 行、页大小 2、3 步、漂移 `[[0,0],[1,0],[1,0]]`。\n\n| 步 | 施加漂移后的窗口 | 正序读 | 倒序读 |\n| --- | --- | --- | --- |\n| 0 | 0 1 2 3 4 5 | 0 1 | 4 5 |\n| 1 | 1 2 3 4 5 | 3 4 | 2 3 |\n| 2 | 2 3 4 5 | （越界，空） | 2 3 |\n\n结束时窗口 = 2 3 4 5。正序读到 {0,1,3,4} ⇒ 漏 2 条（2 和 5）；\n倒序读到 {2,3,4,5} ⇒ **漏 0 条**。安全前缀同理是 0 对 4。\n**同样是\"读了 3 页\"，一个漏一半，一个一条不漏** —— 差别全在坐标会不会漂。\n\n**倒序不是万能的（用例「反方向：每步往队尾加一行」）**：把漂移换成\"每步往队尾加一行\"，\n正序反而更好（漏 2 对漏 4）。\n因为新增行出现在队尾，倒序从队尾读会反复读到同一批新行，把队头的老行饿死。\n这就是\"倒序分页解决跳过问题、但解决不了窗口右扩的问题\"——\n**所以官方还要求窗口 ≤30 分钟**：窗口足够窄时，右扩的量在一个作业周期内是有界的。\n\n**窗口越界必须显式失败（用例「非法：窗口超过官方 30 分钟上限」）**：传 31 分钟就抛\n`window exceeds 1800 seconds`。\n\"参数越界 ⇒ 悄悄截断到 30 分钟\"会造出一个更坏的系统：调用方的水位线是按 31 分钟推的，\n而平台每次只给它 30 分钟的数据 ⇒ **每个周期都稳定漏掉一分钟的窗口**，\n而两边日志都说自己没错。宁可拒绝服务，也不许静默少给。\n\n**水位线为什么只能推到安全前缀**（第 3、4 个输出）：\n把水位线推到\"本次请求的最大 `updated_at`\"是错的 —— 你根本没读完。\n正确判据是\"从队头起连续已读\"。\n用例「边界：步数刚好覆盖初始行数且窗口不动」里窗口不漂移，两种翻页的安全前缀都等于整个窗口，\n所以都可以放心推水位线；而基线用例里正序即使\"看起来把 3 页都读完了\"，安全前缀仍是 0。\n\n**工程延伸（面试追问点）**\n\n1. 只靠倒序够吗？（不够。倒序保证的是\"这次查询不漏读\"，不保证\"该被这次查询看见的行真的在窗口里\"\n   —— 更新把 `updated_at` 推到窗口之外、或上游把时间写成未来值，都会绕过这个保证。\n   所以标准解法是三通道：分钟级增量 + 按成交时间的全量校对 + **订单号集合差集补拉**。）\n2. 怎么**证明**没漏单？（漏单率本身做成 SLI：全量集合基数 − 已拉取留痕基数 = 缺口。\n   \"和商家对一下\"不是证明，是甩锅。）\n3. 大商家单窗口几十万行怎么办？（窗口分片倾斜：按商家维度二次分桶，\n   同一个 30 分钟窗口拆成多个子作业，但**水位线必须整体推进**，\n   否则某个子桶失败会把整条链的水位线卡住 —— 那是最容易做成\"看起来在跑其实在原地\"的地方。）\n4. `order_status=5 全部` 这个取值为什么危险？（它是**筛选值**混进了**枚举值**同一列语义。\n   按状态做分桶统计时如果没排除 5，同一批行会被数两遍。\n   这题不判它，但面试里能主动点出来才是真做过口径治理。）\n5. 上游把 `updated_at` 写成未来时间怎么办？（不能推进水位线，也不能直接丢弃：\n   进\"未来时间隔离区\"+ 不参与水位线 + 告警。丢弃等于承认\"这条订单不存在\"，\n   而它只是时间戳坏了。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] windowMiss(int windowSeconds, int initialRows, int pageSize, int totalSteps, int[][] drift)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.LinkedHashSet;\nimport java.util.Set;\n\npublic class Solution {\n  public static int[] windowMiss(int windowSeconds, int initialRows, int pageSize,\n                                 int totalSteps, int[][] drift) {\n    if (windowSeconds <= 0) throw new IllegalArgumentException(\"window must be positive\");\n    if (windowSeconds > 1800) throw new IllegalArgumentException(\"window exceeds 1800 seconds\");\n    if (initialRows < 0) throw new IllegalArgumentException(\"negative initial rows\");\n    if (pageSize <= 0) throw new IllegalArgumentException(\"page size must be positive\");\n    if (totalSteps < 0) throw new IllegalArgumentException(\"negative steps\");\n    if (drift == null || drift.length != totalSteps) {\n      throw new IllegalArgumentException(\"drift length must equal steps\");\n    }\n    for (int[] d : drift) {\n      if (d == null || d.length != 2) throw new IllegalArgumentException(\"drift must be [dropFront, addTail]\");\n      if (d[0] < 0 || d[1] < 0) throw new IllegalArgumentException(\"negative drift\");\n    }\n\n    java.util.List<Integer> rows = new java.util.ArrayList<>();\n    for (int i = 0; i < initialRows; i++) rows.add(i);\n    int next = initialRows;\n\n    Set<Integer> seenF = new LinkedHashSet<>();\n    Set<Integer> seenR = new LinkedHashSet<>();\n    java.util.List<Integer> last = new java.util.ArrayList<>(rows);\n\n    for (int s = 0; s < totalSteps; s++) {\n      int drop = Math.min(drift[s][0], rows.size());\n      for (int k = 0; k < drop; k++) rows.remove(0);       // 队头：掉出窗口\n      for (int k = 0; k < drift[s][1]; k++) rows.add(next++);  // 队尾：新 updated_at 落进窗口\n      last = new java.util.ArrayList<>(rows);\n\n      int n = rows.size();\n      addAll(seenF, rows, s * pageSize, Math.min(n, (s + 1) * pageSize));\n      int lo = Math.max(0, n - (s + 1) * pageSize);\n      int hi = Math.max(0, n - s * pageSize);\n      addAll(seenR, rows, lo, hi);\n    }\n\n    int missF = 0, missR = 0;\n    for (Integer id : last) {\n      if (!seenF.contains(id)) missF++;\n      if (!seenR.contains(id)) missR++;\n    }\n    return new int[] {missF, missR, prefix(seenF, last), prefix(seenR, last)};\n  }\n\n  private static void addAll(Set<Integer> to, java.util.List<Integer> rows, int lo, int hi) {\n    for (int i = Math.max(0, lo); i < Math.min(hi, rows.size()); i++) to.add(rows.get(i));\n  }\n\n  /** 从窗口队头起连续已读的行数 = 水位线可安全推进的位置。 */\n  private static int prefix(Set<Integer> seen, java.util.List<Integer> last) {\n    int k = 0;\n    while (k < last.size() && seen.contains(last.get(k))) k++;\n    return k;\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"步数 × 页大小 ≥ 总行数就一定读全\"版：完全不模拟窗口漂移，\n  // 于是两种翻页给出同一个答案，漏单永远报 0 —— 这正是线上\"我们不可能漏单\"的说法。\n  public static int[] windowMiss(int windowSeconds, int initialRows, int pageSize,\n                                 int totalSteps, int[][] drift) {\n    int covered = 0;\n    for (int s = 0; s < totalSteps; s++) {\n      int lo = s * pageSize;\n      int hi = Math.min(initialRows, (s + 1) * pageSize);\n      covered += Math.max(0, hi - lo);\n    }\n    int missed = Math.max(0, initialRows - covered);\n    return new int[] {missed, missed, initialRows - missed, initialRows - missed};\n  }\n}"
+  },
+  "estimatedMinutes": 30,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（交易/开放平台方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#1 核心机制 3（`pdd.order.number.list.increment.get` 的三条官方约束原文）＋ §2 追问 3「正序为什么会漏单」＋ §5 题面草稿 C；素材只给了结论，未给可判分的模拟模型",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.106Z"
+  }
+}

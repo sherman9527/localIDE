@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-mysql-0007",
+  "category": "sql",
+  "difficulty": "principal",
+  "title": "Cohort 留存矩阵：报表日是 UTC+8，事件存的是 UTC",
+  "statement": "基线：MySQL 8.0（判题容器 8.0.46，默认 ONLY_FULL_GROUP_BY，判题库 utf8mb4_0900_ai_ci）。\n\n表 app_user_event(uid INT, event_type VARCHAR(12), ts DATETIME)：ts 一律是 **UTC 字面量**（埋点服务按 UTC 落库，DATETIME 不带时区）。event_type 只有 'install' 与 'active' 两种，一个 uid 至多一条 install，但可能存在**早于 install 的脏 active 行**。\n\n指标口径（数据团队与产品已签字，必须逐条照做）：\n- 报表日 report_day = `ts + 8 小时` 后的日期（公司在 UTC+8 出报表）；\n- cohort_day = 该 uid 的 install 事件的 report_day；cohort_size = 该 cohort 的去重 uid 数；\n- 「第 N 日留存」= report_day 恰好等于 cohort_day + N 天 的 active 去重人数（**精确当日留存**，不是 N 日内累计），N 取 1 与 7；\n- 早于 install 的 active 行（DATEDIFF 为负）永远不计入；\n- 输出列顺序与别名必须是 cohort_day, cohort_size, d1_uv, d1_rate_pct, d7_uv, d7_rate_pct；\n- 转化率 = ROUND(uv / cohort_size * 100, 2)，保留 2 位；cohort 内没有任何 active 时输出 0.00（这一行仍必须出现）；\n- 判题按行序敏感比对，必须自带 ORDER BY cohort_day。\n\n只提交一条 SELECT / WITH 查询（允许一条前置 SET SESSION）。注意：判题容器**没有导入时区表**，`CONVERT_TZ(ts,'UTC','Asia/Shanghai')` 会返回 NULL —— 这正是要考的点之一。",
+  "judgeKind": "mysql",
+  "language": "sql",
+  "tags": [
+    "cohort-retention",
+    "timezone-boundary",
+    "conditional-aggregation",
+    "analytics",
+    "modern:mysql8-cte"
+  ],
+  "cases": [
+    {
+      "name": "基础数据：UTC 与 UTC+8 报表日错开一天的三批用户",
+      "input": [],
+      "expected": {
+        "columns": ["cohort_day", "cohort_size", "d1_uv", "d1_rate_pct", "d7_uv", "d7_rate_pct"],
+        "orderSensitive": true,
+        "rows": [
+          ["2026-02-28", 2, 1, 50, 0, 0],
+          ["2026-04-01", 7, 4, 57.14, 2, 28.57],
+          ["2026-04-30", 2, 1, 50, 0, 0]
+        ]
+      },
+      "note": "uid 2 的活跃在 UTC 是 04-01、报表日是 04-02（算 D1）；uid 4 相反，UTC 是 04-02、报表日是 04-03（不算 D1）。用 DATE(ts) 的实现两处同时错，且总数凑不出 4/7。"
+    },
+    {
+      "name": "闰年 2 月 29 日的跨月边界",
+      "input": [
+        "INSERT INTO app_user_event VALUES (12,'install','2028-02-28 04:00:00'),(12,'active','2028-02-29 03:00:00')"
+      ],
+      "expected": {
+        "columns": ["cohort_day", "cohort_size", "d1_uv", "d1_rate_pct", "d7_uv", "d7_rate_pct"],
+        "orderSensitive": true,
+        "rows": [
+          ["2026-02-28", 2, 1, 50, 0, 0],
+          ["2026-04-01", 7, 4, 57.14, 2, 28.57],
+          ["2026-04-30", 2, 1, 50, 0, 0],
+          ["2028-02-28", 1, 1, 100, 0, 0]
+        ]
+      }
+    },
+    {
+      "name": "迟到事件与秒级日界边界（23:59:59 vs 00:00:00）",
+      "input": [
+        "INSERT INTO app_user_event VALUES (4,'active','2026-04-08 15:59:59'),(4,'active','2026-04-08 16:00:00')"
+      ],
+      "expected": {
+        "columns": ["cohort_day", "cohort_size", "d1_uv", "d1_rate_pct", "d7_uv", "d7_rate_pct"],
+        "orderSensitive": true,
+        "rows": [
+          ["2026-02-28", 2, 1, 50, 0, 0],
+          ["2026-04-01", 7, 4, 57.14, 3, 42.86],
+          ["2026-04-30", 2, 1, 50, 0, 0]
+        ]
+      },
+      "note": "15:59:59Z = 报表日 04-08 23:59:59（算 D7）；16:00:00Z = 04-09 00:00:00（不算）。同一人去重后 D7 只加 1。"
+    },
+    {
+      "name": "整群零活跃也必须出行（除零退化边界）",
+      "input": ["INSERT INTO app_user_event VALUES (13,'install','2026-06-01 04:00:00')"],
+      "expected": {
+        "columns": ["cohort_day", "cohort_size", "d1_uv", "d1_rate_pct", "d7_uv", "d7_rate_pct"],
+        "orderSensitive": true,
+        "rows": [
+          ["2026-02-28", 2, 1, 50, 0, 0],
+          ["2026-04-01", 7, 4, 57.14, 2, 28.57],
+          ["2026-04-30", 2, 1, 50, 0, 0],
+          ["2026-06-01", 1, 0, 0, 0, 0]
+        ]
+      }
+    },
+    {
+      "name": "空表边界",
+      "input": ["DELETE FROM app_user_event"],
+      "expected": []
+    }
+  ],
+  "answer": "要点：\n```sql\nWITH e AS (\n  SELECT uid, event_type, DATE(DATE_ADD(ts, INTERVAL 8 HOUR)) AS report_day FROM app_user_event\n),\ninst AS (SELECT uid, MIN(report_day) AS cohort_day FROM e WHERE event_type = 'install' GROUP BY uid),\nact AS (SELECT DISTINCT uid, report_day FROM e WHERE event_type = 'active')\nSELECT i.cohort_day,\n       COUNT(DISTINCT i.uid) AS cohort_size,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 1 THEN a.uid END) AS d1_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 1 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d1_rate_pct,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 7 THEN a.uid END) AS d7_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 7 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d7_rate_pct\nFROM inst i LEFT JOIN act a ON a.uid = i.uid\nGROUP BY i.cohort_day\nORDER BY i.cohort_day;\n```\n1) 时区：**别用 `CONVERT_TZ(...,'UTC','Asia/Shanghai')`**，判题容器（和很多精简过的生产镜像）没有 `mysql.time_zone_name` 数据，它**静默返回 NULL**，整张报表当天数全部落 NULL。要么固定偏移用 `ts + INTERVAL 8 HOUR`，要么启动时 `mysql_tzinfo_to_sql` 导入时区表并在 CI 里断言非 NULL。\n2) `DATEDIFF(报表日, cohort_day)` 的**符号**决定「早于安装」的脏数据自动被排除（负数不等于 1/7）；写成 `ABS(DATEDIFF(...))=1` 的人会把安装前的埋点算进留存。\n3) 留存计数必须 `COUNT(DISTINCT CASE WHEN ... THEN uid END)`，不是 `SUM(CASE WHEN ... THEN 1 END)`：后者按**事件行**计，同一人当天两条埋点会算两个人。\n4) 分母是 cohort_size（该群安装人数），且 `LEFT JOIN` 后必须用 `COUNT(DISTINCT i.uid)`：直接 `COUNT(*)` 会被 act 的行数放大。\n5) 口径要钉死「精确当日」还是「N 日内累计」：本题是前者；`BETWEEN 1 AND 7` 是后者，两者数字差很多，Airbnb 面试里这属于必须反问的点。\n\n面试追问：\n- 为什么 `TIMESTAMP` 而不是 `DATETIME`？→ TIMESTAMP 按会话 `time_zone` 转换（范围到 2038），DATETIME 是字面量；同一份数据混用两种列 = 报表口径必然漂移。2026 口径是「存 UTC DATETIME/TIMESTAMP + 展示层转换」，报表日用哪个时区由指标定义决定并写进口径文件。\n- 月末/月末对齐的 D7 为什么要小心？→ 本题用天数加减，不受 `DATE_SUB(d, INTERVAL 1 MONTH)` 的「按月末裁剪」影响；如果口径是「同一日期的上周」就要显式说明闰年与月末行为。\n- 数据延迟/回刷：D7 的 cohort 在最近 7 天内还不完整，报表要标「未成熟」而不是报 0 —— 用 `cohort_day <= 今天 - 7` 做门限，否则新装群的留存曲线会假性暴跌。\n- 5 亿事件怎么算？→ 先物化 (uid, report_day) 的日活表（把 DISTINCT 前移），install 维表单独存；留存矩阵是日活表上的自连接/位图聚合，不需要每次扫原始埋点。",
+  "runner": {
+    "setup": [
+      "DROP TABLE IF EXISTS app_user_event",
+      "CREATE TABLE app_user_event (uid INT NOT NULL, event_type VARCHAR(12) NOT NULL, ts DATETIME NOT NULL, KEY idx_uid_type_ts (uid, event_type, ts)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci",
+      "INSERT INTO app_user_event VALUES (1,'install','2026-04-01 02:00:00'),(2,'install','2026-04-01 02:00:00'),(3,'install','2026-04-01 02:00:00'),(4,'install','2026-04-01 02:00:00'),(5,'install','2026-04-01 02:00:00'),(6,'install','2026-04-01 02:00:00'),(7,'install','2026-04-01 02:00:00'),(8,'install','2026-04-30 05:00:00'),(9,'install','2026-04-30 05:00:00'),(10,'install','2026-02-28 05:00:00'),(11,'install','2026-02-28 05:00:00'),(1,'active','2026-04-02 01:00:00'),(2,'active','2026-04-01 16:30:00'),(3,'active','2026-04-02 15:00:00'),(3,'active','2026-03-20 01:00:00'),(4,'active','2026-04-02 16:10:00'),(5,'active','2026-04-08 10:00:00'),(6,'active','2026-04-08 15:59:59'),(7,'active','2026-04-01 17:00:00'),(8,'active','2026-05-01 04:00:00'),(10,'active','2026-03-01 03:00:00')"
+    ],
+    "orderSensitive": true,
+    "timeoutMs": 8000,
+    "referenceSolution": "WITH e AS (\n  SELECT uid, event_type, DATE(DATE_ADD(ts, INTERVAL 8 HOUR)) AS report_day FROM app_user_event\n),\ninst AS (\n  SELECT uid, MIN(report_day) AS cohort_day FROM e WHERE event_type = 'install' GROUP BY uid\n),\nact AS (\n  SELECT DISTINCT uid, report_day FROM e WHERE event_type = 'active'\n)\nSELECT i.cohort_day,\n       COUNT(DISTINCT i.uid) AS cohort_size,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 1 THEN a.uid END) AS d1_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 1 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d1_rate_pct,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 7 THEN a.uid END) AS d7_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(a.report_day, i.cohort_day) = 7 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d7_rate_pct\nFROM inst i\nLEFT JOIN act a ON a.uid = i.uid\nGROUP BY i.cohort_day\nORDER BY i.cohort_day",
+    "naiveSolution": "SELECT DATE(i.ts) AS cohort_day,\n       COUNT(DISTINCT i.uid) AS cohort_size,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(DATE(a.ts), DATE(i.ts)) = 1 THEN a.uid END) AS d1_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(DATE(a.ts), DATE(i.ts)) = 1 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d1_rate_pct,\n       COUNT(DISTINCT CASE WHEN DATEDIFF(DATE(a.ts), DATE(i.ts)) = 7 THEN a.uid END) AS d7_uv,\n       ROUND(COUNT(DISTINCT CASE WHEN DATEDIFF(DATE(a.ts), DATE(i.ts)) = 7 THEN a.uid END) / COUNT(DISTINCT i.uid) * 100, 2) AS d7_rate_pct\nFROM app_user_event i\nLEFT JOIN app_user_event a ON a.uid = i.uid AND a.event_type = 'active'\nWHERE i.event_type = 'install'\nGROUP BY DATE(i.ts)\nORDER BY DATE(i.ts)"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/sql/mysql-analytics-window-json.md#16-确定性输出判分前置条件",
+    "addedBy": "content-agent-sql"
+  }
+}

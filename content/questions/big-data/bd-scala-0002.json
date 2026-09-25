@@ -1,0 +1,353 @@
+{
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Hologres TTL 的两把时钟：按写入算过期、按更新算会漏，非精确删除留下的 PK 重复要单独计数",
+  "statement": "## 背景\n\nHologres《在 Hologres 中创建高性能内部表》给了三条会在生产上互相咬的话【源 D11】：\n\n> `time_to_live_in_seconds` \"**从写入时间开始算而不是更新时间**\"；\n> \"TTL 并非精确时间，生产业务中不建议使用 TTL 来管理数据生命周期，建议采用分区表\"；\n> \"到期后数据会在某一段时间（不是固定时间）删除（只删数据，表还在），\n> **因此可能出现 PK 重复或者查询结果不一致**\"。\n\n素材 §2 追问 15 就是这条：\"为什么你不建议用 TTL？\"；追问 8 里\n\"实时表和离线表数字对不上\"的第三层归因也是它（TTL 非精确删除导致 PK 重复）。\n\n## 任务\n\n把一张主键表的\"清理决策\"等价重写成一次 Spark 批处理：读入若干行（同一 `pk` 可以有多行，\n那正是\"TTL 非精确删除\"留下的重复版本），**按主键**输出这套判据。\n\n输入 schema：`pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT`\n（`ds` 是分区序号——第几天，整数；本题不用日期函数也不用时钟）。\n\n输出按 `pk` 升序，列固定为\n`pk, rows_total, dup_rows, kept_version, alive_write, alive_update, ghost_rows, rev_rows, partition_expired`。\n\n## 判分契约（第一条来自官方，其余是本题设定）\n\n- **观测时刻 `now` = 全表最大的 `written_ms`**；分区基准 `now_ds` = 全表最大的 `ds`。\n- **`ttl_seconds` 从写入时间起算**：一行\"按写入过期\" ⇔ `now − written_ms >= ttl_ms`\n  （**等于就是过期**）。\"按更新过期\"用同一式子换成 `updated_ms`。\n- 同一 `pk` 的多行 `ttl_seconds` 不一致时 ⇒ **取最小值**（本题设定：配置回滚留下的短 ttl\n  必须生效，否则\"改了 TTL 但老数据一直不掉\"）。\n- `rows_total` = 该主键的行数；`dup_rows = rows_total − 1`（PK 重复的多余行数，0 才正常）。\n- `alive_write` / `alive_update` = 按两把尺子各自**存活**的行数。\n- `ghost_rows` = 按写入已过期、按更新仍活着的行数（\"过期数据仍被查出\"那一面）。\n- `rev_rows` = 按写入仍活着、按更新已过期的行数（补数/时钟回拨那一面）。\n- `kept_version` = **按写入存活**的行里 `version` 最大者的 version；一行都不存活 ⇒ `0`。\n- `partition_expired` = 分区表口径（官方推荐的替代方案）下这一组该不该消失：\n  `ttl_days = ttl_seconds / 86400`（向下取整），\n  存活行的 `ds` 满足 `now_ds − ds >= ttl_days` ⇒ 1；没有存活行 ⇒ 1。\n\n## 说明\n\n机制取自 Hologres 官方文档【源 D11】；**用一次 Spark 批处理等价重写是【推】**\n（素材 §7 第 6 条：阿里官方没有 Spark 侧的实现），所以 `now` 的取法、`ttl_days` 的取整方向、\n\"两行 ttl 不一致取最小\"都是**本题契约**，不是产品接口。\n题面不出现任何真实表名、行数或清理耗时。\n",
+  "judgeKind": "spark-scala",
+  "tags": [
+    "ttl-semantics",
+    "write-vs-update-clock",
+    "pk-duplication",
+    "partition-pruning",
+    "ghost-rows",
+    "modern:lakehouse"
+  ],
+  "source": {
+    "company": "Alibaba",
+    "role": "数据研发（湖仓与服务层治理方向） 技术专家",
+    "location": "hangzhou",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/alibaba-data-and-storage.md#4 考点 10（生命周期、冷热分层与\"TTL 不精确\"引发的质量事故：\"time_to_live_in_seconds 从写入时间开始算而不是更新时间\"、\"TTL 并非精确时间，生产业务中不建议使用 TTL 来管理数据生命周期，建议采用分区表\"、\"到期后数据会在某一段时间删除（只删数据、表还在），因此可能出现 PK 重复或者查询结果不一致\"【源 D11】；§2 追问 15 与追问 8 的第三层归因。素材该考点的出题建议正是\"按写入时间 vs 更新时间两种口径重算保留集合，断言差集与过期数据仍被查出的两种表现\"。用 Spark 批处理等价重写、now 取全表最大写入时刻、ttl 不一致取最小与 ttl_days 向下取整都是【推】，题面已写成契约）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T16:22:31.965Z"
+  },
+  "language": "scala",
+  "cases": [
+    {
+      "name": "基线：三把尺子各自给出不同的存活数，pk 3 三行同主键且按写入全过期",
+      "input": {
+        "rows": [
+          {
+            "pk": 1,
+            "version": 1,
+            "written_ms": 8640000000,
+            "updated_ms": 8985600000,
+            "ds": 100,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 1,
+            "version": 2,
+            "written_ms": 8899200000,
+            "updated_ms": 8899200000,
+            "ds": 103,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 2,
+            "version": 7,
+            "written_ms": 9072000000,
+            "updated_ms": 9072000000,
+            "ds": 105,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 3,
+            "version": 4,
+            "written_ms": 8640000000,
+            "updated_ms": 8640000000,
+            "ds": 100,
+            "ttl_seconds": 86400
+          },
+          {
+            "pk": 3,
+            "version": 5,
+            "written_ms": 8726400000,
+            "updated_ms": 8812800000,
+            "ds": 101,
+            "ttl_seconds": 86400
+          },
+          {
+            "pk": 3,
+            "version": 6,
+            "written_ms": 8812800000,
+            "updated_ms": 9072000000,
+            "ds": 102,
+            "ttl_seconds": 86400
+          }
+        ],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [
+        {
+          "pk": 1,
+          "rows_total": 2,
+          "dup_rows": 1,
+          "kept_version": 2,
+          "alive_write": 1,
+          "alive_update": 2,
+          "ghost_rows": 1,
+          "rev_rows": 0,
+          "partition_expired": 0
+        },
+        {
+          "pk": 2,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 7,
+          "alive_write": 1,
+          "alive_update": 1,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 0
+        },
+        {
+          "pk": 3,
+          "rows_total": 3,
+          "dup_rows": 2,
+          "kept_version": 0,
+          "alive_write": 0,
+          "alive_update": 1,
+          "ghost_rows": 1,
+          "rev_rows": 0,
+          "partition_expired": 1
+        }
+      ],
+      "note": "now = 105 号分区。pk 1：两行、dup_rows=1（TTL 非精确删除留下的重复版本），按写入只剩 1 行活、按更新 2 行都活 ⇒ ghost_rows=1，kept 是 version 2；pk 2：单行且刚写入 ⇒ kept_version=7、dup_rows=0、partition_expired=0；pk 3：ttl 只有 1 天 ⇒ 三行按写入全过期 ⇒ kept_version=0、但按更新还有一行活着（version 6 的 updated 就是 105）⇒ alive_update=1、ghost_rows=1、partition_expired=1",
+      "visible": true
+    },
+    {
+      "name": "边界：age 恰好等于 ttl ⇒ 判过期（>= 而不是 >），旁边放一行 ttl 多一天的对照",
+      "input": {
+        "rows": [
+          {
+            "pk": 10,
+            "version": 1,
+            "written_ms": 9072000000,
+            "updated_ms": 9072000000,
+            "ds": 105,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 11,
+            "version": 1,
+            "written_ms": 8812800000,
+            "updated_ms": 8553600000,
+            "ds": 102,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 12,
+            "version": 2,
+            "written_ms": 8812800000,
+            "updated_ms": 8899200000,
+            "ds": 102,
+            "ttl_seconds": 345600
+          }
+        ],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [
+        {
+          "pk": 10,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 1,
+          "alive_write": 1,
+          "alive_update": 1,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 0
+        },
+        {
+          "pk": 11,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 0,
+          "alive_write": 0,
+          "alive_update": 0,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 1
+        },
+        {
+          "pk": 12,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 2,
+          "alive_write": 1,
+          "alive_update": 1,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 0
+        }
+      ],
+      "note": "now 只能来自数据，所以必须先有一行 105 号分区的对照。pk 11：写入年龄 3 天 **等于** ttl ⇒ 过期，更新年龄 6 天也过期 ⇒ alive 两列都 0、kept 0、partition_expired=1；pk 12：ttl 多一天 ⇒ 写入年龄 3 < 4 存活 ⇒ kept_version=2、分区差 105 − 102 = 3 天 < ttl_days 4 ⇒ partition_expired=0。两条一起才钉住\"等于\"的方向",
+      "visible": true
+    },
+    {
+      "name": "非法形态：updated 早于 written（时钟回拨/补数）⇒ 不许取较大值兜底",
+      "input": {
+        "rows": [
+          {
+            "pk": 21,
+            "version": 4,
+            "written_ms": 9072000000,
+            "updated_ms": 8208000000,
+            "ds": 105,
+            "ttl_seconds": 259200
+          }
+        ],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [
+        {
+          "pk": 21,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 4,
+          "alive_write": 1,
+          "alive_update": 0,
+          "ghost_rows": 0,
+          "rev_rows": 1,
+          "partition_expired": 0
+        }
+      ],
+      "note": "这一行按写入年龄 0（刚写）⇒ 存活、按更新年龄 10 天 ⇒ 已过期 ⇒ rev_rows=1、alive_write=1、alive_update=0、kept_version=4。谁写了 `GREATEST(written, updated)` 当 TTL 起算点，谁就会把这条**刚写进来的活数据**判成过期 —— 症状是\"数据写进去就消失\"，而且只在补数那天出现",
+      "visible": true
+    },
+    {
+      "name": "边界：同一主键两行 ttl 不一致 ⇒ 取最小，kept_version 会因此变小",
+      "input": {
+        "rows": [
+          {
+            "pk": 31,
+            "version": 9,
+            "written_ms": 8812800000,
+            "updated_ms": 8899200000,
+            "ds": 102,
+            "ttl_seconds": 432000
+          },
+          {
+            "pk": 31,
+            "version": 3,
+            "written_ms": 8985600000,
+            "updated_ms": 8985600000,
+            "ds": 104,
+            "ttl_seconds": 172800
+          }
+        ],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [
+        {
+          "pk": 31,
+          "rows_total": 2,
+          "dup_rows": 1,
+          "kept_version": 3,
+          "alive_write": 1,
+          "alive_update": 2,
+          "ghost_rows": 1,
+          "rev_rows": 0,
+          "partition_expired": 0
+        }
+      ],
+      "note": "本用例的 now 是全表最大写入时刻 = 104 号分区。min ttl = 2 天 ⇒ version 9 那行写入年龄恰好 2 天 ⇒ 过期 ⇒ kept_version=3；若按 max（5 天）两行都活 ⇒ kept_version=9。取最小是本题契约：配置回滚留下的短 ttl 必须生效，否则\"改了 ttl 但老数据一直不掉\"",
+      "visible": true
+    },
+    {
+      "name": "退化：两个主键全部按写入过期 ⇒ 仍各出一行，kept_version 都是 0",
+      "input": {
+        "rows": [
+          {
+            "pk": 40,
+            "version": 1,
+            "written_ms": 9072000000,
+            "updated_ms": 9072000000,
+            "ds": 105,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 41,
+            "version": 1,
+            "written_ms": 7776000000,
+            "updated_ms": 7776000000,
+            "ds": 90,
+            "ttl_seconds": 259200
+          },
+          {
+            "pk": 42,
+            "version": 2,
+            "written_ms": 7862400000,
+            "updated_ms": 7948800000,
+            "ds": 91,
+            "ttl_seconds": 259200
+          }
+        ],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [
+        {
+          "pk": 40,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 1,
+          "alive_write": 1,
+          "alive_update": 1,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 0
+        },
+        {
+          "pk": 41,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 0,
+          "alive_write": 0,
+          "alive_update": 0,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 1
+        },
+        {
+          "pk": 42,
+          "rows_total": 1,
+          "dup_rows": 0,
+          "kept_version": 0,
+          "alive_write": 0,
+          "alive_update": 0,
+          "ghost_rows": 0,
+          "rev_rows": 0,
+          "partition_expired": 1
+        }
+      ],
+      "note": "\"全部过期\"与\"表里没有这个主键\"是两件事：pk 41 与 pk 42 仍各出一行，kept_version=0、alive 两列 0、dup_rows=0、partition_expired=1，而对照组 pk 40 全活 ⇒ 三行都出。把前者读成\"没有这个 key\"，下游就再也不会去补这批数据",
+      "visible": true
+    },
+    {
+      "name": "退化：一条记录都没有 ⇒ 空结果，不许造一行全 0",
+      "input": {
+        "rows": [],
+        "schema": "pk INT, version INT, written_ms BIGINT, updated_ms BIGINT, ds INT, ttl_seconds INT"
+      },
+      "expected": [],
+      "visible": true
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "className": "Solution",
+    "method": "solve",
+    "signature": "solve(df: DataFrame): DataFrame",
+    "timeoutMs": 120000,
+    "referenceSolution": "import org.apache.spark.sql.{DataFrame, Encoders}\nimport org.apache.spark.sql.functions.max\n\nobject Solution {\n  // 字段名必须与列名逐字一致：`as[Rec]` 是按**名字**解析的，\n  // 写 camelCase 会报 [UNRESOLVED_COLUMN] writtenMs cannot be resolved。\n  final case class Rec(pk: Int, version: Int, written_ms: Long, updated_ms: Long,\n                       ds: Int, ttl_seconds: Int)\n  final case class Out(pk: Int, rows_total: Int, dup_rows: Int, kept_version: Int,\n                       alive_write: Int, alive_update: Int, ghost_rows: Int,\n                       rev_rows: Int, partition_expired: Int)\n\n  def solve(df: DataFrame): DataFrame = {\n    // 观测时刻 = 全表最大**写入**时刻；分区基准 = 全表最大 ds（本题契约：不读时钟）\n    val head = df.agg(max(\"written_ms\"), max(\"ds\")).head()\n    val now = if (head.isNullAt(0)) 0L else head.getLong(0)\n    val nowDs = if (head.isNullAt(1)) 0 else head.getInt(1)\n    val daySec = 86400\n    df.select(\"pk\", \"version\", \"written_ms\", \"updated_ms\", \"ds\", \"ttl_seconds\")\n      .as[Rec](Encoders.product[Rec])\n      .groupByKey(_.pk)(Encoders.scalaInt)\n      .mapGroups { (pk, iter) =>\n        val rs = iter.toList\n        // 同一主键上多行 ttl 不一致时取**最小**：短的那个才是\"已经生效的那条配置\"\n        val ttlSec = rs.map(_.ttl_seconds).min\n        val ttlMs = ttlSec.toLong * 1000L\n        val aliveW = rs.filter(r => now - r.written_ms < ttlMs)\n        val aliveU = rs.filter(r => now - r.updated_ms < ttlMs)\n        val ghost = rs.count(r => now - r.written_ms >= ttlMs && now - r.updated_ms < ttlMs)\n        val rev = rs.count(r => now - r.written_ms < ttlMs && now - r.updated_ms >= ttlMs)\n        val sorted = aliveW.sortBy(r => -r.version)\n        val keptVersion = if (sorted.isEmpty) 0 else sorted.head.version\n        val ttlDays = ttlSec / daySec\n        val part = if (sorted.isEmpty) 1\n                   else if (nowDs - sorted.head.ds >= ttlDays) 1 else 0\n        Out(pk, rs.size, rs.size - 1, keptVersion, aliveW.size, aliveU.size, ghost, rev, part)\n      }(Encoders.product[Out])\n      .toDF(\"pk\", \"rows_total\", \"dup_rows\", \"kept_version\", \"alive_write\",\n            \"alive_update\", \"ghost_rows\", \"rev_rows\", \"partition_expired\")\n      .orderBy(\"pk\")\n  }\n}\n",
+    "naiveSolution": "import org.apache.spark.sql.{DataFrame, Encoders}\nimport org.apache.spark.sql.functions.max\n\nobject Solution {\n  final case class Rec(pk: Int, version: Int, written_ms: Long, updated_ms: Long,\n                       ds: Int, ttl_seconds: Int)\n  final case class Out(pk: Int, rows_total: Int, dup_rows: Int, kept_version: Int,\n                       alive_write: Int, alive_update: Int, ghost_rows: Int,\n                       rev_rows: Int, partition_expired: Int)\n\n  def solve(df: DataFrame): DataFrame = {\n    // \"更新时间才是数据的真实新鲜度\"：两把尺子合成一把；\n    // ttl 取最大（放宽一点总不会误删）；kept 不看存活；重复行数不报。\n    val head = df.agg(max(\"written_ms\"), max(\"ds\")).head()\n    val now = if (head.isNullAt(0)) 0L else head.getLong(0)\n    df.select(\"pk\", \"version\", \"written_ms\", \"updated_ms\", \"ds\", \"ttl_seconds\")\n      .as[Rec](Encoders.product[Rec])\n      .groupByKey(_.pk)(Encoders.scalaInt)\n      .mapGroups { (pk, iter) =>\n        val rs = iter.toList\n        val ttlMs = rs.map(_.ttl_seconds).max.toLong * 1000L\n        val alive = rs.filter(r => now - r.updated_ms < ttlMs)\n        Out(pk, rs.size, 0, rs.map(_.version).max,\n            alive.size, alive.size, 0, 0, 0)\n      }(Encoders.product[Out])\n      .toDF(\"pk\", \"rows_total\", \"dup_rows\", \"kept_version\", \"alive_write\",\n            \"alive_update\", \"ghost_rows\", \"rev_rows\", \"partition_expired\")\n      .orderBy(\"pk\")\n  }\n}\n",
+    "orderSensitive": false
+  },
+  "estimatedMinutes": 30,
+  "answer": "## 参考答案要点\n\n一次 `groupByKey(_.pk).mapGroups`，组内**同一把尺子量两遍**：\n`now − written_ms >= ttl_ms` 与 `now − updated_ms >= ttl_ms`。\n`now` 只能从数据里来（全表最大写入时刻）—— 判题不许读时钟，否则参考解自己就不稳定。\n\n**基线三行九列**（`now` 落在 105 号分区）：\n\n| pk | rows_total | dup_rows | kept_version | alive_write | alive_update | ghost | rev | partition_expired |\n|---|---|---|---|---|---|---|---|---|\n| 1 | 2 | 1 | 2 | 1 | 2 | 1 | 0 | 0 |\n| 2 | 1 | 0 | 7 | 1 | 1 | 0 | 0 | 0 |\n| 3 | 3 | 2 | 0 | 0 | 1 | 1 | 0 | 1 |\n\n**pk 3 是\"TTL 只删数据不删表\"的现场**：`ttl = 1 天`，三行的写入年龄是 5 / 4 / 3 天 ⇒\n按写入全部过期 ⇒ `kept_version = 0`；而 version 6 那行的 `updated_ms` 恰好是 105 号分区\n⇒ 按更新它还活着 ⇒ `alive_update = 1` 而 `alive_write = 0`。\n**两个数不相等本身就是结论**：`ghost_rows = 1` 说明\"这张表里还有一行，\n用更新时间口径看它是新数据、用 TTL 口径看它早该没了\" ——\n素材 §1.6 那句\"只删数据、表还在，因此可能出现 PK 重复或者查询结果不一致\"就是这个形状。\n`dup_rows = 2` 则是三行同主键的代价：**主键重复的行数是\"清理没跑完\"的长度计量**。\n\n**分区那一列不能省**（官方给的替代方案是分区表）：\npk 1 的存活行落在 103 号分区，`now_ds − ds = 2`，`ttl_days = 259200 / 86400 = 3` ⇒\n`2 >= 3` 不成立 ⇒ `partition_expired = 0`；\npk 3 没有存活行 ⇒ 按契约直接 1。\n**同一组数据在 TTL 口径下\"已过期\"、在分区口径下\"还在保留期\"是可能的**，\n这正是\"改清理方式要两套并行跑一段\"的量化理由。\n\n**用例「age 恰好等于 ttl」**钉判据方向：\npk 11 写入年龄 3 天 **等于** ttl ⇒ `alive_write = 0`、`kept_version = 0`；\n旁边 pk 12 的 ttl 多一天 ⇒ 3 < 4 ⇒ 存活、`kept_version = 2`、分区差 3 天 < `ttl_days` 4 ⇒ 0。\n写成 `>` 就是把每条数据的保留期无声地延长一个周期。\n\n**用例「updated 早于 written」**是唯一一条 `rev_rows = 1` 的：\n那一行按写入年龄 0（刚补进来的数据）、按更新年龄 10 天 ⇒\n`alive_write = 1` 而 `alive_update = 0`，`kept_version = 4` 仍然存活。\n**谁写了 `GREATEST(written_ms, updated_ms)` 去\"兜底\"，这条就会被判成过期** ——\n症状是\"补进来的数据第二天就没了\"，而它只在补数那天出现，最难复现。\n\n**用例「同一主键两行 ttl 不一致」**取最小（2 天）⇒ version 9 那行过期 ⇒ `kept_version = 3`；\n取最大（5 天）⇒ 两行都活 ⇒ `kept_version = 9`。\n**两行 ttl 不一致是配置变更没跑完的痕迹，不是需要被\"宽容处理\"的噪音**：\n`dup_rows = 1` 与 `kept_version` 一起看，才知道这次变更影响到了哪一行。\n\n**退化两条**：两个主键全部过期时**仍要各出一行**（`kept_version = 0`），\n空输入 ⇒ **空结果**；把前者读成\"这个 key 不存在\"，下游就再也不会去补这批数据。\n\n**朴素解挂六列**：两把尺子合成一把（拿更新时间当唯一依据）⇒ `alive_write` 与 `alive_update`\n永远相等、`ghost_rows`/`rev_rows` 恒 0；ttl 取 max ⇒ `kept_version` 偏大；\n`dup_rows` 写 0（看不见 PK 重复）；`kept_version` 不看存活直接取最大 version；\n`partition_expired` 写 0（等于宣布\"分区表方案没有额外信息\"）。\n\n**工程延伸（面试追问点）**\n\n1. 为什么官方不建议用 TTL 管生命周期？（删除时机不精确 ⇒ 同一秒的两次查询可以给出不同结果，\n   还会留下 PK 重复；分区表是**确定性**的：`partition_expired` 那一列就是它的判据形状。）\n2. 这两列（ghost / rev）在生产上怎么用？（它们是两条独立的质量规则：ghost > 0 说明\n   保留期口径在漂移，rev > 0 说明有回补/回拨。素材考点 13 的监控分类里\"一致性\"就是这一类。）\n3. 为什么 `now` 要从数据里取？（判题器里没有可信时钟；真实系统同理 —— 清理任务的\"当前时刻\"\n   一旦来自 worker 本地时钟，跨可用区的保留期就会不一致。）",
+  "schemaVersion": 1,
+  "id": "bd-scala-0002"
+}

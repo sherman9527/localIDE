@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "id": "fe-react-0012",
+  "category": "frontend",
+  "difficulty": "senior",
+  "title": "实现可访问的 combobox 标签输入与字素族计数",
+  "statement": "## 场景\n\n国际化选址组件（Airbnb 式的城市标签输入）。QA 提了三类单子：① VoiceOver 用户完全听不到\"当前高亮在第几项\"（combobox 模式没做对）；② 中文/emoji 输入时字数提示是 12/20，但用户看到只有 4 个字符——因为 `length` 数的是 UTF-16 码元，国旗是 2 个码点，`slice` 还会把一个代理对切成半个（渲染出乱码方块）；③ 德语用户输入 `café`（组合附音符写法）被判成两个不同标签，列表里出现重复项。\n\n## 契约（提交写在 `Solution.tsx`）\n\n```tsx\nexport interface TagInputProps {\n  options: string[];                       // 候选（不可变）\n  limit: number;                           // 最多选几个\n  maxLength?: number;                      // 输入框上限，按字素族计，默认 20\n  onChange: (tags: string[]) => void;      // 每次真实增删都要回调（受控上报）\n}\n\nexport function TagInput(props: TagInputProps): JSX.Element;\n```\n\n### ARIA 契约（无障碍判分点）\n\n- 输入框：`role=\"combobox\"`、`aria-expanded`（字符串 `'true'`/`'false'`）、`aria-controls=\"tag-list\"`、`aria-autocomplete=\"list\"`、`aria-activedescendant`（无高亮时为**空串**）；\n- 候选列表：`<ul id=\"tag-list\" role=\"listbox\">`，每项 `<li role=\"option\" id=\"tag-opt-<下标>\" aria-selected=...>`（**只有 listbox 展开时才有 option 节点**）；\n- `no-match` 只在**有查询词且过滤后为空**时出现；状态区：`data-testid=\"tags\"`（已选标签 `join('|')`）、`\"chars\"`（当前输入的字素族数）、`\"remaining\"`（`maxLength - 字数`，不为负）、`\"limit-note\"`（达到上限时文案 `最多 <limit> 个标签`，否则空串）、`\"no-match\"`（展开且有查询但无命中时文案 `无匹配候选`）、`\"announce\"`（带 `aria-live=\"polite\"`，写最近一次动作文案，如 `已添加 Berlin`）。\n\n### 键盘契约\n\n- 列表在**聚焦或输入时**展开（`aria-expanded` 转 `true`）：有查询词时给过滤后的候选，空查询时给全部候选；未聚焦前是收起态（`aria-expanded` 为 `false` 且没有 option 节点）；`Escape` 收起；\n- `ArrowDown`/`ArrowUp`：在有候选时循环移动高亮（**首尾环绕**）；`Home`/`End` 跳到首/末；`Escape` 收起并清空 `aria-activedescendant`；\n- `Enter`：选中当前高亮项（无高亮时不提交，避免把半截输入当标签）；\n- `Backspace`：输入框为空且已有标签时删除最后一个标签。\n\n### 文本正确性契约\n\n- 计数与截断都必须按**字素族**（`Intl.Segmenter`，granularity `grapheme`）：截断不许切断代理对/ZWJ 序列；\n- 去重与过滤要先 `normalize('NFC')` 再比（`cafe\\u0301` 与 `café` 同一个标签），比较忽略大小写；标签存 **NFC 形式**；\n- 达到 `limit` 后拒绝新增（`onChange` 不再被调用），并给出 `limit-note`。\n\n## 不许做什么\n\n- 不许用 `value.length` / `slice()` 处理用户可见长度（这是本题的失分点）；\n- 不许用 `onBlur` 收起列表导致点击候选时先收起（要么 `onMouseDown` + `preventDefault`，要么别的等价做法），也不许用 `<div>` 自己造 role；\n- 不许引入 reach-ui/ariakit 等库（沙箱不 `npm install`）；\n- 不许断言/依赖 CSS 视觉效果：判题只看属性与调用序列（jsdom 无布局）。\n\n## 判分\n\n7 个用例：收起态属性、无匹配空态、焦点与展开的关系、方向键循环与 `aria-selected`/`aria-activedescendant` 同步、NFC 去重与 `onChange` 序列、emoji 字素计数与截断、上限拒绝新增。",
+  "judgeKind": "react-vitest",
+  "language": "typescript",
+  "tags": [
+    "modern:intl-segmenter",
+    "accessibility",
+    "unicode",
+    "combobox",
+    "controlled-input"
+  ],
+  "cases": [
+    {
+      "name": "空输入时列表收起且 aria-expanded 为 false",
+      "input": {
+        "query": ""
+      },
+      "expected": "aria-expanded='false'、aria-controls='tag-list'、aria-autocomplete='list'、chars='0'、option 数 0"
+    },
+    {
+      "name": "无匹配候选时展示空态并清空 activedescendant",
+      "input": {
+        "query": "Qm"
+      },
+      "expected": "展开但 0 个 option，no-match='无匹配候选'，aria-activedescendant 为空串"
+    },
+    {
+      "name": "重复按方向键循环高亮不越界",
+      "input": {
+        "focus": true,
+        "keys": "ArrowDown x6 + ArrowUp x3"
+      },
+      "expected": "展开并给出 4 个候选；高亮环绕到 tag-opt-1，再上移三次到 tag-opt-2"
+    },
+    {
+      "name": "方向键循环高亮且 aria-selected 与 activedescendant 同步",
+      "input": {
+        "query": "n",
+        "keys": [
+          "ArrowDown",
+          "End",
+          "ArrowDown",
+          "ArrowUp",
+          "Home",
+          "Escape"
+        ]
+      },
+      "expected": "activedescendant 依次 tag-opt-0 → 2 → 0（环绕）→ 2 → 0 → 空串"
+    },
+    {
+      "name": "Enter 选中后 NFC 等价写法的重复标签不二次加入",
+      "input": {
+        "options": [
+          "Zürich",
+          "café",
+          "cafe+\\u0301"
+        ]
+      },
+      "expected": "tags 依次 'Zürich'、'Zürich|café'；announce='已添加 café'；Backspace 后 'Zürich'；onChange 长度序列 [1,2,1]"
+    },
+    {
+      "name": "超大 emoji 输入按字素族计数且不切断代理对",
+      "input": {
+        "maxLength": 4,
+        "value": "🇨🇳🇺🇸🇻🇱"
+      },
+      "expected": "value 被截成前 4 个字素（两面国旗），chars='4'、remaining='0'；'é'+组合符+'a' 计成 3"
+    },
+    {
+      "name": "达到上限后拒绝新增并给出提示",
+      "input": {
+        "limit": 2
+      },
+      "expected": "第三次新增被拒，tags 不变，limit-note='最多 2 个标签'"
+    }
+  ],
+  "runner": {
+    "entry": "function",
+    "files": [
+      {
+        "path": "tag-input.test.tsx",
+        "content": "import { fireEvent, render, screen } from '@testing-library/react';\nimport { expect, it } from 'vitest';\nimport { TagInput } from './Solution';\n\nconst OPTIONS = ['Amsterdam', 'Berlin', 'Copenhagen', 'Zürich'];\n\nfunction boot(props: Partial<Parameters<typeof TagInput>[0]> = {}) {\n  const added: string[][] = [];\n  const base = {\n    options: OPTIONS,\n    limit: 3,\n    maxLength: 20,\n    onChange: (tags: string[]) => added.push(tags.slice()),\n  };\n  const merged = { ...base, ...props } as Parameters<typeof TagInput>[0];\n  const view = render(<TagInput {...merged} />);\n  const input = () => screen.getByRole('combobox') as HTMLInputElement;\n  const options = () => screen.queryAllByRole('option');\n  const type = (value: string) => {\n    fireEvent.change(input(), { target: { value } });\n  };\n  const key = (name: string) => {\n    fireEvent.keyDown(input(), { key: name });\n  };\n  const attr = (name: string) => input().getAttribute(name);\n  const text = (testid: string) => screen.getByTestId(testid).textContent;\n  return { view, input, options, type, key, attr, text, added };\n}\n\nit('空输入时列表收起且 aria-expanded 为 false', () => {\n  const t = boot();\n  expect(t.attr('aria-expanded')).toBe('false');\n  expect(t.attr('aria-controls')).toBe('tag-list');\n  expect(t.attr('aria-autocomplete')).toBe('list');\n  expect(t.text('chars')).toBe('0');\n  expect(t.options().length).toBe(0);\n});\n\nit('无匹配候选时展示空态并清空 activedescendant', () => {\n  const t = boot();\n  t.type('Qm');\n  expect(t.attr('aria-expanded')).toBe('true');\n  expect(t.options().length).toBe(0);\n  expect(t.text('no-match')).toBe('无匹配候选');\n  expect(t.attr('aria-activedescendant') ?? '').toBe('');\n});\n\nit('重复按方向键循环高亮不越界', () => {\n  const t = boot();\n  fireEvent.focus(t.input());\n  expect(t.attr('aria-expanded')).toBe('true');\n  expect(t.options().length).toBe(4);\n  for (let i = 0; i < 6; i += 1) t.key('ArrowDown');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-1');\n  for (let i = 0; i < 3; i += 1) t.key('ArrowUp');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-2');\n});\n\nit('方向键循环高亮且 aria-selected 与 activedescendant 同步', () => {\n  const t = boot();\n  t.type('e');\n  expect(t.options().length).toBe(3);\n  t.key('ArrowDown');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-0');\n  expect(t.options()[0].getAttribute('aria-selected')).toBe('true');\n  t.key('End');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-2');\n  t.key('ArrowDown');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-0');\n  t.key('ArrowUp');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-2');\n  t.key('Home');\n  expect(t.attr('aria-activedescendant')).toBe('tag-opt-0');\n  t.key('Escape');\n  expect(t.attr('aria-activedescendant') ?? '').toBe('');\n});\n\nit('Enter 选中后 NFC 等价写法的重复标签不二次加入', () => {\n  const t = boot({ options: ['Zürich', 'café', 'café'] });\n  fireEvent.focus(t.input());\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Zürich');\n  t.type('caf');\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Zürich|café');\n  expect(t.text('announce')).toBe('已添加 café');\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Zürich|café');\n  expect(t.text('announce')).toBe('已存在 café');\n  t.type('');\n  t.key('Backspace');\n  expect(t.text('tags')).toBe('Zürich');\n  expect(t.added.map((list) => list.length)).toEqual([1, 2, 1]);\n});\n\nit('超大 emoji 输入按字素族计数且不切断代理对', () => {\n  const t = boot({ maxLength: 4 });\n  t.type('🇨🇳🇺🇸🇻🇳abc');\n  expect(t.input().value).toBe('🇨🇳🇺🇸🇻🇳a');\n  expect(t.text('chars')).toBe('4');\n  expect(t.text('remaining')).toBe('0');\n  t.type('é́éa');\n  expect(t.text('chars')).toBe('3');\n  expect(t.input().value.length).toBe(5);\n});\n\nit('达到上限后拒绝新增并给出提示', () => {\n  const t = boot({ limit: 2, options: ['Amsterdam', 'Berlin', 'Copenhagen'] });\n  fireEvent.focus(t.input());\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Amsterdam');\n  expect(t.text('limit-note')).toBe('');\n  t.key('ArrowDown');\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Amsterdam|Berlin');\n  t.type('Copen');\n  expect(t.options().length).toBe(1);\n  t.key('ArrowDown');\n  t.key('Enter');\n  expect(t.text('tags')).toBe('Amsterdam|Berlin');\n  expect(t.text('limit-note')).toBe('最多 2 个标签');\n});\n"
+      }
+    ],
+    "timeoutMs": 45000,
+    "referenceSolution": "import { useState } from 'react';\n\nexport interface TagInputProps {\n  options: string[];\n  limit: number;\n  maxLength?: number;\n  onChange: (tags: string[]) => void;\n}\n\n/** 字素族切分：length 是 UTF-16 码元数，Array.from 是码点数，只有 Segmenter 才是\"用户看到的字符\"。 */\nconst segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });\n\nconst graphemes = (value: string): string[] => [...segmenter.segment(value)].map((part) => part.segment);\n\nconst clampByGrapheme = (value: string, max: number): string => {\n  const parts = graphemes(value);\n  return parts.length > max ? parts.slice(0, max).join('') : value;\n};\n\nexport function TagInput({ options, limit, maxLength = 20, onChange }: TagInputProps) {\n  const [query, setQuery] = useState('');\n  const [tags, setTags] = useState<string[]>([]);\n  const [open, setOpen] = useState(false);\n  const [active, setActive] = useState(-1);\n  const [announce, setAnnounce] = useState('');\n\n  const normalized = query.normalize('NFC');\n  const matches = normalized.trim()\n    ? options.filter((option) => option.normalize('NFC').toLowerCase().includes(normalized.toLowerCase()))\n    : options.slice();\n  const full = tags.length >= limit;\n  const shown = open ? (normalized.trim().length > 0 ? matches : options.slice()) : [];\n\n  const commit = (next: string[]) => {\n    setTags(next);\n    onChange(next);\n  };\n\n  const add = (candidate: string) => {\n    const value = candidate.normalize('NFC');\n    if (!value.trim()) return;\n    if (tags.some((tag) => tag.normalize('NFC').toLowerCase() === value.toLowerCase())) {\n      setAnnounce('已存在 ' + value);\n      return;\n    }\n    if (full) return;\n    const next = [...tags, value];\n    commit(next);\n    setAnnounce('已添加 ' + value);\n    setActive(-1);\n  };\n\n  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {\n    const size = shown.length;\n    switch (event.key) {\n      case 'ArrowDown': {\n        event.preventDefault();\n        if (size === 0) return;\n        setActive((index) => (index < 0 ? 0 : (index + 1) % size));\n        return;\n      }\n      case 'ArrowUp': {\n        event.preventDefault();\n        if (size === 0) return;\n        setActive((index) => (index <= 0 ? size - 1 : index - 1));\n        return;\n      }\n      case 'Home': {\n        if (size === 0) return;\n        event.preventDefault();\n        setActive(0);\n        return;\n      }\n      case 'End': {\n        if (size === 0) return;\n        event.preventDefault();\n        setActive(size - 1);\n        return;\n      }\n      case 'Enter': {\n        if (active >= 0 && shown[active]) {\n          event.preventDefault();\n          add(shown[active] as string);\n        }\n        return;\n      }\n      case 'Escape': {\n        setOpen(false);\n        setActive(-1);\n        return;\n      }\n      case 'Backspace': {\n        if (query.length === 0 && tags.length > 0) {\n          event.preventDefault();\n          commit(tags.slice(0, -1));\n          setAnnounce('已移除 ' + (tags[tags.length - 1] as string));\n        }\n        return;\n      }\n      default:\n        return;\n    }\n  };\n\n  const activeId = active >= 0 && shown[active] ? 'tag-opt-' + active : '';\n\n  return (\n    <div>\n      <input\n        role=\"combobox\"\n        aria-expanded={open}\n        aria-controls=\"tag-list\"\n        aria-autocomplete=\"list\"\n        aria-activedescendant={activeId}\n        value={query}\n        onFocus={() => setOpen(true)}\n        onChange={(event) => {\n          setQuery(clampByGrapheme(event.target.value, maxLength));\n          setOpen(true);\n          setActive(-1);\n        }}\n        onKeyDown={onKeyDown}\n      />\n      <span data-testid=\"chars\">{graphemes(query).length}</span>\n      <span data-testid=\"remaining\">{Math.max(0, maxLength - graphemes(query).length)}</span>\n      <span data-testid=\"limit-note\">{full ? '最多 ' + limit + ' 个标签' : ''}</span>\n      <ul id=\"tag-list\" role=\"listbox\">\n        {shown.map((option, index) => (\n          <li\n            key={option}\n            id={'tag-opt-' + index}\n            role=\"option\"\n            aria-selected={index === active}\n            onMouseDown={(event) => {\n              event.preventDefault();\n              add(option);\n            }}\n          >\n            {option}\n          </li>\n        ))}\n      </ul>\n      {open && normalized.trim().length > 0 && shown.length === 0 ? <span data-testid=\"no-match\">无匹配候选</span> : null}\n      <span data-testid=\"tags\">{tags.join('|')}</span>\n      <span data-testid=\"announce\" aria-live=\"polite\">\n        {announce}\n      </span>\n    </div>\n  );\n}\n",
+    "naiveSolution": "import { useState } from 'react';\n\nexport function TagInput({ options, limit, maxLength = 20, onChange }) {\n  const [query, setQuery] = useState('');\n  const [tags, setTags] = useState([]);\n  const [open, setOpen] = useState(false);\n  const [active, setActive] = useState(-1);\n\n  const matches = options.filter((option) => option.toLowerCase().includes(query.toLowerCase()));\n\n  const add = (value) => {\n    if (tags.includes(value)) return;\n    const next = [...tags, value];\n    setTags(next);\n    onChange(next);\n  };\n\n  return (\n    <div>\n      <input\n        aria-expanded={open}\n        value={query}\n        onFocus={() => setOpen(true)}\n        onChange={(event) => {\n          setQuery(event.target.value.slice(0, maxLength));\n          setActive(-1);\n        }}\n        onKeyDown={(event) => {\n          if (event.key === 'ArrowDown') setActive((i) => i + 1);\n          if (event.key === 'Enter' && matches[active]) add(matches[active]);\n        }}\n      />\n      <span data-testid=\"chars\">{query.length}</span>\n      <span data-testid=\"remaining\">{maxLength - query.length}</span>\n      <span data-testid=\"limit-note\" />\n      <ul>\n        {matches.map((option, index) => (\n          <li key={option} id={'tag-opt-' + index} onClick={() => add(option)}>\n            {option}\n          </li>\n        ))}\n      </ul>\n      <span data-testid=\"tags\">{tags.join('|')}</span>\n      <span data-testid=\"announce\" />\n    </div>\n  );\n}\n"
+  },
+  "answer": "参考要点：\n- `length` 是 UTF-16 码元数、`Array.from`/码点是码点数，只有 `Intl.Segmenter({granularity: \"grapheme\"})` 才是\"用户看到的字符\"；表单上限、计数器、截断三处必须同一套口径，否则会出现\"4 个字符显示 12\"。截断用字素数组 `slice` 再 join，天然不会切出半个代理对。\n- 去重与过滤要先做 NFC 归一化：`e\\u0301` 与 `é` 码点不同、字素也不同（Segmenter 会分成 2 个），只有 normalize 之后才相等；标签要存 NFC 形式，避免回传给后端时口径漂移。\n- combobox 模式的三个属性是一个整体：`aria-expanded`（列表是否展开）、`aria-activedescendant`（当前高亮 option 的 id）、`aria-selected`（option 自身是否被选中）；只写 `role=\"combobox\"` 而不同步这三个，读屏等于没接。\n- 收起不能靠 `onBlur`：mousedown 早于 blur，鼠标点候选会先收起 → 点不到。用 `onMouseDown + preventDefault`（保住焦点）是标准解。\n- `aria-live=\"polite\"` 区域承担「刚才发生了什么」的播报，这是列表型交互最容易被漏掉的一环。\n- 键盘语义要环绕（Home/End/上下），并且 `Escape` 清空高亮；这些都是 WCAP/ADA 对 Apple、Airbnb 类产品的硬要求。\n\n面试追问：\n1. 用 `content-visibility` 或虚拟化渲染 1000 个候选时，读屏怎么处理？（`aria-setsize`/`aria-posinset` + 只渲染窗口内节点会截断朗读，需要\"整表可朗读\"降级）\n2. `maxLength` 用字素族后，后端仍按码元限长怎么办？（两端约定同一套口径，前端展示字素族计数、提交前再按后端口径校验并回显具体差异）\n3. 为什么 `aria-selected` 在 listbox 的 option 上而不是 `aria-checked`？（listbox 是单选语义用 selected；checked 属 checkbox/treeitem）\n4. 怎么把这类无障碍契约固化进 CI？（`getByRole` 优先的测试写法 + eslint-plugin-jsx-a11y + axe 扫描，断言属性而不是 class）",
+  "estimatedMinutes": 30,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/frontend/typescript-strict-modeling.md#unicode-与字符串正确性",
+    "addedBy": "content-agent-fe"
+  }
+}

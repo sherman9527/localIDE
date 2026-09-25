@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "id": "sql-redis-0009",
+  "category": "sql",
+  "difficulty": "senior",
+  "title": "券批次额度的 Redis 落地：集合成员才是发行量，重放必须 NX，关批次不许撕券",
+  "statement": "## 背景\n\n拼多多的优惠券是**批次**模型，官方三个动作说明\"发行量\"是一个独立额度对象：\n`pdd.promotion.goods.coupon.create`（创建批次）、`pdd.promotion.coupon.quantity.add`\n（**增加发行数量**）、`pdd.promotion.coupon.close`（**关闭批次**）。\n而且**已发出去的券不可回收** —— 关闭批次只停新领，不撕已发的承诺。\n\n算法课里已经有一道同方向的双池子模型题（券额度 vs 商品库存）；\n**这题是它的落地版：只用 Redis 命令，把\"超发\"和\"重放\"变成结构上不可能发生的事。**\n\n## 环境\n\nRedis 7.2.7。**禁止** `EVAL` / `EVALSHA` / `SCRIPT` / `FCALL` / `KEYS` / `FLUSHDB` /\n`CONFIG` / `DEBUG` / `SORT` / `OBJECT` / `SELECT`（判题器直接拒）。\n所以\"用 Lua 做 owner 校验 / 做 if-else 分支\"不在解空间内。\n\n## 判题方式（先读这段）\n\n判题**不模拟并发、也不让时间流逝**。它做三件事：\n1. 按下面的\"初始状态\"把 Redis 摆好；\n2. 按顺序执行你提交的**这一份命令脚本**（每行一条，`#` 开头是注释）；\n3. 逐条执行校验命令并比对最终状态。\n\n所以你写的是\"针对这个已知场景的一段安全脚本\"。\n脚本里**没有分支可用** —— 一切条件都要靠命令自己（`NX` / `XX`）或数据形状来表达。\n\n## 初始状态\n\n```\nHSET coupon:B1:cap total 5 issued 3            -- 批次发行上限 5，已发 3\nZADD coupon:B1:codes 1 c-001 / 2 c-002 / 3 c-003   -- 已发的券码集合（score = 领取序号）\ncoupon:B1:closed 不存在                          -- 批次未关闭\n```\n\n## 同一批到达的 6 个事件（必须全部处理）\n\n| 事件 | 情况 | 必须 | 绝对不许 |\n| --- | --- | --- | --- |\n| E1 | 领一张新券 `c-004`，seq 4 | 写进券码集合 | 覆盖已有成员 |\n| E2 | **同一个领取请求重放**，但 seq 生成器给了 6 | 变成 no-op | 把 `c-004` 的 seq 改写成 6 |\n| E3 | 领 `c-005`，seq 5 | 写入 ⇒ 发行量正好到 5 | 越过上限 |\n| E4 | 还想领 `c-006`，但额度已满 | **什么都不发** | 造出第 6 个成员 |\n| E5 | 关单退回 `c-002` | 把它从集合里移掉 | 留在集合里（额度永远还不回来） |\n| E6 | 关闭批次 | 落下关闭标记 | 顺手把已发券的集合删掉 |\n\n要求最终状态（校验命令会读这些）：`coupon:B1:codes` 里恰好是\n`c-001`(1) / `c-003`(3) / `c-004`(**4**) / `c-005`(5) 四个成员；`coupon:B1:closed` 为 `1`；\n`coupon:B1:cap` 这个 HASH 的 `total` 字段仍然是 `5`。\n\n## 这题真正考的东西\n\n1. **额度不能是计数器**：`DECR`/`INCR` 的语义是\"先改再说\"，\n   中断、重放、并发都会把它推离真相，而**偏移方向是双向的**\n   （多加 ⇒ 超发资损；少加 ⇒ 券发不出去被投诉）。\n   用**集合成员**表示\"一张已发出的券\"，超发就只能是\"多一个成员\"，\n   而成员数量与上限的核对是一次 `ZCARD` 就能做完的断言。\n2. **重放必须落到同一个成员**：`ZADD key 6 c-004`（不带 NX）会把 seq 改掉 ——\n   看起来\"还是那 5 张\"，但**领取顺序被重放事件改写了**，\n   于是\"先领先得\"的公平性失效，而且事后从数据上完全看不出来。\n3. **关闭批次只改变准入，不改变承诺**：`SET closed 1` 是对的，\n   `DEL coupon:B1:codes` 是**单方面撕券** —— 那才是素材里\"超发风险由保证金兜底\"的兑现形态。\n\n只交一段命令脚本，不需要写代码。",
+  "judgeKind": "redis",
+  "language": "sql",
+  "tags": [
+    "coupon-quota",
+    "idempotent-replay",
+    "data-shape-solves-it",
+    "no-lua-constraint",
+    "modern:marketing-integrity"
+  ],
+  "cases": [
+    {
+      "name": "重放不许改写领取顺序：c-004 的 score 仍是首次的 4",
+      "input": [
+        "ZSCORE coupon:B1:codes c-004"
+      ],
+      "expected": "4",
+      "visible": true,
+      "note": "不带 NX 的 ZADD 会把它改成 6 —— 发行总量看着对，只有顺序错了"
+    },
+    {
+      "name": "已发券集合基数是 4（发了 5 张、退回 1 张）",
+      "input": [
+        "ZCARD coupon:B1:codes"
+      ],
+      "expected": 4,
+      "visible": true
+    },
+    {
+      "name": "边界：额度到顶时不许多出成员（score > 5 的成员数是 0）",
+      "input": [
+        "ZCOUNT coupon:B1:codes 6 +inf"
+      ],
+      "expected": 0,
+      "visible": true,
+      "note": "用 ZCARD 判超发在并发下会赢者通吃；这一条断的是\"根本没有第 6 张\""
+    },
+    {
+      "name": "退回的那张必须真被移掉",
+      "input": [
+        "ZSCORE coupon:B1:codes c-002"
+      ],
+      "expected": null,
+      "visible": true,
+      "note": "没 ZREM 的话这 1 个额度永久还不回来，实际可售券只剩 4 张"
+    },
+    {
+      "name": "关闭批次只挡新领，不许回收已发券：集合还在",
+      "input": [
+        "EXISTS coupon:B1:codes"
+      ],
+      "expected": 1,
+      "visible": true,
+      "note": "DEL 掉集合 = 单方面撕券，同时毁掉额度历史与审计举证链"
+    },
+    {
+      "name": "关闭标记要落下",
+      "input": [
+        "GET coupon:B1:closed"
+      ],
+      "expected": "1",
+      "visible": true
+    },
+    {
+      "name": "发行上限不许被这个脚本改掉",
+      "input": [
+        "HGET coupon:B1:cap total"
+      ],
+      "expected": "5",
+      "visible": true,
+      "note": "加发行量是另一个动作（quantity.add），不在本场景里 ⇒ 动了就是越权"
+    },
+    {
+      "name": "被拒的那张 c-006 绝不许存在",
+      "input": [
+        "ZSCORE coupon:B1:codes c-006"
+      ],
+      "expected": null,
+      "visible": true
+    }
+  ],
+  "answer": "## 参考答案\n\n```\nZADD coupon:B1:codes 4 c-004\nZADD coupon:B1:codes NX 6 c-004     # 重放 ⇒ no-op，seq 保持 4\nZADD coupon:B1:codes 5 c-005\n# E4 额度已满：一个命令都不发\nZREM coupon:B1:codes c-002\nSET coupon:B1:closed 1\n```\n\n**为什么 `c-004` 的 score 必须是 4 而不是 6**：\n`ZADD` 不带 `NX` 时对已存在成员是**更新分数**。\n重放事件带来的是一个\"更晚生成的 seq\"，它比原值大 ⇒ 不但不报错，\n还会把 `c-004` 从领取顺序的第 4 位推到第 6 位。\n症状是\"先发券的用户排队排到后面去了\"，而**发行总量看起来完全正确** ——\n这是本仓库反复强调的那类\"静默降级\"：所有聚合数都对，只有顺序错了。\n`NX` 的语义恰好是\"只在成员不存在时写入\"，它把重放变成真正的 no-op。\n\n**为什么\"什么都不发\"是 E4 的正确实现**：\n脚本没有分支，所以只能靠**写脚本的人已经知道额度已满**这一事实。\n判题矩阵证明的是\"这份脚本在这个初始状态下产出的最终状态是对的\"。\n线上不能这么写 —— 线上有三条路：\n① `EVAL` 里判 `ZCARD >= total`（**被白名单禁掉，本题就是考你知道该禁**）；\n② 把额度做成**分桶预占**：`ZADD bucket:<i> …`，桶数 × 每桶上限 = 总发行量，\n   超发在结构上不可能，代价是分配不均时会有空桶；\n③ 用队列 + 单一写入者（把\"要不要发\"这个决策集中到一个进程里），\n   写路径变成幂等的 `ZADD`。\n第 ② 条是这套题里最值得答出来的：它把\"额度校验\"从流程问题变成了**数据建模**问题。\n\n**关闭批次不许删集合**（校验里那条\"被撕掉的券不能再回来\"）：\n`DEL coupon:B1:codes` 会把 5 张已发券一并抹掉 ——\n它同时毁掉了三样东西：消费者的兑现承诺、额度的历史真相（事后无法回答\n\"这个批次一共发出去多少\"）、以及审计举证链（素材里\"一店一处罚\"要求逐单可复原）。\n正确形态是**只加一个准入标记**，让 `closed` 参与读路径的判断，而不是参与写路径的清理。\n\n**工程延伸（面试追问点）**\n\n1. 为什么 score 用领取序号而不是时间戳？（时间戳在同一毫秒内会撞，撞了就退化成\"按 member\n   字典序\"，于是\"先领先得\"变成随机；单调 seq 需要 `INCR` 发号，\n   那是一次额外往返，但是**唯一能保证顺序的写法**。）\n2. `ZCARD` 与 `HSET cap issued` 两个数不一致怎么办？（这正是本题把\"已发\"做成集合的理由：\n   集合并**不需要**与 issued 一致，它才是真相。真实系统里 issued 是缓存、集合是事实，\n   对账任务要拿集合去修 issued，而不是反过来。）\n3. 退回一张券算不算\"额度还回来\"？（要分业务：`ZREM` 之后 `ZCARD` 变小 ⇒ 可以再发。\n   但如果这张券还没过期且允许再次核销，正确做法是**保留成员 + 标记未用**\n   （再加一个 `ZSET coupon:B1:unused`），否则\"退回额度\"和\"退给消费者\"会被混成一件事。）\n4. 商品库存那一半呢？（券够货不够是乘积区事故。落地时必须把\n   `ZCARD codes` 与剩余可售库存放在**同一个决策点**上比较 ——\n   那就是算法题「券批次发行量与商品库存是两套池子」里最后那个 `无货可兑` 的数。）",
+  "runner": {
+    "entry": "function",
+    "setup": [
+      "DEL coupon:B1:codes",
+      "DEL coupon:B1:closed",
+      "HSET coupon:B1:cap total 5 issued 3",
+      "ZADD coupon:B1:codes 1 c-001",
+      "ZADD coupon:B1:codes 2 c-002",
+      "ZADD coupon:B1:codes 3 c-003"
+    ],
+    "orderSensitive": false,
+    "timeoutMs": 10000,
+    "referenceSolution": "# E1 新领一张券 c-004（seq 4）\nZADD coupon:B1:codes 4 c-004\n# E2 同一个领取请求重放，但客户端拿到的 seq 变了（6）\n#    ⇒ 必须 NX：不加 NX 会把 c-004 的 seq 改写成 6，重放就不是 no-op 了\nZADD coupon:B1:codes NX 6 c-004\n# E3 再领一张 c-005（seq 5）⇒ 发行量到此正好 5 张，触及上限\nZADD coupon:B1:codes 5 c-005\n# E4 又有请求要领 c-006，但批次额度已满 ⇒ 一条写入命令都不许发。\n#    本脚本已经写了 5 个成员，超发在这个数据结构里不可能发生。\n# E5 关单退回 c-002\nZREM coupon:B1:codes c-002\n# E6 关闭批次：只挡新领，绝不回收已发出去的券\nSET coupon:B1:closed 1",
+    "naiveSolution": "# \"计数器一把梭\"版：容量靠 INCR/DECR 自己数，\n# 于是重放会多加、超发要事后才发现、关闭批次顺手把整个 key 删掉。\nINCR coupon:B1:cap_total_x\nSET coupon:B1:cap 6\nDEL coupon:B1:codes\nSET coupon:B1:closed 1"
+  },
+  "estimatedMinutes": 22,
+  "source": {
+    "company": "PDD",
+    "role": "服务端研发（营销/券与活动方向） 高级工程师",
+    "location": "shanghai",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/pdd-transaction-and-inventory.md#4 考点 7（券批次三动作 create / quantity.add / close 是官方接口；素材建议 judgeKind=redis「批次额度预占/回滚 + 关闭批次的并发语义 + 防超发」，并限定\"owner 校验只能靠数据形状解\"因为 EVAL 被禁）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T10:07:38.121Z"
+  }
+}

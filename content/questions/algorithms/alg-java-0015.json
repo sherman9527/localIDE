@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0015",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "摄取管道里带引号转义的 CSV 行解析",
+  "statement": "## 背景\n\n运营上传的 CSV（以及一部分应用日志行）要进摄取管道。手写 `line.split(\",\")` 在第一行真实数据上就会出错：**尾部空字段被丢掉、引号内的逗号被切开、`\"\"` 转义没还原**。这三类都是线上\"数据静默错位\"的经典来源（列数不对齐后整行往后串）。\n\n请实现一个 RFC4180 子集解析器。\n\n## 入口\n\n```java\npublic static String[] parseCsvLine(String line, char delim)\n```\n\n规则（判分口径，逐条对齐）：\n\n1. 字段以 `delim` 分隔；`line` 为空（长度 0）→ 返回**长度 0** 的数组（不是\"含一个空字段的数组\"）。\n2. **所有字段都保留**，包括空字段与尾部空字段：`\"a,b,,\"` → 4 个字段 `[\"a\",\"b\",\"\",\"\"]`。\n3. 以引号开始的字段（即去掉引号前没有任何字符）按引用字段处理：内部的 `delim`、换行、空白都是普通字符；`\"\"` 表示一个字面量 `\"`；结束引号之后的字符不在 `delim` 上时抛 `IllegalArgumentException`（严格模式，禁止静默吞掉脏数据）。\n4. 未加引号的字段**不做 trim**：`\" d\"` 就是 `\" d\"`（前导空格是数据，不是格式）。\n5. 引号未闭合（`inQuotes` 在行尾仍为真）→ 抛 `IllegalArgumentException`。\n6. 只有一个字段的行（没有分隔符）返回长度 1。\n\n## 不变式与硬约束\n\n1. 复杂度 O(line.length)，只许单遍扫描；不许 `replaceAll`/正则回溯（正则在热路径上有真实开销，而且 `split` 的默认 limit 语义就是本题的判负点）。\n2. 累加字段用**一个** `StringBuilder`（清空复用），不许 `field += c`；要能说出\"循环内字符串拼接每轮新建 builder + 数组复制\"的代价。\n3. 按 **UTF-16 code unit** 逐字符扫描是允许的，但必须保证**代理对不被拆开**（不要按 `byte` 或 `char` 数组重新编码；emoji 出现在引号内也要原样输出）。\n4. 返回的数组是新分配的，元素可以含空串；不要返回 `List<String>`。\n\n## 输出契约\n\n返回 `String[]`。判题按数组逐元素比较（含空串元素），因此\"尾部空字段\"必须存在。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "string-parsing",
+    "codepoint-safety",
+    "split-contract",
+    "rfc4180",
+    "modern:ingest-parsing"
+  ],
+  "cases": [
+    {
+      "name": "空行返回零字段",
+      "input": [
+        "",
+        ","
+      ],
+      "expected": []
+    },
+    {
+      "name": "尾部空字段不得丢失",
+      "input": [
+        "a,b,,",
+        ","
+      ],
+      "expected": [
+        "a",
+        "b",
+        "",
+        ""
+      ]
+    },
+    {
+      "name": "引号内的逗号与转义引号（退化输入）",
+      "input": [
+        "a,\"b,c\",\"\"\"x\"\"\", d",
+        ","
+      ],
+      "expected": [
+        "a",
+        "b,c",
+        "\"x\"",
+        " d"
+      ]
+    },
+    {
+      "name": "整体被引号包裹的普通字段",
+      "input": [
+        "\"plain\"",
+        ","
+      ],
+      "expected": [
+        "plain"
+      ]
+    },
+    {
+      "name": "自定义分隔符与连续分隔符",
+      "input": [
+        "x;;y",
+        ";"
+      ],
+      "expected": [
+        "x",
+        "",
+        "y"
+      ]
+    },
+    {
+      "name": "非 ASCII 字段与引号内逗号",
+      "input": [
+        "日本,語,\"x,ok\"",
+        ","
+      ],
+      "expected": [
+        "日本",
+        "語",
+        "x,ok"
+      ]
+    },
+    {
+      "name": "单字段无分隔符",
+      "input": [
+        "solo",
+        ","
+      ],
+      "expected": [
+        "solo"
+      ]
+    }
+  ],
+  "runner": {
+    "className": "Solution",
+    "signature": "String[] parseCsvLine(String line, char delim)",
+    "entry": "function",
+    "timeoutMs": 15000,
+    "referenceSolution": "public class Solution {\n  /**\n   * 单遍状态机：inQuotes / started（本字段是否已经开始，用于区分\"字段开头的引号\"与\"字段中间的引号\"）。\n   * 引用字段里 \"\" -> 一个字面量引号；未加引号的字段不 trim；空行 -> 零字段。\n   * 只复用一个 StringBuilder，避免循环内字符串拼接的 O(n^2) 复制。\n   */\n  public static String[] parseCsvLine(String line, char delim) {\n    if (line == null || line.isEmpty()) return new String[0];\n    java.util.List<String> out = new java.util.ArrayList<>();\n    StringBuilder field = new StringBuilder(line.length());\n    boolean inQuotes = false;\n    boolean started = false;\n    for (int k = 0; k < line.length(); k++) {\n      char c = line.charAt(k);\n      if (inQuotes) {\n        if (c == '\"') {\n          if (k + 1 < line.length() && line.charAt(k + 1) == '\"') {\n            field.append('\"');                    // \"\" -> 字面量引号\n            k++;                                  // 注意：for 循环还会再 ++，正好跳过转义的第二个引号\n          } else {\n            inQuotes = false;                     // 闭合引号\n          }\n        } else {\n          field.append(c);                        // 引号内的 delim/空白/代理对都原样保留\n        }\n      } else if (c == '\"' && !started) {\n        inQuotes = true;\n        started = true;\n      } else if (c == '\"') {\n        throw new IllegalArgumentException(\"quote in the middle of an unquoted field\");\n      } else if (c == delim) {\n        out.add(field.toString());\n        field.setLength(0);\n        started = false;\n      } else {\n        field.append(c);\n        started = true;\n      }\n    }\n    if (inQuotes) throw new IllegalArgumentException(\"unbalanced quote\");\n    out.add(field.toString());                    // 尾部字段（哪怕是空串）必须保留\n    return out.toArray(new String[0]);\n  }\n}\n",
+    "naiveSolution": "public class Solution {\n  // 朴素：直接用 String.split。默认 limit=0 会丢掉全部尾部空字段，\n  // 引号与 \"\" 转义完全不处理（引号被当成普通字符留在字段里）。\n  public static String[] parseCsvLine(String line, char delim) {\n    if (line == null || line.isEmpty()) return new String[0];\n    return line.split(java.util.regex.Pattern.quote(String.valueOf(delim)));\n  }\n}\n"
+  },
+  "answer": "**思路**：单遍状态机，两个布尔量：`inQuotes`（在引用态）与 `started`（当前字段是否已开始，用来区分\"字段开头的引号\"与\"字段中间的引号\"）。遇到 `\"\"` 输出一个 `\"` 并额外前进一格（`k++` 之后 for 的 `k++` 正好落在转义引号的下一格——这个 off-by-one 是这题最容易写错的地方）。尾部字段无条件 `out.add`，所以空字段不丢。\n\n**判分点对应的错法**：\n- `\"a,b,,\"` → `split(\",\")` 给 2 个字段（默认 limit=0 丢尾部空串），要 4 个必须 `split(\",\", -1)`；即便如此引号与转义还是错。\n- `\" d\"`：`trim()` 会吃掉数据里的前导空格；`strip()` 按 Unicode 空白，能吃掉 U+00A0 —— 两者都不该用在这里。\n- 引号内 emoji：按 `char` 扫没问题（代理对的两个 code unit 被原样 `append`），但如果改用 `getBytes()`/`char[]` 再重编码就会产出孤立代理或 U+FFFD。\n- 分隔符是正则元字符（`.`、`|`、`$`）时 `split(String.valueOf(delim))` 直接错（`\".\"` 是通配）；朴素解用 `Pattern.quote` 只补掉这一半，另一半（尾部空串/引号）仍然错。\n\n**性能口径**：`split` 每次调用都要 `Pattern.compile`（Java 7u6 起对单字符非元字符有 fast path，`\".\"` 不在其中）；热路径上手工 `indexOf` 或本状态机更快。`StringBuilder` 预分配 `line.length()`，避免\"字符数翻倍扩容\"；`field.toString()` 每字段一次拷贝（Java 9+ 起 `toString` 会复制为 compact string，无法省）。\n\n**复杂度**：O(len) 时间、O(len) 输出。\n\n**面试追问**：\n1. 跨行的引用字段（引号内含 `\\n`）怎么办？（单行解析器要扩展成\"未闭合引号 → 继续读下一行\"，判分接口就要改成流式；这就是 CSV 必须有 quoting 规范的原因。）\n2. 为什么要 `started` 而不能\"看到引号就进引用态\"？（`ab\"cd\",e` 这种脏字段会被静默解析成 `abcd`；严格模式抛错才可在摄取层做 DQC 告警。）\n3. `List.of` vs `new ArrayList` vs 返回值可变性？（返回 `String[]` 就没有\"调用方修改返回值打穿内部状态\"的问题；如果返回 `List<String>` 要么 `List.copyOf`（不可变快照）要么显式声明\"返回可变列表\"，两者对上游可用性完全不同。）\n4. 如何处理 BOM 与 CRLF？（`\\\\r\\\\n` 结尾时最后一个字段会带上 `\\\\r`；BOM（U+FEFF）要在校验前剥掉。判分不含这两类输入，但线上必须有。）",
+  "estimatedMinutes": 20,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "ingestedAt": "2026-09-19T00:00:00.000Z",
+    "era": "2026",
+    "knowledgeRef": "content/knowledge/algorithms/java-arrays-strings.md#14-字符串与字符char-不是个字符",
+    "addedBy": "content-agent-alg"
+  }
+}

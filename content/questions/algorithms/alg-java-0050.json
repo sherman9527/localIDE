@@ -1,0 +1,339 @@
+{
+  "schemaVersion": 1,
+  "id": "alg-java-0050",
+  "category": "algorithms",
+  "difficulty": "senior",
+  "title": "服务端限流两个维度：令牌桶与连接数配额，以及 gRPC 这个协议盲区",
+  "statement": "## 背景\n\nKitex 的服务端限流文档给了四件可核查的事实【源 S3】：\n\n1. 限流有**两个独立维度**：`MaxConnections`（连接数）与 `MaxQPS`，\n   默认实现分别是**计数器**与**令牌桶**；\n2. `WithLimit` 与 `WithQPSLimiter/WithConnectionLimiter` 同时配置时**只有后者生效**（覆盖规则）；\n3. 默认 QPS 限流在非多路复用下挂在 **OnRead**（省掉反序列化开销），\n   多路复用或自定义限流器才放 **OnMessage**（要拿到 method 才能按方法限流）；\n4. **只对 Thrift 与 Kitex Protobuf 协议生效，对 gRPC 暂不生效** ——\n   gRPC 要靠 HTTP/2 流控窗口（`WithGRPCInitialWindowSize` / `WithGRPCInitialConnWindowSize`）。\n\n## 任务\n\n```java\npublic static int[] limiterSimulate(int qps, int burst, int maxConnections,\n                                    int[] arrivalsMs, int[] holdMs, int[] grpc)\n```\n\n第 i 个请求在 `arrivalsMs[i]` 毫秒到达，若被放行则占用连接 `holdMs[i]` 毫秒\n（`grpc[i] == 1` 表示这条流量走 gRPC）。\n返回 `{放行数, 被 QPS 拒数, 被连接数拒数, 结束时剩余令牌数(向下取整)}`。\n\n## 契约\n\n**令牌桶**：容量 `burst` 个令牌，速率 `qps` 个/秒。初始**满桶**（`burst` 个），\n从**第一个到达时刻**开始计时（不许把 1970 年到现在的时间也算成补给）。\n每个令牌拆成 `1_000_000` 微信用量做**整数**运算：\n\n```\n本次补给（微信用量） = (now - last) * 1000 * qps\ncredit = min(burst * 1_000_000, credit + 补给)\n```\n\n只有\"确实有补给\"时才推进 `last`（同一毫秒内的多条请求不许把 `last` 挪来挪去）。\n放行一个非 gRPC 请求消耗 `1_000_000`；不足则**按 QPS 拒**。\n\n**判定顺序：先连接数，再令牌桶。** 三条理由，都要能说出来：\n连接数是**资源**维度（拒绝是免费的，不用反序列化），\nQPS 是**吞吐**维度；先查便宜的那个。\n被任一维度拒绝的请求**既不占连接也不消耗令牌**\n（它当场就返回限流错误了）。\n\n**连接数**：某请求在 `now` 时刻算\"活跃\"，当且仅当它被放行且\n`arrival + hold > now`（**严格大于**：同一毫秒正好释放的连接不再占用名额）。\n活跃数 `>= maxConnections` ⇒ 按连接数拒。\n\n**gRPC 是协议盲区**：`grpc[i] == 1` 时**跳过令牌桶判定**（不扣令牌、也不会因令牌不足被拒），\n但**仍然受连接数限制**。这条建模的意义：限流器挂在解码之前，\ngRPC 的流量走的是另一条传输路径，框架的 QPS 计数器根本看不到它 ——\n而连接是共享的，所以连接维度仍然有效。\n\n## 合法性（`IllegalArgumentException`，消息一字不差）\n\n`qps must be positive` / `burst must be at least 1` / `maxConnections must be positive` /\n`input arrays must not be null` / `input arrays must have the same length` /\n`arrivals must be non-decreasing` / `hold must be non-negative` / `grpc must be 0 or 1`\n\n## 这题真正考的东西\n\n**\"限流就是配个 QPS\"漏掉的是另一半：谁在占着你的进程。**\nQPS 桶只约束\"每秒进来多少\"，不约束\"同时在跑多少\"。\n下游 RT 从 20ms 恶化到 2s 时，100 QPS 的限制仍然放行 100 条/秒，\n同时在途的请求从 2 个变成 200 个 —— 线程、连接、堆全部被拖走，\n**限流器自己成了压死服务的最后一根稻草**。\n连接数（并发数）维度是唯一能拦住这一类的。\n\n第二件：**令牌桶与秒级计数器的差别就在桶边界。**\n秒级计数器在 `t=0.99s` 和 `t=1.01s` 各放满一秒的量 ⇒ 20ms 内 2 倍突发。\n朴素实现挂在这里（`naiveSolution` 就是这个写法），\n而用例「边界：桶容量 1 时同一毫秒只放一条」正是它和令牌桶分岔的那一条。",
+  "judgeKind": "java-junit",
+  "language": "java",
+  "tags": [
+    "rate-limiting",
+    "token-bucket",
+    "connection-quota",
+    "protocol-blindspot",
+    "modern:resilience-semantics"
+  ],
+  "cases": [
+    {
+      "name": "基线：令牌桶与连接数各拒一次",
+      "input": [
+        10,
+        2,
+        2,
+        [
+          0,
+          20,
+          40,
+          120,
+          140
+        ],
+        [
+          100,
+          100,
+          100,
+          10,
+          10
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        3,
+        1,
+        1,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "协议盲区：gRPC 请求绕不过连接数限流，但 QPS 桶管不到它",
+      "input": [
+        10,
+        2,
+        2,
+        [
+          0,
+          20,
+          40,
+          120,
+          140
+        ],
+        [
+          100,
+          100,
+          100,
+          10,
+          10
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          1
+        ]
+      ],
+      "expected": [
+        4,
+        0,
+        1,
+        0
+      ],
+      "visible": true,
+      "note": "最后一条 grpc=1 ⇒ 不扣令牌，于是它的放行与 QPS 无关，这正是\"QPS 限流对 gRPC 不生效\"的建模"
+    },
+    {
+      "name": "边界：桶容量 1 时同一毫秒只放一条，其余按 QPS 拒",
+      "input": [
+        1000,
+        1,
+        100,
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        1,
+        4,
+        0,
+        0
+      ],
+      "visible": true
+    },
+    {
+      "name": "边界：连接数先于 QPS 拒绝（检查顺序是可观测的）",
+      "input": [
+        10,
+        5,
+        1,
+        [
+          0,
+          10,
+          20,
+          30
+        ],
+        [
+          100,
+          100,
+          100,
+          100
+        ],
+        [
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        1,
+        0,
+        3,
+        4
+      ],
+      "visible": true,
+      "note": "末位是 4 而不是 1 ⇒ 被连接数拒的那 3 条**没有**扣令牌。顺序颠倒或\"先扣再退\"都会把这一位算成 1"
+    },
+    {
+      "name": "退化：空到达序列 ⇒ 一个都没拒，令牌原封不动是 burst",
+      "input": [
+        50,
+        3,
+        4,
+        [],
+        [],
+        []
+      ],
+      "expected": [
+        0,
+        0,
+        0,
+        3
+      ],
+      "visible": true
+    },
+    {
+      "name": "桶有上限：长时间空闲不会攒出超过 burst 的突发额度",
+      "input": [
+        10,
+        2,
+        5,
+        [
+          0,
+          100000
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "expected": [
+        2,
+        0,
+        0,
+        1
+      ],
+      "visible": true,
+      "note": "100 秒只补到 2 个令牌 ⇒ 最后剩余仍是 2，不是 1002"
+    },
+    {
+      "name": "非法：qps 为 0",
+      "input": [
+        0,
+        2,
+        2,
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "qps must be positive"
+    },
+    {
+      "name": "非法：三条数组长度不一致",
+      "input": [
+        10,
+        2,
+        2,
+        [
+          0,
+          10
+        ],
+        [
+          5
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "input arrays must have the same length"
+    },
+    {
+      "name": "非法：到达时间倒流",
+      "input": [
+        10,
+        2,
+        2,
+        [
+          100,
+          50
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          0,
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "arrivals must be non-decreasing"
+    },
+    {
+      "name": "非法：突发容量小于 1",
+      "input": [
+        10,
+        0,
+        2,
+        [
+          0
+        ],
+        [
+          5
+        ],
+        [
+          0
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "burst must be at least 1"
+    },
+    {
+      "name": "非法：连接标志不是 0/1",
+      "input": [
+        10,
+        2,
+        2,
+        [
+          0
+        ],
+        [
+          5
+        ],
+        [
+          2
+        ]
+      ],
+      "expected": null,
+      "visible": true,
+      "expectThrow": "IllegalArgumentException",
+      "throwMessage": "grpc must be 0 or 1"
+    }
+  ],
+  "answer": "## 参考答案要点\n\n**基线用例 `{10, 2, 2, [0,20,40,120,140], [100,100,100,10,10], 全 Thrift}` 逐步算**\n（credit 以\"令牌\"为单位，`1 令牌 = 1_000_000` 微信用量；`qps=10` ⇒ 每 100ms 补一个）：\n\n| 到达 | 补给后 credit | 活跃连接 | 判定 |\n| --- | --- | --- | --- |\n| 0 | 2.0（初始满桶） | 0 | 放行 ⇒ 占连接至 100，之后 credit 1.0 |\n| 20 | 1.0 + 0.2 = 1.2 | 1 | 放行 ⇒ 占至 120，之后 credit 0.2 |\n| 40 | 0.2 + 0.2 = 0.4 | 2 | **连接数已满 ⇒ 拒**（不扣令牌） |\n| 120 | 0.4 + 0.8 = 1.2 | 0（两条都在 120 释放，判据是严格大于） | 放行，之后 credit 0.2 |\n| 140 | 0.2 + 0.2 = 0.4 | 1 | **令牌不足 ⇒ 拒** |\n\n⇒ `{3, 1, 1, 0}`。两个拒因各出现一次，而且**判定顺序是可观测的**：\n第 3 条（40ms）到达时桶里只剩 `0.4` 个令牌，若把两个检查颠倒成\"先 QPS 后连接数\"，\n它会被算成 QPS 拒；同理最后一条也会 ⇒ 基线用例变成 `{3, 2, 0, 0}`，\n`rejectedConn` 直接归零 —— **\"该扩并发还是该压速率\"这个决策就建立在最后两个数的分布上**。\n真正钉死\"被拒的请求不许扣令牌\"的是用例\n「边界：连接数先于 QPS 拒绝（检查顺序是可观测的）」：\n`qps=10 / burst=5 / maxConn=1`，四条请求都落在 30ms 内 ⇒\n只放行 1 条、3 条全被连接数拒，剩余令牌是 `4`（4.3 向下取整：只被扣过一次，加 0.3 个补给），\n任何\"先扣再退\"的实现都会把它算成 `1`。\n\n**gRPC 那条与基线只差最后一位标志 ⇒ `{4, 0, 1, 0}`**：\n最后一条走 gRPC，跳过令牌判定，于是\"桶里没有令牌\"这件事完全不拦它。\n**这就是协议盲区的全部含义 —— 不是\"限流更严\"，是那一路流量根本不计数。**\n答\"给 gRPC 也配一个 QPS 限制\"是错的：真实系统里要配的是 HTTP/2 流控窗口\n（`InitialWindowSize` / `InitialConnWindowSize`），那是**字节配额**不是**请求速率**，\n两者不可互换 —— 前者防的是慢消费者占满连接，后者防的是过载。\n\n**\"长时间空闲不许攒出超过 burst 的突发\"**（用例「桶有上限」）：\n`qps=10 / burst=2`，两条请求之间隔了 100 秒 —— 按速率补给早就超过整桶容量，\n所以 `min(cap, credit + 补给)` 把它截回 2 个令牌；放行第二条之后剩 1 ⇒ `{2, 0, 0, 1}`。\n**桶的意义就是给突发限额**：没有那个 `min`，\n一个空闲十分钟的实例会在下一秒被打进十分钟总量级别的请求 ——\n那是最典型的\"限流器自己放大故障\"。\n\n**朴素解为什么必挂**：它按秒切片计数、不看桶、不看连接数、也不区分协议。\n在基线用例上它对第 3 条给出\"按 QPS 拒\"而不是\"按连接数拒\"，\n在「边界：桶容量 1」上它会把 5 条全放行（`qps=1000` 一秒内远没到 1000），\n第 4 位返回写死的 `qps` 更是必然与真实剩余令牌不符。\n\n**工程延伸（面试追问点）**\n\n1. 为什么默认放 OnRead？（省一次反序列化；代价是**看不到 method**，\n   所以\"按接口分档限流\"必须挪到 OnMessage —— 这是性能与信息量的显式取舍，\n   素材 §2 追问 4 原问题。）\n2. 多实例怎么共享桶？（单机桶在 N 个实例下等效于 `N × qps`。共享要么走 Redis\n   （一次往返、且**桶服务挂了要决定放行还是拒绝** —— 放行是保吞吐、拒绝是保下游，\n   必须显式选一个并把降级率打点），要么走\"总配额 / 实例数 + 定期再平衡\"，\n   后者会瞬时超限但零依赖。详见本批的 redis 题。）\n3. 动态改阈值要不要重置桶？（不该。`Updater.UpdateLimit` 换的是速率与容量参数，\n   **已积累的 credit 属于旧配置的时间轴**：把桶清空会让刚放宽的限流照样拒一批，\n   把桶填满则等于给新限制开了一张空票。）\n4. 可观测？（`LimitReporter` 的 `ConnOverloadReport` / `QPSOverloadReport` 两个回调，\n   对应两个拒因 —— **拒因必须分开统计**，混成一个\"被限流 N 次\"就没法判断\n   该扩并发还是该压速率。这也是本题返回四个数而不是一个数的原因。）",
+  "runner": {
+    "className": "Solution",
+    "signature": "int[] limiterSimulate(int qps, int burst, int maxConnections, int[] arrivalsMs, int[] holdMs, int[] grpc)",
+    "entry": "function",
+    "orderSensitive": false,
+    "timeoutMs": 15000,
+    "referenceSolution": "import java.util.ArrayList;\nimport java.util.List;\n\npublic class Solution {\n  private static final long UNIT = 1000000L;\n\n  public static int[] limiterSimulate(int qps, int burst, int maxConnections,\n                                      int[] arrivalsMs, int[] holdMs, int[] grpc) {\n    if (qps <= 0) throw new IllegalArgumentException(\"qps must be positive\");\n    if (burst < 1) throw new IllegalArgumentException(\"burst must be at least 1\");\n    if (maxConnections < 1) throw new IllegalArgumentException(\"maxConnections must be positive\");\n    if (arrivalsMs == null || holdMs == null || grpc == null)\n      throw new IllegalArgumentException(\"input arrays must not be null\");\n    if (arrivalsMs.length != holdMs.length || arrivalsMs.length != grpc.length)\n      throw new IllegalArgumentException(\"input arrays must have the same length\");\n    for (int i = 0; i < arrivalsMs.length; i++) {\n      if (i > 0 && arrivalsMs[i] < arrivalsMs[i - 1])\n        throw new IllegalArgumentException(\"arrivals must be non-decreasing\");\n      if (holdMs[i] < 0) throw new IllegalArgumentException(\"hold must be non-negative\");\n      if (grpc[i] != 0 && grpc[i] != 1) throw new IllegalArgumentException(\"grpc must be 0 or 1\");\n    }\n\n    long cap = (long) burst * UNIT;\n    long credit = cap;\n    long last = arrivalsMs.length == 0 ? 0L : arrivalsMs[0];\n    int allowed = 0, rejectedQps = 0, rejectedConn = 0;\n    List<Long> ends = new ArrayList<>();\n    for (int i = 0; i < arrivalsMs.length; i++) {\n      long now = arrivalsMs[i];\n      long gain = (now - last) * 1000L * qps;\n      if (gain > 0) { credit = Math.min(cap, credit + gain); last = now; }\n      List<Long> live = new ArrayList<>();\n      for (Long e : ends) if (e > now) live.add(e);\n      ends = live;\n      if (ends.size() >= maxConnections) { rejectedConn++; continue; }\n      if (grpc[i] == 0) {\n        if (credit < UNIT) { rejectedQps++; continue; }\n        credit -= UNIT;\n      }\n      allowed++;\n      ends.add(now + holdMs[i]);\n    }\n    return new int[] {allowed, rejectedQps, rejectedConn, (int) (credit / UNIT)};\n  }\n}",
+    "naiveSolution": "public class Solution {\n  // \"限流就是配个 QPS\"版：只有秒级计数、没有桶、没有连接数维度，\n  // 于是一秒钟边界上能放 2 倍流量，且 gRPC 与 Thrift 被同一把尺子量。\n  public static int[] limiterSimulate(int qps, int burst, int maxConnections,\n                                      int[] arrivalsMs, int[] holdMs, int[] grpc) {\n    if (qps <= 0) throw new IllegalArgumentException(\"qps must be positive\");\n    if (burst < 1) throw new IllegalArgumentException(\"burst must be at least 1\");\n    if (maxConnections < 1) throw new IllegalArgumentException(\"maxConnections must be positive\");\n    if (arrivalsMs == null || holdMs == null || grpc == null)\n      throw new IllegalArgumentException(\"input arrays must not be null\");\n    if (arrivalsMs.length != holdMs.length || arrivalsMs.length != grpc.length)\n      throw new IllegalArgumentException(\"input arrays must have the same length\");\n    for (int i = 0; i < arrivalsMs.length; i++) {\n      if (i > 0 && arrivalsMs[i] < arrivalsMs[i - 1])\n        throw new IllegalArgumentException(\"arrivals must be non-decreasing\");\n      if (holdMs[i] < 0) throw new IllegalArgumentException(\"hold must be non-negative\");\n      if (grpc[i] != 0 && grpc[i] != 1) throw new IllegalArgumentException(\"grpc must be 0 or 1\");\n    }\n    int allowed = 0, rejected = 0;\n    long windowSec = -1, inWindow = 0;\n    for (int i = 0; i < arrivalsMs.length; i++) {\n      long sec = arrivalsMs[i] / 1000;\n      if (sec != windowSec) { windowSec = sec; inWindow = 0; }\n      if (inWindow >= qps) { rejected++; continue; }\n      inWindow++;\n      allowed++;\n    }\n    return new int[] {allowed, rejected, 0, qps};\n  }\n}"
+  },
+  "estimatedMinutes": 28,
+  "source": {
+    "company": "ByteDance",
+    "role": "服务端研发（Go 微服务治理与稳定性方向） 高级工程师",
+    "location": "beijing",
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/hot-interviews/bytedance-backend-and-infrastructure.md#4 考点 3（服务端限流：QPS、连接数与协议盲区：令牌桶与计数器、OnRead vs OnMessage、gRPC 不生效、UpdateLimit、LimitReporter）＋ §1.1 服务端\"连接数限流 + QPS 限流\"（\"先连接数后 QPS\"与\"gRPC 仍受连接数约束\"是【推】，题面已标明为本题建模）",
+    "era": "2026",
+    "addedBy": "arena-company-expansion",
+    "ingestedAt": "2026-09-23T11:20:38.825Z"
+  }
+}
