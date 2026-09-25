@@ -2962,7 +2962,18 @@ Windows 盘符式与 msys 式都算），否则 `admin` / `test` / `data` 这类
 5. 推之前 `git push --dry-run` 确认**只有 `refs/heads/main` 一条 ref**：`push.followTags` 未设置
    ⇒ 备份 tag 不会顺带推上去。这一步不是形式主义：若 followTags 开着，那 142 个带个人邮箱的旧 commit
    会跟着 tag 一起公开，而"我扫过工作树所以没事"完全拦不住它。
-6. `git push -u origin main` ⇒ 远端实测 `refs/heads/main` 一个 commit、身份干净、**无 tag**。| 容器交付档 | `./start.sh --verify` | ✅ 判题矩阵 **433 passed / 0 skipped**、IDE 档 118 / 0 skipped、EXIT=0<br>（跑在"文档两处改完、E2E 判据还没改"的树上。顺序是干净的：容器档 `SKIP_E2E=1` 根本不读 `tests/e2e/`，而 `.gitignore` 不参与镜像构建（那是 `.dockerignore` 的活）⇒ 这两条改动都不在它的判据路径上。E2E 判据改完是**单独重跑 E2E** 验的） |
+6. `git push -u origin main` ⇒ 远端实测 `refs/heads/main` 一个 commit、身份干净、**无 tag**。
+7. 用户随后要求"干掉本地历史 commit"⇒ 才做上面第 1 步里我**故意留着**的那一步：
+   `reflog expire --expire=now --expire-unreachable=now --all` + `git gc --prune=now --aggressive`。
+   结案口径是"真没了"而不是"看不见了"：`cat-file -e` 对旧 tip / 旧标签对象全部报缺失、`fsck` 无 dangling、
+   `.git` 29M → 9.8M、散对象 3106 → 0。
+   ｜**附注标签本身带身份**：`v0.1.0` 是 annotated tag，它的对象里存着 tagger 姓名与邮箱 ——
+   所以"删掉它"不是清理旧引用，是**脱敏**的一部分。重打时同样用环境变量传身份、不碰 `git config`。
+   ｜**为什么最后还要再扫一遍全部对象**：工作树干净、HEAD 干净都不等于"仓库干净"，
+   身份可以只活在 commit 元数据或 tag 对象里。所以判据是
+   `git rev-list --objects --all --tags | cat-file --batch` 扫 737 个对象（含 commit/tree/tag 本体），
+   三种判据命中 0 才算结案。删完历史再跑一次 `verify:fast`（✅ 0）确认没有闸门依赖旧历史 ——
+   题库基线取的是 `git ls-files` 的跟踪数，与 commit 数无关，所以它不该红；真红了就说明有东西在偷偷读历史。| 容器交付档 | `./start.sh --verify` | ✅ 判题矩阵 **433 passed / 0 skipped**、IDE 档 118 / 0 skipped、EXIT=0<br>（跑在"文档两处改完、E2E 判据还没改"的树上。顺序是干净的：容器档 `SKIP_E2E=1` 根本不读 `tests/e2e/`，而 `.gitignore` 不参与镜像构建（那是 `.dockerignore` 的活）⇒ 这两条改动都不在它的判据路径上。E2E 判据改完是**单独重跑 E2E** 验的） |
 | 宿主 E2E | `npm run e2e` | ✅ **45 passed（2.8m）**，REAL_EXIT=0（首轮 44 passed / 1 failed，红因见上） |
 | 界面 | `#/bank` 真浏览器 | ✅ 五控件中心点 190.0000 全等；换类别（sql）后再量仍全等；console error 与 warning **均 0** |
 | 题库闸门 | `node scripts/check-bank.mjs` | ✅ exit 0（`.bank-count` 改 ignore 后） |

@@ -1044,14 +1044,18 @@
   里被复盘抄回来的账户名（于是补了 `publish-identity.test.ts` 这道闸门，判据从本机取身份、不硬编码）。
   621 文件 / 615 文本 blob 命中 0；6 张 PNG 另查了元数据也无。`push --dry-run` 确认只发一条 ref、
   `followTags` 未开 ⇒ 备份 tag 不会跟着公开。远端实测：1 个 commit、身份干净、无 tag。
-  ｜**备份已按用户要求删除**：`local-history-138` 分支、`backup/prepublic-20260925` tag、
-  `data/history-backup-20260925.bundle`（9.8MB）三者都没了。**但故意没跑 `git gc --prune=now`** ——
-  旧对象目前仍可走查（`git rev-list --count 3f3f672` = 142），所以两三周内反悔还来得及；
-  那一步是唯一把"可反悔"变成"真没了"的操作。
-  ｜**一条还活着的坑，别踩**：仓库里还有个更早的 **`v0.1.0` 标签**（用户自己打的，指向旧线上的
-  `9970f85`），它一个就把那 142 个带个人邮箱的旧 commit 全部锚住。远端没有它，所以现在不泄漏；
-  但**哪天 `git push --tags` 或从它拉 GitHub Release，旧历史就一起公开了**。
-  要么把它挪到新初始提交上、要么删掉、要么永远只 `git push origin main`。
+  ｜**旧历史已彻底删除（2026-09-25 当晚，用户"干掉本地历史 commit"）**：`local-history-138` 分支、
+  `backup/prepublic-20260925` tag、9.8MB bundle 先删；随后 `git reflog expire --expire=now
+  --expire-unreachable=now --all` + `git gc --prune=now --aggressive` 把对象也回收了。
+  验证不是"看不见"而是"真没了"：`git cat-file -e 3f3f672 / 9970f85 / 5128a65` 三者全部报缺失，
+  `git fsck` 无 dangling，`.git` 29M → 9.8M（散对象 3106 → 0）。现存 3 个 commit。
+  ｜**`v0.1.0` 的处理**：它是**附注标签**，而附注标签对象自己存着 tagger 姓名与邮箱 ——
+  所以它既是旧历史的锚点，也是脱敏目标之一（不是"顺手删"，是它本身带着身份）。
+  已删旧的重打在干净初始提交上，tagger 用 noreply；消息也从"100 道"改成实际的 254 道 / 7 judgeKind。
+  ｜**全对象复扫**：`git rev-list --objects --all --tags` 喂 `cat-file --batch`，
+  737 个对象（commit + tree + blob + tag 元数据全在内）按个人邮箱 / 账户名 / 盘符路径三种判据扫
+  ⇒ **命中 0**；现存身份只有 `sherman9527 <…@users.noreply.github.com>` 一种。
+  删历史后 `npm run verify:fast` ✅ REAL_EXIT=0（题库基线仍取 git 跟踪数 254、六家地板与出处审计照常报数）。
   ｜**Docker 回收的真相，记下来免得下次误判**：`image prune -f`（75 个悬空镜像）+ `builder prune -f`
   报"回收 40.04GB"，但**宿主 `df` 一点没变** —— Docker Desktop 在 Windows 上把数据放在
   `~/main/dockerStorage/DockerDesktopWSL/disk/docker_data.vhdx`，那文件只涨不缩（实测仍 51GB）。
