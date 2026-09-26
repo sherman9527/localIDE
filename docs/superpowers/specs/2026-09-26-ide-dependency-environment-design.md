@@ -43,15 +43,25 @@ IDE 现在只支持"镜像预装"，没有任何"依赖"这个概念：
 
 ## 3. 架构
 
+> **选址修正（Task 2 实测推翻了自己原先的判断）**：环境**不放 `data/`**。
+> 原本以为"和 db 一样放 bind mount 里最符合本仓库'数据都留仓库内'的规矩"，实测同一个
+> `python3 -m venv --system-site-packages`：容器内 `/opt` **1.76s**、`/tmp` 1.72s、
+> 而 bind mount 的 `/app/data` **87.2s**（慢 50 倍）—— venv 要写几千个小文件，全走 FUSE。
+> 后果不是"慢一点"，是第一次用 IDE 就卡一分半、并撞穿创建超时，而症状完全看不出跟挂载类型有关。
+> ⇒ 容器里由 compose 设 `ARENA_IDE_ENV_DIR=/opt/arena-ide-env` + **命名卷**（既快，又能跨
+> `--rebuild` 保留用户装的包）；宿主 `--dev` 没有该变量，退回 `dataDir/ide-env` 照常可用。
+> 这条选址由 `env.test.ts` 里"读 compose 确认 arena 的 env 目录不在 `/app/data` 下"钉住。
+
 ```
-data/ide-env/                    ← 持久；bind mount 进容器；不参与 judge 沙箱清扫
+命名卷 arena-ide-env → /opt/arena-ide-env      ← 容器；不在 bind mount 上，也不在 judge/ 下
   python/                        ← python3 -m venv --system-site-packages
     lib/python3.*/site-packages/     ← 用户装的包在这里；预装的在系统目录，继承而来
-  node/
-    package.json                 ← 用户主动装的声明
+  node/                          ← javascript 与 typescript 共用（按运行时家族分，不按语言 id）
+    package.json                     ← 用户主动装的声明
     node_modules/
   java/lib/*.jar                 ← 本期不填充（见 §6 支持矩阵），目录先占位
   scala/lib/*.jar
+E2E 用另一个卷 arena-ide-env-e2e    ← 与 ARENA_DATA_DIR 指向 data/e2e 是同一条隔离纪律
 ```
 
 路径里的 `python3.*` 是**通配而不是写死小版本**：镜像现在是 3.10，将来升基础镜像时写死的 `lib/python3.10/site-packages` 会变成"清单永远读不到东西"的静默故障（venv 建在 3.11 下、扫描只认 3.10 ⇒ 空清单 + 不报错）。同理 `executable` 用 `bin/python` 而不是 `bin/python3.10`。
@@ -156,7 +166,8 @@ T1  装 requests → 清单出现 requests → IDE 里 import 成功
 
 ## 8. 已知代价（说清楚，别等等下才发现）
 
-- **磁盘**：`data/ide-env/` 会涨，且不在 judge 沙箱的 `SWEEP_MAX_AGE_MS` 清扫范围内（那是刻意的）。所以面板必须显示体积、reset 必须一键可达。
-- **首次 venv 创建**落在第一次用到环境的那次请求上（1-2s），会给一次"点了稍等"的体验；换来的是起容器不用付这笔钱。
+- **磁盘**：环境卷会涨，且**不在** judge 沙箱的 `SWEEP_MAX_AGE_MS` 清扫范围内（那是刻意的：清扫逻辑按 `judge/` 前缀认沙箱，环境不是沙箱）。所以面板必须显示体积、reset 必须一键可达。
+- **它也不在 `data/` 里**，所以"把整个仓库目录拷走即备份"这条不再覆盖 IDE 环境 —— 备份它要 `docker run --rm -v arena-ide-env:/v busybox tar czf - -C /v .`。这是选址换成命名卷换来的新代价，写在这里免得哪天当成"备份居然没带上包"的 bug。
+- **首次 venv 创建**（1.76s）落在第一次用到环境的请求上；不做启动期预建，避免每次起容器都付这笔钱。
 - **它不新增攻击面，但确实把"能装任意包"变成事实**：`pip install` 会执行 setup.py / build backend，等价于任意代码执行。在"本机、单人、绑回环"的威胁模型下这不是新问题（用户本来就能跑任意代码），但**一旦这工具哪天变成多租户，这里和 `ide/runner.ts:10` 自陈的那句"不是多租户沙箱"要一起补**。
 - **IDE 跑通 ≠ 题目判过**：这是隔离换来的必然结果，界面上用一行常驻标注承担，不假装能消除。

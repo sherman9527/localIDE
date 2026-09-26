@@ -29,8 +29,13 @@ services:
       - ./docker-cache:/root/.cache
       # 题库是文件形态：挂载后改题目不必重新构建镜像
       - ./content:/app/content
+      # IDE 的用户依赖环境**必须走命名卷，不能放 ./data**：那是 Windows 的 bind mount，
+      # 实测 `python3 -m venv` 在 /opt 1.76s、在 /app/data 87.2s（慢 50 倍，直接撞穿创建超时）。
+      # 卷还能跨 rebuild 保留 —— 用户装的包不该因为改一行 Dockerfile 就没了。
+      - arena-ide-env:/opt/arena-ide-env
     environment:
       NODE_ENV: production
+      ARENA_IDE_ENV_DIR: /opt/arena-ide-env
       ARENA_DB_FILE: /app/data/arena.db
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
@@ -76,8 +81,11 @@ services:
       - ./:/app
       - ./data:/app/data
       - ./docker-cache:/root/.cache
+      # 与 arena 同一个卷：dev 与正式跑的是同一个人在同一台机器上的环境，分开只会让人困惑
+      - arena-ide-env:/opt/arena-ide-env
     environment:
       NODE_ENV: development
+      ARENA_IDE_ENV_DIR: /opt/arena-ide-env
       ARENA_DB_FILE: /app/data/arena.db
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
@@ -101,8 +109,12 @@ services:
       - ./data:/app/data
       - ./docker-cache:/root/.cache
       - ./content:/app/content:ro
+      # E2E 用**自己那份**卷：真人装在 IDE 里的包不许影响测试结果，反之亦然
+      # （与 ARENA_DATA_DIR 指向 data/e2e 是同一条隔离纪律）。
+      - arena-ide-env-e2e:/opt/arena-ide-env
     environment:
       NODE_ENV: production
+      ARENA_IDE_ENV_DIR: /opt/arena-ide-env
       ARENA_DATA_DIR: /app/data/e2e
       # 三条都显式给：镜像里的旧 config 不会从 ARENA_DATA_DIR 派生 db/沙箱路径，
       # 少一条就会静默写回真人那份 data/arena.db（实测踩过）。
@@ -114,3 +126,10 @@ services:
     extra_hosts: *host-gateway
     init: true
     command: ["node", "server/dist/index.js"]
+
+# IDE 的用户依赖环境。命名卷活在 Docker VM 的 ext4 里，所以既没有 bind mount 的 50 倍惩罚，
+# 也不会因为 ./start.sh --rebuild 就丢掉用户装的包。
+# 闸门：server/test/ide/env.test.ts 会读 compose 确认 arena 把 ARENA_IDE_ENV_DIR 指在 bind mount 之外。
+volumes:
+  arena-ide-env:
+  arena-ide-env-e2e:
