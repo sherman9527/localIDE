@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import type { DebugVar } from '@arena/shared';
 import { config } from '../config.js';
 import { writeLine, type BackendEvent, type DebugBackend, type DebugHandle, type LaunchResult } from './debug-backend.js';
+import { ensureIdeEnv, type IdeEnv } from './env.js';
+import { findLanguage } from './languages.js';
+
+/** 环境解析要拿到语言条目；python 在注册表里是恒定存在的（表形状另有闸门）。 */
+const pythonLanguage = findLanguage('python')!;
 
 /**
  * Python 后端（WI-81）：起 `debug_python.py`，双向一行一个 JSON。
@@ -63,8 +68,22 @@ export const pythonBackend: DebugBackend = {
     if (!existsSync(PYTHON_DRIVER_FILE)) {
       return { ok: false, event: { type: 'error', text: `调试驱动脚本不在预期位置：${PYTHON_DRIVER_FILE}` } };
     }
-    const child = spawn('python3', ['-u', PYTHON_DRIVER_FILE], {
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    // 与一次性运行、REPL 用同一个 venv。环境建不出来时**明确报错**，
+    // 不许退回系统 python3 —— 那会让"调试时 import 不到刚装的包"变成静默行为。
+    let ideEnv: IdeEnv;
+    try {
+      ideEnv = await ensureIdeEnv(pythonLanguage);
+    } catch (err) {
+      return { ok: false, event: { type: 'error', text: `IDE 的 python 环境准备失败：${(err as Error).message}` } };
+    }
+    // 这里不留"裸解释器名兜底"：留了就等于允许环境没接上也能起会话，
+    // 而那正是这条路径最容易悄悄退回去的样子。兜底值一旦生效，症状是调试时 import 少东西。
+    const python = ideEnv.executable;
+    if (!python) {
+      return { ok: false, event: { type: 'error', text: 'IDE 的 python 环境没有给出解释器路径' } };
+    }
+    const child = spawn(python, ['-u', PYTHON_DRIVER_FILE], {
+      env: { ...process.env, PYTHONUNBUFFERED: '1', ...ideEnv.env },
       // 独立进程组：超时要连用户代码 fork 出来的子进程一起收，别留孤儿
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],

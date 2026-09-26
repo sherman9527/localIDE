@@ -6,6 +6,8 @@
  * 每条都靠 `ideAvailability()` 现探，不写死"我们装了 JDK"。
  */
 import type { IdeDebugKind, IdeExecution, Language } from '@arena/shared';
+// 只取占位符常量；env.ts 对本文件只有 `import type`，运行期不构成环。
+import { IDE_CLASSPATH_ARG } from './env.js';
 
 export type IdeLanguageId =
   | 'java' | 'python' | 'javascript' | 'typescript' | 'c' | 'cpp'
@@ -246,8 +248,10 @@ export const IDE_LANGUAGES: readonly IdeLanguage[] = [
     fileName: 'Main.java',
     editorLanguage: 'java',
     sample: SAMPLE_JAVA,
-    compile: { command: 'javac', args: ['-encoding', 'UTF-8', 'Main.java'] },
-    run: { command: 'java', args: ['-cp', '.', 'Main'] },
+    // `-cp` 用占位符：classpath 要在运行期由 ideEnvFor 展开（卷路径 + 镜像带的 junit jar）。
+    // 判题侧一直能 import org.junit 而 IDE 不能，就是因为这两行原来没有 -cp。
+    compile: { command: 'javac', args: ['-encoding', 'UTF-8', '-cp', IDE_CLASSPATH_ARG, 'Main.java'] },
+    run: { command: 'java', args: ['-cp', IDE_CLASSPATH_ARG, 'Main'] },
     probe: { command: 'javac', args: ['-version'] },
     replKind: true,
     debugKind: 'java',

@@ -89,9 +89,26 @@ export function ideEnvFor(language: IdeLanguage, root: string = IDE_ENV_ROOT): I
     env.env.NODE_PATH = env.nodeModulesDir;
     return env;
   }
-  env.classpath = [join(familyDir(root, family), 'lib', '*')];
+  // javac 的 `-cp` 会**顶掉**默认的"当前目录"，所以 `.` 必须显式带上，
+  // 否则用户代码连自己写的同目录类都找不到（实测过一次：只给 lib/* 就报找不到 Main）。
+  env.classpath = ['.', join(familyDir(root, family), 'lib', '*')];
+  if (family === 'java') env.classpath.push(config.junitJar); // 镜像带的，不算"用户自装"
   return env;
 }
+
+/**
+ * 语言表里的 classpath 占位符。注册表是静态字面量，而 classpath 要在运行期才知道
+ * （卷路径、junit jar 都来自 config），所以表里放这个记号、由 resolveCommand 展开。
+ */
+export const IDE_CLASSPATH_ARG = '@@CLASSPATH@@';
+
+/** 把环境套到一条命令上：解释器换成 venv 的、classpath 占位符展开。 */
+export function resolveCommand(cmd: { command: string; args: readonly string[] }, env: IdeEnv): { command: string; args: string[] } {
+  const args = cmd.args.map((a) => (a === IDE_CLASSPATH_ARG ? env.classpath.join(pathDelimiter) : a));
+  return { command: env.executable ?? cmd.command, args };
+}
+
+const pathDelimiter = process.platform === 'win32' ? ';' : ':';
 
 export interface IdeEnvPaths {
   measureBytes(): Promise<number>;

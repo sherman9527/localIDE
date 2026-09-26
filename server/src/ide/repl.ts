@@ -24,6 +24,7 @@ import type { ReplFeedResponse, ReplFeedStatus, ReplSessionInfo } from '@arena/s
 import { IDE_SESSION_LIMITS } from '@arena/shared';
 import { killProcessTree } from '../judge/process.js';
 import { IDE_LIMITS, findLanguage, type IdeLanguageId } from './languages.js';
+import { ensureIdeEnv, resolveCommand } from './env.js';
 
 /**
  * 三条纪律的数值都在 `shared` 的 `IDE_SESSION_LIMITS` 里（调试会话用的是同一份）：
@@ -230,16 +231,32 @@ export async function startRepl(language: string): Promise<ReplStartResult> {
     };
   }
   let child: ChildProcessWithoutNullStreams;
+  // REPL 必须与一次性运行用**同一个**环境：只给 run 接 venv 的话，用户会看到
+  // "我明明装了，REPL 里 import 不到"，而且一句错误都没有。
+  let cmd: { command: string; args: readonly string[] } = { command: spec.command, args: spec.args };
+  let replEnv: NodeJS.ProcessEnv = { ...(spec.env ?? {}) };
+  const replLanguage = findLanguage(language);
+  if (replLanguage) {
+    try {
+      const ideEnv = await ensureIdeEnv(replLanguage);
+      cmd = resolveCommand(cmd, ideEnv);
+      replEnv = { ...replEnv, ...ideEnv.env };
+    } catch (err) {
+      // 环境建不出来就明说，不许悄悄退回系统解释器 —— 那样会话能开、import 却少东西，
+      // 是最难查的一种不一致。
+      return { session: null, message: `${label} 的依赖环境准备失败：${(err as Error).message}` };
+    }
+  }
   try {
-    child = spawn(spec.command, spec.args, {
-      env: { ...process.env, ...(spec.env ?? {}) },
+    child = spawn(cmd.command, [...cmd.args], {
+      env: { ...process.env, ...replEnv },
       // 独立进程组：超时要连解释器 fork 出来的子进程一起收，别留孤儿
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
   } catch (err) {
-    return { session: null, message: `起不来 ${spec.command}：${(err as Error).message}` };
+    return { session: null, message: `起不来 ${cmd.command}：${(err as Error).message}` };
   }
   const session: Session = {
     id: randomUUID(),

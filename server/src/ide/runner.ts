@@ -15,6 +15,7 @@
 import { runProcess, type ExecResult } from '../judge/process.js';
 import { probeAvailability, runIdePyspark, runIdeRedis, runIdeSparkScala, runIdeSql } from './executors.js';
 import { createWorkspace } from '../judge/workspace.js';
+import { ensureIdeEnv, resolveCommand } from './env.js';
 import { IDE_LANGUAGES, IDE_LIMITS, findLanguage, type IdeLanguage } from './languages.js';
 
 // 契约只有一份：状态/阶段的联合类型在 shared 里定义，前端按它渲染。
@@ -156,16 +157,21 @@ export async function runIdeCode(request: IdeRunRequest): Promise<IdeRunResult> 
       await workspace.write(name, content);
     }
     await workspace.write(language.fileName, code);
+    // 环境在这里解析一次，compile 与 run 共用 —— 两条命令若各算一遍，
+    // 就会出现"编译看得见某个包、运行时看不见"这种无法解释的分裂。
+    const env = await ensureIdeEnv(language);
     const execOpts = {
       cwd: workspace.root,
       timeoutMs,
       input: stdin,
+      env: env.env,
       // 多采一点好判断"是否被截断"，切回 cap 在 finishFrom 里做
       maxOutputChars: IDE_LIMITS.stdoutCapChars + 4096,
     };
 
     if (language.compile) {
-      const built = await runProcess(language.compile.command, language.compile.args, execOpts);
+      const cmd = resolveCommand(language.compile, env);
+      const built = await runProcess(cmd.command, cmd.args, execOpts);
       if (built.timedOut || built.code !== 0) {
         return finishFrom(built, 'compile', {
           message: built.timedOut ? '编译超时' : undefined,
@@ -173,7 +179,7 @@ export async function runIdeCode(request: IdeRunRequest): Promise<IdeRunResult> 
       }
     }
 
-    const run = language.run;
+    const run = resolveCommand(language.run, env);
     const ran = await runProcess(run.command, run.args, execOpts);
     return finishFrom(ran, 'run');
   } catch (error) {
