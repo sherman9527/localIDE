@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { readInventory } from '../../src/ide/env-inventory.js';
+import { VENV_BASELINE_FILENAME } from '../../src/ide/env.js';
 import { findLanguage } from '../../src/ide/languages.js';
 
 /**
@@ -86,6 +87,35 @@ describe('python 清单', () => {
     await writeFile(join(info, 'METADATA'), 'Metadata-Version: 2.1\nName: typing-extensions\nVersion: 4.9.0\n');
     const inv = await readInventory(python, root);
     expect(inv.packages.map((p) => `${p.name}@${p.version}`)).toEqual(['typing-extensions@4.9.0']);
+  });
+
+  /**
+   * `python3 -m venv` 会把 pip 与 setuptools 装进 **venv 自己的** site-packages，
+   * 所以"只扫 venv 目录 = 只列用户装的"是错的。真浏览器里量到过：面板把
+   * pip 22.0.2（11.1MB）+ setuptools 59.6.0（3.4MB）报成用户包，合计 47.7MB。
+   * 修法是减去"建好那一刻的基线"，而不是硬编码一个包名集合 ——
+   * 硬编码会把"用户自己 pip install -U pip"这件事也藏掉。
+   */
+  it('减去 venv 自带的引导包，但用户后来装的仍然要显示', async () => {
+    const root = await freshRoot();
+    await plantDistInfo(root, 'pip', '22.0.2');
+    await plantDistInfo(root, 'setuptools', '59.6.0');
+    await plantDistInfo(root, 'requests', '2.31.0');
+    await mkdir(join(root, 'python'), { recursive: true });
+    await writeFile(
+      join(root, 'python', VENV_BASELINE_FILENAME),
+      JSON.stringify({ entries: ['pip-22.0.2.dist-info', 'setuptools-59.6.0.dist-info'] }),
+    );
+    const inv = await readInventory(python, root);
+    expect(inv.packages.map((p) => p.name)).toEqual(['requests']);
+  });
+
+  it('没有基线文件时不猜：全部列出（宁可多列，也不许把用户真装的藏掉）', async () => {
+    const root = await freshRoot();
+    await plantDistInfo(root, 'pip', '22.0.2');
+    await plantDistInfo(root, 'requests', '2.31.0');
+    const inv = await readInventory(python, root);
+    expect(inv.packages.map((p) => p.name).sort()).toEqual(['pip', 'requests']);
   });
 });
 

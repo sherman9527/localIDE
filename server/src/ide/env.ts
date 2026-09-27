@@ -90,6 +90,58 @@ export interface IdeEnv {
   nodeModulesDir?: string;
 }
 
+/** venv 创建时自带的引导包清单所在处。基线不是"日志"，它由环境本身在创建那一刻生成。 */
+const VENV_BASELINE_FILE = '.arena-baseline.json';
+
+/** venv 自己的 site-packages（小版本号不写死，所以扫一层）。 */
+export async function venvSitePackagesDirs(root: string): Promise<string[]> {
+  const { readdir } = await import('node:fs/promises');
+  const libDir = join(familyDir(root, 'python'), 'lib');
+  const versions = await readdir(libDir).catch(() => [] as string[]);
+  return versions.map((v) => join(libDir, v, 'site-packages'));
+}
+
+async function distInfoNames(root: string): Promise<string[]> {
+  const { readdir } = await import('node:fs/promises');
+  const names: string[] = [];
+  for (const site of await venvSitePackagesDirs(root)) {
+    for (const e of await readdir(site).catch(() => [] as string[])) {
+      if (/\.(dist|egg)-info$/.test(e)) names.push(e);
+    }
+  }
+  return names.sort();
+}
+
+/**
+ * 记下"刚建好时 venv 里已有什么"。
+ *
+ * 为什么需要：`python3 -m venv` 会把 pip 与 setuptools 装进 **venv 自己的** site-packages，
+ * 所以"只扫 venv 目录就天然只列出用户装的"这句话是错的 —— 真浏览器里量到过：
+ * 面板把 pip 22.0.2（11.1MB）与 setuptools 59.6.0（3.4MB）报成用户包，合计 47.7MB。
+ * 用基线相减而不是硬编码一个包名集合，是因为硬编码会把"用户自己升级了 pip"也藏掉。
+ */
+export async function writeVenvBaseline(root: string): Promise<void> {
+  const { writeFile } = await import('node:fs/promises');
+  const entries = await distInfoNames(root);
+  await writeFile(
+    join(familyDir(root, 'python'), VENV_BASELINE_FILE),
+    JSON.stringify({ entries, writtenAt: new Date().toISOString() }, null, 2),
+  );
+}
+
+export async function readVenvBaseline(root: string): Promise<string[] | null> {
+  const { readFile } = await import('node:fs/promises');
+  try {
+    const raw = await readFile(join(familyDir(root, 'python'), VENV_BASELINE_FILE), 'utf8');
+    const parsed = JSON.parse(raw) as { entries?: unknown };
+    return Array.isArray(parsed.entries) ? parsed.entries.map(String) : null;
+  } catch {
+    return null;
+  }
+}
+
+export const VENV_BASELINE_FILENAME = VENV_BASELINE_FILE;
+
 /** 纯计算：不碰文件系统。 */
 export function ideEnvFor(language: IdeLanguage, root: string = IDE_ENV_ROOT): IdeEnv {
   const family = envFamilyOf(language);
@@ -163,13 +215,18 @@ const ensuring = new Map<IdeEnvFamily, Promise<void>>();
 
 async function buildFamily(family: IdeEnvFamily): Promise<void> {
   if (family === 'python') {
-    if (existsSync(venvPythonPath(IDE_ENV_ROOT))) return;
+    await mkdir(IDE_ENV_ROOT, { recursive: true });
+    if (existsSync(venvPythonPath(IDE_ENV_ROOT))) {
+      // 已存在但没基线（老环境或上次写到一半挂掉）：现在补一份。
+      // 不补的话面板会把 venv 自带的 pip/setuptools 报成"用户装的"。
+      if ((await readVenvBaseline(IDE_ENV_ROOT)) === null) await writeVenvBaseline(IDE_ENV_ROOT);
+      return;
+    }
     const target = familyDir(IDE_ENV_ROOT, 'python');
     // 必须先建好 cwd：spawn 的 cwd 不存在时，Node 报的是 `spawn python3 ENOENT` ——
     // 一个指向命令名的错，极易被读成"容器里没装 python"（实测就是这样绕了一圈）。
-    await mkdir(IDE_ENV_ROOT, { recursive: true });
     // --system-site-packages 不是可省的：不开它，镜像里预装的 pandas 在 IDE 里反而 import 不到，
-    // 那是倒退。区分"用户装的"靠只扫 venv 自己的 site-packages，不靠把系统包挡在外面。
+    // 那是倒退。区分"用户装的"靠基线相减，不靠把系统包挡在外面。
     const res = await runProcess('python3', ['-m', 'venv', '--system-site-packages', target], {
       cwd: IDE_ENV_ROOT,
       timeoutMs: 120_000,
@@ -177,6 +234,7 @@ async function buildFamily(family: IdeEnvFamily): Promise<void> {
     if (res.code !== 0) {
       throw new Error(`创建 IDE 的 python 环境失败（exit ${res.code}）：${(res.stderr || res.stdout).slice(0, 300)}`);
     }
+    await writeVenvBaseline(IDE_ENV_ROOT);
     return;
   }
   await mkdir(join(familyDir(IDE_ENV_ROOT, family), 'lib'), { recursive: true });

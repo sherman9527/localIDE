@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { IDE_ENV_ROOT, envFamilyOf, envUnsupportedReason, familyDir, sumBytes, type IdeEnvFamily } from './env.js';
+import { IDE_ENV_ROOT, envFamilyOf, envUnsupportedReason, familyDir, readVenvBaseline, sumBytes, type IdeEnvFamily } from './env.js';
 import type { IdeLanguage } from './languages.js';
 
 /**
@@ -56,6 +56,15 @@ function moduleDirCandidates(name: string): string[] {
   const top = name.split('.')[0] ?? name;
   const topUnderscored = underscored.split('.')[0] ?? underscored;
   return [...new Set([name, underscored, top, topUnderscored])];
+}
+
+/**
+ * 基线存的是 dist-info 目录名，所以要由 name/version 还原它。
+ * pip 写盘时把连字符换成下划线（PEP 427），两种写法都要能对上。
+ */
+function distKeysOf(name: string, version: string): string[] {
+  const v = version.replace(/-/g, '_'); // 版本里的连字符同样会被规范化
+  return [`${name}-${v}.dist-info`, `${name.replace(/-/g, '_')}-${v}.dist-info`];
 }
 
 async function pythonPackages(root: string): Promise<IdeEnvPackage[]> {
@@ -141,7 +150,11 @@ export async function readInventory(language: IdeLanguage, root: string = IDE_EN
   let packages: IdeEnvPackage[] = [];
   let drift: string[] = [];
   if (family === 'python') {
-    packages = await pythonPackages(root);
+    // 减去"建好那一刻 venv 里已有"的基线：venv 自带 pip/setuptools，它们不是用户装的。
+    // 没有基线文件时不减 —— 宁可多列，也不许把用户真装的东西藏掉。
+    const all = await pythonPackages(root);
+    const baseline = new Set((await readVenvBaseline(root)) ?? []);
+    packages = baseline.size === 0 ? all : all.filter((p) => !distKeysOf(p.name, p.version).some((k) => baseline.has(k)));
   } else if (family === 'node') {
     // 只算一次：调两遍会读到两个时刻的磁盘状态，drift 与 packages 可能对不上
     const inv = await nodeInventory(root);
