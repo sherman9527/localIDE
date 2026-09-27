@@ -27,6 +27,12 @@ IDE 现在只支持"镜像预装"，没有任何"依赖"这个概念：
 ⇒ 所有用户装的包只落在 `data/ide-env/` 下，这些路径**只注入 IDE 的三条执行路径，判题侧一行都不改**。
 ⇒ 这条要有闸门（§7 T2），不能靠"我没写进去"。
 
+> **落地时被抓到的一次真漏（Task 9 容器交付档跑红）**：除了"注入路径"这条明路，还有一条暗的 ——
+> compose 必须给服务进程设 `ARENA_IDE_ENV_DIR`（见 §3 的选址修正），而判题子进程的环境是
+> `{ ...process.env, ...opts.env }`，于是**这个变量本身**被每一道题继承。宿主上它不存在，所以快档全绿。
+> ⇒ 修法不是在判题层过滤（那要求判题层知道 IDE 有这套东西），而是在 `server/src/config.ts` 里读一次就摘掉。
+> ⇒ 闸门因此多了 B2 一层：验"摘掉"这个动作本身，否则 B 只是在赌"这台机器没设过这个变量"。
+
 ### 红线二：命令窗口不是 shell
 
 全仓的进程创建纪律是 `shell:false` + argv 数组，今天的审计结论还写着"没有任何用户输入进得去"（`HANDOVER.md` WI-86）。一个叫 install 的输入框如果实现成 `sh -c <输入>`，那句话当场作废。
@@ -39,7 +45,13 @@ IDE 现在只支持"镜像预装"，没有任何"依赖"这个概念：
 日志会漂移：手工往 `lib/` 塞一个 jar、装到一半崩了、容器重建后目录还在但记录没了。任何一种都会让界面显示的列表与现实不一致，而"界面说假话"是本项目的老毛病。
 
 ⇒ python 扫 venv 的 `*.dist-info` 目录名，node 读 `package.json` + `node_modules/*/package.json`，jar 列文件。
-⇒ 推论：**"哪些是用户自装的"这个问题，物理位置就是答案**，不需要维护任何 diff 表。
+⇒ 推论：**"哪些是用户自装的"这个问题，物理位置基本就是答案**。
+
+> **这句推论被真浏览器修正了一半**：venv 会把 pip 与 setuptools 装进**它自己的** site-packages，
+> 所以"只扫环境自己那一层"仍然把镜像自带的引导包报成用户包（实测 47.7MB，单测抓不到 ——
+> 那些 dist-info 全是我自己造的）。⇒ 还要减一份"建好那一刻已有什么"的基线
+> （`.arena-baseline.json`，由环境在创建当刻生成，不是安装日志）。
+> 不硬编码包名集合，因为硬编码会把"用户自己升级了 pip"也一起藏掉。
 
 ## 3. 架构
 
@@ -136,9 +148,15 @@ IDE 结果区下方一个"环境"面板：清单（按语言分组）+ 命令行
 | --- | --- | --- | --- |
 | python | ✅ `pip3 install/uninstall/list/freeze/show` | ✅ dist-info | venv 是一等公民，`--system-site-packages` 保住预装 |
 | javascript / typescript | ✅ `npm install/ls/uninstall`（`--prefix` 由服务端注入，用户不许写 `--prefix`/`-C`/`-g`） | ✅ package.json + node_modules | 顺带把"碰巧能过"的 node_modules 查找变成成文设计 |
-| java / scala | ❌ | 只列 `lib/*.jar`（本期为空） | jar 要连**传递依赖**一起解析成 classpath；`mvn dependency:get` 只下进 `~/.m2` 不给你 classpath，做对要 `copy-dependencies` + 生成 pom —— 那是另一个量级的功能，不塞进本期 |
-| c / cpp | ❌ |  | 只能 apt，运行期装不了 |
-| sql / redis / pyspark / spark-scala | ❌ |  | 它们的"依赖"是服务端与镜像，不是包 |
+| java / spark-scala | ❌（jar 丢进 `<环境>/lib` 就进 classpath，界面把这条路径说给用户） | 只列 `lib/*.jar` | 依赖要连**传递依赖**一起解析成 classpath；`mvn dependency:get` 只下进 `~/.m2` 不给你 classpath，做对要 `copy-dependencies` + 生成 pom —— 那是另一个量级的功能，不塞进本期 |
+| c / cpp | ❌ | ❌ | 只能 apt，运行期装不了 |
+| mysql / redis | ❌ | ❌ | 它们的"依赖"是那个服务本身，不是包 |
+| pyspark | ❌ | ❌ | 解释器由**与判题共用**的常驻 Spark 池持有，单独开环境会撞红线一（spark-scala 不走那个池，所以它有 lib 环境） |
+
+⇒ **开不开命令窗口是后端事实，写在清单的 `commandWindow` 里**（`{open:true, example}` / `{open:false, reason}`），
+前端不许再按语言 id 猜第二遍。第一版就是猜了：Java 的面板挂着一个 placeholder 写 `pip3 install requests`
+的输入框，敲什么都只会收到一句"被拒绝" —— 那是界面在说谎，不是功能缺失。
+⇒ reset 对 java/spark-scala 这两族照样有用（jar 是手工塞的，更要能一键清掉），所以"没有命令窗口"不等于"没有面板"。
 
 **明确不做**（避免下次重新讨论）：题目级依赖声明（用户说了只谈 IDE）、import 失败→猜包名（`yaml`→pyyaml、`cv2`→opencv-python 这类映射猜错就得设计回落，而命令窗口把这整块复杂度删掉了）、网络/uid/rlimit 隔离、包版本锁定与 lockfile。
 

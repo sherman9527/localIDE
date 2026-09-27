@@ -202,6 +202,11 @@ tests/       Playwright E2E
   E2E 用宿主浏览器跑（默认 **Edge**，与日常使用一致）：`npm run e2e`；想换 Chrome 加 `ARENA_E2E_CHANNEL=chrome`。
   `./start.sh --e2e` 因此默认只把这条宿主命令告诉你，`--e2e --in-container` 是留给"网络能取到浏览器"的情形。
 - **`start.ps1` 必须带 UTF-8 BOM**：Windows PowerShell 5.1 读无 BOM 的中文脚本会解析失败（不是编码偏好，是它的默认代码页）。
+- **IDE 里现装的第三方包只属于 IDE，判题器看不到**（网页 IDE 的「依赖环境」面板：命令窗口 + 清单 + reset）。
+  python 走 venv、node 走 `node_modules`、Java/Scala 走 `lib/*` 进 classpath；装在**命名卷** `arena-ide-env`
+  里，跨 `--rebuild` 保留。C/C++ 只能靠镜像预装（apt），SQL/Redis 的"依赖"是那个服务本身，
+  PySpark 的解释器与判题共用一个常驻池所以不开环境 —— 每条理由界面上都会说，不写成"此语言不支持"。
+  ⇒ 反面一句也要说清：**做题想用第三方包 = 改镜像**，不能靠别人现装（`docs/JUDGING.md` 最后一段）。
 - 单人单机自用：没有账号体系、没有并发防护、没有跨人排行榜。
 - **端口只绑回环**（`127.0.0.1:7788`）：没有鉴权的服务发布到所有网卡，等于把整个题库（含被"移除"的题）
   和进度暴露给同局域网的人。**代价：手机 / iPad 访问不了**（已确认不需要）。

@@ -86,6 +86,7 @@ TypeScript 5.7 strict，`tsc -b` 三栈引用构建（`shared → server → web
 | GET | `/ide/languages` | 网页 IDE 的语言注册表（十种语言：label/样例/高亮/执行形态/**这门语言的运行预算**/现探可用性） |
 | POST | `/ide/run` | 网页 IDE 执行一次（与判题共用沙箱、白名单与并发闸，但不写 attempt） |
 | GET·POST | `/ide/repl*`、`/ide/debug*` | 两类**跨请求存活的子进程**：逐句求值（WI-77）与行断点单步（WI-81）。都是一问一答（每条命令都有天然的结束点），端点形状见下面两段 |
+| GET·POST | `/ide/env`、`/ide/env/command`、`/ide/env/reset` | 依赖环境（WI-87）：清单（GET，含占用字节）、命令窗口（POST，SSE 逐行回显）、回到镜像默认（POST reset）。落点在命名卷，**判题看不到**（见 `docs/JUDGING.md`） |
 | POST | `/judge` | 同步判题（兜底路径） |
 | POST | `/judge/stream` | 同一链路的 SSE 形态：`queued → log* → result` |
 | POST | `/grade` | 主观题评分 |
@@ -244,6 +245,34 @@ jdb 的 `locals` 不给类型（`DebugVar.type` 留空，不按值猜 int/long�
 
 **常驻 worker 的排队**：同一时刻只允许一个请求在飞（共用一个 JVM 的 stdout），
 判题优先于 IDE 且**不抢占**正在跑的那个 —— 抢占会把一次判题变成半成品。
+
+**依赖环境**（`ide/env.ts` + `env-command.ts` + `env-inventory.ts` + `reset.ts`，WI-87）：
+IDE 里可以现装第三方包（`pip3 install requests` / `npm i dayjs`），面板上同时给清单、占用字节与 reset。
+四条被实测逼出来的规矩：
+
+- **命令窗口不是 shell**。程序名与子命令走枚举，其余参数原样进 argv（`shell:false`），
+  并且拒绝会改变落点的逃逸参数（`--target` / `-e` / `pip --prefix`、`npm -g` / `-C`…）——
+  全仓库"没有任何用户输入进得去"那句审计结论（WI-86）就靠这条撑着，写成 `sh -c <输入>` 当场作废。
+  `pip3 install X` 会被改写成 `<venv 里的 python> -m pip install X`：直接跑系统 pip3 会把包装到**卷外面**。
+- **一切落点按运行时家族，不按语言 id**（`envFamilyOf`）：js 与 ts 共用同一份 `node_modules`，
+  否则用户要为同一份包装两次、还得猜哪门语言看得见它。python 用 venv 且必带 `--system-site-packages`
+  （不开它，镜像预装的 pandas 在 IDE 里反而 import 不到，那是倒退）；java/scala 用 `lib/*` 进 `-cp`。
+  一门语言的三条执行路径（运行 / REPL / 行断点）都从同一个 `IdeEnv` 拿解释器与环境，
+  只改一条会得到"装了但 REPL 里 import 不到"这种零报错的不一致。
+- **清单只读环境本身，不读安装日志**：venv 创建时自带 pip 与 setuptools，
+  所以"扫目录就天然只列出用户装的"是错的（真浏览器里量到面板把 47.7MB 报成用户包）。
+  改成建环境那一刻写一份基线 `.arena-baseline.json` 相减；不硬编码包名，
+  因为硬编码会把"用户自己升级了 pip"也一起藏掉。
+- **reset 的顺序是先杀会话、再删目录、最后重建**。反了会得到一个"解释器文件已经没了但进程还在跑"的活会话。
+
+容器里环境必须落在命名卷 `arena-ide-env`（compose）：`./data` 是 Windows 的 bind mount，
+同一个 `python3 -m venv` 在 `/opt` 1.76s、在 `/app/data` **87.2s**，慢 50 倍直接撞穿创建超时；
+卷还跨 `--rebuild` 保留，用户装的包不会因为改一行 Dockerfile 就没了。
+
+不支持命令窗口的语言各有理由，且**只写一份**（`envUnsupportedReason()`，面板与 reset 共用）：
+c/cpp 的依赖只能 apt 预装、mysql/redis 的"依赖"是那个服务本身、
+pyspark 的解释器由**与判题共用**的常驻池持有（单独开环境会撞红线一）。
+红线本身的落地与验证见 `docs/JUDGING.md` 最后一段。
 
 ---
 

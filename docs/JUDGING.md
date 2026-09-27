@@ -137,3 +137,24 @@
 }
 ```
 权重合计必须等于 10（schema 强制），`answer` 字段放参考要点（只喂给评分模型，不给答题者看）。
+
+## 判题看不到 IDE 里现装的包（红线）
+
+网页 IDE 有一个"依赖环境"面板：`pip install` / `npm install` 当场生效，装在命名卷 `arena-ide-env` 里，
+reset 一键回到镜像默认。**这条能力到不了判题器**，两道保险各自独立：
+
+- IDE 只把环境注入它自己的三条执行路径（一次性运行 / REPL / 行断点），注入方式是**子进程的 `env` 参数**；
+  服务进程的 `process.env` 一个字都不写（有闸门扫 `server/src/ide/**` 的赋值形态）。
+- `ARENA_IDE_ENV_DIR` 在 `server/src/config.ts` 里读一次就摘掉。compose 必须设它（venv 建在 bind mount 上
+  要 87s，只能指到命名卷），而判题子进程的环境是 `{ ...process.env, ...opts.env }`（`judge/process.ts`、
+  `exec/spark-pool.ts` 两处），留着它等于让每道题都看见 IDE 装了些什么。摘在 config 而不是在判题层过滤，
+  是为了让判题层**根本不需要知道 IDE 有这套东西**。
+
+理由不是洁癖：`docker/BUILDINFO.md` 承诺"重建镜像即可复现判题结果"。如果"用户今天在 IDE 里装了 pandas"
+能让"明天这道题的 AC 变了"，那条承诺就作废了。⇒ **出题要用第三方包 = 改镜像**，不是让人现装。
+
+闸门：`server/test/regression/ide-env-isolation.test.ts`，四层（A 行为：真起一个判题子进程看它的 env；
+B 全局：服务进程自己干净；B2 机制：摘掉这个动作本身有效，否则 B 只是在赌"这台机器没设过变量"；
+C 源码：判题目录不许引用、IDE 目录不许写 `process.env`）。
+这条闸门是**在容器里跑红之后才修对的**：宿主档位上那个变量本来就不存在，四层全绿而容器里漏成一片 ——
+所以 `./start.sh --verify` 那一档不是可选项。
