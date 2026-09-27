@@ -48,6 +48,8 @@ export default function Ide() {
   const [runError, setRunError] = useState<string | null>(null);
   const [formatting, setFormatting] = useState(false);
   const [formatNote, setFormatNote] = useState<string | null>(null);
+  /** 每次运行 +1，作为环境面板该重拉了的信号（见 runCode 的 finally 里的说明） */
+  const [envRevision, setEnvRevision] = useState(0);
   /** 断点行号（1 起）。真值在这里，编辑器里的只是镜像 —— 面板发请求要拿它。 */
   const [breakpoints, setBreakpoints] = useState<number[]>([]);
   const [stoppedLine, setStoppedLine] = useState<number | null>(null);
@@ -157,6 +159,9 @@ export default function Ide() {
       setResult(null);
     } finally {
       setRunning(false);
+      // 运行会 ensureIdeEnv（可能顺手补写老环境缺的基线），所以要让环境面板重拉一次，
+      // 否则面板会停在"把 venv 自带的 pip 报成用户包"那份旧真相上。
+      setEnvRevision((r) => r + 1);
     }
   }, [languageId, running, code, stdin, setup]);
 
@@ -300,8 +305,9 @@ export default function Ide() {
             {active ? (
               <IdeEnvPanel
                 key={`env-${active.id}`}
-                activeLanguage={active.id}
-                languageLabels={Object.fromEntries(languages.map((l) => [l.id, l.label]))}
+                languageId={active.id}
+                languageLabel={active.label}
+                revision={envRevision}
               />
             ) : null}
           </div>

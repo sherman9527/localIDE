@@ -39,8 +39,6 @@ const inv = (over: Partial<IdeEnvInventory>): IdeEnvInventory => ({
 });
 
 const response = (inventories: IdeEnvInventory[]): IdeEnvResponse => ({ inventories });
-const LABELS = { python: 'Python 3', javascript: 'JavaScript', c: 'C' };
-
 const byTestId = (id: string): HTMLElement | null => screen.queryByTestId(id);
 
 afterEach(() => {
@@ -53,7 +51,7 @@ describe('IdeEnvPanel', () => {
     envGet.mockResolvedValue(
       response([inv({ packages: [{ name: 'requests', version: '2.31.0', sizeBytes: 2048 }], totalBytes: 2048 })]),
     );
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-list')).toBeTruthy());
     const text = byTestId('ide-env-list')?.textContent ?? '';
     expect(text).toContain('requests');
@@ -65,7 +63,7 @@ describe('IdeEnvPanel', () => {
     envGet.mockResolvedValue(
       response([inv({ language: 'c', supported: false, reason: 'C 的依赖只能靠镜像预装（apt），运行期装不了' })]),
     );
-    render(<IdeEnvPanel activeLanguage="c" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="c" languageLabel="C" />);
     await waitFor(() => expect(byTestId('ide-env-unsupported')).toBeTruthy());
     expect(byTestId('ide-env-unsupported')?.textContent).toContain('apt');
     expect(byTestId('ide-env-command')).toBeNull();
@@ -74,7 +72,7 @@ describe('IdeEnvPanel', () => {
 
   it('声明与实装不一致时把 drift 显示出来，不许静默', async () => {
     envGet.mockResolvedValue(response([inv({ packages: [], drift: ['left-pad'] })]));
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-drift')).toBeTruthy());
     expect(byTestId('ide-env-drift')?.textContent).toContain('left-pad');
   });
@@ -85,7 +83,7 @@ describe('IdeEnvPanel', () => {
       onEvent?.({ type: 'output', text: 'Successfully installed requests-2.31.0\n' });
       return { status: 'ok', code: 0 };
     });
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-command')).toBeTruthy());
 
     fireEvent.change(byTestId('ide-env-command')!, { target: { value: 'pip3 install requests==2.31' } });
@@ -99,7 +97,7 @@ describe('IdeEnvPanel', () => {
   it('没收到结束标记时明说"完成与否未知"，不安静当成功', async () => {
     envGet.mockResolvedValue(response([inv({})]));
     envCommand.mockResolvedValue(null); // 流被截断
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-command')).toBeTruthy());
     fireEvent.change(byTestId('ide-env-command')!, { target: { value: 'pip3 install rich' } });
     fireEvent.click(byTestId('ide-env-run')!);
@@ -114,7 +112,7 @@ describe('IdeEnvPanel', () => {
         release = () => r({ status: 'ok', code: 0 });
       }),
     );
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-command')).toBeTruthy());
     fireEvent.change(byTestId('ide-env-command')!, { target: { value: 'pip3 install rich' } });
     fireEvent.click(byTestId('ide-env-run')!);
@@ -127,7 +125,7 @@ describe('IdeEnvPanel', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
     envGet.mockResolvedValue(response([inv({ totalBytes: 5_000_000 })]));
     envReset.mockResolvedValue({ ok: true, removedBytes: 5_000_000, stoppedSessions: 2, inventories: [] });
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-reset')).toBeTruthy());
     fireEvent.click(byTestId('ide-env-reset')!);
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
@@ -138,11 +136,35 @@ describe('IdeEnvPanel', () => {
   it('用户取消二次确认时不发请求（重置会删掉他装的所有包）', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     envGet.mockResolvedValue(response([inv({})]));
-    render(<IdeEnvPanel activeLanguage="python" languageLabels={LABELS} />);
+    render(<IdeEnvPanel languageId="python" languageLabel="Python 3" />);
     await waitFor(() => expect(byTestId('ide-env-reset')).toBeTruthy());
     fireEvent.click(byTestId('ide-env-reset')!);
     await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
     expect(envReset).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
+  });
+
+  /**
+   * 运行会触发 ensureIdeEnv，而老环境（基线文件缺失）正是在那一刻被补写的。
+   * 面板如果不跟着重拉，就会出现"后端已经只列用户包、界面还在列 pip/setuptools"
+   * —— 实测在真浏览器里撞到过一次（命名卷跨重建保留，老环境没基线）。
+   */
+  it('revision 变化时重新拉清单（否则运行后界面会停在旧真相）', async () => {
+    envGet.mockResolvedValue(response([inv({ packages: [] })]));
+    const { rerender } = render(<IdeEnvPanel languageId="python" languageLabel="Python 3" revision={0} />);
+    await waitFor(() => expect(envGet).toHaveBeenCalledTimes(1));
+
+    rerender(<IdeEnvPanel languageId="python" languageLabel="Python 3" revision={1} />);
+    await waitFor(() => expect(envGet).toHaveBeenCalledTimes(2));
+  });
+
+  it('同一 revision 下反复渲染不重复请求（否则每次输入都打一次后端）', async () => {
+    envGet.mockResolvedValue(response([inv({ packages: [] })]));
+    const { rerender } = render(<IdeEnvPanel languageId="python" languageLabel="Python 3" revision={3} />);
+    await waitFor(() => expect(envGet).toHaveBeenCalledTimes(1));
+    rerender(<IdeEnvPanel languageId="python" languageLabel="Python 3" revision={3} />);
+    rerender(<IdeEnvPanel languageId="python" languageLabel="Python 3" revision={3} />);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(envGet).toHaveBeenCalledTimes(1);
   });
 });

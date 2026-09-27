@@ -14,9 +14,14 @@ import { useAsync } from '../lib/hooks';
  */
 
 interface Props {
-  /** 面板默认选中当前正在写的语言；换语言时跟着换 */
-  activeLanguage: string;
-  languageLabels: Record<string, string>;
+  /** 面板显示的就是**当前正在写的这门语言**的环境 —— 不再自带一个语言选择器 */
+  languageId: string;
+  languageLabel: string;
+  /**
+   * 每次运行完成后由页面 +1。运行会触发 ensureIdeEnv，而老环境缺基线正是在那一刻被补写 ——
+   * 不给一个重拉的信号，界面就会停在"把 venv 自带的 pip 当用户包"那份旧真相上。
+   */
+  revision?: number;
 }
 
 function formatBytes(n: number): string {
@@ -25,20 +30,19 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
-  const [selected, setSelected] = useState(activeLanguage);
+export default function IdeEnvPanel({ languageId, languageLabel, revision = 0 }: Props) {
   const [command, setCommand] = useState('');
   const [log, setLog] = useState<string[]>([]);
   const [running, setRunning] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const { data, loading, error, reload } = useAsync((signal) => api.ideEnv({ signal }), [running, resetting]);
+  const { data, loading, error, reload } = useAsync((signal) => api.ideEnv({ signal }), [running, resetting, revision]);
   const logRef = useRef<HTMLPreElement | null>(null);
 
-  // 换语言时面板跟着换：右栏两个面板曾因 key 复用而"切走了面板还赖着"（WI-81）
+  // 换语言时清掉上一次的输出：留着会让人以为那个包是这门语言装的
   useEffect(() => {
-    setSelected(activeLanguage);
     setLog([]);
-  }, [activeLanguage]);
+    setCommand('');
+  }, [languageId]);
 
   useEffect(() => {
     const el = logRef.current;
@@ -46,7 +50,7 @@ export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
   }, [log]);
 
   const inventories: IdeEnvInventory[] = data?.inventories ?? [];
-  const current = inventories.find((i) => i.language === selected);
+  const current = inventories.find((i) => i.language === languageId);
 
   const runInstall = useCallback(async () => {
     const argv = command.trim().split(/\s+/).filter(Boolean);
@@ -57,7 +61,7 @@ export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
       const onEvent = (e: IdeEnvCommandEvent): void => {
         if (e.type === 'output') setLog((prev) => [...prev, e.text]);
       };
-      const done = await api.ideEnvCommand({ language: selected, argv }, onEvent);
+      const done = await api.ideEnvCommand({ language: languageId, argv }, onEvent);
       if (!done) {
         // 没有 done 就是流被截断。必须说实话 —— 静默收尾会让人以为装成功了。
         setLog((prev) => [...prev, '（连接中断，没有收到结束标记：这条命令是否完成**未知**，请看清单）']);
@@ -71,13 +75,13 @@ export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
       setCommand('');
       reload();
     }
-  }, [command, running, selected, reload]);
+  }, [command, running, languageId, reload]);
 
   const reset = useCallback(async () => {
     if (resetting) return;
     setResetting(true);
     try {
-      const res = await api.ideEnvReset({ language: selected });
+      const res = await api.ideEnvReset({ language: languageId });
       setLog([
         res.ok
           ? `已重置（释放 ${formatBytes(res.removedBytes)}，作废 ${res.stoppedSessions} 个活会话）`
@@ -89,22 +93,17 @@ export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
       setResetting(false);
       reload();
     }
-  }, [resetting, selected, reload]);
+  }, [resetting, languageId, reload]);
 
   return (
     <section className="card ide-env-panel" data-testid="ide-env" aria-label="依赖环境">
       <header className="ide-env-head">
         <h2 className="card-title">依赖环境</h2>
-        <label className="ide-env-lang">
-          <span className="visually-hidden">选择语言</span>
-          <select className="select" value={selected} onChange={(e) => setSelected(e.target.value)} aria-label="查看哪门语言的环境">
-            {Object.entries(languageLabels).map(([id, label]) => (
-              <option key={id} value={id}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {/* 这里**不再放语言选择器**：页面顶部那个已经说了"我在写哪门语言"，
+            第二份选择器除了制造两个真相源，还会让 getByLabel('语言') 命中两个元素。 */}
+        <span className="badge" data-testid="ide-env-lang">
+          {languageLabel}
+        </span>
       </header>
 
       <p className="ide-env-note">这些包只影响 IDE 的运行 / REPL / 调试；<strong>判题器看不到它们</strong>。</p>
@@ -148,7 +147,7 @@ export default function IdeEnvPanel({ activeLanguage, languageLabels }: Props) {
               className="btn"
               onClick={() => {
                 // 破坏性动作要确认：它会停掉活的 REPL 并删掉用户装的所有包
-                if (window.confirm(`重置 ${languageLabels[selected] ?? selected} 的依赖环境？活着的 REPL / 调试会话会被关掉。`)) {
+                if (window.confirm(`重置 ${languageLabel} 的依赖环境？活着的 REPL / 调试会话会被关掉。`)) {
                   void reset();
                 }
               }}
