@@ -243,6 +243,11 @@ case "${1:-up}" in
     stop_bridge
     ;;
   --verify)
+    # **先起新代码，再验**。`docker compose exec` 进的是**当前跑着的那个容器**，
+    # 而容器用的是它被创建时的镜像 —— 所以光 `docker compose build` 都不算，必须 `up -d` 重建容器。
+    # 实测踩过：改完代码直接 `./start.sh --verify`，验的是上一个镜像里的源码，
+    # 新加的那条闸门"通过"得毫无意义（它压根没看见新文件），而日志看起来跟真的一样。
+    start_app || exit 1
     # -T：非 TTY 下（CI、agent、被别的脚本调用）不加 -T 会直接 "the input device is not a TTY" 失败
     # SKIP_E2E=1：E2E 的 global setup 要用 `docker compose` 起隔离实例，容器里没有 docker 可用，
     # 不加这一句 --verify 会在最后一个阶段必挂（判题矩阵其实已经跑完了），看起来像"验证不通过"。

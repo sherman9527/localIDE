@@ -213,6 +213,12 @@ if ($Logs) { docker compose logs -f arena; exit }
 if ($BridgeLogs) { Get-Content 'data\llm-bridge.log' -Wait -Tail 60; exit }
 if ($Status) { docker compose ps; exit }
 if ($Verify) {
+  # **先起新代码，再验**（与 start.sh --verify 同一判据）：`docker compose exec` 进的是当前跑着的
+  # 容器，而它用的是被创建时那个镜像 —— 只 build 不 up -d 等于验旧代码。
+  Start-Bridge
+  Invoke-Step '镜像构建' { docker compose build --pull=false }
+  Invoke-Step '启动容器' { docker compose up -d arena }
+  Wait-Healthy 180
   # 与 start.sh 同一判据：容器里没有 docker，E2E 起不了隔离实例，必须 SKIP_E2E=1，
   # 否则 --verify 会在最后一个阶段必挂（判题矩阵其实已经跑完）。
   Write-Host '[arena] 容器内验证跳过 E2E（容器里起不了隔离实例）；E2E 请在宿主跑：npm run e2e（用 Edge 验你真正看的界面）' -ForegroundColor Cyan

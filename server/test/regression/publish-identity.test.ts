@@ -43,6 +43,31 @@ function identityPatterns(): Array<{ label: string; re: RegExp }> {
 
 const BINARY = /\.(png|jpe?g|gif|webp|ico|woff2?|ttf|eot|zip|wasm|pdf|bundle)$/i;
 
+/**
+ * 这条闸门只能在**有 git 元数据**的地方跑，而容器里恰好没有：`.dockerignore` 排掉了 `.git`，
+ * 于是 `git ls-files` 直接 `fatal: not a git repository`。
+ * 第一版没管它，结果 `./start.sh --verify` 整个交付档被这条"跟判题无关"的闸门撞红
+ * （容器测的是镜像里那份源码，它不知道也不该知道自己会不会被发布）。
+ *
+ * 但"没 git 就跳过"不能写成无条件 `try/catch → return`：那等于宿主上 git 一坏，
+ * 这条闸门就静默变成装饰品（正是 `dev_verify_workflow.md` 第 3 条要点名的故障）。
+ * ⇒ 跳过必须**同时**满足"确实在镜像里"，这一条单独占一个永远会跑的 it。
+ */
+const inImage = existsSync('/.dockerenv');
+
+function trackedTextFiles(): string[] | null {
+  try {
+    return execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', cwd: config.repoRoot })
+      .split('\0')
+      .filter(Boolean)
+      .filter((p) => !BINARY.test(p));
+  } catch {
+    return null;
+  }
+}
+
+const tracked = trackedTextFiles();
+
 describe('发布闸门：库里不许有本机身份', () => {
   const patterns = identityPatterns();
 
@@ -53,28 +78,25 @@ describe('发布闸门：库里不许有本机身份', () => {
     ).toBeGreaterThan(0);
   });
 
-  it('被跟踪的文件里不许出现本机账户名或个人邮箱', () => {
-    const files = execFileSync('git', ['ls-files', '-z'], {
-      encoding: 'utf8',
-      cwd: config.repoRoot,
-    })
-      .split('\0')
-      .filter(Boolean)
-      .filter((p) => !BINARY.test(p));
-    expect(files.length, '一个文件都没扫到，说明 git ls-files 跑空了').toBeGreaterThan(50);
+  it('在镜像里跳过只能因为镜像里没有 .git，不能因为宿主仓库坏了', () => {
+    if (tracked !== null) return; // 拿得到文件清单 ⇒ 本条无需判据，正常跑主用例
+    expect(inImage, 'git ls-files 失败了，但这里不是镜像（/.dockerenv 不存在）⇒ 宿主仓库出问题，不许当"跳过"混过去').toBe(true);
+  });
 
-    const offenders: string[] = [];
-    for (const f of files) {
-      const full = join(config.repoRoot, f);
-      if (!existsSync(full)) continue; // 只在历史里存在、工作树已删的，交给发布前的全量扫描
+  it.skipIf(tracked === null)('被跟踪的文件里不许出现本机账户名或个人邮箱', () => {
+    // skipIf 而不是 return：跑出来的那一行会写 "1 skipped"，看不见跳过这件事本身就是缺陷
+    const files = tracked ?? []; // 走到这里 tracked 必然非 null（上面那两条 it 负责"为什么会是 null"）
+    expect(files.length, '一个文件都没扫到，说明 git ls-files 跑空了').toBeGreaterThan(50);
+    const hits: string[] = [];
+    for (const rel of files) {
       let text: string;
       try {
-        text = readFileSync(full, 'utf8');
+        text = readFileSync(join(config.repoRoot, rel), 'utf8');
       } catch {
-        continue;
+        continue; // 列出来却读不到（刚被删）：不是本条要管的事
       }
-      for (const p of patterns) if (p.re.test(text)) offenders.push(`${p.label}  ->  ${f}`);
+      for (const { label, re } of patterns) if (re.test(text)) hits.push(`${rel} ← ${label}`);
     }
-    expect(offenders, `这些文件会把本机身份公开：\n${offenders.join('\n')}`).toEqual([]);
+    expect(hits, `这些文件里出现了本机身份：\n${hits.join('\n')}`).toEqual([]);
   });
 });

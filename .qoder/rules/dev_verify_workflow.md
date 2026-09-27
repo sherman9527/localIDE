@@ -8,6 +8,10 @@
 1. **任何改动都要跑验证**，且**没看到通过输出之前不许说"完成"**。
    验证入口只有两个：`npm run verify:fast`（宿主，约 45s）与 `./start.sh --verify`
    （容器内 `SKIP_E2E=1 ARENA_REQUIRE_STACKS=1 npm run verify`，含判题矩阵）。
+   **`--verify` 会先 build + `up -d` 再 exec**（两个脚本都是这条判据，2026-09-27 补）：
+   `docker compose exec` 进的是**当前跑着的容器**，而容器用的是它被创建时的镜像 ——
+   实测踩过：改完代码直接 `--verify`，验的是上一个镜像里的源码，新加的闸门"通过"得毫无意义
+   （它压根没看见新文件），而日志看起来跟真的一样。
    **E2E 归宿主**：镜像里不带浏览器（那个 `ARG INSTALL_E2E` 开关从来没人传过，已删），
    所以容器内裸跑 `npm run verify` 会在最后一个阶段必挂 —— 那不是回归，是走错门。
    确实要在容器里跑：`./start.sh --e2e --in-container`（当场装 bundled Chromium，
@@ -20,6 +24,10 @@
    于是"闸门"一直是装饰）、`runner-coverage`（每个 judgeKind 是否有双向往返测试）、
    `assert-ran.mjs`（判题矩阵整片 skip 也算失败）。加新目录/新栈时它们会要求你接线。
    故意手动跑的闸门要在文件里写一行 `verify-gate: manual —— 原因`，否则守卫会替你不依不饶。
+   **换机器成立的闸门（如"扫被 git 跟踪的文件"）在镜像里必然跑不了**：`.dockerignore` 排掉了 `.git`，
+   `git ls-files` 直接 fatal ⇒ 整个交付档被一条与判题无关的闸门撞红（`publish-identity.test.ts` 就是这样）。
+   跳过要用 `it.skipIf`（报告会写 "1 skipped"）而不是 `try/catch → return`，
+   并且**另起一条永远会跑的断言**解释"为什么会是 null"（那里必须是镜像，不能是宿主仓库坏了）。
 4. **跨 session 记忆要更新**：`memo.md` 追加里程碑（做了什么 / 验证表 / 已知问题 / 教训），
    `HANDOVER.md` 移动工作项（完成 → COMPLETED 并带验证命令与结果）。
 
