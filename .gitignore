@@ -26,7 +26,9 @@ blob-report/
 # 浏览器自动化产生的临时页面快照
 .playwright-mcp/
 
-# npm 缓存里的"上次检查更新"时间戳：每次 npm 动一下就变，纯噪音
+# npm 缓存里的噪音：每次 npm 动一下就写的调试日志与"上次检查更新"时间戳
+# （docker-cache 本体是要留的 —— 它承载离线构建的包，这两类文件不是）
+docker-cache/npm/_logs/
 docker-cache/npm/_update-notifier-last-checked
 
 # Python 编译缓存（spark_worker 的 .pyc 曾被提交进仓库）
