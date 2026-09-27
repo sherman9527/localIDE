@@ -318,15 +318,26 @@ export interface IdeEnvPackage {
 }
 
 /**
+ * 面板的命令窗口开不开。判据是后端事实（这个家族有没有"一条命令就能装对"的安装器），
+ * 不是前端按语言 id 猜 —— 关着的时候必须同时给出**为什么**与**那该怎么办**，
+ * 给一个永远会被拒的输入框比不给更糟（用户会以为是自己的写法错了）。
+ */
+export type IdeEnvCommandWindow =
+  | { open: true; /** 输入框的示例写法，由后端给：它才知道该敲 `pip3` 还是 `npm` */ example: string }
+  | { open: false; reason: string };
+
+/**
  * 一门语言的依赖环境清单。`supported:false` 时 `reason` 必须说清为什么 ——
  * 给一个空列表会让人以为"我装了但没生效"。
  */
 export interface IdeEnvInventory {
   language: string;
-  /** 环境按运行时家族分（js 与 ts 同属 node）。前端用它决定命令输入框的示例写法。 */
+  /** 环境按运行时家族分（js 与 ts 同属 node）。 */
   family?: 'python' | 'node' | 'java' | 'scala';
   supported: boolean;
   reason?: string;
+  /** 只在 `supported` 时有意义：这门语言怎么往环境里加东西。 */
+  commandWindow?: IdeEnvCommandWindow;
   packages: IdeEnvPackage[];
   /** 整个环境目录的体积（venv 自带的 pip/setuptools 也算，面板要说的是"吃掉多少盘"） */
   totalBytes: number;

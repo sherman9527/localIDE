@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { IDE_ENV_ROOT, envFamilyOf, envUnsupportedReason, familyDir, readVenvBaseline, sumBytes, type IdeEnvFamily } from './env.js';
+import { commandWindowFor } from './env-command.js';
 import type { IdeLanguage } from './languages.js';
 
 /**
@@ -10,8 +11,9 @@ import type { IdeLanguage } from './languages.js';
  * 不是"装过什么"的记录。记录会漂移：手工塞一个 jar、装到一半崩了、容器重建后目录还在
  * 而记录没了 —— 任何一种都会让界面显示的和现实不一致。
  *
- * 推论很省事：**"哪些是用户自装的"由物理位置回答**。venv 继承了系统 site-packages
- * （为了保住镜像预装的 pandas），但清单只扫 venv 自己那一层，所以不需要维护 diff 表。
+ * "哪些是用户自装的"主要由物理位置回答（清单只扫环境自己那一层，不扫系统 site-packages），
+ * 但光靠位置不够：venv 创建时会把 pip/setuptools 装进**它自己的** site-packages，
+ * 所以要再减一份"建好那一刻已有什么"的基线（见 `writeVenvBaseline`）。
  */
 
 // 类型只有一份真相：契约在 shared，服务端实现它，不另立一个"看起来一样"的版本。
@@ -167,5 +169,14 @@ export async function readInventory(language: IdeLanguage, root: string = IDE_EN
   // 体积按整个环境目录量，而不是把各包相加：venv 自带的 pip/setuptools 也真实占盘，
   // 面板要说的是"这个环境吃掉多少磁盘"，不是"用户包的元数据合计"。
   const totalBytes = await sumBytes(familyDir(root, family));
-  return { language: language.id, family, supported: true, packages, totalBytes, drift, note: NOTE };
+  return {
+    language: language.id,
+    family,
+    supported: true,
+    commandWindow: commandWindowFor(language, root),
+    packages,
+    totalBytes,
+    drift,
+    note: NOTE,
+  };
 }

@@ -1,7 +1,16 @@
 import { join } from 'node:path';
+import type { IdeEnvCommandWindow } from '@arena/shared';
 import { config } from '../config.js';
 import { runProcess } from '../judge/process.js';
-import { IDE_ENV_ROOT, ensureIdeEnv, envFamilyOf, venvPythonPath, type IdeEnvFamily } from './env.js';
+import {
+  IDE_ENV_ROOT,
+  ensureIdeEnv,
+  envFamilyOf,
+  envUnsupportedReason,
+  familyDir,
+  venvPythonPath,
+  type IdeEnvFamily,
+} from './env.js';
 import type { IdeLanguage } from './languages.js';
 
 /**
@@ -84,20 +93,31 @@ function normalizeNode(argv: string[], nodeRoot: string): { sub: string; rest: s
   return { sub, rest: [...rest, '--prefix', nodeRoot] };
 }
 
+/**
+ * 命令窗口开不开 —— 一处判据，面板与 `parseEnvCommand` 共用（两边说不一样的话就是 bug）。
+ * 关着的两类不许并成一句"不支持"：java/scala **有**环境（jar 丢进 lib 这条路是通的），
+ * 只是没有一条能把传递依赖解析对的 install 命令 —— 所以要说清"该怎么做"，而不是只说不行。
+ */
+export function commandWindowFor(language: IdeLanguage, root: string = IDE_ENV_ROOT): IdeEnvCommandWindow {
+  const family = envFamilyOf(language);
+  if (family === 'python') return { open: true, example: 'pip3 install requests' };
+  if (family === 'node') return { open: true, example: 'npm install left-pad' };
+  if (!family) return { open: false, reason: envUnsupportedReason(language) };
+  return {
+    open: false,
+    reason:
+      `${language.label} 的依赖是 jar 文件：放进 ${join(familyDir(root, family), 'lib')} 就会进 classpath。` +
+      '不开命令窗口是因为传递依赖要一起解析成 classpath，一条 install 装不对。',
+  };
+}
+
 export function parseEnvCommand(language: IdeLanguage, argv: readonly string[]): EnvCommandParse {
   const cleaned = [...argv].map((a) => String(a)).filter((a) => a.trim() !== '');
   if (cleaned.length === 0) return { ok: false, reason: '命令是空的' };
 
   const family = envFamilyOf(language);
-  if (family !== 'python' && family !== 'node') {
-    return {
-      ok: false,
-      reason:
-        family === undefined
-          ? `${language.label} 没有可安装的依赖环境（这门语言的依赖只能靠镜像预装）`
-          : `${language.label} 本期不开命令窗口：它的依赖要连传递依赖一起解析成 classpath，不是一条 install 能装对的`,
-    };
-  }
+  const window = commandWindowFor(language);
+  if (!window.open) return { ok: false, reason: window.reason };
 
   if (family === 'python') {
     const norm = normalizePython(cleaned);

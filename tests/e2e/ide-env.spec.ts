@@ -66,6 +66,16 @@ test('切到没有依赖环境的语言：给原因，并且不出现命令输�
   await expect(page.getByTestId('ide-env-command')).toHaveCount(0);
 });
 
+test('切到"有环境但没有安装器"的语言：给 jar 的落点，不给一个必然被拒的输入框', async ({ page }) => {
+  await page.getByLabel('语言').selectOption('java');
+  const closed = page.getByTestId('ide-env-closed');
+  await expect(closed).toBeVisible();
+  await expect(closed).toContainText(/java[\\/]lib/);
+  await expect(page.getByTestId('ide-env-command')).toHaveCount(0);
+  // reset 对这类语言同样有用：jar 是手工塞进去的，更要能一键清掉
+  await expect(page.getByTestId('ide-env-reset')).toBeVisible();
+});
+
 test('pip3 list 能跑通并把输出显示出来（不联网，验的是整条 SSE 通路）', async ({ page }) => {
   await page.getByTestId('ide-env-command').fill('pip3 list');
   await page.getByTestId('ide-env-run').click();

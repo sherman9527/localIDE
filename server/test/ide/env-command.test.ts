@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
 import { IDE_ENV_ROOT, envFamilyOf, venvPythonPath } from '../../src/ide/env.js';
-import { parseEnvCommand, runEnvCommand, envCommandBusy } from '../../src/ide/env-command.js';
+import { parseEnvCommand, runEnvCommand, envCommandBusy, commandWindowFor } from '../../src/ide/env-command.js';
 import { findLanguage } from '../../src/ide/languages.js';
 
 /**
@@ -69,11 +69,29 @@ describe('parseEnvCommand：白名单，不是 shell', () => {
     if (r.ok) expect(r.args).toContain('a;rm -rf /');
   });
 
-  it('本期没有环境的语言直接拒绝，并说明原因', () => {
+  it('命令窗口开不开由后端一处决定，且拒绝语与面板看到的是同一句话', () => {
+    expect(commandWindowFor(python)).toEqual({ open: true, example: 'pip3 install requests' });
+    expect(commandWindowFor(node)).toEqual({ open: true, example: 'npm install left-pad' });
+
+    // java 有环境（jar 进 classpath 这条路是通的），只是没有安装器 ⇒ 要说"该怎么做"
+    // 路径按 join 比而不是写死 `/`：宿主是 Windows，join 出来是反斜杠
+    const jw = commandWindowFor(java, '/env-root');
+    expect(jw.open).toBe(false);
+    if (!jw.open) expect(jw.reason).toContain(join('/env-root', 'java', 'lib'));
+    const sw = commandWindowFor(findLanguage('spark-scala')!, '/env-root');
+    expect(sw.open).toBe(false);
+    if (!sw.open) expect(sw.reason).toContain(join('/env-root', 'scala', 'lib'));
+
+    const cw = commandWindowFor(c);
+    expect(cw.open).toBe(false);
+    if (!cw.open) expect(cw.reason).toContain('apt'); // 来自 envUnsupportedReason，不另写一份
+
+    // 面板按 commandWindow 决定给不给输入框；给了框却必然被拒 = 界面说谎。两边判据必须一致。
     for (const lang of [java, c]) {
       const r = parseEnvCommand(lang, ['pip3', 'list']);
       expect(r.ok, `${lang.id} 不该有命令窗口`).toBe(false);
-      if (!r.ok) expect(r.reason.length).toBeGreaterThan(4);
+      const w = commandWindowFor(lang);
+      if (!r.ok && !w.open) expect(r.reason).toBe(w.reason);
     }
     expect(envFamilyOf(java)).toBe('java'); // java 有环境目录，但没有命令窗口（传递依赖另说）
   });

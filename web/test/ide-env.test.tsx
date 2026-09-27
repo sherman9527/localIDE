@@ -31,6 +31,8 @@ import IdeEnvPanel from '../src/components/IdeEnvPanel';
 const inv = (over: Partial<IdeEnvInventory>): IdeEnvInventory => ({
   language: 'python',
   supported: true,
+  family: 'python',
+  commandWindow: { open: true, example: 'pip3 install requests' },
   packages: [],
   totalBytes: 0,
   drift: [],
@@ -68,6 +70,27 @@ describe('IdeEnvPanel', () => {
     expect(byTestId('ide-env-unsupported')?.textContent).toContain('apt');
     expect(byTestId('ide-env-command')).toBeNull();
     expect(byTestId('ide-env-reset')).toBeNull();
+  });
+
+  it('有环境但没有安装器的语言：不给输入框，要给"该怎么做"，且 reset 照旧可用', async () => {
+    envGet.mockResolvedValue(
+      response([
+        inv({
+          language: 'java',
+          family: 'java',
+          commandWindow: { open: false, reason: 'Java 的依赖是 jar 文件：放进 /opt/arena-ide-env/java/lib 就会进 classpath。' },
+          packages: [{ name: 'guava-33.jar', version: '', sizeBytes: 1024 }],
+          totalBytes: 1024,
+        }),
+      ]),
+    );
+    render(<IdeEnvPanel languageId="java" languageLabel="Java" />);
+    await waitFor(() => expect(byTestId('ide-env-closed')).toBeTruthy());
+    expect(byTestId('ide-env-closed')?.textContent).toContain('java/lib');
+    expect(byTestId('ide-env-command')).toBeNull();
+    // 清回镜像默认对这类语言同样有用（jar 是塞进去的，更要能一键清空）
+    expect(byTestId('ide-env-reset')).toBeTruthy();
+    expect(byTestId('ide-env-list')?.textContent).toContain('guava-33.jar');
   });
 
   it('声明与实装不一致时把 drift 显示出来，不许静默', async () => {

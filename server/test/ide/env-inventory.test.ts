@@ -165,4 +165,15 @@ describe('java / scala 与不支持的语言', () => {
       expect(inv.note).toContain('判题');
     }
   });
+
+  it('清单要带上"这门语言怎么加包"，否则面板只能自己按语言 id 猜（Java 挂 pip 输入框就是这么来的）', async () => {
+    const root = await freshRoot();
+    expect((await readInventory(python, root)).commandWindow).toEqual({ open: true, example: 'pip3 install requests' });
+    expect((await readInventory(node, root)).commandWindow).toEqual({ open: true, example: 'npm install left-pad' });
+    const jv = await readInventory(java, root);
+    expect(jv.supported, 'java 有环境：lib 下的 jar 会进 classpath').toBe(true);
+    expect(jv.commandWindow?.open, '但没有安装器').toBe(false);
+    // 没有环境的语言不给 commandWindow：面板那条 reason 已有出处，两处说同一件事就是重复
+    expect((await readInventory(c, root)).commandWindow).toBeUndefined();
+  });
 });

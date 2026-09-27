@@ -119,47 +119,61 @@ export default function IdeEnvPanel({ languageId, languageLabel, revision = 0 }:
 
       {current?.supported ? (
         <>
-          <div className="ide-env-form-row">
-            <input
-              className="input"
-              type="text"
-              value={command}
-              placeholder={current.family === 'node' ? 'npm install left-pad' : 'pip3 install requests'}
-              onChange={(e) => setCommand(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void runInstall();
-              }}
-              disabled={running}
-              aria-label="环境命令"
-              data-testid="ide-env-command"
-            />
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => void runInstall()}
-              disabled={running || command.trim() === ''}
-              data-testid="ide-env-run"
-            >
-              {running ? '执行中…' : '执行'}
-            </button>
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                // 破坏性动作要确认：它会停掉活的 REPL 并删掉用户装的所有包
-                if (window.confirm(`重置 ${languageLabel} 的依赖环境？活着的 REPL / 调试会话会被关掉。`)) {
-                  void reset();
-                }
-              }}
-              disabled={resetting}
-              data-testid="ide-env-reset"
-            >
-              {resetting ? '重置中…' : '重置环境'}
-            </button>
-          </div>
-          <p className="ide-env-hint">
-            命令按空白拆开交给 pip / npm，不经过 shell —— 分号、管道在这里只是字符。
-          </p>
+          {/* 开不开、示例怎么写都由后端说（`commandWindow`）：前端自己按语言 id 猜过一次，
+              结果是 Java 的面板挂着一个 pip 输入框，敲什么都只会收到一句"被拒绝"。 */}
+          {current.commandWindow && !current.commandWindow.open ? (
+            <p className="ide-env-unsupported" data-testid="ide-env-closed">
+              {current.commandWindow.reason}
+            </p>
+          ) : null}
+
+          {current.commandWindow?.open ? (
+            <>
+              <div className="ide-env-form-row">
+                <input
+                  className="input"
+                  type="text"
+                  value={command}
+                  placeholder={current.commandWindow.example}
+                  onChange={(e) => setCommand(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void runInstall();
+                  }}
+                  disabled={running}
+                  aria-label="环境命令"
+                  data-testid="ide-env-command"
+                />
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void runInstall()}
+                  disabled={running || command.trim() === ''}
+                  data-testid="ide-env-run"
+                >
+                  {running ? '执行中…' : '执行'}
+                </button>
+              </div>
+              <p className="ide-env-hint">
+                命令按空白拆开交给 pip / npm，不经过 shell —— 分号、管道在这里只是字符。
+              </p>
+            </>
+          ) : null}
+
+          {/* reset 与命令窗口是两件事：Java 那类没有安装器，但"清回镜像默认"照样有用。 */}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              // 破坏性动作要确认：它会停掉活的 REPL 并删掉用户装的所有包
+              if (window.confirm(`重置 ${languageLabel} 的依赖环境？活着的 REPL / 调试会话会被关掉。`)) {
+                void reset();
+              }
+            }}
+            disabled={resetting}
+            data-testid="ide-env-reset"
+          >
+            {resetting ? '重置中…' : '重置环境'}
+          </button>
 
           {current.drift.length > 0 ? (
             <p className="banner banner-warn" data-testid="ide-env-drift">
