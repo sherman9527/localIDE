@@ -309,3 +309,31 @@ export type IdeEnvCommandEvent =
   | { type: 'output'; text: string }
   /** 最后一条必为 done：界面据此收尾，缺了它就是把请求悬在半空 */
   | { type: 'done'; status: IdeEnvCommandStatus; code: number | null };
+
+/** IDE 环境里"用户自己装了什么"的一条记录。 */
+export interface IdeEnvPackage {
+  name: string;
+  version: string;
+  sizeBytes: number;
+}
+
+/**
+ * 一门语言的依赖环境清单。`supported:false` 时 `reason` 必须说清为什么 ——
+ * 给一个空列表会让人以为"我装了但没生效"。
+ */
+export interface IdeEnvInventory {
+  language: string;
+  supported: boolean;
+  reason?: string;
+  packages: IdeEnvPackage[];
+  /** 整个环境目录的体积（venv 自带的 pip/setuptools 也算，面板要说的是"吃掉多少盘"） */
+  totalBytes: number;
+  /** 声明了却不在 node_modules 里的包名。不一致必须显式报出来，不许吞。 */
+  drift: string[];
+  /** 常驻提示："这些只影响 IDE，判题器看不到" */
+  note: string;
+}
+
+export interface IdeEnvResponse {
+  inventories: IdeEnvInventory[];
+}

@@ -119,7 +119,7 @@ export function ideEnvPaths(root: string): IdeEnvPaths {
 }
 
 /** 目录不存在算 0 而不是抛错 —— 面板要在"还没装过任何东西"的状态下也能拉清单。 */
-async function sumBytes(dir: string): Promise<number> {
+export async function sumBytes(dir: string): Promise<number> {
   let entries: string[];
   try {
     entries = await readdir(dir);

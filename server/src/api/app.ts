@@ -44,6 +44,7 @@ import { IDE_LANGUAGES, IDE_LIMITS, ideAvailability, runIdeCode } from '../ide/r
 import { REPL_IDLE_MS, REPL_MAX_SESSIONS, feedRepl, replSessions, startRepl, stopRepl } from '../ide/repl.js';
 import { DEBUG_IDLE_MS, DEBUG_MAX_SESSIONS, debugSessions, startDebug, stepDebug, stopDebug } from '../ide/debug.js';
 import { runEnvCommand } from '../ide/env-command.js';
+import { readInventory } from '../ide/env-inventory.js';
 import { findLanguage } from '../ide/languages.js';
 import type {
   DebugAction,
@@ -56,6 +57,7 @@ import type {
   DebugStopResponse,
   IdeEnvCommandEvent,
   IdeEnvCommandRequest,
+  IdeEnvResponse,
   IdeLanguagesResponse,
   IdeRunRequest,
   IdeRunResponse,
@@ -481,6 +483,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const body = (request.body ?? {}) as Partial<DebugStopRequest>;
     const ok = await stopDebug(typeof body.sessionId === 'string' ? body.sessionId : '');
     return { ok, sessions: debugSessions().length };
+  });
+
+  // MARK: /api/ide/env（清单：用户自己装了什么、占多少盘、哪些语言不支持）
+  app.get(`${api}/ide/env`, async (): Promise<IdeEnvResponse> => {
+    // 一次把所有语言算完给前端：面板是"每门语言一栏"，逐个请求会变成十次往返
+    const inventories = await Promise.all(IDE_LANGUAGES.map((lang) => readInventory(lang)));
+    return { inventories };
   });
 
   // MARK: /api/ide/env/command（SSE：装包是几十秒到几分钟的事，不能悬一个普通请求）

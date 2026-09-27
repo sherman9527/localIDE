@@ -197,4 +197,21 @@ describe('路由接线：校验必须在 hijack 之前', () => {
   it('无论成功还是异常，都以一条 done 事件收尾（缺了界面就悬在半空）', () => {
     expect(route.split("type: 'done'").length - 1, 'done 事件至少要在成功与异常两条路径上各发一次').toBeGreaterThanOrEqual(2);
   });
+
+  /**
+   * 这条是被自己坑出来的：一次编辑把注释和 `app.post(...)` 并到了同一行，
+   * 于是**整条路由注册被注释吞掉** —— 接口直接不存在，而上面那条切片断言照样通过
+   * （它只 indexOf 字符串，不看那行是不是注释）。
+   */
+  it('两条 env 路由都是真语句，没被同行注释吞掉', () => {
+    const src = readFileSync(join(config.repoRoot, 'server', 'src', 'api', 'app.ts'), 'utf8');
+    const lines = src.split('\n');
+    for (const needle of ['api}/ide/env`', 'api}/ide/env/command']) {
+      const hits = lines.filter((l) => l.includes(needle) && !l.trim().startsWith('//'));
+      expect(hits.length, `找不到注册了 ${needle} 的行`).toBeGreaterThanOrEqual(1);
+      for (const l of hits) {
+        expect(l.trim().startsWith('app.'), `路由注册行不是语句：${l.trim().slice(0, 80)}`).toBe(true);
+      }
+    }
+  });
 });
