@@ -134,7 +134,9 @@ describe('真装一次（容器档）', () => {
       await writeFile(join(src, 'arena_probe_pkg.py'), 'MARKER = "installed-into-venv"\n');
 
       const chunks: string[] = [];
-      const res = await runEnvCommand(python, ['pip3', 'install', src], (c) => chunks.push(c));
+      // --no-cache-dir：不加的话 pip 会把构建出的 wheel 写进 /root/.cache，
+      // 而那是 bind mount 的 docker-cache/ —— 一次测试在仓库里留下两个 .whl 脏文件。
+      const res = await runEnvCommand(python, ['pip3', 'install', '--no-cache-dir', src], (c) => chunks.push(c));
       expect(res.status, `安装失败：${res.output.slice(-400)}`).toBe('ok');
       expect(chunks.join('')).toContain('arena-probe-pkg');
 
