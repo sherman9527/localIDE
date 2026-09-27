@@ -2993,3 +2993,93 @@ Windows 盘符式与 msys 式都算），否则 `admin` / `test` / `data` 这类
    这轮两次凭印象写数：一次把"文件数"当成"引用数"，一次把**已经修掉的敏感字符串原样抄进复盘**。
    两次都是被闸门或复扫抓住的，不是被自己抓住的 ⇒ "写完自查"在这个环节不可靠，
    可靠的是把判据变成机器能跑的（于是有了 `publish-identity.test.ts`）。
+
+---
+
+## 里程碑 AY：IDE 的依赖环境 —— 三条红线，其中一条是在容器里跑红之后才修对的（2026-09-27）
+
+用户要的是："IDE 下面给一个 command 窗口，能执行 `npm install` / `pip3 install`；显示用户自己装了哪些包；
+再加一个 reset environment 回到默认环境。" 范围当场圈死在 **只谈 IDE，不谈做题现装依赖**（设计文档 §1）。
+分支 `ide-deps`，15 个 commit，每个 commit 都过一遍快档（pre-commit hook 的白捡收益）。
+
+### 做了什么
+
+| 组件 | 落地 |
+| --- | --- |
+| 环境对象 | `ide/env.ts`：`ideEnvFor()` 纯算路径、`ensureIdeEnv()` 按**运行时家族**建（python=venv、node=node_modules、java/scala=`lib/*` 进 `-cp`），每家族一把锁 |
+| 三条执行路径同源 | run / REPL / 行断点都从同一个 `IdeEnv` 拿解释器与环境 —— 顺手修掉一个老 bug：java 在 IDE 里根本没有 `-cp`（`javac` 的 `-cp` 会顶掉默认 cwd，所以 `.` 要显式带上） |
+| 命令窗口 | `ide/env-command.ts` + `POST /api/ide/env/command`（SSE 逐行回显）：程序名与子命令走枚举，其余参数原样进 argv，`shell:false` |
+| 清单 | `ide/env-inventory.ts` + `GET /api/ide/env`：只读环境本身（dist-info / package.json / jar 文件），带基线相减 |
+| reset | `ide/reset.ts` + `POST /api/ide/env/reset`：先停该家族的活会话 → 量体积 → 删 → 重建 |
+| 面板 | `web/src/components/IdeEnvPanel.tsx`，挂右栏，`key` 前缀 `env-`（WI-81 那条重复 key 的教训） |
+| 存储 | 命名卷 `arena-ide-env` + `ARENA_IDE_ENV_DIR`；E2E 实例另起一份卷 |
+
+### 选址是被实测推翻的
+
+原设计写"环境放 `data/ide-env/`"。真在容器里建了一次 venv：**`/opt` 1.76s、bind mount 的 `/app/data` 87.2s**
+（慢 50 倍，Windows Docker 的老账），直接撞穿创建超时 ⇒ 挪到命名卷，并在 `env.test.ts` 里加一条
+"读 compose 确认 arena 把 `ARENA_IDE_ENV_DIR` 指在 bind mount 之外"的断言 —— 否则这个设置会被人静默删掉。
+
+### 红线一是怎么红的（这轮最值钱的一条）
+
+Task 1 先立闸门、功能后写 —— 到 Task 9 第一次进容器交付档，它当场红了三层，**而且是真红**：
+
+compose 必须给服务进程设 `ARENA_IDE_ENV_DIR`（就是上面那条选址结论），而判题子进程的环境是
+`{ ...process.env, ...opts.env }` ⇒ 这个变量被每一道题继承。宿主档位全绿，因为宿主上这个变量不存在。
+
+⇒ 修法是在 `config.ts` 里"读一次就摘掉"，**不是**在判题层过滤 —— 后者要求判题层知道 IDE 有这套东西，
+正是红线一不想要的形状。
+⇒ 闸门因此多了 **B2** 一层：验"摘掉"这个动作本身。没有它，B 那条在宿主上只是"赌这台机器没设过变量"。
+破坏性验证：删掉那行 `delete` ⇒ 容器模拟（带变量）红 4 条；宿主红 B2 一条（B 依然绿 —— 这就是 B2 存在的全部理由）。
+
+### 同一轮顺手抓到的两个"验证自己骗人"
+
+1. **`./start.sh --verify` 验的是上一个镜像里的源码。** `docker compose exec` 进的是当前跑着的容器，
+   而容器用的是它被创建时的镜像 —— 于是"新加的闸门通过了"这句话可以毫无意义（它压根没看见新文件）。
+   ⇒ 两个启动脚本都改成先 `build` + `up -d` 再 exec（`dev_verify_workflow.md` 第 1 条已同步）。
+2. **`.dockerignore` 排掉 `.git` ⇒ 镜像里 `git ls-files` 直接 fatal**，一条与判题无关的发布闸门
+   （`publish-identity.test.ts`）把整个容器档撞红。
+   ⇒ 用 `it.skipIf` 显式跳过（报告会写 `1 skipped`），并**另起一条永远会跑的断言**解释"为什么会是 null"：
+   那里必须是镜像（`/.dockerenv` 存在），不能是宿主仓库坏了。破坏性：强行返回 null ⇒ 宿主那条立刻红。
+
+### 界面说谎的一种新形态
+
+写文档时对着契约看了一遍，发现 Java 的面板挂着一个 placeholder 写 `pip3 install requests` 的输入框 ——
+因为第一版前端按 `supported` + `family` 自己猜"有没有命令窗口"。Java 确实有环境（jar 进 classpath），
+但它没有安装器，于是那个框敲什么都只会被拒。
+⇒ 判据收回后端一处（`commandWindowFor`，清单里给 `commandWindow`），拒绝语与面板看到的是**同一个字符串**（有断言钉）。
+⇒ reset 与命令窗口解耦：jar 是手工塞的，更要能一键清回默认。
+
+### 验证表
+
+| 档 | 命令 | 结果 |
+| --- | --- | --- |
+| 宿主快档 | `npm run verify:fast` | ✅ EXIT=0（110 passed / 67 skipped，skip 全是判题矩阵） |
+| 容器交付档 | `./start.sh --verify` | ✅ `CONTAINER_VERIFY_EXIT=0`；判题矩阵 **443 passed / 444 total**；`[matrix] 158 道代码题全部可判、跳过（栈不可用）0 道`；`publish-identity` 显式 `1 skipped` |
+| 宿主 E2E | `npm run e2e` | ✅ **53 passed (3.1m)**，其中 `ide-env.spec.ts` 8 条（含新加的 Java 那条） |
+| 真浏览器 | `#/ide` | ✅ console **0 error / 0 warning**（整个 session，含两次换语言 + 一次真命令）；换语言后 `ide-env` 实例数=1；`pip3 show pip` 走通，日志里能看到被改写成 `/opt/arena-ide-env/python/bin/python -m pip show pip`；停顿 45s 后 `/api/health` 200、清单仍报 `pkgs=0 / 50.0MB` |
+
+### 已知问题（没修的，都记成条目）
+
+- **PySpark 没有依赖环境**：解释器由**与判题共用**的那个常驻池持有，单独开环境会撞红线一。
+  理由走 `envUnsupportedReason()` 一处，面板原样显示，不写成"不支持"。`spark-scala` 不走那个池，所以它有 lib 环境。
+- **C/C++ 只能 apt**、**MySQL/Redis 的"依赖"是那个服务本身** —— 同样只有理由，没有输入框。
+- **Java/Scala 的 jar 怎么进去**：容器里是命名卷，宿主资源管理器看不到，只能
+  `docker cp <jar> daily-arena:/opt/arena-ide-env/java/lib/`；宿主 `--dev` 模式下直接放 `data/ide-env/java/lib`。
+  界面给的是**服务端看到的那个绝对路径**，所以两种模式下都自洽。本期不做 Web 上传 jar。
+- **`scripts/check-bank.mjs` 的 git 基线在容器里是死的**（这轮从容器日志里看见 `fatal: not a git repository`）：
+  它退回 `.bank-count`，而那个文件在容器里通常不存在 ⇒ baseline=0，"只增不减"这条在容器档其实不成立。
+  记成 **N-18**（见 HANDOVER 需求池）。
+
+### 教训
+
+1. **"在某台机器上才成立"的判据，必须显式说明它在哪儿跑。** 这轮两处同族：B 那条"process.env 干净"
+   在宿主为真、容器为假；发布闸门扫"被 git 跟踪的文件"在镜像里必然跑不了。
+   统一的形状是：**能跑就跑，不能跑就 `skipIf` 让报告里看得见，再补一条断言解释"为什么是 null"**。
+2. **验证命令的入口条件也要验。** `--verify` 不 rebuild 这件事，让前面所有"容器档通过"的记录都可能掺水 ——
+   症状不是报错，是**一条新闸门安静地"通过"**。这类"看起来在工作的不工作"比红字难抓十倍。
+3. **契约字段别让前端二次推断。** `supported` 说的是"有没有环境"，不是"能不能敲命令" ——
+   两个问题共用一个布尔，界面就必然对其中一条说谎。加 `commandWindow` 之后判据只剩一处。
+4. **文档里"不需要 X"这种断言，先量一次再写。** 设计文档那句"物理位置就是答案，不需要维护 diff 表"
+   被真浏览器修正了一半（venv 自带 pip/setuptools 被报成用户包，47.7MB）；
+   而"清单只扫环境自己那一层"这句话在单测里永远抓不到 —— 那些 dist-info 全是我自己造的。

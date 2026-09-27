@@ -1069,6 +1069,36 @@
   llm-rubric / java / react 全 true）；**进度数据没动**（XP 106、最长连击 1、青铜段位，db 是 bind mount）；
   容器内题库 254 道；真浏览器 `#/ide` 点"运行" ⇒ 退出码 0 + stdout 正确，console **error 与 warning 均 0**。
 
+- [x] WI-87 IDE 的依赖环境：命令窗口 + 用户包清单 + reset（2026-09-26 用户提，2026-09-27 交付；分支 `ide-deps`，15 commit）
+  ｜设计文档 `docs/superpowers/specs/2026-09-26-ide-dependency-environment-design.md`、
+  实施计划 `docs/superpowers/plans/2026-09-26-ide-dependency-environment.md`（9 个任务，TDD 顺序）。
+  ｜**范围**：用户当场圈死"只说 IDE，不说做题可以现装依赖"，所以三条红线里最硬的一条是
+  "IDE 环境绝不注入判题"（判题可复现 = 重建镜像即可复现，`docker/BUILDINFO.md` 那条承诺不能破）。
+  ｜落地：`ide/env.ts`（环境对象，按**运行时家族**分不是按语言 id —— js/ts 共用一份 node_modules）、
+  `env-command.ts`（argv 白名单，`shell:false`；`pip3 install X` 改写成 `<venv python> -m pip install X`）、
+  `env-inventory.ts`（清单只读环境本身 + venv 基线相减）、`reset.ts`（先停该家族活会话再删再重建）、
+  三个路由（清单 GET / 命令 SSE / reset POST）、`web/src/components/IdeEnvPanel.tsx`（挂右栏）。
+  ｜**这条闸门是在容器里跑红之后才修对的**：compose 必须设 `ARENA_IDE_ENV_DIR`（venv 在 bind mount 上
+  创建要 87.2s vs `/opt` 1.76s），而判题子进程 `{...process.env}` 会继承它 ⇒ 修在 `config.ts`"读一次就摘掉"，
+  不在判题层过滤（那要求判题层知道 IDE 有这套东西）；闸门补了 **B2**（验"摘掉"这个动作本身，
+  否则 B 只是赌"这台机器没设过变量"）。破坏性：删掉 `delete` ⇒ 容器模拟红 4 条、宿主红 B2 一条。
+  ｜同一轮还抓到两个"验证自己骗人"（都修了，见 memo 里程碑 AY）：
+  ① `./start.sh --verify` 验的是**上一个镜像里的源码**（`compose exec` 进的是当前容器）⇒
+  两个启动脚本都改成先 build + `up -d` 再 exec；
+  ② `.dockerignore` 排掉 `.git` ⇒ 镜像里 `git ls-files` fatal，发布闸门把容器档撞红
+  ⇒ 改 `it.skipIf` + 一条常驻断言解释"为什么会是 null"（必须是镜像，不能是宿主仓库坏了）。
+  ｜界面那处也修了：Java 面板原先挂着一个 placeholder 写 `pip3 install requests` 的输入框（前端按
+  `supported` 自己猜的），而 Java 没有安装器 ⇒ "开不开命令窗口"收回后端一处（清单里的 `commandWindow`），
+  关着的时候给"为什么 + 该怎么做"（把 `lib` 的绝对路径说给用户），reset 与它解耦。
+  ｜验证：宿主 `npm run verify:fast` ✅ EXIT=0；容器 `./start.sh --verify` ✅ EXIT=0 且判题矩阵
+  **443 passed / 444 total**、`[matrix] 158 道代码题全部可判、跳过（栈不可用）0 道`；
+  宿主 `npm run e2e` ✅ **53 passed**（`ide-env.spec.ts` 8 条）；
+  真浏览器 ✅ console **0 error / 0 warning**（含两次换语言 + 一次真 `pip3 show pip`，日志里能看到改写成
+  `/opt/arena-ide-env/python/bin/python -m pip show pip`）、换语言后面板实例数恒为 1、停顿 45s 后服务仍在。
+  ｜**已知边界**（都写进了 README / JUDGING / ARCHITECTURE）：pyspark 不开环境（解释器在与判题共用的池里）、
+  c/cpp 只能 apt、mysql/redis 的"依赖"是服务本身；Java/Scala 的 jar 在容器里只能
+  `docker cp` 进命名卷 `arena-ide-env`。⇒ 出题要用第三方包 = 改镜像，不能靠用户现装。
+
 ## IN PROGRESS
 
 - [ ] WI-56 公司扩充（长期项）：目标 **每家 25-30 题**（2026-09-22 用户拍板，取代 commit `2b71a0d`
@@ -1200,6 +1230,18 @@
   与"写过后被删"。**别把它当 flaky 关掉**——本仓库有过三个"断言下全绿的静默降级"。
 
 ## 新增需求池（尚未成为 WI）
+
+- **N-18 `scripts/check-bank.mjs` 的 git 基线在容器里是死的**（2026-09-27 做 WI-87 时从容器日志里看见的：
+  判题矩阵那一段开头印了一行 `fatal: not a git repository`）。
+  ｜为什么是真问题不是噪音：那个函数的注释自己写着"基线用 git 已跟踪的题目数，而不是 `.bank-count`
+  这种本机才有的状态文件 —— 后者换台机器就归零，于是'只增不减'这条断言实际上是死的"。
+  而 `.dockerignore` 排掉了 `.git` ⇒ `trackedQuestions()` 返回 null ⇒ 恰恰退回它说要防的那个 `.bank-count`，
+  容器里那个文件通常不存在 ⇒ baseline=0。**结论：C5"只增不减"在容器交付档不成立**，只有宿主档成立。
+  ｜三个方向：① 让容器档显式跳过这条并打一行"本档不验基线"（诚实但放弃覆盖）；
+  ② 把基线换成"镜像里烤一份 tracked 清单"（构建期生成，运行期可读，`.git` 仍然不进镜像）；
+  ③ 容器里把仓库当 git 仓库挂进来（`--dev`/`tools` 服务本来就是 `./:/app`，只有 `arena` 服务不是）。
+  ｜**别顺手做**：改 baseline 的取法会动到"题库只增不减"这条红线的判据本身，得连带复扫一遍
+  `content/questions/` 与历史基线文件是否一致。
 
 - **N-17 题库的"标签"下拉有 963 个选项**（2026-09-24 做 WI-79 时顺手量到）：
   252 道题一共挂出 963 个不同标签，平均每题 3.8 个 —— 也就是说标签基本是自由文本，不是一个词表。
