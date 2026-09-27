@@ -17,10 +17,7 @@ import type { IdeLanguage } from './languages.js';
 // 类型只有一份真相：契约在 shared，服务端实现它，不另立一个"看起来一样"的版本。
 import type { IdeEnvInventory as IdeEnvContract, IdeEnvPackage } from '@arena/shared';
 
-export interface IdeEnvInventory extends IdeEnvContract {
-  /** 环境按运行时家族分（js/ts 同属 node 家族）；契约里不给前端，只服务内部用 */
-  family?: IdeEnvFamily;
-}
+export type IdeEnvInventory = IdeEnvContract;
 
 const NOTE = '这些包只影响 IDE 的运行 / REPL / 调试；判题器看不到它们。';
 

@@ -1746,7 +1746,8 @@ tbody th {
 }
 
 .ide-side > .ide-repl,
-.ide-side > .ide-debug {
+.ide-side > .ide-debug,
+.ide-side > .ide-env-panel {
   /* 只削左右：上下留给"栏内分隔线"那条规则，同一属性两条规则打架就得靠 !important 了 */
   border-left: 0;
   border-right: 0;
@@ -1756,6 +1757,89 @@ tbody th {
 .ide-side > .ide-repl {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/* 依赖环境面板：排在 REPL 之下，它不是"边跑边看"的东西，所以不给 flex 撑高 */
+.ide-env-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+
+.ide-env-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.ide-env-head .card-title {
+  margin: 0;
+}
+
+.ide-env-note,
+.ide-env-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+  line-height: 1.45;
+}
+
+.ide-env-unsupported {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  color: var(--text-muted);
+  font-size: var(--font-sm);
+}
+
+.ide-env-form-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ide-env-form-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ide-env-packages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ide-env-package {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: var(--space-2);
+  align-items: baseline;
+  font-size: var(--font-sm);
+}
+
+.ide-env-total {
+  margin: var(--space-2) 0 0;
+  font-size: var(--font-sm);
+}
+
+.ide-env-log {
+  margin: 0;
+  max-height: 200px;
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--font-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (min-width: 1100px) {

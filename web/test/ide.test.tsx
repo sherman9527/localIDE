@@ -112,6 +112,11 @@ vi.mock('../src/api', () => ({
   api: {
     ideLanguages: () => Promise.resolve(LANGUAGES),
     ideRun: (body: { language: string; code: string; stdin?: string }) => ideRun(body),
+    // 依赖环境面板在挂载时就拉清单（不像 REPL 那样等用户点了才请求），
+    // 所以这里必须给，否则整个 IDE 页面测试都会因为 mock 少一个方法而红。
+    ideEnv: () => Promise.resolve({ inventories: [] }),
+    ideEnvCommand: () => Promise.resolve({ status: 'ok', code: 0 }),
+    ideEnvReset: () => Promise.resolve({ ok: true, removedBytes: 0, stoppedSessions: 0, inventories: [] }),
   },
 }));
 
@@ -244,6 +249,33 @@ describe('网页 IDE 页面', () => {
     const button = screen.getByRole('button', { name: /运行/ }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
     expect(screen.getByText(/这台机器上没有 C 的工具链/)).toBeTruthy();
+  });
+
+  /**
+   * 依赖环境面板挂在右栏。这条验的是 WI-81 那一类故障的复发可能：
+   * 三个面板曾经共用 key={active.id} ⇒ React 报重复 key，而真实症状是
+   * "切到 mysql 之后 python 的调试面板还赖在页面上"。所以这里同时看
+   * ① 页面上永远只有一个环境面板，② 换语言后 console 没出现 key 冲突。
+   */
+  it('换语言后环境面板只有一个实例，且没有重复 key 的 React 告警', async () => {
+    const errors: unknown[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      errors.push(args.join(' '));
+    });
+    await ready();
+    expect(document.querySelectorAll('[data-testid="ide-env"]').length).toBe(1);
+
+    fireEvent.change(screen.getByLabelText('语言'), { target: { value: 'mysql' } });
+    await screen.findByText('网页 IDE');
+    expect(document.querySelectorAll('[data-testid="ide-env"]').length).toBe(1);
+
+    fireEvent.change(screen.getByLabelText('语言'), { target: { value: 'python' } });
+    await screen.findByText('网页 IDE');
+    expect(document.querySelectorAll('[data-testid="ide-env"]').length).toBe(1);
+
+    const keyComplaints = errors.filter((e) => String(e).includes('unique "key"'));
+    expect(keyComplaints).toEqual([]);
+    spy.mockRestore();
   });
 
   it('Spark 语言：预算显示在文件栏里；运行中另开一处显示"已等多久"，按钮文字不许变', async () => {

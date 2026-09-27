@@ -323,6 +323,8 @@ export interface IdeEnvPackage {
  */
 export interface IdeEnvInventory {
   language: string;
+  /** 环境按运行时家族分（js 与 ts 同属 node）。前端用它决定命令输入框的示例写法。 */
+  family?: 'python' | 'node' | 'java' | 'scala';
   supported: boolean;
   reason?: string;
   packages: IdeEnvPackage[];

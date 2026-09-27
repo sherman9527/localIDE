@@ -8,6 +8,11 @@ import type {
   DebugStopRequest,
   DebugStopResponse,
   IdeLanguagesResponse,
+  IdeEnvCommandEvent,
+  IdeEnvCommandRequest,
+  IdeEnvCommandStatus,
+  IdeEnvResponse,
+  IdeEnvResetResponse,
   IdeRunRequest,
   IdeRunResponse,
   ReplFeedRequest,
@@ -162,6 +167,68 @@ export async function judgeStream(
   return final;
 }
 
+/**
+ * IDE 装包：pip/npm 可以跑几十秒到三分钟，所以走 SSE 把输出实时吐给面板。
+ * 返回最后那条 done 的状态；没有 done 就是流被截断，上层要如实说。
+ */
+export async function envCommandStream(
+  body: IdeEnvCommandRequest,
+  onEvent?: (e: IdeEnvCommandEvent) => void,
+  opts: RequestOptions = {},
+): Promise<{ status: IdeEnvCommandStatus; code: number | null } | null> {
+  const label = '环境命令';
+  const doFetch = opts.fetchImpl ?? globalThis.fetch;
+  let res: Response;
+  try {
+    res = await doFetch(`${API_PREFIX}/ide/env/command`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal: opts.signal,
+    });
+  } catch (e) {
+    if (isAbort(e)) throw e;
+    throw offlineError(label);
+  }
+  if (!res.ok) throw await toApiError(res, label);
+
+  const emit = (frame: SseFrame): { status: IdeEnvCommandStatus; code: number | null } | null => {
+    const event = parseJsonFrame<IdeEnvCommandEvent>(frame.data);
+    if (!event || typeof event.type !== 'string') return null;
+    onEvent?.(event);
+    return event.type === 'done' ? { status: event.status, code: event.code } : null;
+  };
+
+  // 参数错误在 hijack 之前用 JSON 返回 —— 这条分支必须处理，否则界面会以为"没反应"
+  if ((res.headers.get('content-type') ?? '').includes('application/json')) {
+    const payload = (await res.json()) as { message?: string };
+    const message = payload.message ?? '命令被拒绝';
+    onEvent?.({ type: 'output', text: message });
+    onEvent?.({ type: 'done', status: 'rejected', code: null });
+    return { status: 'rejected', code: null };
+  }
+
+  const parser = createSseParser();
+  let final: { status: IdeEnvCommandStatus; code: number | null } | null = null;
+  if (res.body && typeof res.body.getReader === 'function') {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+        const r = emit(frame);
+        if (r) final = r;
+      }
+    }
+  }
+  for (const frame of parser.end()) {
+    const r = emit(frame);
+    if (r) final = r;
+  }
+  return final;
+}
+
 export const api = {
   health: (opts?: RequestOptions) => get<StackHealth>('/health', { ...opts, label: '读取环境状态' }),
   // 网页 IDE（WI-64）：只走 /api/ide/*，与题目接口零共用 —— 由 boundary.test.ts 把住
@@ -209,6 +276,11 @@ export const api = {
   judge: (body: JudgePostRequest, opts?: RequestOptions) => post<JudgePostResponse>('/judge', body, { ...opts, label: '判题' }),
   judgeStream: (body: JudgePostRequest, onEvent?: (e: JudgeEvent) => void, opts?: RequestOptions) =>
     judgeStream(body, onEvent, opts),
+  ideEnv: (opts?: RequestOptions) => get<IdeEnvResponse>('/ide/env', { ...opts, label: '读取依赖环境' }),
+  ideEnvCommand: (body: IdeEnvCommandRequest, onEvent?: (e: IdeEnvCommandEvent) => void, opts?: RequestOptions) =>
+    envCommandStream(body, onEvent, opts),
+  ideEnvReset: (body: { language: string }, opts?: RequestOptions) =>
+    post<IdeEnvResetResponse>('/ide/env/reset', body, { ...opts, label: '重置依赖环境' }),
   grade: (body: GradePostRequest, opts?: RequestOptions) =>
     post<GradePostResponse>('/grade', body, { ...opts, label: '评分' }),
 };

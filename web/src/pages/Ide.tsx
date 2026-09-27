@@ -7,6 +7,7 @@ import { Empty, ErrorState, Loading } from '../components/AsyncState';
 import CodeEditor from '../components/CodeEditor';
 import DebugPanel from '../components/DebugPanel';
 import ReplPanel from '../components/ReplPanel';
+import IdeEnvPanel from '../components/IdeEnvPanel';
 import { formatSource } from '../lib/format-source';
 
 /**
@@ -293,6 +294,15 @@ export default function Ide() {
             ) : null}
             {active?.replKind ? (
               <ReplPanel key={`repl-${active.id}`} language={active.id} label={active.label} />
+            ) : null}
+            {/* key 必须与上面两个不同前缀：WI-81 那次两个面板共用 key={active.id}，
+                React 报重复 key，而真实故障是"切到 mysql 之后 python 的调试面板还赖在页面上"。 */}
+            {active ? (
+              <IdeEnvPanel
+                key={`env-${active.id}`}
+                activeLanguage={active.id}
+                languageLabels={Object.fromEntries(languages.map((l) => [l.id, l.label]))}
+              />
             ) : null}
           </div>
         </div>
