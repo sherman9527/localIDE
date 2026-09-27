@@ -43,6 +43,8 @@ import type { BankPort, Clock, GradePort, JudgePort, ProgressStore } from '../po
 import { IDE_LANGUAGES, IDE_LIMITS, ideAvailability, runIdeCode } from '../ide/runner.js';
 import { REPL_IDLE_MS, REPL_MAX_SESSIONS, feedRepl, replSessions, startRepl, stopRepl } from '../ide/repl.js';
 import { DEBUG_IDLE_MS, DEBUG_MAX_SESSIONS, debugSessions, startDebug, stepDebug, stopDebug } from '../ide/debug.js';
+import { runEnvCommand } from '../ide/env-command.js';
+import { findLanguage } from '../ide/languages.js';
 import type {
   DebugAction,
   DebugSessionsResponse,
@@ -52,6 +54,8 @@ import type {
   DebugStepResponse,
   DebugStopRequest,
   DebugStopResponse,
+  IdeEnvCommandEvent,
+  IdeEnvCommandRequest,
   IdeLanguagesResponse,
   IdeRunRequest,
   IdeRunResponse,
@@ -477,6 +481,50 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const body = (request.body ?? {}) as Partial<DebugStopRequest>;
     const ok = await stopDebug(typeof body.sessionId === 'string' ? body.sessionId : '');
     return { ok, sessions: debugSessions().length };
+  });
+
+  // MARK: /api/ide/env/command（SSE：装包是几十秒到几分钟的事，不能悬一个普通请求）
+  // 参数错误必须在 hijack 之前用 JSON 返回 —— 进了流就改不了状态码。
+  app.post(`${api}/ide/env/command`, async (request, reply) => {
+    const body = (request.body ?? {}) as Partial<IdeEnvCommandRequest>;
+    const languageId = typeof body.language === 'string' ? body.language : '';
+    const lang = findLanguage(languageId);
+    if (!lang) return notFound(reply, `没有 ${languageId || '(空)'} 这门语言`);
+    if (!Array.isArray(body.argv) || body.argv.length === 0) return badRequest(reply, 'argv 必填且非空');
+
+    reply.hijack();
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    let closed = false;
+    const send = (event: IdeEnvCommandEvent): void => {
+      if (closed) return;
+      raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    // 装包时 pip 可以安静几十秒，没有心跳就会被浏览器当成连接死了
+    const keepAlive = setInterval(() => {
+      if (!closed) raw.write(': keep-alive\n\n');
+    }, 5_000);
+    raw.on('close', () => {
+      closed = true;
+      clearInterval(keepAlive);
+    });
+
+    try {
+      const res = await runEnvCommand(lang, body.argv.map(String), (text) => send({ type: 'output', text }));
+      send({ type: 'done', status: res.status, code: res.code });
+    } catch (err) {
+      // 已经在流里了，状态码救不回来：用一条 done 收尾，保证"最后一条必为 done"
+      send({ type: 'output', text: `环境命令执行失败：${(err as Error).message}` });
+      send({ type: 'done', status: 'failed', code: null });
+    } finally {
+      clearInterval(keepAlive);
+      if (!closed) raw.end();
+    }
   });
 
   // MARK: /api/judge（同步兜底）

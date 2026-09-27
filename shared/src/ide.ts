@@ -290,3 +290,22 @@ export const IDE_SESSION_LIMITS = {
   /** 一次最多给多少个局部变量（超了在 message 里说明被截断） */
   maxLocals: 60,
 } as const;
+
+/**
+ * IDE 依赖环境：命令窗口的请求与流式事件。
+ *
+ * `argv` 由前端按空白切好后传来，服务端**只认白名单里的程序与子命令**，
+ * 其余参数原样进 argv 交给 `shell:false` 的 spawn。也就是说这里没有任何形式
+ * 会经过 shell —— 分号、管道、`$()` 都只是字符。
+ */
+export interface IdeEnvCommandRequest {
+  language: string;
+  argv: string[];
+}
+
+export type IdeEnvCommandStatus = 'ok' | 'failed' | 'rejected' | 'busy' | 'timeout';
+
+export type IdeEnvCommandEvent =
+  | { type: 'output'; text: string }
+  /** 最后一条必为 done：界面据此收尾，缺了它就是把请求悬在半空 */
+  | { type: 'done'; status: IdeEnvCommandStatus; code: number | null };
