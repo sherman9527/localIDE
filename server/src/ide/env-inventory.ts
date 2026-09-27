@@ -1,6 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { IDE_ENV_ROOT, envFamilyOf, familyDir, sumBytes, type IdeEnvFamily } from './env.js';
+import { IDE_ENV_ROOT, envFamilyOf, envUnsupportedReason, familyDir, sumBytes, type IdeEnvFamily } from './env.js';
 import type { IdeLanguage } from './languages.js';
 
 /**
@@ -23,14 +23,6 @@ export interface IdeEnvInventory extends IdeEnvContract {
 }
 
 const NOTE = '这些包只影响 IDE 的运行 / REPL / 调试；判题器看不到它们。';
-
-const UNSUPPORTED: Partial<Record<IdeLanguage['id'], string>> = {
-  c: 'C 的依赖只能靠镜像预装（apt），运行期装不了',
-  cpp: 'C++ 的依赖只能靠镜像预装（apt），运行期装不了',
-  mysql: 'SQL 的"依赖"是那个 mysqld 本身，不是包',
-  redis: 'Redis 的"依赖"是那个 redis-server 本身，不是包',
-  pyspark: 'PySpark 的解释器由 Spark 会话池持有，而那个池与判题共用 —— 单独开环境会撞红线',
-};
 
 async function readJson(path: string): Promise<Record<string, unknown> | null> {
   try {
@@ -141,7 +133,7 @@ export async function readInventory(language: IdeLanguage, root: string = IDE_EN
     return {
       language: language.id,
       supported: false,
-      reason: UNSUPPORTED[language.id] ?? '这门语言没有可安装的依赖环境',
+      reason: envUnsupportedReason(language),
       packages: [],
       totalBytes: 0,
       drift: [],

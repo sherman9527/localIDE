@@ -337,3 +337,20 @@ export interface IdeEnvInventory {
 export interface IdeEnvResponse {
   inventories: IdeEnvInventory[];
 }
+
+export interface IdeEnvResetRequest {
+  language: string;
+}
+
+/**
+ * reset 的结果。`ok:false` 时 reason 必填 —— "点了没反应"是最糟的反馈。
+ * 顺带把重置后的清单一起回，省一次往返，也避免前端拿旧清单继续显示。
+ */
+export interface IdeEnvResetResponse {
+  ok: boolean;
+  removedBytes: number;
+  /** 被作废的 REPL / 调试会话数。reset 必须停它们，否则旧会话还在读已删除的路径。 */
+  stoppedSessions: number;
+  reason?: string;
+  inventories: IdeEnvInventory[];
+}

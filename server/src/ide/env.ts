@@ -48,6 +48,22 @@ export function envFamilyOf(language: IdeLanguage): IdeEnvFamily | undefined {
   return FAMILY_BY_LANGUAGE[language.id];
 }
 
+/**
+ * 没有环境的语言要有一句**说得出口的理由**。清单与 reset 都要用，
+ * 所以只写一份 —— 两处各写一遍，将来一定有一处变成假话。
+ */
+const UNSUPPORTED_REASON: Partial<Record<IdeLanguage['id'], string>> = {
+  c: 'C 的依赖只能靠镜像预装（apt），运行期装不了',
+  cpp: 'C++ 的依赖只能靠镜像预装（apt），运行期装不了',
+  mysql: 'SQL 的"依赖"是那个 mysqld 本身，不是包',
+  redis: 'Redis 的"依赖"是那个 redis-server 本身，不是包',
+  pyspark: 'PySpark 的解释器由 Spark 会话池持有，而那个池与判题共用 —— 单独开环境会撞红线',
+};
+
+export function envUnsupportedReason(language: IdeLanguage): string {
+  return UNSUPPORTED_REASON[language.id] ?? `${language.label} 没有可安装的依赖环境`;
+}
+
 /** venv 的目录布局随平台变（Windows 是 Scripts/python.exe），所以只有这一处知道它长什么样。 */
 export function venvPythonPath(root: string): string {
   return process.platform === 'win32'

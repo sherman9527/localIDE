@@ -45,6 +45,7 @@ import { REPL_IDLE_MS, REPL_MAX_SESSIONS, feedRepl, replSessions, startRepl, sto
 import { DEBUG_IDLE_MS, DEBUG_MAX_SESSIONS, debugSessions, startDebug, stepDebug, stopDebug } from '../ide/debug.js';
 import { runEnvCommand } from '../ide/env-command.js';
 import { readInventory } from '../ide/env-inventory.js';
+import { resetIdeEnv } from '../ide/reset.js';
 import { findLanguage } from '../ide/languages.js';
 import type {
   DebugAction,
@@ -57,6 +58,8 @@ import type {
   DebugStopResponse,
   IdeEnvCommandEvent,
   IdeEnvCommandRequest,
+  IdeEnvResetRequest,
+  IdeEnvResetResponse,
   IdeEnvResponse,
   IdeLanguagesResponse,
   IdeRunRequest,
@@ -490,6 +493,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     // 一次把所有语言算完给前端：面板是"每门语言一栏"，逐个请求会变成十次往返
     const inventories = await Promise.all(IDE_LANGUAGES.map((lang) => readInventory(lang)));
     return { inventories };
+  });
+
+  // MARK: /api/ide/env/reset（回到镜像默认；会作废该家族的活会话）
+  app.post(`${api}/ide/env/reset`, async (request): Promise<IdeEnvResetResponse> => {
+    const body = (request.body ?? {}) as Partial<IdeEnvResetRequest>;
+    const languageId = typeof body.language === 'string' ? body.language : '';
+    const lang = findLanguage(languageId);
+    if (!lang) {
+      return { ok: false, removedBytes: 0, stoppedSessions: 0, reason: `没有 ${languageId || '(空)'} 这门语言`, inventories: [] };
+    }
+    const res = await resetIdeEnv(lang);
+    const inventories = await Promise.all(IDE_LANGUAGES.map((l) => readInventory(l)));
+    return { ...res, inventories };
   });
 
   // MARK: /api/ide/env/command（SSE：装包是几十秒到几分钟的事，不能悬一个普通请求）

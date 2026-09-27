@@ -1,19 +1,10 @@
 import { readFileSync } from 'node:fs';
-import { mkdtemp, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
-import {
-  IDE_ENV_ROOT,
-  ensureIdeEnv,
-  envFamilyOf,
-  venvPythonPath,
-  venvSitePackagesRoot,
-} from '../../src/ide/env.js';
+import { IDE_ENV_ROOT, envFamilyOf, venvPythonPath } from '../../src/ide/env.js';
 import { parseEnvCommand, runEnvCommand, envCommandBusy } from '../../src/ide/env-command.js';
 import { findLanguage } from '../../src/ide/languages.js';
-import { ideAvailability } from '../../src/ide/runner.js';
 
 /**
  * 命令窗口：让用户自己在 IDE 里装依赖。
@@ -118,59 +109,14 @@ describe('runEnvCommand：一把 per-family 锁 + 独立超时', () => {
   });
 });
 
-const available = await ideAvailability();
-const guardedPython = available['python'] === true ? it : it.skip;
-
-describe('真装一次（容器档）', () => {
-  guardedPython(
-    '装一个本地包：必须落进 venv，而且系统 site-packages 里不许出现它（红线一在真实安装上验一次）',
-    async () => {
-      await ensureIdeEnv(python);
-      const src = await mkdtemp(join(tmpdir(), 'arena-probe-pkg-'));
-      await writeFile(
-        join(src, 'setup.py'),
-        ['from setuptools import setup', "setup(name='arena-probe-pkg', version='1.0', py_modules=['arena_probe_pkg'])", ''].join('\n'),
-      );
-      await writeFile(join(src, 'arena_probe_pkg.py'), 'MARKER = "installed-into-venv"\n');
-
-      const chunks: string[] = [];
-      // --no-cache-dir：不加的话 pip 会把构建出的 wheel 写进 /root/.cache，
-      // 而那是 bind mount 的 docker-cache/ —— 一次测试在仓库里留下两个 .whl 脏文件。
-      const res = await runEnvCommand(python, ['pip3', 'install', '--no-cache-dir', src], (c) => chunks.push(c));
-      expect(res.status, `安装失败：${res.output.slice(-400)}`).toBe('ok');
-      expect(chunks.join('')).toContain('arena-probe-pkg');
-
-      const inVenv = await anySiteHas(venvSitePackagesRoot(IDE_ENV_ROOT), 'arena_probe_pkg');
-      expect(inVenv, '包装完了却不在 venv 里 ⇒ 用错了 pip').toBe(true);
-
-      // 系统侧：判题用的就是这个解释器，出现用户包等于环境漏进了判题
-      const { runProcess } = await import('../../src/judge/process.js');
-      const probe = await runProcess('python3', ['-c', 'import arena_probe_pkg'], {
-        cwd: config.repoRoot,
-        timeoutMs: 30_000,
-      });
-      expect(probe.code, '系统 python3 竟然能 import 用户刚装的包 ⇒ 环境漏进判题了').not.toBe(0);
-    },
-    240_000,
-  );
-
-  guardedPython('装一个不存在的包：状态必须是失败，并把 pip 的话原样带出来', async () => {
-    await ensureIdeEnv(python);
-    const res = await runEnvCommand(python, ['pip3', 'install', 'arena-no-such-pkg-9x7q'], () => {});
-    expect(res.status).toBe('failed');
-    expect(res.output.toLowerCase()).toMatch(/no matching distribution|error|could not find/i);
-  });
-});
-
-/** venv 下 lib/pythonX.Y/site-packages 的小版本号不写死，所以扫一层再找。 */
-async function anySiteHas(libRoot: string, moduleName: string): Promise<boolean> {
-  const versions = await readdir(libRoot).catch(() => [] as string[]);
-  for (const v of versions) {
-    const files = await readdir(join(libRoot, v, 'site-packages')).catch(() => [] as string[]);
-    if (files.some((f) => f === `${moduleName}.py` || f.startsWith(`${moduleName}-`))) return true;
-  }
-  return false;
-}
+/**
+ * 需要真 venv 的"装包"用例都在 `env-lifecycle.test.ts` 里，不在这里。
+ *
+ * 原因不是整理，是正确性：vitest 默认并行跑不同文件，而 reset 会把共享的 venv 删掉重建。
+ * 实测把两者拆在两个文件里时，装包用例会随机红 —— 这是 WI-72 那轮记过的
+ * "同目录并发测试互相删"同一类故障，在测试自己身上复现了一次。
+ * 本文件只留不碰共享状态的用例（白名单解析、锁、接线顺序）。
+ */
 
 /**
  * 接线顺序断言（不是测逻辑，是测"别把校验挪到流里"）。
@@ -206,7 +152,7 @@ describe('路由接线：校验必须在 hijack 之前', () => {
   it('两条 env 路由都是真语句，没被同行注释吞掉', () => {
     const src = readFileSync(join(config.repoRoot, 'server', 'src', 'api', 'app.ts'), 'utf8');
     const lines = src.split('\n');
-    for (const needle of ['api}/ide/env`', 'api}/ide/env/command']) {
+    for (const needle of ['api}/ide/env`', 'api}/ide/env/reset', 'api}/ide/env/command']) {
       const hits = lines.filter((l) => l.includes(needle) && !l.trim().startsWith('//'));
       expect(hits.length, `找不到注册了 ${needle} 的行`).toBeGreaterThanOrEqual(1);
       for (const l of hits) {
