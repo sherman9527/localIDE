@@ -22,13 +22,13 @@ import type { IdeLanguage } from './languages.js';
  */
 
 /**
- * 环境根目录。**默认落在 dataDir 下，但容器里必须由 compose 指到卷上** ——
+ * 环境根目录。**容器里由 compose 指到命名卷，宿主 `--dev` 没有那个变量时退回 dataDir** ——
  * 这不是风格问题：`data/` 是 Windows 的 bind mount，venv 要写几千个小文件，实测
  * 同一个 `python3 -m venv` 在 `/opt` 是 1.76s、在 `/app/data` 是 **87.2s**（慢 50 倍），
- * 直接撞穿创建超时。⇒ 容器里 `ARENA_IDE_ENV_DIR=/opt/arena-ide-env`（命名卷，
- * 既快又能跨 rebuild 保留）；宿主 `--dev` 没有这个变量，退回 dataDir 照常可用。
+ * 直接撞穿创建超时。卷还能跨 rebuild 保留，用户装的包不会因为改一行 Dockerfile 就没了。
+ * ⇒ 变量在 `config.ts` 里读一次就摘掉；这里只认已经算好的值（红线一的成因见那段注释）。
  */
-export const IDE_ENV_ROOT = process.env.ARENA_IDE_ENV_DIR ?? join(config.dataDir, 'ide-env');
+export const IDE_ENV_ROOT = config.ideEnvDir;
 
 /**
  * 环境按**运行时家族**分，不按语言 id —— javascript 与 typescript 必须共用同一个

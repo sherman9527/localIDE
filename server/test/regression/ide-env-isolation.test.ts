@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { config } from '../../src/config.js';
+import { config, consumeIdeEnvDir } from '../../src/config.js';
 import { runProcess } from '../../src/judge/process.js';
 
 /**
@@ -15,10 +15,18 @@ import { runProcess } from '../../src/judge/process.js';
  * "用户今天在 IDE 里装的包"改变"明天判题的结果"，而 `docker/BUILDINFO.md` 承诺的是
  * 重建镜像即可复现。⇒ 这条闸门必须在功能存在之前先立住。
  *
- * 三条断言各守一层，缺一不可：
+ * 四条断言各守一层，缺一不可：
  *   A 行为：真的走一次 runProcess，看子进程拿到的 env 里有没有 ide-env。
  *   B 全局：服务进程自己的 process.env 必须干净（A 之所以成立是因为 B）。
+ *   B2 机制：B 在容器里成立是因为 config 把 ARENA_IDE_ENV_DIR 读完就摘掉 —— 那个动作本身要能验，
+ *            否则 B 只是在赌"这台机器没设过这个变量"（容器里就是设过的，见下）。
  *   C 源码：判题目录不许引用 ide-env；IDE 目录不许写 process.env。
+ *
+ * B 为什么不能只靠"宿主上没这个变量"就算通过：compose 给 arena / dev / e2e 三个服务都显式设了
+ * `ARENA_IDE_ENV_DIR=/opt/arena-ide-env`（venv 建在 bind mount 上要 87s，必须指到命名卷），
+ * 所以容器里服务进程的 process.env 天生带它，而它会被每一个判题子进程继承。
+ * 这条闸门第一次在容器交付档跑红（宿主全绿），修法是把变量在 config 里消费掉，而不是在判题层过滤
+ * —— 后者要求判题层知道 IDE 有这套东西，那正是红线一不想要的。
  */
 
 const IDE_ENV_MARKER = 'ide-env';
@@ -35,6 +43,21 @@ describe('红线一：IDE 依赖环境不许污染判题', () => {
       envLooksClean(process.env),
       'IDE 的环境被写进了服务进程全局 —— 判题子进程会经由 `{...process.env}` 继承它',
     ).toEqual([]);
+  });
+
+  it('B2 config 把 ARENA_IDE_ENV_DIR 读完就摘掉（B 靠的是这个动作，不是"这台机器没设过"）', () => {
+    const key = 'ARENA_IDE_ENV_DIR';
+    const original = process.env[key];
+    try {
+      process.env[key] = join(config.dataDir, 'ide-env-probe');
+      expect(consumeIdeEnvDir(), '没读到刚设的值 ⇒ 容器里卷路径会被静默换成默认值（venv 创建要 87s）').toContain('ide-env-probe');
+      expect(process.env[key], '读完没摘掉 ⇒ 每一个判题子进程都会继承它，红线一当场作废').toBeUndefined();
+      // 摘掉之后必须回到默认值：IDE 与判题必须算出同一个根，否则面板列的包和 IDE 用的包不是一份
+      expect(consumeIdeEnvDir()).toBe(join(config.dataDir, 'ide-env'));
+    } finally {
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
   });
 
   it('A 真的起一个判题子进程，它看到的 env 里没有 ide-env', async () => {

@@ -29,6 +29,24 @@ const repoRoot = process.env.ARENA_ROOT ?? findRepoRoot(import.meta.dirname);
  */
 const dataDir = process.env.ARENA_DATA_DIR ?? join(repoRoot, 'data');
 
+/**
+ * IDE 的用户依赖环境目录。这个环境变量**读一次就从 process.env 摘掉**，因为判题子进程的环境
+ * 是 `{ ...process.env, ...opts.env }`（`judge/process.ts`、`exec/spark-pool.ts` 两处）：
+ * compose 必须把它设给服务进程（venv 建在 bind mount 上要 87s，见 compose.yml 那条注释），
+ * 于是只要它留在 process.env 里，每一道题的运行都会看见 IDE 装了什么 ——
+ * 而 `docker/BUILDINFO.md` 承诺的是"重建镜像即可复现"。
+ * 摘在这里而不是在判题层过滤，是为了让判题层**根本不需要知道 IDE 有这套东西**（红线一）。
+ * 闸门：`server/test/regression/ide-env-isolation.test.ts` 的 B（摘干净了）+ B2（这个动作本身有效）。
+ */
+const IDE_ENV_DIR_KEY = 'ARENA_IDE_ENV_DIR';
+
+/** 导出只为让闸门能验"读完就摘"这个动作，不是给业务代码调用的第二入口。 */
+export function consumeIdeEnvDir(): string {
+  const raw = process.env[IDE_ENV_DIR_KEY];
+  delete process.env[IDE_ENV_DIR_KEY];
+  return raw && raw.trim() ? raw.trim() : join(dataDir, 'ide-env');
+}
+
 /** 全部路径默认落在仓库目录内（rule.md C1）。 */
 export const config = {
   repoRoot,
@@ -40,6 +58,7 @@ export const config = {
   dataDir,
   dbFile: process.env.ARENA_DB_FILE ?? join(dataDir, 'arena.db'),
   judgeWorkDir: join(dataDir, 'judge'),
+  ideEnvDir: consumeIdeEnvDir(),
   webDist: join(repoRoot, 'web', 'dist'),
   junitJar: process.env.ARENA_JUNIT_JAR ?? '/opt/junit/junit-platform-console-standalone.jar',
   scalaJarDir: process.env.ARENA_SCALA_JARS ?? '/opt/scala',
