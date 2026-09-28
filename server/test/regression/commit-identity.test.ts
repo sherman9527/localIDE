@@ -30,7 +30,7 @@ function freshRepo(): string {
   return dir;
 }
 
-function runChecker(cwd: string, env: Record<string, string>) {
+function runChecker(cwd: string, env: Record<string, string | undefined>) {
   return spawnSync('bash', [CHECKER], {
     cwd,
     encoding: 'utf8',
