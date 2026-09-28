@@ -9,6 +9,20 @@ set -uo pipefail
 root="$(git rev-parse --show-toplevel)" || exit 1
 cd "${root}"
 
+# 署名闸门排在"跳过校验"那条早退**之前**：ARENA_SKIP_HOOK 绕的是测试套件，
+# 不该顺手绕掉发布纪律 —— 提交身份推上去就公开了，收不回来。
+if ! bash .githooks/check-commit-identity.sh; then
+  echo '[pre-commit] 署名闸门未通过，提交已阻止（改法见上一条输出）。' >&2
+  exit 1
+fi
+
+# 生效的到底是哪份 hook：core.hooksPath 没指过来时，git 跑的是 .git/hooks/pre-commit 那份拷贝。
+# 改了 .githooks 而拷贝没跟上，闸门会"看起来还在守着"其实停在旧行为上。
+active_hook="$(git rev-parse --git-path hooks/pre-commit 2>/dev/null || echo '')"
+if [ -n "${active_hook}" ] && [ -f "${active_hook}" ] && ! cmp -s "${active_hook}" "${root}/.githooks/pre-commit"; then
+  echo "[pre-commit] 注意：当前生效的 hook 与 .githooks/pre-commit 不一致，请同步：cp .githooks/pre-commit \"${active_hook}\"（或 npm run hooks:install）" >&2
+fi
+
 if [ "${ARENA_SKIP_HOOK:-0}" = "1" ]; then
   echo '[pre-commit] 已跳过（ARENA_SKIP_HOOK=1）—— 请记得在 memo.md 记录原因' >&2
   exit 0

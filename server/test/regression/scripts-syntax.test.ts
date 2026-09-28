@@ -29,8 +29,26 @@ const rootLevel = (dir: string, ext: string) =>
     .filter((e) => e.isFile() && e.name.endsWith(ext))
     .map((e) => e.name);
 
+/**
+ * `.githooks/` 里的可执行脚本以前**不在任何语法闸门里**（那个目录只被 `*.sh` 的通配漏掉了，
+ * 而 hook 文件没有扩展名）。它偏偏是最不能坏的一份：坏了不会有任何地方报错，
+ * 只会让"每次提交都跑校验"这件事静默停止 —— 而且 pre-commit 现在还是两份
+ * （tracked 的 `.githooks/pre-commit` 与实际生效的 `.git/hooks/pre-commit` 拷贝）。
+ * 判据取 shebang，不取扩展名。
+ */
+function hookScripts(): string[] {
+  const dir = join(ROOT, '.githooks');
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((e) => e.isFile())
+    .filter((e) => readFileSync(join(dir, e.name)).subarray(0, 2).toString('latin1') === '#!')
+    .map((e) => `.githooks/${e.name}`)
+    .sort();
+}
+
+const hookFiles = hookScripts();
 const mjsFiles = [...rootLevel(ROOT, '.mjs'), ...walk(join(ROOT, 'scripts'), (name) => name.endsWith('.mjs'))].sort();
-const shFiles = [...rootLevel(ROOT, '.sh'), ...walk(join(ROOT, 'scripts'), (name) => name.endsWith('.sh')), ...walk(join(ROOT, 'docker'), (name) => name.endsWith('.sh'))].sort();
+const shFiles = [...rootLevel(ROOT, '.sh'), ...walk(join(ROOT, 'scripts'), (name) => name.endsWith('.sh')), ...walk(join(ROOT, 'docker'), (name) => name.endsWith('.sh')), ...hookFiles].sort();
 
 describe('scripts/*.mjs 语法自检（node --check）', () => {
   it('确实扫到了脚本文件（空清单等于闸门失效）', () => {
@@ -52,6 +70,11 @@ describe('shell 脚本语法自检（bash -n）', () => {
 
   it('确实扫到了 .sh 文件', () => {
     expect(shFiles.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('.githooks 里至少有一份脚本被这条闸门认领（改扩展名或挪目录就会让它空转）', () => {
+    expect(hookFiles.length, '.githooks/ 下没有 shebang 脚本 ⇒ 上面那条"hook 也进闸门"的认领是空的').toBeGreaterThanOrEqual(1);
+    expect(hookFiles, 'pre-commit 必须在清单里').toContain('.githooks/pre-commit');
   });
 
   // 宿主与容器都有 bash（verify.sh 自己就是 bash 跑的）；真没有时这条明确 skip 而不是假装通过

@@ -23,7 +23,7 @@
 | `./start.sh --ide` | 起服务并**直接打开网页 IDE**（同一个容器、同一个服务，只是换个落地页；不记分也不留提交历史） |
 | `./start.sh --logs` | 跟踪容器日志 |
 | `./start.sh --bridge-logs` | 跟踪宿主 CLI 桥日志（主观题掉成人工自检表时先看这里） |
-| `./start.sh --verify` | 容器内跑全量校验（含真判题） |
+| `./start.sh --verify` | 先构建 + 起新容器，再在容器里跑全量校验（含真判题）。**构建这一步不能省**：`compose exec` 进的是当前跑着的容器，不改代码就直接验会测到上一个镜像里的源码 |
 | `./start.sh --e2e` | 告诉你宿主跑 E2E 的命令（默认浏览器 **Edge**；`--e2e --in-container` 才在容器里跑） |
 | `./start.sh --status` | compose 视角的运行状态 |
 | `./start.sh --down` | 停止（顺带停掉宿主 CLI 桥与 E2E 隔离实例） |
@@ -105,6 +105,11 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 - 运行预算按语言给（命令型 10s，Spark 两门 120s —— 实测一次 PySpark 0.3~6.7s、Spark Scala 一遍 15.4s 含真编译），
   数字显示在编辑器上方，运行中还会跳"已等几秒"，免得十几秒的等待看起来像卡死。
 - IDE 与判题共用那个常驻 Spark worker：**判题优先，IDE 排队，不抢占**正在跑的判题。
+- **依赖环境**（右栏那张卡）：想引第三方包不用等镜像改版 —— Python 敲 `pip3 install requests`、
+  JS/TS 敲 `npm i dayjs`，输出逐行流回来；同一张卡列出**你自己装的那几个包**（版本、各占多少、环境合计多少）
+  与一个 `重置环境`。Java / Spark Scala 没有"一条命令装对传递依赖"这种好事，所以那里不给输入框，
+  而是告诉你把 jar 放进哪个目录（放进去就会进 classpath）。三条边界：**这些包只影响 IDE**（判题看不到）、
+  **命令窗口不是 shell**（分号与管道在这里只是字符）、**reset 会关掉这门语言活着的 REPL / 调试会话**。
 
 ## 主观题评分与"CLI 桥"
 
@@ -125,7 +130,7 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 ```bash
 npm run verify:fast     # 宿主机可跑：lint + 类型 + 前端构建与产物预算 + 单元/集成测试
 npm run typecheck       # tsc -b 三个生产项目 + 三份测试项目（shared/server/tests 的测试文件都在内）
-./start.sh --verify     # 容器内全量：再加判题矩阵（矩阵必须报 0 skipped）。E2E 在宿主跑，见下一行
+./start.sh --verify     # 容器内全量：先 build + up -d（否则验的是旧镜像），再加判题矩阵（矩阵必须报 0 skipped）。E2E 在宿主跑，见下一行
 npm run e2e             # 宿主 Playwright：自己起一个隔离实例（127.0.0.1:7798，只读题库）
 npm run hooks:install   # 一次性：把 .githooks/pre-commit 接到 git
 ```
@@ -155,8 +160,15 @@ npm run hooks:install   # 一次性：把 .githooks/pre-commit 接到 git
 8. **前端产物预算**（`scripts/check-bundle.mjs`）：首屏只能有 1 个 JS + 1 个 CSS（两边都断言）且 gzip 不超预算，
    入口里出现 zod / CodeMirror 就判红 —— 拆包的成果最容易被一次"顺手 import"悄悄还回去。
 9. **仓库自带脚本的语法与行尾**（`server/test/regression/scripts-syntax.test.ts`）：根目录与 `scripts/**/*.mjs`
-   过 `node --check`、`*.sh` 过 `bash -n` **且不许有 CR**、`start.ps1` 钉住"恰好一个 UTF-8 BOM"（多一个就炸），
-   外加 `start.sh` 与 `start.ps1` 的开关集合必须一致。
+   过 `node --check`、`*.sh` 过 `bash -n` **且不许有 CR**（判据是字节 —— Git Bash 容忍 CRLF，Linux bash 不容忍）、
+   `start.ps1` 钉住"恰好一个 UTF-8 BOM"（多一个就炸），外加 `start.sh` 与 `start.ps1` 的开关集合必须一致。
+   `.githooks/` 里的脚本也在这张清单上（按 shebang 认领，不看扩展名）—— 它坏了不会报错，
+   只会让"每次提交都跑校验"这件事静默停止。
+10. **提交署名闸门**（`.githooks/check-commit-identity.sh`，判据是 `.githooks/publish-identity`）：
+    作者与提交者的邮箱必须等于发布身份，且**排在 `ARENA_SKIP_HOOK` 那条早退之前** —— 跳过测试套件
+    不该顺手跳过发布纪律。为什么单独一条：扫文件内容的发布闸门看不见 commit 元数据，
+    而身份就写在那里，推上去收不回来（上一轮 5 个 commit 用本机 `git config` 提，把个人邮箱带进了历史）。
+    本仓库的规矩是不改 `git config`、身份逐条命令传，而"记得传"不可靠 ⇒ 交给机器判。
 
 ### E2E 打在哪
 
@@ -190,8 +202,11 @@ tests/       Playwright E2E
   题目本身不转录这些文档的原文：`source` 的字段只有
   `origin/jds/ingestedAt/era/company/role/location/knowledgeRef/addedBy`，没有任何 quote/excerpt 字段，
   公开的是我们自己写的题面与判分点。
-- **单镜像**：所有技术栈都在一个镜像里（约 3-4GB）。镜像层实体存在 Docker Desktop 的 VM 存储里，
-  仓库内的 `./docker-cache` 只承载 npm/pip 等构建缓存 —— 不改全局 daemon 配置就无法把镜像本体也搬进来。
+- **单镜像**：所有技术栈都在一个镜像里（`docker images daily-arena` 实测 **2.36GB**）。
+  Windows 上磁盘占的比这大得多，而且**只涨不缩** —— 那是 Docker Desktop 的 VHDX，删镜像不还空间、
+  重启也不还（实测回收 40GB 后 `df` 一点没动）；保持已分配反而让下次构建复用空间、不再涨盘。
+  镜像层实体存在 Docker 的 VM 存储里，仓库内的 `./docker-cache` 只承载 npm/pip 等构建缓存 ——
+  不改全局 daemon 配置就无法把镜像本体也搬进来。
 - **MySQL 版本**：ubuntu:22.04 提供的是 8.0.x（不是 8.4 LTS）；Redis 是源码编译的 7.2.7（不是 8.x）。
   超出该版本可用的命令，判题器会明确报"不可用"而不是给错判。
 - **Flink**：不做真跑判分（mini-cluster 的镜像与启动成本不划算），相关题走主观题 rubric。
@@ -202,11 +217,10 @@ tests/       Playwright E2E
   E2E 用宿主浏览器跑（默认 **Edge**，与日常使用一致）：`npm run e2e`；想换 Chrome 加 `ARENA_E2E_CHANNEL=chrome`。
   `./start.sh --e2e` 因此默认只把这条宿主命令告诉你，`--e2e --in-container` 是留给"网络能取到浏览器"的情形。
 - **`start.ps1` 必须带 UTF-8 BOM**：Windows PowerShell 5.1 读无 BOM 的中文脚本会解析失败（不是编码偏好，是它的默认代码页）。
-- **IDE 里现装的第三方包只属于 IDE，判题器看不到**（网页 IDE 的「依赖环境」面板：命令窗口 + 清单 + reset）。
-  python 走 venv、node 走 `node_modules`、Java/Scala 走 `lib/*` 进 classpath；装在**命名卷** `arena-ide-env`
-  里，跨 `--rebuild` 保留。C/C++ 只能靠镜像预装（apt），SQL/Redis 的"依赖"是那个服务本身，
-  PySpark 的解释器与判题共用一个常驻池所以不开环境 —— 每条理由界面上都会说，不写成"此语言不支持"。
-  ⇒ 反面一句也要说清：**做题想用第三方包 = 改镜像**，不能靠别人现装（`docs/JUDGING.md` 最后一段）。
+- **IDE 里现装的第三方包只属于 IDE，判题器看不到**（面板长什么样见上面「网页 IDE」；这里只说边界）。
+  ⇒ 反面一句：**做题想用第三方包 = 改镜像**，不能靠别人现装 —— 否则"重建镜像即可复现判题"当场作废
+  （两道保险写在 `docs/JUDGING.md` 最后一段）。C/C++ 只能靠 apt 预装、SQL/Redis 的"依赖"是那个服务本身、
+  PySpark 的解释器与判题共用一个常驻池所以不开环境 —— 每种不支持界面上都给理由，不写成"此语言不支持"。
 - 单人单机自用：没有账号体系、没有并发防护、没有跨人排行榜。
 - **端口只绑回环**（`127.0.0.1:7788`）：没有鉴权的服务发布到所有网卡，等于把整个题库（含被"移除"的题）
   和进度暴露给同局域网的人。**代价：手机 / iPad 访问不了**（已确认不需要）。
