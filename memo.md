@@ -3083,3 +3083,59 @@ compose 必须给服务进程设 `ARENA_IDE_ENV_DIR`（就是上面那条选址�
 4. **文档里"不需要 X"这种断言，先量一次再写。** 设计文档那句"物理位置就是答案，不需要维护 diff 表"
    被真浏览器修正了一半（venv 自带 pip/setuptools 被报成用户包，47.7MB）；
    而"清单只扫环境自己那一层"这句话在单测里永远抓不到 —— 那些 dist-info 全是我自己造的。
+
+---
+
+## 里程碑 AZ：push 前那次手动复扫，最后变成一条闸门（2026-09-28）
+
+用户说"push 吧"。推之前我按上次的习惯复扫了一遍**将要被推出去的东西** —— 这次抓到的不在文件里，
+在 commit 元数据里：今天那 5 个 commit 的作者与提交者都写着个人邮箱（我直接用了本机 `git config`，
+而本仓库的规矩是"不改 config、身份逐条命令传"，我忘了传）。
+
+### 顺序
+
+1. 先改写、再推：`filter-branch --env-filter` 只动 `origin/main..main`，把邮箱换成发布身份。
+   改完做**两件事**才敢推：留一条 `backup-...` ref；`git diff backup main` 必须为空 ——
+   证明这次只换署名，内容一字未动。
+2. `git push --dry-run origin main` 确认只发一条 ref（上次记过：`followTags` 若开着，
+   旧 commit 会跟着 tag 一起出去）。这次实测 `followTags` 未设、远端只有 `refs/heads/main`。
+3. 推完从 **GitHub 侧回读**（不是看本地）：最新 17 条 commit 的 author/committer 全是 noreply，
+   且 `author.login` 正确关联到账号 —— 这才叫"推上去的东西没有敏感信息"。
+
+### 为什么不止步于"这次改好了"
+
+身份这件事的形状是：**判据不在被扫的对象里**。`publish-identity.test.ts` 扫被跟踪的文件，
+commit 元数据它看不见；两个判据根本不相交，所以"发布闸门是绿的"与"历史是干净的"可以同时成立。
+而靠我"记得传 env"已经失败过一次 ⇒ 落成 `.githooks/check-commit-identity.sh`（WI-88），
+并刻意排在 `ARENA_SKIP_HOOK` 那条早退**之前** —— 那个开关的语义是"这次不跑测试套件"，
+不是"这次可以公开我的邮箱"。
+
+### 又挖出两个"静默不生效"的洞
+
+- `.githooks/*` **不在任何语法闸门里**（那个目录只被 `*.sh` 通配，而 hook 文件没扩展名）。
+  它坏了不会有任何地方报错，只会让"每次提交都跑校验"悄悄停掉。⇒ 按 shebang 认领进 `scripts-syntax`。
+- 真正生效的是 `.git/hooks/pre-commit` 那份**拷贝**（`core.hooksPath` 没设，README 一直写着两条路都算）。
+  那么"改了 tracked 的那份、拷贝没跟上"就完全没人知道 —— 这次改的正是这个文件，所以顺手让
+  pre-commit 自己比对两份并说出来。它不是闸门（cmp 一致不等于行为一致），但至少不再静默。
+
+### 我自己造的两次错，都记下来
+
+1. **先 `git add`、再改类型** ⇒ 提交进去的是改前那一份，而 pre-commit 跑的是**工作树**，
+   于是"闸门绿了"证明不了"那条 commit 绿"。checkout 到那条 commit 的人 typecheck 会红。
+   修法是新起一条 commit（`2191baa`）而不是 amend —— 不问用户就不改写已有提交。
+   ⇒ **提完看一眼 `git status` 干不干净**：脏就说明"验过的"和"提上去的"不是同一份内容。
+2. **`grep -c $'\r'` 报的是行数不是 CR 数**（在那次调用里判据退化成了"匹配任意行"），
+   差点让我把三个本来 LF 干净的文件报成 CRLF 并"修"一遍。改用 node 数 `0x0D` 字节才对。
+   ⇒ 同一句仓库老话的第三次复现：**判据要落到字节上，落到管道计数上就会骗人。**
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 新用例 | `server/test/regression/commit-identity.test.ts` 7 passed（先红：脚本不存在，exit 127） |
+| 端到端 | 临时仓库里真跑 git hook：外来身份 ⇒ 拦下且 `rev-list --count`=0；正确身份 ⇒ 放行且 1 提交 |
+| 破坏性 | 删判据文件 ⇒ 红；只坏 committer ⇒ 也拦（GitHub 上两个都显示、两个都会公开） |
+| 本机 dogfood | 用默认 config 提一条被拦下，输出点名那个个人邮箱并打印该用的命令 |
+| 宿主快档 | ✅ 两次 commit 各跑一遍（pre-commit），含新增 7 条 |
+| 推送 | `origin/main = e52a6f0`，GitHub 侧回读 17 条 commit 全 noreply |
+| 容器交付档 | `./start.sh --verify` ✅ `EXIT=0`；判题矩阵 **451 passed / 452 total**、158 道代码题跳过 0；**新加的 7 条署名用例在镜像里全绿** —— 那里没有 `.git` 也没有 git config，"临时仓库 + `git var` 兜底"这条路照样成立 |

@@ -28,6 +28,11 @@
    `git ls-files` 直接 fatal ⇒ 整个交付档被一条与判题无关的闸门撞红（`publish-identity.test.ts` 就是这样）。
    跳过要用 `it.skipIf`（报告会写 "1 skipped"）而不是 `try/catch → return`，
    并且**另起一条永远会跑的断言**解释"为什么会是 null"（那里必须是镜像，不能是宿主仓库坏了）。
+   **还有一类是"判据根本不在被扫的对象里"**：扫文件内容的发布闸门看不见 commit 元数据，
+   于是"闸门全绿"与"历史里有个人邮箱"可以同时成立 ⇒ 那种东西要单独一条判据
+   （`.githooks/check-commit-identity.sh`，且必须排在 `ARENA_SKIP_HOOK` 早退之前）。
+   `.githooks/*` 现在也在 `scripts-syntax` 的 `bash -n` 与 CR 字节判据里（按 shebang 认领）：
+   hook 坏了不会报错，只会让"每次提交都跑校验"静默停止。
 4. **跨 session 记忆要更新**：`memo.md` 追加里程碑（做了什么 / 验证表 / 已知问题 / 教训），
    `HANDOVER.md` 移动工作项（完成 → COMPLETED 并带验证命令与结果）。
 

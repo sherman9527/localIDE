@@ -1099,6 +1099,43 @@
   c/cpp 只能 apt、mysql/redis 的"依赖"是服务本身；Java/Scala 的 jar 在容器里只能
   `docker cp` 进命名卷 `arena-ide-env`。⇒ 出题要用第三方包 = 改镜像，不能靠用户现装。
 
+- [x] WI-88 提交署名闸门（2026-09-28，起因是这次 push 前的一次手动复扫）
+  ｜推之前发现今天 5 个 commit 的作者/提交者写着个人邮箱 —— `publish-identity.test.ts` 扫的是
+  **被跟踪的文件**，而身份写在 commit 元数据里，两类判据根本不相交；推上去就进了公开历史。
+  ｜先把那 5 条改写成发布身份（`filter-branch --env-filter`，只动 `origin/main..main`，
+  留备份 ref，且 `git diff backup main` 为空 ⇒ 内容一字未变），再 fast-forward 推上去：
+  `origin/main = e52a6f0`，GitHub 侧回读 17 条 commit 全是 noreply、账号关联正确。
+  ｜闸门三件：`.githooks/publish-identity`（判据；换身份要改这个文件并提交，让这件事留在 diff 里，
+  比留一个 `SKIP=1` 的口子诚实）\+ `.githooks/check-commit-identity.sh`（读
+  `git var GIT_{AUTHOR,COMMITTER}_IDENT` 而不是读 config —— "逐条传身份"那条路也要能被验到；
+  没判据即红，不静默放行）\+ 接线排在 `ARENA_SKIP_HOOK` 那条早退**之前**
+  （跳过测试套件不该顺手跳过发布纪律；有顺序断言钉，锚点取语句不取词 —— 注释里也提到那个词，
+  第一版比错了位置）。
+  ｜顺带补两个洞：① `.githooks/*` 以前不在 `scripts-syntax` 的 `bash -n` 与 CR 字节判据里
+  （按 shebang 认领，不看扩展名）—— hook 坏了不会报错，只会让"每次提交都跑校验"静默停止；
+  ② 真正生效的是 `.git/hooks/pre-commit` 那份**拷贝**（`core.hooksPath` 没设，README 一直这么说），
+  改了 tracked 那份而拷贝没跟上没人知道 ⇒ pre-commit 现在自己比对并说出来。
+  ｜测试形状：`server/test/regression/commit-identity.test.ts` 7 条全走行为（临时仓库 + env 喂身份 +
+  看退出码与 stderr），先红（脚本不存在，exit 127）后绿。
+  ｜破坏性 / 端到端：外来身份 ⇒ 拦下且 `git rev-list --count HEAD`=0；正确身份 ⇒ 放行且 1 提交；
+  删判据文件 ⇒ 红；在本机用默认 config 真提一条 ⇒ 被拦下，输出点名那个个人邮箱并给出该用的命令。
+  ｜两条自己造的错，都值得记：**① 顺序错** —— 先 `git add` 再改类型，于是提交进去的是改前那一份，
+  而 pre-commit 跑的是**工作树**，"闸门绿"证明不了"那条 commit 绿"（`2191baa` 修的就是它；
+  没 amend —— 不问用户就不改写已有提交）⇒ 提完必须看一眼 status 干不干净，脏就说明
+  "验过的"和"提上去的"不是同一份内容。**② 测量假阳性** —— `grep -c $'\r'` 在那次调用里退化成
+  行数而不是 CR 数，差点把三个本来干净的文件报成 CRLF；改用 node 数 `0x0D` 字节才对
+  ⇒ 判"有没有 CR"要数字节，别信管道的计数。
+  ｜验证：宿主 `npm run verify:fast` ✅（含这 7 条新用例，端到端 hook 行为另在临时仓库验）；
+  容器 `./start.sh --verify` ✅ `EXIT=0`，判题矩阵 **451 passed / 452 total**、
+  `[matrix] 158 道代码题全部可判、跳过（栈不可用）0 道`。
+  ｜容器那轮最值钱的副产品：`commit-identity.test.ts` 7 条**在镜像里全跑绿** —— 那里既没有 `.git`
+  也没有 git config，"临时仓库 + `git var` 兜底身份"这条路径照样成立，说明它不靠"这台机器配好了"。
+  （对照：同一轮里 `publish-identity` 是 `3 tests | 1 skipped` —— 它确实只能在宿主生效，且明说了。）
+  ｜**仍开着的**：本地还留两条带个人邮箱的旧 ref（`backup-pre-identity-rewrite` 与 filter-branch
+  自己留的 `refs/original/refs/heads/main`），只在本地、不在远端。要不要 `update-ref -d` +
+  `reflog expire` + `gc --prune=now` 真正回收，等用户点头（不可反悔）；验收按上次那套：
+  逐对象 `cat-file -e` 报缺失、`fsck` 无 dangling、扫**全部可达对象**命中 0。
+
 ## IN PROGRESS
 
 - [ ] WI-56 公司扩充（长期项）：目标 **每家 25-30 题**（2026-09-22 用户拍板，取代 commit `2b71a0d`
