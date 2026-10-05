@@ -32,7 +32,7 @@ run "typecheck" npm run typecheck
 # NODE_ENV 要显式 production：上面为 RTL 导出的 test 会让 vite 打进 dev 版 react-dom（多 ~60KB gzip），预算就量歪了。
 run "前端构建" env NODE_ENV=production npm run build -w web
 run "前端产物预算" node scripts/check-bundle.mjs
-run "单元测试（shared + exec + regression + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/*.test.ts
+run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 run "题库只增不减（基线取 git 跟踪数）" node scripts/check-bank.mjs --count-only
 # 整个 bank 目录都要在 FULL_GATE 下跑：只点名 content 的话，
 # bank/provenance.test.ts（skipIf ARENA_FULL_GATE）就永远只是"被跑过"而从未真跑。
