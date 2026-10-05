@@ -64,6 +64,7 @@ RUN arena-mirrors pip && arena-mirrors maven && arena-mirrors env
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip3 install --no-cache-dir --upgrade pip setuptools wheel \
     && pip3 install --no-cache-dir "pyspark==${SPARK_VERSION}" "pandas>=2.2,<3" \
+         "notebook>=7,<8" "ipykernel>=6,<7" "nbformat>=5.9,<6" "nbclient>=0.8" \
     && python3 -c "import pyspark, os; print('pyspark', pyspark.__version__)"
 
 ARG SPARK_JARS_DIR=/opt/spark-jars
@@ -83,6 +84,12 @@ RUN set -eux; \
     done; \
     java -version 2>&1 | head -1; \
     ls /opt/junit /opt/scala | head
+
+# kernel 的解释器是 venv（IDE 那份），但 kernelspec 本体必须在镜像级目录：
+# venv 会被 IDE 的「重置环境」整个删掉（server/src/ide/reset.ts），装在里面等于让用户一键删掉 kernel。
+COPY docker/jupyter/kernels/arena-pyspark/kernel.json /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json
+RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
+    && jupyter kernelspec list 2>/dev/null | grep -q arena-pyspark
 
 ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:/opt/junit:${PATH}" \
     SPARK_JARS_DIR=${SPARK_JARS_DIR} \

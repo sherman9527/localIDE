@@ -1,0 +1,17 @@
+{
+  "argv": [
+    "/opt/arena-ide-env/python/bin/python",
+    "-m",
+    "ipykernel_launcher",
+    "-f",
+    "{connection_file}"
+  ],
+  "display_name": "PySpark (arena)",
+  "language": "python",
+  "interrupt_mode": "signal",
+  "env": {
+    "PYSPARK_SUBMIT_ARGS": "--conf spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh --conf spark.driver.extraJavaOptions=-Dderby.system.home=/app/data/notebook-warehouse/derby --master local[2] --driver-memory 512m pyspark-shell",
+    "SPARK_LOCAL_IP": "127.0.0.1",
+    "PYSPARK_DRIVER_PYTHON": "/opt/arena-ide-env/python/bin/python"
+  }
+}
