@@ -13,5 +13,8 @@
     "PYSPARK_SUBMIT_ARGS": "--conf spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh --conf spark.driver.extraJavaOptions=-Dderby.system.home=/app/data/notebook-warehouse/derby --master local[2] --driver-memory 512m pyspark-shell",
     "SPARK_LOCAL_IP": "127.0.0.1",
     "PYSPARK_DRIVER_PYTHON": "/opt/arena-ide-env/python/bin/python"
+  },
+  "metadata": {
+    "arena_sync_note": "argv[0] 与 PYSPARK_DRIVER_PYTHON 的真相来源：venv 根 = compose.yml 的 ARENA_IDE_ENV_DIR，内部布局 python/bin/python = server/src/ide/env.ts 的 venvPythonPath（Linux 分支）。任一处改动都要同步本文件，并跑 server/test/regression/notebook-image.test.ts 核对。"
   }
 }

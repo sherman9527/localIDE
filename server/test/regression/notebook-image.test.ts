@@ -8,7 +8,15 @@ import { config } from '../../src/config.js';
  * ① 必须装在**镜像级**目录 —— 装进 venv 的话，WI-87 的「重置环境」会把 kernel 一起删掉，
  *    而界面只显示"打不开"，不解释为什么；
  * ② argv[0] 必须等于 compose 里 ARENA_IDE_ENV_DIR 派生出来的解释器路径 —— 写死字面量就是
- *    第二处真相，compose 一改就悄悄不成立（本仓库对这类"两处各写一遍"栽过很多次）；
+ *    第二处真相，compose 一改就悄悄不成立（本仓库对这类"两处各写一遍"栽过很多次）。
+ *    venv **内部布局**（python/bin/python）的权威在 server/src/ide/env.ts:venvPythonPath 的
+ *    Linux 分支，这里不 import 该函数来派生期望值，原因是它就是没法 import：本闸门跑在宿主
+ *    （Windows 开发机 + verify:fast），venvPythonPath 在 win32 返回 `<root>\python\Scripts\python.exe`
+ *    —— 分隔符、文件名、root 前缀三处都和 kernel.json（Linux 工件）对不上；把
+ *    process.platform 按下去再调用也不行，env.ts 顶层 `import { join } from 'node:path'`
+ *    绑的是**加载时平台**的 join。import ⇒ 闸门在宿主永红。折中路由（评审控制方裁定）：
+ *    本文件核对 compose 派生的根 + kernel.json 文件内相等断言（argv[0] ↔ PYSPARK_DRIVER_PYTHON）
+ *    消掉第四处字面量，布局漂移由 kernel.json 的 metadata.arena_sync_note 指回 env.ts。
  * ③ Spark 的配置只能待在 PYSPARK_SUBMIT_ARGS 里，且必须以 `pyspark-shell` 收尾：
  *    写成普通环境变量**完全没效果**，少了尾缀则 --conf 会被当成应用参数。
  */
@@ -21,10 +29,25 @@ const compose = readFileSync(join(root, 'compose.yml'), 'utf8');
 const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8');
 
 describe('arena-pyspark kernelspec', () => {
-  it('argv 指向 venv 解释器，且 venv 根与 compose 的 ARENA_IDE_ENV_DIR 一致', () => {
-    const dir = /ARENA_IDE_ENV_DIR:\s*(\S+)/.exec(compose)?.[1];
-    expect(dir, 'compose 没设 ARENA_IDE_ENV_DIR ⇒ 没法核对 kernel 路径').toBeTruthy();
+  it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
+    // 旧判据只吃三处（arena/dev/e2e，compose.yml:38/88/117）里的**第一处** ARENA_IDE_ENV_DIR，
+    // dev/e2e 漂移无人看管；且 \S+ 会把 YAML 引号一并捕获，`ARENA_IDE_ENV_DIR: "/opt/arena-ide-env"`
+    // 这种语义等价的写法会冤红。现在：只认以 `/` 开头的值（引号可选），三处必须全部命中且相等。
+    const matches = [...compose.matchAll(/^\s*ARENA_IDE_ENV_DIR:\s*"?(\/[^\s"]*)"?\s*$/gm)];
+    expect(
+      matches.length,
+      'compose 应有 3 处绝对路径的 ARENA_IDE_ENV_DIR（arena/dev/e2e 各一）；不是 3 就说明有服务改了写法（相对路径不算）',
+    ).toBe(3);
+    const dirs = Array.from(new Set(matches.map((m) => m[1])));
+    expect(
+      dirs.length,
+      `三个服务的 ARENA_IDE_ENV_DIR 分叉了：${dirs.join(' | ')} ⇒ kernel 的解释器在某个服务里指向不存在的目录`,
+    ).toBe(1);
+    const dir = dirs[0];
+    // 字面量 python/bin/python 是 env.ts Linux 分支的镜像：那边的布局一改，这里与 kernel.json 必须同步。
     expect(kernel.argv[0]).toBe(`${dir}/python/bin/python`);
+    // kernel.json 里 PYSPARK_DRIVER_PYTHON 与 argv[0] 是同一条路径的第四份抄写，文件内相等断言把它钉死。
+    expect(kernel.env?.PYSPARK_DRIVER_PYTHON, 'PYSPARK_DRIVER_PYTHON 必须与 argv[0] 完全一致').toBe(kernel.argv[0]);
     expect(kernel.argv).toEqual(expect.arrayContaining(['-m', 'ipykernel_launcher', '{connection_file}']));
   });
 
@@ -33,20 +56,34 @@ describe('arena-pyspark kernelspec', () => {
     expect(kernel.display_name).not.toMatch(/3\.\d+\.\d+/);
   });
 
-  it('Spark 配置走 PYSPARK_SUBMIT_ARGS：含 --master、pyspark-shell 尾缀、独立 warehouse 与 Derby', () => {
-    const args = kernel.env?.PYSPARK_SUBMIT_ARGS ?? '';
-    expect(args).toContain('pyspark-shell');
-    expect(args).toContain('--master local[2]');
-    expect(args).toContain('spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh');
-    expect(args).toContain('-Dderby.system.home=/app/data/notebook-warehouse/derby');
+  it('Spark 配置走 PYSPARK_SUBMIT_ARGS：--conf/--master 等必须排在 pyspark-shell 尾缀之前', () => {
+    const args = (kernel.env?.PYSPARK_SUBMIT_ARGS ?? '').trim();
+    // 尾缀是**位置**属性，不是"出现过"：pyspark 拿 ` pyspark-shell` 这个结尾区分 submit 参数与应用参数。
+    // 旧断言 toContain('pyspark-shell') 对 `pyspark-shell --master local[2] ...`（挪到最前）和
+    // 嵌在别的 token 里的散字符串都照样绿；改成只出现在结尾、且前面还有 --conf/--master 才算过。
+    expect(args, 'PYSPARK_SUBMIT_ARGS 必须以独立 token pyspark-shell 收尾').toMatch(/ pyspark-shell$/);
+    const beforeTail = args.slice(0, args.lastIndexOf(' pyspark-shell'));
+    expect(beforeTail).toContain('--master local[2]');
+    expect(beforeTail).toContain('spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh');
+    expect(beforeTail).toContain('-Dderby.system.home=/app/data/notebook-warehouse/derby');
     expect(kernel.env?.SPARK_LOCAL_IP).toBe('127.0.0.1');
   });
 
-  it('Dockerfile 把它 COPY 进镜像级目录并当场断言，且没有 ipykernel install --user 这类写法', () => {
-    const copy = dockerfile.split('\n').find((l) => l.includes('arena-pyspark/kernel.json'));
-    expect(copy, 'Dockerfile 没把 kernel.json COPY 进镜像').toBeTruthy();
-    expect(copy).toContain('/usr/local/share/jupyter/kernels/arena-pyspark/');
-    expect(copy).not.toContain('arena-ide-env');
+  it('Dockerfile 用 COPY 把它落进镜像级目录、构建期用 jupyter kernelspec list 当场断言，且没有 ipykernel install --user 这类写法', () => {
+    // 旧判据 find(l => l.includes('arena-pyspark/kernel.json')) 只取第一条命中，而 COPY 行与
+    // 自检 RUN 行都含这个子串：删 COPY 留自检 ⇒ 命中的是 RUN 行、形状"像对"，"kernel 没进镜像"判绿；
+    // 再往 venv 里 COPY 一份，只要镜像级 COPY 排在前面，旧 ipykernel 正则也看不见。
+    // 现在两刀都换成对**全体相关行**的判定。
+    const kernelLines = dockerfile.split('\n').filter((l) => /jupyter\/kernels/.test(l));
+    expect(
+      kernelLines.some((l) => /^COPY\s/.test(l) && l.includes('/usr/local/share/jupyter/kernels/arena-pyspark/')),
+      'Dockerfile 没有把 kernelspec 放进 /usr/local/share/jupyter/kernels/ 的 COPY 行',
+    ).toBe(true);
+    expect(
+      kernelLines.filter((l) => /arena-ide-env/.test(l)),
+      'kernelspec 出现在 IDE venv 路径里 —— 「重置环境」（server/src/ide/reset.ts）会把 kernel 一起删掉',
+    ).toEqual([]);
+    expect(dockerfile, '构建期自检消失了 ⇒ kernel 没了要等用户点开界面才发现').toMatch(/jupyter kernelspec list/);
     expect(dockerfile).not.toMatch(/ipykernel install[^\n]*(--user|arena-ide-env)/);
   });
 });

@@ -85,12 +85,6 @@ RUN set -eux; \
     java -version 2>&1 | head -1; \
     ls /opt/junit /opt/scala | head
 
-# kernel 的解释器是 venv（IDE 那份），但 kernelspec 本体必须在镜像级目录：
-# venv 会被 IDE 的「重置环境」整个删掉（server/src/ide/reset.ts），装在里面等于让用户一键删掉 kernel。
-COPY docker/jupyter/kernels/arena-pyspark/kernel.json /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json
-RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
-    && jupyter kernelspec list 2>/dev/null | grep -q arena-pyspark
-
 ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:/opt/junit:${PATH}" \
     SPARK_JARS_DIR=${SPARK_JARS_DIR} \
     SCALA_HOME_DIR=/opt/scala
@@ -119,6 +113,20 @@ RUN set -eux; \
     redis-server --version | head -1; \
     redis-server --version | grep -q "v=${REDIS_VERSION%.*}" \
       || { echo "[arena] Redis 版本不对：$(redis-server --version)"; tail -20 /tmp/redis-build.log; exit 1; }
+
+# kernel 的解释器是 venv（IDE 那份），但 kernelspec 本体必须在镜像级目录：
+# venv 会被 IDE 的「重置环境」整个删掉（server/src/ide/reset.ts），装在里面等于让用户一键删掉 kernel。
+# 这两行刻意放在 stack 段**末尾**（Redis 源码构建之后）：改 kernel.json 只重建它自己和下游
+# manifest 层，不必重跑上面几分钟的 Redis make —— deps 段 npm install 有 cache mount，重建也便宜。
+# 自检按本文件惯例带具体原因（对齐 :42-45/:114/:120-121 的 `|| { echo; exit 1; }` 形状），
+# 三种故障要能读出三种差别：文件没 COPY 到 / jupyter 跑不动（stderr 直接进消息）/ jupyter 看不见这个 kernel。
+COPY docker/jupyter/kernels/arena-pyspark/kernel.json /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json
+RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
+      || { echo "[arena] kernel.json 没出现在镜像级 kernels 目录（COPY 行被删或路径写错？）"; exit 1; }; \
+    ks_list="$(jupyter kernelspec list 2>&1)" \
+      || { echo "[arena] jupyter kernelspec list 跑不动（jupyter 未安装或不在 PATH？），stderr+stdout：${ks_list}"; exit 1; }; \
+    echo "${ks_list}" | grep -q arena-pyspark \
+      || { echo "[arena] jupyter 看不见 arena-pyspark kernel，kernelspec list 输出：${ks_list}"; exit 1; }
 
 # ---------------- 依赖层：只 COPY manifest，保证改代码不重刷 npm ----------------
 FROM stack AS deps
