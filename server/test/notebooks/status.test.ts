@@ -34,9 +34,17 @@ const fake = () =>
       ? { status: 200, json: async () => ({ default: 'python', kernels: { 'arena-pyspark': { name: 'arena-pyspark', spec: { display_name: 'PySpark (arena)' } } } }) }
       : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) }) as unknown as typeof fetch;
 
-/** /api/status 直接回一个状态码（kernelspecs 不会被问到，因为第一个请求就早退了）。 */
+/**
+ * 只有 `/api/status` 回那个状态码，kernelspecs 照常答 200。
+ * 故意做成"半个坏"：两个端点各有各的守卫，若假 fetch 两边一律 403，删掉任意一支都会被另一支
+ * 替它说出一句对的话 ⇒ 那条变异测不出来（评审要的就是"每一支都独立被判住"）。
+ */
 const statusDeny = (status = 403) =>
-  (vi.fn(async () => ({ status, json: async () => ({}) }) as unknown) as typeof fetch);
+  (vi.fn(async (u: string | URL) =>
+    String(u).includes('/api/kernelspecs')
+      ? { status: 200, json: async () => ({ kernels: {} }) }
+      : { status, json: async () => ({}) }
+  ) as unknown as typeof fetch);
 
 /** 只有 /api/kernelspecs 坏掉：状态码非 200，body 是 HTML（json() 必抛 SyntaxError）。 */
 const kernelspecsBoom = (status: number) =>
