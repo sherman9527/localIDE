@@ -74,6 +74,12 @@ write_env_key() {
       return 1
       ;;
   esac
+  # 「是不是首启（原来没有 .env）」必须**在 touch 之前**判。这一条曾经是错的：touch 无条件先把文件建出来，
+  # 于是它下面那句 `[ -f "$ENV_FILE" ]` 永远为真 ⇒ "没有原文件可抄 ⇒ 按 0600 建" 那一支是**dead code**，
+  # 全新的 .env 实际落在 umask 默认（Linux 上 0644），而注释和报告都写着 0600。
+  # touch 留在这里只负责一件事：让下面那条 awk 读原始文件时不会遇到"文件不存在"。
+  local firstCreate=0
+  [ -f "$ENV_FILE" ] || firstCreate=1
   touch "$ENV_FILE"
   # **不用 sed 做替换**：值里带 `|`、`&`、`\` 时 sed 会把它们当作替换表达式的一部分
   # （`&` 是"整段匹配"、`\` 是转义、分隔符本身直接截断），于是 .env 被悄悄写坏 ——
@@ -106,16 +112,19 @@ write_env_key() {
   # 权限要跟过去：`mv` 落下去的是 **tmp 的 mode**（shell 重定向按 umask 建，通常 0644），
   # 于是这次改写会把人手加固过的 0600 .env 静默降回 0644 —— 而 .env 里是桥 token 与 notebook 的
   # Jupyter token，那个 Jupyter 还是 entrypoint 里 `--allow-root` 起的。有原文件就照抄它的 mode，
-  # 没有就按最严的 0600 建。失败不致命（不是所有文件系统都支持 chmod），但要说一句，
-  # 别让人以为已经加固了。
+  # 首启（上面 firstCreate=1）就按最严的 0600 建。判据用的是那个**在 touch 之前算出来的 flag**，
+  # 不是这里的 `[ -f ]` —— touch 已经建过文件，`[ -f ]` 在这一行必然为真，抄它就是把 0600 那支写成死的。
+  # 失败不致命（不是所有文件系统都支持 chmod），但要说一句，别让人以为已经加固了。
   # 诚实的边界：Windows/Git Bash 上 chmod 根本不改变 stat 报的 mode（实测 chmod 600 之后仍报 644），
   # 所以这条在宿主上是 best-effort，真效果要到 Linux（容器档）才看得见。
-  # 闸门：server/test/regression/env-write-atomicity.test.ts（代码里这句在不在 = 永远跑的那条；
-  # 实际 mode 保不保得住 = 只在认 chmod 的文件系统上跑的那条，跳过了会在报告里写出来）。
-  if [ -f "$ENV_FILE" ]; then
-    chmod --reference="$ENV_FILE" "$tmp" 2>/dev/null || fail "没能把 ${tmp} 的权限对齐 ${ENV_FILE}（将以默认权限改写 .env）"
-  else
+  # 闸门：server/test/regression/env-write-atomicity.test.ts —— 三支都有人管：
+  # ① 两句 chmod 在不在（纯文本判据，从 bash 的 describe 里提出来，没有 bash 也会跑）；
+  # ② **哪一支真的被调用了**（把 chmod 桩成同名函数打点，NTFS 上也判得动 ⇒ 上一轮缺的就是这条）；
+  # ③ 落盘后的实际 mode（只在认 chmod 的文件系统上跑，跳过了会在报告里写出来，并附一条独立对照判据）。
+  if [ "$firstCreate" = 1 ]; then
     chmod 600 "$tmp" 2>/dev/null || fail "没能把 ${tmp} 设成 0600（将以默认权限新建 .env）"
+  else
+    chmod --reference="$ENV_FILE" "$tmp" 2>/dev/null || fail "没能把 ${tmp} 的权限对齐 ${ENV_FILE}（将以默认权限改写 .env）"
   fi
   mv "$tmp" "$ENV_FILE" || { fail "没能改写 ${ENV_FILE}（新内容在 ${tmp}，手工合并后删掉它）"; return 1; }
   # 后置条件：写完**读回来对一遍**。mv 返回 0 只证明"这次替换发生了"，不证明 .env 里真是那个值 ——

@@ -51,9 +51,11 @@ function Read-EnvKey([string]$key) {
   if (Test-Path $EnvFile) {
     # 这里**不加** -Encoding UTF8，与下面 Write-EnvKey 里的 Get-Content 不同，是实测出来的差别而不是疏忽：
     # PS 5.1 的 Select-String 默认就按 UTF-8 解码（实测同一行中文值：默认与 -Encoding UTF8 拿到的码点
-    # 完全相同、长度相同），而 Get-Content 默认按 ANSI(本机 GB2312) 解码（会把中文行尾的字节当双字节
-    # 字符前导字节、连换行一起吃掉 ⇒ 两行并一行）。两边都写 -Encoding UTF8 只会让人以为"这边原本也有
-    # 同样的洞"，而它没有。
+    # 完全相同、长度相同），而 Get-Content 默认按 ANSI(本机 gb2312/CP936) 解码 —— 非 ASCII 字节会被重新
+    # 配对成别的码点（mojibake：实测那一行 13 个汉字 = 39 字节被读成 20 个错码点），再按 UTF-8 写回去就是
+    # 永久损坏。两边都写 -Encoding UTF8 只会让人以为"这边原本也有同样的洞"，而它没有。
+    # （上一轮这里把机制写成"前导字节吞掉 0x0A ⇒ 两行并一行"，那是记错了：合并只在"该行非 ASCII 字节数为
+    #  奇数、行尾留下悬空前导字节"时才发生，基准文件实测默认与 -Encoding UTF8 都是 4 行。写侧的真实机制见 Write-EnvKey 的注释。）
     $line = Select-String -Path $EnvFile -Pattern "^$key=" | Select-Object -Last 1
     if ($line) { return ($line.Line -split '=', 2)[1] }
   }
@@ -76,9 +78,13 @@ function Write-EnvKey([string]$key, [string]$value) {
   # 滤旧行换成**字面量**前缀比较（StartsWith），键名不再进正则 —— 与 sh 侧换成 awk 字面量比较同判据。
   $prefix = "$key="
   # 读必须显式 -Encoding UTF8：PS 5.1 不带 -Encoding 时按 ANSI 读，而**这台机器的 ANSI 是 GB2312/CP936**
-  # （实测 `[Text.Encoding]::Default.WebName` = gb2312）。于是无 BOM 的 UTF-8 .env 会被错映射成别的码点，
-  # 更糟的是双字节字符的"前导字节"会把紧跟的 0x0A 一起吃掉 ⇒ 相邻两行合并、那行的键从 .env 里消失
-  # （实测 3 行的基准文件读出来是 2 行；再按 UTF-8 写回去就是永久的数据损坏）。
+  # （实测 `[Text.Encoding]::Default.WebName` = gb2312）。真正的损坏是**再编码**（mojibake）：无 BOM 的
+  # UTF-8 多字节序列会被重新配对成别的码点 —— 实测同一行 "# 中文注释：桥 token 与 notebook token 都只写在这里"
+  # 默认读进来是 20 个错码点、按 UTF-8 写回去字节数从 39 变 48，**那一行从此坏掉**（这是永久损坏，
+  # 下一次改写只会把坏掉的内容继续抄一遍）。行切分本身在基准文件上没变（实测默认与 -Encoding UTF8 都是 4 行）
+  # —— 上一轮把机制记成"尾字节吞掉 0x0A ⇒ 两行并一行"是记错了：CP936 的前导字节确实会吞紧跟的 0x0A，
+  # 但只在"那一行的非 ASCII 字节数是奇数、行尾留下一个悬空前导字节"时发生（实测 `x=1\n释\ny=2` 会 2 行 vs 3 行），
+  # 而这里写的注释行是 3 字节/字、凑得整，所以判据抓的是 mojibake 不是合并。两种口径都由这一句 -Encoding UTF8 挡住。
   # 反向的取舍写在这里，别以为没有：真·ANSI(GBK) 存的 .env 用 UTF8 读会得到 U+FFFD —— 但这两个脚本
   # 写出去的一直是 UTF-8 无 BOM，compose 与 server/src/config.ts 读的也是 UTF-8，权威在这一侧。
   $kept = @(Get-Content $EnvFile -Encoding UTF8 | Where-Object { -not $_.StartsWith($prefix) })
@@ -112,7 +118,14 @@ function Write-EnvKey([string]$key, [string]$value) {
   # 都是"短了但一切正常"。本项目在桥 token 上撞过的正是"两份不一致而两边都绿"（WI-86）。
   $got = Read-EnvKey $key
   if ($got -ne $value) {
-    $why = "[arena] $EnvFile 里读回的 '$key' 与刚写进去的不一致（读回 '$got' / 期望 '$value'）—— 别再往下跑：检查 $EnvFile 有没有被别的进程改写、值里是不是带了换行"
+    # 只报**长度**，绝不报值本身（与 start.sh 的 ${#got} / ${#val} 同判据）。
+    # 上一轮这里印的是 '$got' / '$value'：$ErrorActionPreference='Stop' 下这句话既进控制台、
+    # 又进错误记录，还可能被 Start-Transcript / 调用方的重定向整份收进日志 —— 而值就是那个 token，
+    # 等于自己把上面第 124 行"只在本机之间传递，不进日志"的纪律破掉。长度足以定位问题（短了 = 值里带换行，
+    # 长了 = 被别的进程改写过），不需要值本身。
+    # 口径差别写清楚：sh 的 ${#var} 在 C locale 下是字节数，这里的 .Length 是 UTF-16 码元数；
+    # token 恒为 ASCII，两个口径在判据上等价，**共同点是两边都不印出值**。
+    $why = "[arena] $EnvFile 里读回的 '$key' 与刚写进去的不一致（读回 $($got.Length) 个字符 / 期望 $($value.Length) 个字符）—— 别再往下跑：检查 $EnvFile 有没有被别的进程改写、值里是不是带了换行"
     Write-Host $why -ForegroundColor Red
     throw $why
   }

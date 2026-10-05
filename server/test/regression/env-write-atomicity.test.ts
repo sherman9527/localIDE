@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -25,6 +25,11 @@ import { config } from '../../src/config.js';
  * ④ 再加一条结构判据，兜住"③ 全靠入口键名闸门还在才成立"这件事：把"键名进正则"与
  *    "失败被吞成截空"直接钉在代码文本上，并用内联的旧实现当常驻反例
  *    （形状照 notebook-env-isolation.test.ts 的"判据自己也进 fixture"）。
+ * ⑤ 权限那三支分开设判据，少一支就会退回上一轮的洞（`chmod 600` 那支是 dead code 而 S6 全绿）：
+ *    文本里两句在不在（纯文本，不需要 bash ⇒ 放在永远跑的块里）+ **哪一支真的被调用**
+ *    （桩掉 chmod 打点，NTFS 上也判得动）+ 落盘 mode 对不对（只在认 chmod 的文件系统上跑，
+ *    跳过理由由一条"两个独立口径必须一致"的常驻判据守着）。
+ * ⑥ 后置条件的报错只许报**长度**、不许报**值**（值就是 token）—— sh/ps 两侧各一条。
  */
 
 const SH_SRC = readFileSync(join(config.repoRoot, 'start.sh'), 'utf8');
@@ -43,6 +48,13 @@ const SEED = [
 ].join('\n');
 const SEED_BYTES = Buffer.from(SEED, 'utf8');
 const sha = (b: Buffer): string => createHash('sha256').update(b).digest('hex');
+
+/**
+ * 用来抓"报错把值印出来"的探针值。它**只允许出现在 .env 文件里**：写进 .env 是本分（那本来就是
+ * token 的唯一来源），印进控制台 / 错误记录 / 任何被重定向出去的日志是越界 —— 而 .env 里放的是桥 token
+ * 与 `--allow-root` 的 Jupyter token，`start.ps1` 自己的注释就写着"只在本机之间传递，不进日志"。
+ */
+const SECRET_VALUE = 'SECRETCANTEXISTONLYINTHEFILENOTINTHELOG';
 
 /* ------------------------------------------------------------------ 临时目录与哨兵 */
 
@@ -140,6 +152,7 @@ type Run = {
   bytes: () => Buffer | null;
   text: () => string;
   tmps: () => string[];
+  chmodCalls: () => string[];
 };
 
 function resultOf(dir: string, r: { status: number | null; stdout?: string; stderr?: string }): Run {
@@ -152,6 +165,8 @@ function resultOf(dir: string, r: { status: number | null; stdout?: string; stde
     bytes: () => (existsSync(envPath) ? readFileSync(envPath) : null),
     text: () => (existsSync(envPath) ? readFileSync(envPath, 'utf8') : ''),
     tmps: () => readdirSync(dir).filter((f) => f.startsWith('.env.tmp.')),
+    // 只有开了 observeChmod 的用例才会有这个文件（桩的实现见 runSh）
+    chmodCalls: () => (existsSync(join(dir, 'chmod-calls.log')) ? readFileSync(join(dir, 'chmod-calls.log'), 'utf8').split('\n').filter(Boolean) : []),
   };
 }
 
@@ -159,8 +174,11 @@ function resultOf(dir: string, r: { status: number | null; stdout?: string; stde
  * 把抠出来的实现装进临时目录跑。
  * `failMv` 是把 `mv` 换成同名 shell 函数（bash 里函数优先于外部命令）注入失败：
  * 'all' = 每次都不让 mv 成功；数字 = 只让第 N 次失败（用来分别命中 start_bridge 里的两个调用点）。
+ * `observeChmod` 用同一个机制把 `chmod` 桩成打点函数（原样转发给 command chmod，不改行为）：
+ * 于是"**哪一支 chmod 被调用了**"在**不记 mode 的文件系统上也看得见** —— 上一轮的洞正是
+ * "两句 chmod 都在文本里、但首启那一支永远跑不到"，只看 mode 的判据在 NTFS 上根本抓不到它。
  */
-function runSh(body: string, opts: { seed?: string | null; env?: Record<string, string>; failMv?: 'all' | 'none' | number } = {}): Run {
+function runSh(body: string, opts: { seed?: string | null; env?: Record<string, string>; failMv?: 'all' | 'none' | number; observeChmod?: boolean } = {}): Run {
   const dir = newDir('sh');
   if (opts.seed !== null) writeFileSync(join(dir, '.env'), opts.seed ?? SEED, 'utf8');
   const failMv = String(opts.failMv ?? 'none');
@@ -192,6 +210,9 @@ function runSh(body: string, opts: { seed?: string | null; env?: Record<string, 
     '  fi',
     '  command mv "$@"',
     '}',
+    // chmod 桩：实现里那两句都带 `2>/dev/null`，往 stderr 打点会被吞掉（实测踩过）⇒ 记到文件里。
+    // 原样转发给 command chmod ⇒ 真实 mode 该改还是改，本桩只负责"哪一支被调用"看得见。
+    ...(opts.observeChmod ? ['chmod() { printf \'%s\\n\' "$*" >>chmod-calls.log; command chmod "$@"; }'] : []),
     body,
   ].join('\n');
   writeFileSync(join(dir, 'harness.sh'), script, 'utf8');
@@ -216,6 +237,10 @@ function runPs(body: string, opts: { seed?: string | null; env?: Record<string, 
   if (opts.seed !== null) writeFileSync(join(dir, '.env'), opts.seed ?? SEED, 'utf8');
   const script = [
     '$ErrorActionPreference = "Stop"',
+    // 强制按 UTF-8 输出：否则 PS 5.1 写重定向 stdout 用的是控制台代码页（本机 gb2312），
+    // 下面那些**中文**断言（如"报错里只许报长度"那句要匹配的 `读回 N 个字符`）在这台机器上永远读不到原字。
+    // 这是 harness 的观测口径，不改 start.ps1 的行为（实测：加这一行之前 stdout 是 mojibake、之后可正解）。
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
     '# ↓↓↓ 从仓库里的 start.ps1 当场抠出来的本体（不是副本） ↓↓↓',
     PS_READ,
     PS_WRITE,
@@ -233,9 +258,13 @@ function runPs(body: string, opts: { seed?: string | null; env?: Record<string, 
     body,
   ].join('\r\n');
   const file = join(dir, 'harness.ps1');
-  // BOM 必须带上：PS 5.1 读无 BOM 的 UTF-8 .ps1 会按 ANSI(本机 GBK) 解码，
-  // 中文注释的尾字节会被当成双字节字符的前导字节 —— 它会把紧跟的换行一起吃掉，两行并成一行，
-  // 于是 harness 自己的语法都可能坏掉。本闸门要防的就是同一个机制（见 Write-EnvKey 的 -Encoding UTF8）。
+  // BOM 必须带上：PS 5.1 读无 BOM 的 UTF-8 .ps1 会按 ANSI(本机 gb2312/CP936) 解码，
+  // 中文注释与字符串字面量的字节被重新配对成别的码点（mojibake）⇒ harness 自己的语法都可能坏掉、
+  // 里头的中文值也不再是原来那串。写侧的 .env 会被同一种再编码损坏毁掉（见 start.ps1 的 -Encoding UTF8
+  // 与下面那条"中文注释原样保留"的判据）。
+  // 更正一处旧说法：这里曾经写"尾字节把紧跟的 0x0A 吃掉 ⇒ 两行并一行"，那不是主机制，也只在
+  // "该行非 ASCII 字节数为奇数、行尾留下悬空前导字节"时偶然发生（CP936 的前导字节遇到非法 trail 时
+  // 会连非法字节一起吃掉并输出 '?'）；本仓库基准文件实测默认读与 -Encoding UTF8 读都是 4 行。
   writeFileSync(file, '\uFEFF' + script + '\r\n', 'utf8');
   const r = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'harness.ps1'], {
     cwd: dir,
@@ -271,7 +300,7 @@ const OLD_GREP_LINE = '  grep -v "^${key}=" "$ENV_FILE" >"$tmp" 2>/dev/null || :
 const OLD_SED_LINE = '  sed -i "s/^${key}=.*/${key}=${val}/" "$ENV_FILE"';
 const OLD_TRUNCATE_LINE = '  grep -v "^KEY=x" "$ENV_FILE" >"$ENV_FILE"';
 
-/** 这台机器的文件系统到不到位 chmod 的 mode（Git Bash/NTFS 上不到位：实测 chmod 600 后 stat 仍报 644）。 */
+/** 口径 A（绝对）：`chmod 600` 之后 `stat` 报的是不是正好 0600。Git Bash/NTFS 上不是（实测仍报 644）。 */
 function fsHonorsChmod(dir: string): boolean {
   const f = join(dir, 'mode-probe');
   writeFileSync(f, 'x\n', 'utf8');
@@ -283,7 +312,32 @@ function fsHonorsChmod(dir: string): boolean {
   }
 }
 
-const honorsChmod = hasBash && fsHonorsChmod(newDir('chmod-probe'));
+/**
+ * 口径 B（相对，且换一把工具）：两个文件**分别**显式设成 0644 / 0600，看报出来的 mode 会不会不同。
+ * 故意与口径 A 三处都不同 —— 用 node 自己的 `chmodSync`（不依赖 chmod 可执行文件）、判"是否不同"
+ * （不依赖 umask 恰好让新建文件是 0644）：
+ * ① 整卷 fmask 把所有文件都报成 0600 时 A 说"记"、B 说"不记"；
+ * ② 只有"新建文件的初始 mode 本来就不一样"能骗到 B，而那种情况 A 也照样是假的。
+ * 两条一致才说明"下面那条 mode 判据被跳过"的理由真的是"这个文件系统不记 mode"。
+ */
+function fsHonorsChmodByContrast(dir: string): boolean {
+  const a = join(dir, 'mode-644');
+  const b = join(dir, 'mode-600');
+  writeFileSync(a, 'x\n', 'utf8');
+  writeFileSync(b, 'x\n', 'utf8');
+  chmodSync(a, 0o644);
+  chmodSync(b, 0o600);
+  try {
+    return (statSync(a).mode & 0o777) !== (statSync(b).mode & 0o777);
+  } catch {
+    return false;
+  }
+}
+
+const fsRecordsMode = fsHonorsChmod(newDir('chmod-probe'));
+const contrastRecordsMode = fsHonorsChmodByContrast(newDir('chmod-contrast'));
+/** 实际 mode 那两条行为判据的开关：除了文件系统认不认 chmod，还要有 bash 才谈得上跑 sh 的实现。 */
+const honorsChmod = hasBash && fsRecordsMode;
 
 /* ------------------------------------------------------------------ 用例 */
 
@@ -342,6 +396,49 @@ describe('闸门真的在守东西（空转防护 + 结构判据）', () => {
   it('两个实现至少有一个真的在跑（都不在就是闸门空转）', () => {
     const mode = hasBash && hasPs ? 'both' : hasBash ? 'sh-only' : hasPs ? 'ps-only' : 'none';
     expect(mode, '这台机器既没有 bash 也没有 powershell.exe ⇒ 下面整片行为判据一条都没跑（不许当"跳过"混过去）').not.toBe('none');
+  });
+
+  /**
+   * 权限那句判据的地基。**上一轮它在 describe.skipIf(!hasBash) 里** ⇒ 没有 bash 的宿主上这条
+   * 也会静默不跑，而它是纯文本判据、压根不需要 bash —— 现在提到这个永远跑的块里。
+   *
+   * 但"两句都在文本里"上一轮被证明**不够**：`chmod 600 "$tmp"` 那一支当时是 dead code
+   * （门它的是 `touch "$ENV_FILE"` **之后**的 `[ -f "$ENV_FILE" ]`，而 touch 无条件建文件 ⇒ 恒为真），
+   * 文本判据 S6 全绿、行为从来没发生过。所以这里钉的是**形状**：首启那一支必须由"touch 之前算出来的
+   * flag"门住。真正"哪一支被调用"由 bash 侧那条桩判据判（NTFS 上也判得动），落盘 mode 由 it.skipIf 那条判。
+   */
+  it('write_env_key 里给 tmp 设权限的两支都在，且首启那支不是被 touch 之后的 [ -f ] 门住的死代码', () => {
+    const carries = /chmod\b[^\n]*--reference="\$\{?ENV_FILE\}?"/.test(SH_WRITE);
+    const creates = /chmod\s+600\s+"\$tmp"/.test(SH_WRITE);
+    expect(
+      [carries && '有原文件：抄它的 mode', creates && '首启：0600'].filter(Boolean),
+      'start.sh 的 write_env_key 里少了给 tmp 设权限的那句 ⇒ mv 落的是 tmp 的 umask 默认 mode（通常 0644），' +
+        '会把手工加固过的 0600 .env 静默降回 0644（.env 里是桥 token 与 --allow-root 的 Jupyter token）',
+    ).toEqual(['有原文件：抄它的 mode', '首启：0600']);
+
+    const touchAt = SH_WRITE.indexOf('touch "$ENV_FILE"');
+    expect(touchAt, 'start.sh 的 write_env_key 里找不到 touch "$ENV_FILE" ⇒ 本条判据要跟着实现同步（不许静默空转）').toBeGreaterThanOrEqual(0);
+    const flagAt = SH_WRITE.indexOf('firstCreate=1');
+    expect(flagAt, '找不到首启判定 firstCreate=1 ⇒ "按 0600 新建"那一支八成又回到 touch 之后的 [ -f "$ENV_FILE" ] 上，而那必然为真 = dead code').toBeGreaterThanOrEqual(0);
+    expect(flagAt, '首启判定必须发生在 touch **之前**：touch 之后 [ -f ] 恒为真，用它门 0600 那支就是写一段跑不到的代码').toBeLessThan(touchAt);
+    const armAt = SH_WRITE.search(/\n[ \t]*chmod\s+600\s+"\$tmp"/);
+    expect(armAt, '找不到 chmod 600 "$tmp" 这条**语句**（注释里提一句不算，实测第一版就被注释里那句"chmod 600 之后仍报 644"骗过）⇒ 本条判据要跟着实现同步').toBeGreaterThanOrEqual(0);
+    expect(SH_WRITE.slice(0, armAt), 'chmod 600 那一支的门禁条件里看不到 [ "$firstCreate" = 1 ] ⇒ 它又被 touch 之后的 [ -f "$ENV_FILE" ] 门住了（那一行恒为真 = dead code）').toContain('[ "$firstCreate" = 1 ]');
+  });
+
+  it('那条 mode 行为判据"被跳过"的理由必须站得住：两个独立口径要给同一个答案（永远跑）', () => {
+    // 上一轮这里写的是 `if (!honorsChmod) expect(honorsChmod).toBe(false)` —— 那是同义反复，
+    // 把同一个布尔念一遍，永远不可能红，正是本仓库点名的"装饰品"。
+    // 现在比的是**两个不同口径**（口径 A：git bash 的 chmod + "是不是正好 0600"；
+    // 口径 B：node 的 chmodSync + "两个文件的 mode 是否不同"），它们谁都可能单独骗人，对不上就是真故障：
+    // 要么下面那条 it.skipIf 在空转，要么它跳过的理由根本不是"这个文件系统不记 mode"。
+    // （形状照 publish-identity.test.ts:81-84：companion 做的是另一个判断。）
+    expect(
+      contrastRecordsMode,
+      `口径 A（chmod 600 → 是否正好 0600）说"这台机器${fsRecordsMode ? '记' : '不记'} mode"，` +
+        `口径 B（644/600 两文件对照）说"${contrastRecordsMode ? '记' : '不记'}" ⇒ 对不上：` +
+        '下面那两条看落盘 mode 的判据要么在空转，要么它们 skipIf 的理由是别的故障（不是"文件系统不记 chmod"）——两种都不许当"跳过"混过去',
+    ).toBe(fsRecordsMode);
   });
 });
 
@@ -429,11 +526,14 @@ describe.skipIf(!hasBash)('bash 侧行为：write_env_key / start_bridge（start
     expect(bytes.subarray(0, 3).toString('hex')).not.toBe('efbbbf');
   });
 
-  it('后置条件：值落不进 .env 就必须响亮失败（"写短了但 rc=0"不许成立）', () => {
+  it('后置条件：值落不进 .env 就必须响亮失败（"写短了但 rc=0"不许成立），且只报长度不报值', () => {
     // 带换行的值落盘会变成两行，read_env_key 只能读回第一行 ⇒ 正是"短了却成功"的形状
-    const r = runSh("write_env_key ARENA_MULTI $'line1\\nline2'");
+    const r = runSh(`write_env_key ARENA_MULTI $'line1\\n${SECRET_VALUE}'`);
     expect(r.rc, '值里带换行 ⇒ 读回来对不上，这种"改写成功"必须判红').not.toBe(0);
     expect(r.err).toContain('ARENA_MULTI');
+    // 值本身（= token）不许出现在控制台或错误输出里：整个 run 被重定向时那就是"进日志"
+    expect(`${r.out}${r.err}`, '读回不一致的报错把值印出来了 ⇒ token 泄进控制台/重定向的日志（只许报长度）').not.toContain(SECRET_VALUE);
+    expect(r.err, '长度要留下来：短了 = 值里带换行，长了 = 被别的进程改写过 —— 报长度足够定位，不需要值').toMatch(/读回 \d+ 字节 \/ 期望 \d+ 字节/);
   });
 
   it('mv 坏在第一次（桥 token）⇒ 调用方（start_bridge）停下，不是只有 helper 返回非零', () => {
@@ -477,31 +577,38 @@ describe.skipIf(!hasBash)('bash 侧行为：write_env_key / start_bridge（start
   });
 
   /**
-   * 权限那句判据的地基（永远跑）：mv 用的是 tmp 的 mode，不抄就把手加固过的 0600 降回 0644
-   * —— 而 .env 里是桥 token 与那个 `--allow-root` 的 Jupyter token。
+   * 上一轮缺的那一条：两句 chmod 都在文本里、S6 全绿，但"首启 ⇒ 0600"那一支从来没跑到过
+   * （门它的是 `touch` 之后的 `[ -f "$ENV_FILE" ]`，恒为真）。看**哪一支被调用**就不需要文件系统
+   * 认 mode —— 桩掉 chmod 打点即可，所以这条在 NTFS 上也判得动（本机实测它红过）。
    */
-  it('write_env_key 里有给 tmp 设权限的那句（行为判据能不能跑都依赖它还在）', () => {
-    // 两个分支都要在：有原文件 ⇒ 照抄它的 mode（不然手工加固被降回 umask 默认）；
-    // 首启没有原文件可抄 ⇒ 按最严的 0600 建。少任何一个分支都是"某条路径上把 token 文件的权限放宽"。
-    const carries = /chmod\b[^\n]*--reference="\$\{?ENV_FILE\}?"/.test(SH_WRITE);
-    const creates = /chmod\s+600\s+"\$tmp"/.test(SH_WRITE);
-    expect(
-      [carries && '有原文件：抄它的 mode', creates && '首启：0600'].filter(Boolean),
-      'start.sh 的 write_env_key 里少了给 tmp 设权限的那句 ⇒ mv 落的是 tmp 的 umask 默认 mode（通常 0644），' +
-        '会把手工加固过的 0600 .env 静默降回 0644（.env 里是桥 token 与 --allow-root 的 Jupyter token）',
-    ).toEqual(['有原文件：抄它的 mode', '首启：0600']);
-    if (!honorsChmod) {
-      // 这一句是"为什么会看到 1 skipped"的常驻解释（同 publish-identity.test.ts 的形状）：
-      // 宿主是 Git Bash/NTFS，chmod 不改变 stat 报的 mode（实测 chmod 600 之后仍报 644），
-      // 所以下面那条行为判据只能到真 Linux 文件系统（容器档）上跑。
-      expect(honorsChmod, '本条 skipped 的理由：这台机器的文件系统不记录 chmod 的 mode').toBe(false);
-    }
+  it('首启走的确实是 chmod 600 那一支、有原文件时走 --reference（桩掉 chmod 看调用）', () => {
+    const fresh = runSh("write_env_key ARENA_FIRST 'one'", { seed: null, observeChmod: true });
+    expect(fresh.rc, `首启改写返回 ${fresh.rc}：${fresh.err}`).toBe(0);
+    const freshCalls = fresh.chmodCalls().join(' | ');
+    const again = runSh("write_env_key ARENA_SECOND 'two'", { observeChmod: true });
+    expect(again.rc, `改写返回 ${again.rc}：${again.err}`).toBe(0);
+    const againCalls = again.chmodCalls().join(' | ');
+    // 首启：走 0600 那支。上一轮的形态是"两句 chmod 都在文本里、S6 全绿，而这一支从来没被调用过"
+    // —— 门它的是 touch 之后的 [ -f ]（恒为真）。看调用而不是看落盘 mode，NTFS 上也判得动。
+    expect(freshCalls, '首启时 chmod 一次都没被调用 ⇒ 新 .env 落在 umask 默认（Linux 上 0644），"按 0600 新建"那句是死的').toMatch(/(^| )600 \.env\.tmp\./);
+    expect(freshCalls, '首启却去抄"原文件"的 mode ⇒ 又回到 touch 之后 [ -f ] 恒为真那个洞（它抄的是 touch 刚建出来的那份默认 mode）').not.toContain('--reference');
+    // 有原文件：抄它的 mode，不替它决定 0600（那会把故意放宽过的 .env 悄悄改严）
+    expect(againCalls, '有原文件时应当抄它的 mode（chmod --reference），实际调用是：' + againCalls).toContain('--reference=.env');
+    expect(againCalls, '有原文件时也走了 0600 那支 ⇒ firstCreate 的判定写反了').not.toMatch(/(^| )600 \.env\.tmp\./);
   });
 
   it.skipIf(!honorsChmod)('（能记 mode 的文件系统上）改写不会把 .env 的 0600 降回默认', () => {
     const r = runSh("chmod 600 \"$ENV_FILE\"\nwrite_env_key ARENA_P 'v'");
     expect(r.rc).toBe(0);
     expect((statSync(join(r.dir, '.env')).mode & 0o777).toString(8), '改写把 .env 的权限降回默认了').toBe('600');
+  });
+
+  it.skipIf(!honorsChmod)('（能记 mode 的文件系统上）首启新建的 .env 就是 0600', () => {
+    // 与上面那条成对：上面判"有原文件 ⇒ 抄"，这条判"没原文件 ⇒ 0600"。
+    // 本机（NTFS）跑不了 ⇒ it.skipIf（报告会写 skipped，不静默），跳过理由由上面那条双口径判据守着。
+    const r = runSh("write_env_key ARENA_FIRST 'one'", { seed: null });
+    expect(r.rc, `首启改写返回 ${r.rc}：${r.err}`).toBe(0);
+    expect((statSync(join(r.dir, '.env')).mode & 0o777).toString(8), '首启新建的 .env 不是 0600 ⇒ chmod 600 那一支没跑到（或又被 [ -f ] 门成死代码）').toBe('600');
   });
 });
 
@@ -535,8 +642,11 @@ describe.skipIf(!hasPs)('powershell 侧行为：Write-EnvKey / Start-Bridge（st
       'OTHER_KEY=keep-me',
       '# 中文注释：桥 token 与 notebook token 都只写在这里',
     ]) {
-      expect(text.split(/\r?\n/), `丢了这一行：${keep}（PS 5.1 不带 -Encoding 时按 ANSI 读：UTF-8 的尾字节被当 GBK 双字节字符的前导字节，` +
-        '把紧跟的那个 0x0A 一起吃掉 ⇒ 相邻两行合并、那行键从 .env 里消失，整段中文也变成再编码后的错字节）').toContain(keep);
+      expect(text.split(/\r?\n/), `丢了这一行：${keep}（机制是**再编码损坏**：PS 5.1 不带 -Encoding 时按本机 ANSI=gb2312/CP936 解码，` +
+        'UTF-8 的多字节序列被重新配对成别的码点 —— 实测那一行 13 个汉字（39 字节）默认读进来是 20 个错码点，' +
+        '再按 UTF-8 写回去 39 字节变 48 字节，那行中文就永久坏掉了。行切分在这儿没变（实测默认与 -Encoding UTF8 都是 4 行）：' +
+        '上一轮把机制记成"尾字节吞掉紧跟的 0x0A ⇒ 两行并一行"是记错了 —— 合并只在"该行非 ASCII 字节数为奇数、' +
+        '行尾留下悬空前导字节"时偶然发生（实测 x=1\\n释\\ny=2 会 2 行 vs 3 行），不是本判据抓的东西）').toContain(keep);
     }
     expect(r.out).toContain('LINES=5');
     expect(r.out).toContain('READBACK=abc123');
@@ -548,16 +658,22 @@ describe.skipIf(!hasPs)('powershell 侧行为：Write-EnvKey / Start-Bridge（st
     expect(bytes.subarray(0, 3).toString('hex'), '.env 被加了 BOM（compose 读第一行会多个隐形字符）').not.toBe('efbbbf');
   });
 
-  it('后置条件（ps1 与 sh 同判据）：值落不进 .env 就必须抛，不许"短了但成功"', () => {
+  it('后置条件（ps1 与 sh 同判据）：值落不进 .env 就必须抛，不许"短了但成功"，且只报长度不报值', () => {
+    const cut = 13; // 把探针值拆成两段字面量：连 harness 源码里都不出现完整的它，错误回显源码行也骗不过下面那条
     const r = runPs(
       [
-        "$v = [string]::Join([char]10, @('line1', 'line2'))",
+        `$secret = ('${SECRET_VALUE.slice(0, cut)}' + '${SECRET_VALUE.slice(cut)}')`,
+        "$v = [string]::Join([char]10, @('line1', $secret))",
         'Write-EnvKey "ARENA_MULTI" $v',
         "Write-Host 'MARKER-AFTER'",
       ].join('\r\n'),
     );
     expect(r.rc, '值里带换行 ⇒ 读回来对不上，这种"改写成功"必须判红').not.toBe(0);
     expect(r.out, '异常没穿出调用方').not.toContain('MARKER-AFTER');
+    // 上一轮这里印的是 '$got' / '$value'：$ErrorActionPreference='Stop' 下那句话同时进控制台与错误记录，
+    // 而值就是 token ⇒ 把"只在本机之间传递，不进日志"自己破掉了。
+    expect(`${r.out}${r.err}`, '读回不一致的报错把值印出来了 ⇒ token 泄进控制台/错误记录/转录（只许报长度）').not.toContain(SECRET_VALUE);
+    expect(r.out, '长度要留下来：短了 = 值里带换行，长了 = 被别的进程改写过 —— 报长度足够定位，不需要值').toMatch(/读回 \d+ 个字符 \/ 期望 \d+ 个字符/);
   });
 
   it('Move-Item 失败 ⇒ 异常穿出真的 Start-Bridge（调用方被迫停下）', () => {
