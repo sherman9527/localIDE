@@ -18,6 +18,10 @@ blob-report/
 .env
 .env.local
 *.local
+# start.sh / start.ps1 改写 .env 用的中间文件（tmp+mv 才有"原文件不被截断"这条保证）。
+# 只在失败时留下（成功的 mv 会带走它），而里面就是那份 token —— 不挡住的话一次 mv 失败
+# 就把一个带密钥的未跟踪文件摆在那里，等着下一次 `git add -A` 把它提交上去。
+.env.tmp.*
 .qoder/settings.local.json
 
 # 题库计数的本机辅助文件（check-bank 的基线取 git 已跟踪题数，不依赖它）

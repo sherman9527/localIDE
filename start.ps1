@@ -58,10 +58,33 @@ function Read-EnvKey([string]$key) {
 function Write-EnvKey([string]$key, [string]$value) {
   # 同上：缺键名会往 .env 里写一行 "=值"，而 compose 读到的是一行非法键
   if (-not $key) { throw 'Write-EnvKey 需要键名' }
+  # 键名先过形状闸门（与 start.sh 的 case 同判据）。旧写法把键名当**正则**用（-notmatch "^$key="），
+  # 两类真实故障都从这来（都在临时 .env 上实测过）：`ARENA_[oops` 这种未闭合字符类让比较在第一条
+  # 行就抛"未终止的 [] 集"⇒ 整个脚本终止（响亮，但为了一个与 .env 无关的理由）；`ARENA.TOK` 里的
+  # `.` 是通配，会**静默删掉别人的行**（`ARENA_TOK=` 被当成同名旧行滤掉，新键照写，rc 一切正常）。
+  if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
+    throw "Write-EnvKey 拒绝写入：键名 '$key' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 原文件一个字节都没动，新值也没写"
+  }
   if (-not (Test-Path $EnvFile)) { New-Item -ItemType File -Path $EnvFile | Out-Null }
-  $kept = @(Get-Content $EnvFile | Where-Object { $_ -notmatch "^$key=" })
+  # 滤旧行换成**字面量**前缀比较（StartsWith），键名不再进正则 —— 与 sh 侧换成 awk 字面量比较同判据。
+  $prefix = "$key="
+  $kept = @(Get-Content $EnvFile | Where-Object { -not $_.StartsWith($prefix) })
+  # 写 tmp 再 move（与 sh 侧的 tmp+mv 同一个形状）：旧写法直接 WriteAllText($EnvFile) 会**先截断原文件**，
+  # 中途失败（文件被占用 / 磁盘满）就把 .env 留在半截状态、旧内容找不回来 —— sh 侧早就堵掉了这条。
   # 显式 UTF-8 无 BOM + LF：compose 读 .env 时 BOM 会让第一行的键名多个隐形字符，CRLF 会把 \r 带进 token
-  [System.IO.File]::WriteAllText($EnvFile, (($kept + "$key=$value") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  $tmp = "$EnvFile.tmp.$PID"
+  try {
+    [System.IO.File]::WriteAllText($tmp, (($kept + "$key=$value") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -Force -Path $tmp -Destination $EnvFile -ErrorAction Stop
+  } catch {
+    # 失败必须让调用方**停下**：throw 会穿过 Start-Bridge 直接终止脚本（等同 sh 侧的 `|| return 1`）。
+    # 继续跑等于"进程环境里是新 token、.env 里是旧 token"，而下一次启动读的是 .env ⇒
+    # 桥与容器各拿一份 —— 本仓库在桥 token 上撞过一次（WI-86）：容器一路 401、主观题静默降级 manual。
+    # 话要说准：tmp 没写出来（磁盘满 / 权限）时不能指着它让人"手工合并"。
+    $where = if (Test-Path $tmp) { "新内容在 $tmp，手工合并后删掉它" } else { '临时文件没写出来（磁盘满 / 权限？）' }
+    Write-Host "[arena] 没能改写 $EnvFile（$where）：$($_.Exception.Message)" -ForegroundColor Red
+    throw
+  }
 }
 
 function Read-EnvToken { return Read-EnvKey 'ARENA_LLM_BRIDGE_TOKEN' }

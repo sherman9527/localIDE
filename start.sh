@@ -55,6 +55,20 @@ read_env_key() {
 
 write_env_key() {
   local key="${1:?write_env_key 需要键名}" val="${2:-}"
+  # 键名先过形状闸门（只允许 [A-Za-z_][A-Za-z0-9_]*）。这不是洁癖：键名是要拿去做**前缀匹配**的，
+  # 而旧写法把它当正则喂给 grep —— `ARENA_[oops=` 里未闭合的字符类让 grep **exit 2**（真报错）。
+  # 那本来不要紧，要紧的是下一行原来的样子：`grep -v ... >"$tmp" 2>/dev/null || : >"$tmp"`
+  # 把 exit 1（"谁都没匹配上"，正常情况）与 exit ≥2（真报错）**分成同一条路**，于是报错的那次
+  # 会走 `||` 分支把 tmp 截成空、只追加新键，然后 mv 覆盖 .env ⇒
+  # **整份 .env 只剩一行，其余键全没了，而 rc=0、一行错误都没有**（评审实测复现过）。
+  # 闸门放在入口 + 下面换成无正则的滤法，两条一起把这类"静默截断"堵死：没有任何失败路径能留下
+  # 一份缺键的 .env，失败时原文件一个字节都不动。
+  case "$key" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
+      fail "拒绝改写 ${ENV_FILE}：键名 '${key}' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 原文件一个字节都没动，新值也没写"
+      return 1
+      ;;
+  esac
   touch "$ENV_FILE"
   # **不用 sed 做替换**：值里带 `|`、`&`、`\` 时 sed 会把它们当作替换表达式的一部分
   # （`&` 是"整段匹配"、`\` 是转义、分隔符本身直接截断），于是 .env 被悄悄写坏 ——
@@ -62,14 +76,33 @@ write_env_key() {
   # 与 ps1 那份对等实现同一个形状（那边一直是 filter+append，漂移的方向从来是 sh 侧偷懒）。
   # 顺带堵掉另一个洞：旧写法 grep 命中但 sed 失败时会落到 append 分支 ⇒ .env 里两行同名键。
   local tmp="${ENV_FILE}.tmp.$$"
-  grep -v "^${key}=" "$ENV_FILE" >"$tmp" 2>/dev/null || : >"$tmp"
-  printf '%s=%s\n' "$key" "$val" >>"$tmp"
+  # 滤旧行改走 awk 的**字面量**前缀比较（键名已经在上面保证不含元字符）。这样"按退出码区分
+  # 到底是哪种情况"这件事根本不用做：awk 只会整体成功或整体失败，失败一律走下面那条响亮分支，
+  # 没有任何一条路径能留下"一份缺了别的键的 .env"。
+  # 顺带说清**不是**理由的理由，免得下一个人以为还漏了哪层保护：原文件最后一行没有换行符时，
+  # 换行是会被补上的（实测 GNU grep 3.0 与 gawk 5.0 都补），所以"新键粘到上一行"不是这次改的洞。
+  # 真正的洞只有一个：grep 的 exit 1（正常）与 exit ≥2（真报错）被 `||` 分不开。
+  # 原文件全程只读 ⇒ 不存在截断窗口；写坏只会发生在 tmp 上，而 tmp 失败就地返回。
+  if ! K="${key}=" awk 'BEGIN { p = ENVIRON["K"] } substr($0, 1, length(p)) != p' "$ENV_FILE" >"$tmp"; then
+    fail "没能滤掉 ${ENV_FILE} 里旧的 '${key}=' 行（awk 或写临时文件失败）—— 原文件一个字节都没动，新值没写进去"
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! printf '%s=%s\n' "$key" "$val" >>"$tmp"; then
+    fail "没能把 ${key} 的新值写进 ${tmp}（磁盘满 / 只读？）—— ${ENV_FILE} 保持原样，本次没有改写"
+    rm -f "$tmp"
+    return 1
+  fi
   # mv 失败时把话说响亮：静默 return 0 会让"改写成功"看起来成立，而 .env 里还是旧值
   # （旧写法的 sed -i 失败就是同样地落在 append 分支上，等于把错误吞成了一份重复键）。
+  # 返回值现在**有人接**了：两个调用点都 `|| return 1`，见 start_bridge。
+  # 写不进去就停下，别带着"进程环境里是新 token、.env 里是旧 token"继续往下 —— 那正是本仓库
+  # 在桥 token 上撞过的错配类（容器一路 401、主观题静默降级成人工自检表）。
   mv "$tmp" "$ENV_FILE" || { fail "没能改写 ${ENV_FILE}（新内容在 ${tmp}，手工合并后删掉它）"; return 1; }
 }
 
 read_env_token() { read_env_key ARENA_LLM_BRIDGE_TOKEN; }
+# 这一句返回的就是 write_env_key 的状态（函数体只有这一条命令）—— 调用方必须接住它。
 write_env_token() { write_env_key ARENA_LLM_BRIDGE_TOKEN "$1"; }
 
 # notebook 的 token 与桥同一纪律：唯一来源是 .env（已 gitignore），只在本机之间传递，不进日志。
@@ -128,13 +161,17 @@ start_bridge() {
   local token="${ARENA_LLM_BRIDGE_TOKEN:-$(read_env_token)}"
   [ -n "$token" ] || token="$(openssl rand -hex 16 2>/dev/null || echo "local-$RANDOM$RANDOM")"
   export ARENA_LLM_BRIDGE_TOKEN="$token"
-  write_env_token "$token"
+  # 写不进 .env 就停下（`|| return 1`）：继续往下等于"进程环境是新 token、.env 是旧 token"，
+  # 而下一次启动读的是 .env ⇒ 桥与容器各拿一份 —— 本仓库在桥 token 上撞过一次（WI-86），
+  # 症状是容器一路 401 而主观题静默降级成人工自检表。start_app / up / --rebuild 都把它变成 exit 1，
+  # 所以这里失败时 Docker 那几步根本不会被调用。
+  write_env_token "$token" || return 1
 
   # notebook 的 token：**缺了才生成**。每次启动都换一个新 token，而容器还是那个在跑的旧容器
   # （compose up -d 对没变化的服务不会重建），entrypoint 里的 jupyter 与 .env 就会各拿一份 →
   # 打印出来的 URL 打不开，症状和 WI-86 的"桥 token 漂移"是同一类。
   if [ -z "$(read_env_jupyter_token)" ]; then
-    write_env_jupyter_token "$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+    write_env_jupyter_token "$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)" || return 1
     say "已生成 notebook 的 Jupyter token（.env → ARENA_JUPYTER_TOKEN）"
   fi
   # 以 .env 为准导出：compose 的 ${VAR:-} 插值里进程环境优先于 .env 文件，
