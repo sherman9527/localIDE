@@ -597,13 +597,15 @@ nbformat v4 骨架，`metadata.kernelspec = { name: "arena-pyspark", display_nam
 
 ```python
 # cell 1 (markdown): 这份 notebook 只回答一个问题 —— arena-pyspark kernel 真能起 Spark 吗？
+#   （cell 里不许出现里程碑编号或验证命令名：它是用户会打开看的东西，描述"该做什么"而不是"第几步"。评审 M11）
+#   四个 cell 都带 `id` 字段（nbformat 4.5 声明它；不带的话 nbconvert 只能现场回填。评审 M10）
 # cell 2 (code):
 import sys
 print("python", sys.executable)
-# cell 3 (code):
-from pyspark.sql import SparkSession
+# cell 3 (code): 打的是 **id 之和**，不是行数 —— 与 Task 10 那条 `/rows 15/` 判据同一个数（评审 I-1）
+from pyspark.sql import SparkSession, functions as f
 spark = SparkSession.builder.appName("arena-smoke").getOrCreate()
-print("rows", spark.range(6).count())
+print("rows", int(spark.range(6).agg(f.sum("id")).collect()[0][0]))  # 0+1+2+3+4+5 = 15
 # cell 4 (code): 红线一延伸的正面证据 —— 解释器必须在 IDE 的 venv 里
 assert sys.executable.startswith("/opt/arena-ide-env/"), sys.executable
 print("venv ok")
@@ -996,7 +998,7 @@ describe('arena-pyspark kernel 在容器里真能起 Spark', () => {
       { encoding: 'utf8', timeout: 180_000, maxBuffer: 32 * 1024 * 1024 },
     );
     expect(out).toContain('venv ok');
-    expect(out).toMatch(/rows 15/); // spark.range(6) 的 id 之和 = 0+1+…+5
+    expect(out).toMatch(/rows 15/); // cell 3 打的是 spark.range(6) 的 id **之和** = 0+1+2+3+4+5 = 15（行数会是 6 —— 评审 I-1 把两边对齐成同一个算式）
     expect(out).not.toMatch(/Traceback/);
   }, 200_000);
 
