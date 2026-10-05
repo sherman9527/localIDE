@@ -42,20 +42,29 @@ function Invoke-Step {
   }
 }
 
-function Read-EnvToken {
+# 读写逻辑只这一份：桥与 notebook 各一对 wrapper（与 start.sh 的 read_env_key / write_env_key 同判据）。
+# 分叉成两份的下场一定是"其中一份说假话"。
+function Read-EnvKey([string]$key) {
   if (Test-Path $EnvFile) {
-    $line = Select-String -Path $EnvFile -Pattern '^ARENA_LLM_BRIDGE_TOKEN=' | Select-Object -Last 1
+    $line = Select-String -Path $EnvFile -Pattern "^$key=" | Select-Object -Last 1
     if ($line) { return ($line.Line -split '=', 2)[1] }
   }
   return ''
 }
 
-function Write-EnvToken([string]$token) {
+function Write-EnvKey([string]$key, [string]$value) {
   if (-not (Test-Path $EnvFile)) { New-Item -ItemType File -Path $EnvFile | Out-Null }
-  $kept = @(Get-Content $EnvFile | Where-Object { $_ -notmatch '^ARENA_LLM_BRIDGE_TOKEN=' })
+  $kept = @(Get-Content $EnvFile | Where-Object { $_ -notmatch "^$key=" })
   # 显式 UTF-8 无 BOM + LF：compose 读 .env 时 BOM 会让第一行的键名多个隐形字符，CRLF 会把 \r 带进 token
-  [System.IO.File]::WriteAllText($EnvFile, (($kept + "ARENA_LLM_BRIDGE_TOKEN=$token") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  [System.IO.File]::WriteAllText($EnvFile, (($kept + "$key=$value") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
 }
+
+function Read-EnvToken { return Read-EnvKey 'ARENA_LLM_BRIDGE_TOKEN' }
+function Write-EnvToken([string]$token) { Write-EnvKey 'ARENA_LLM_BRIDGE_TOKEN' $token }
+
+# notebook 的 token 与桥同一纪律：唯一来源是 .env（已 gitignore），只在本机之间传递，不进日志。
+function Read-EnvJupyterToken { return Read-EnvKey 'ARENA_JUPYTER_TOKEN' }
+function Write-EnvJupyterToken([string]$token) { Write-EnvKey 'ARENA_JUPYTER_TOKEN' $token }
 
 function Write-TextFile([string]$path, [string]$text) {
   [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot $path), $text + "`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -100,6 +109,20 @@ function Start-Bridge {
   if (-not $token) { $token = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N') }
   $env:ARENA_LLM_BRIDGE_TOKEN = $token
   Write-EnvToken $token
+
+  # notebook 的 token：缺了才生成（与 start.sh 同一判据）。每次换 token 而容器还是旧的那个在跑，
+  # entrypoint 里的 jupyter 与 .env 就各拿一份 → 打印出来的 URL 打不开。
+  $jupyter = Read-EnvJupyterToken
+  if (-not $jupyter) {
+    # start.sh 那边是 urandom→base64→tr 取 24 位 [A-Za-z0-9]；PS 5.1 没有对等的简单写法，
+    # 用桥同样的 GUID idiom 截到 24 位，字符集一致（都是 [a-f0-9]），熵远超本机 token 的需要。
+    $jupyter = ([guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')).Substring(0, 24)
+    Write-EnvJupyterToken $jupyter
+    Write-Host '[arena] 已生成 notebook 的 Jupyter token（.env → ARENA_JUPYTER_TOKEN）' -ForegroundColor Cyan
+  }
+  # 以 .env 为准导出：compose 的 ${VAR:-} 插值里进程环境优先于 .env 文件
+  $env:ARENA_JUPYTER_TOKEN = $jupyter
+
   New-Item -ItemType Directory -Force -Path data | Out-Null
 
   $state = Get-BridgeState $token
@@ -203,6 +226,17 @@ function Report-Health {
   }
 }
 
+# notebook 的入口要说给人看（token 只打印到终端，不写进任何日志文件 —— .env 才是唯一来源）。
+# -Dev 分支不走这里：dev 服务故意不发布 notebook 端口，打印出来就是个打不开的地址（说假话）。
+function Report-Notebook {
+  $token = Read-EnvJupyterToken
+  if (-not $token) {
+    Write-Host '[arena] Notebook 未就绪：.env 里没有 ARENA_JUPYTER_TOKEN（.\start.ps1 首启会生成）' -ForegroundColor Yellow
+    return
+  }
+  Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree?token=$token （页面第五项 Notebook 也能拿到）" -ForegroundColor Cyan
+}
+
 if ($Down) {
   docker compose --profile e2e stop e2e 2>$null
   Stop-Bridge
@@ -254,6 +288,7 @@ if ($Dev) {
 Invoke-Step '启动容器' { docker compose up -d arena }
 Wait-Healthy 180
 Report-Health
+Report-Notebook
 Warn-MissingHooks
 if ($Ide) {
   # 网页 IDE 与做题系统共用同一个容器、同一个服务，所以"独立启动"只是换个落地页

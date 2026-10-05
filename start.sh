@@ -42,17 +42,26 @@ ENV_FILE=".env"
 BRIDGE_PID="data/llm-bridge.pid"
 
 # token 必须"宿主桥"和"容器"用的是同一个，所以把它落到 .env（已被 gitignore）当唯一来源。
-read_env_token() {
-  [ -f "$ENV_FILE" ] && sed -n 's/^ARENA_LLM_BRIDGE_TOKEN=//p' "$ENV_FILE" | tail -1
+# 读写逻辑只这一份：桥与 notebook 各留一对 wrapper。分叉出第二份的下场是"其中一份说假话"
+# （历史上 sh 侧修了 hook 检测、ps1 还在报旧状态就是同一类漂移）。
+read_env_key() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+
+write_env_key() {
+  local key="$1" val="$2"
+  touch "$ENV_FILE"
+  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  else
+    printf '%s=%s\n' "$key" "$val" >>"$ENV_FILE"
+  fi
 }
 
-write_env_token() {
-  local token="$1"
-  touch "$ENV_FILE"
-  grep -q '^ARENA_LLM_BRIDGE_TOKEN=' "$ENV_FILE" 2>/dev/null \
-    && sed -i.bak "s/^ARENA_LLM_BRIDGE_TOKEN=.*/ARENA_LLM_BRIDGE_TOKEN=$token/" "$ENV_FILE" && rm -f "$ENV_FILE.bak" \
-    || printf 'ARENA_LLM_BRIDGE_TOKEN=%s\n' "$token" >>"$ENV_FILE"
-}
+read_env_token() { read_env_key ARENA_LLM_BRIDGE_TOKEN; }
+write_env_token() { write_env_key ARENA_LLM_BRIDGE_TOKEN "$1"; }
+
+# notebook 的 token 与桥同一纪律：唯一来源是 .env（已 gitignore），只在本机之间传递，不进日志。
+read_env_jupyter_token() { read_env_key ARENA_JUPYTER_TOKEN; }
+write_env_jupyter_token() { write_env_key ARENA_JUPYTER_TOKEN "$1"; }
 
 # 端口上真正应答的那个进程才是事实。pid 文件会骗人：Windows 的 Git Bash 里
 # `kill -0 <错位的 pid>` 哪怕对应的是别的进程也返回真 —— 于是"孤儿桥 + 新 token"这种状态下
@@ -107,6 +116,17 @@ start_bridge() {
   [ -n "$token" ] || token="$(openssl rand -hex 16 2>/dev/null || echo "local-$RANDOM$RANDOM")"
   export ARENA_LLM_BRIDGE_TOKEN="$token"
   write_env_token "$token"
+
+  # notebook 的 token：**缺了才生成**。每次启动都换一个新 token，而容器还是那个在跑的旧容器
+  # （compose up -d 对没变化的服务不会重建），entrypoint 里的 jupyter 与 .env 就会各拿一份 →
+  # 打印出来的 URL 打不开，症状和 WI-86 的"桥 token 漂移"是同一类。
+  if [ -z "$(read_env_jupyter_token)" ]; then
+    write_env_jupyter_token "$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+    say "已生成 notebook 的 Jupyter token（.env → ARENA_JUPYTER_TOKEN）"
+  fi
+  # 以 .env 为准导出：compose 的 ${VAR:-} 插值里进程环境优先于 .env 文件，
+  # 留一个陈旧的同名 shell 变量在里面，容器拿到的就不是唯一来源那份了。
+  export ARENA_JUPYTER_TOKEN="$(read_env_jupyter_token)"
 
   mkdir -p data
   local state
@@ -196,6 +216,20 @@ report_health() {
   fi
 }
 
+# notebook 的入口要说给人看（token 只打印到终端，不写进任何日志文件 —— .env 才是唯一来源）。
+# --dev 不走这里（它不经过 start_app）：dev 服务故意不发布 notebook 端口，
+# 打印出来就是个打不开的地址（说假话）。--verify / --ide 走 start_app，会打印 —— 那两个
+# 路径起的就是 arena 本身，7789 是真的能开。
+report_notebook() {
+  local token
+  token="$(read_env_jupyter_token)"
+  if [ -z "$token" ]; then
+    say "Notebook 未就绪：.env 里没有 ARENA_JUPYTER_TOKEN（./start.sh 首启会生成）"
+    return 0
+  fi
+  say "Notebook：http://127.0.0.1:7789/tree?token=${token}（页面第五项 Notebook 也能拿到）"
+}
+
 # 起服务。落地页由各分支自己决定（up 开首页，--ide 直接开 IDE）。
 # 构建这一步不能省也不能吞：省了就会"起成功但跑的是上一个镜像"，
 # 吞掉构建失败则连"跑的是旧代码"都看不出来 —— 这两个坑本项目都踩过。
@@ -206,6 +240,7 @@ start_app() {
   docker compose up -d arena || return 1
   wait_healthy 180 || return 1
   report_health
+  report_notebook
   warn_missing_hooks
 }
 
@@ -219,6 +254,7 @@ case "${1:-up}" in
     # （mysql 首次建库 + spark 冷加载），偏偏是这条最需要宽限的路径。
     wait_healthy 180 || exit 1
     report_health
+    report_notebook
     warn_missing_hooks
     open_browser
     ;;

@@ -23,6 +23,9 @@ services:
       # 代价说清楚：**手机 / iPad 访问不了**（已确认不需要，2026-09-24）。
       # 闸门：server/test/regression/compose-ports.test.ts 钉住"每个发布端口都必须绑回环"。
       - "127.0.0.1:7788:7788"
+      # notebook 同样只绑回环：它等于"任意代码执行 + 能读题库文件"，开到局域网比 /api/bank 严重。
+      # 代价一样：手机 / iPad 打不开（已确认不需要）。闸门：notebook-compose.test.ts
+      - "127.0.0.1:7789:8888"
     volumes:
       # 运行期数据与依赖缓存都留在仓库目录内（需求 通用 7 / 场景 14）
       - ./data:/app/data
@@ -39,6 +42,11 @@ services:
       ARENA_DB_FILE: /app/data/arena.db
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
+      # notebook 的 token 只做透传、不给默认值：唯一来源是 .env（./start.sh 首启生成）。
+      # 缺了就该由 entrypoint 决定"不起"（见 docker/entrypoint.sh），而不是悄悄起一个无鉴权的。
+      # 每一个用这张镜像的服务都要带上这一行（entrypoint 是镜像级的，dev/e2e 也会起 jupyter）：
+      # 漏一处的判据由 notebook-compose.test.ts 钉，不靠人记。闸门：server/test/regression/notebook-compose.test.ts
+      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
@@ -64,6 +72,10 @@ services:
       - ./vitest.config.ts:/app/vitest.config.ts
       - ./docker:/app/docker
       - ./docker-cache/npm:/root/.npm
+    environment:
+      # tools 覆盖了 entrypoint（下面那条 `entrypoint: ["bash","-lc"]`），自己不会起 jupyter，
+      # 但 Task 10 的容器档 notebook 测试要在这个容器里读到同一个 token ⇒ 只透传，不加端口。
+      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
     init: true
     entrypoint: ["bash", "-lc"]
     command: ["echo '用 docker compose run --rm tools <命令>'"]
@@ -89,6 +101,7 @@ services:
       ARENA_DB_FILE: /app/data/arena.db
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
+      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
@@ -122,6 +135,9 @@ services:
       ARENA_HIDDEN_FILE: /app/data/e2e/hidden.json
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
+      # 同一个 entrypoint 会给 e2e 也起一个 jupyter（只监听容器内，不发布到宿主 —— notebook 端口
+      # 归 arena 一个服务发布，判据见 notebook-compose.test.ts）。缺 token 它就不起，所以这里也得透传。
+      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
