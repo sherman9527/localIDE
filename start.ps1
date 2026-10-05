@@ -49,6 +49,11 @@ function Read-EnvKey([string]$key) {
   # 少传一个参数只会得到 $key = ''，于是 "^=" 谁也匹配不到 ⇒ 读回来是空 ⇒ 上层以为"没有 token"）
   if (-not $key) { throw 'Read-EnvKey 需要键名' }
   if (Test-Path $EnvFile) {
+    # 这里**不加** -Encoding UTF8，与下面 Write-EnvKey 里的 Get-Content 不同，是实测出来的差别而不是疏忽：
+    # PS 5.1 的 Select-String 默认就按 UTF-8 解码（实测同一行中文值：默认与 -Encoding UTF8 拿到的码点
+    # 完全相同、长度相同），而 Get-Content 默认按 ANSI(本机 GB2312) 解码（会把中文行尾的字节当双字节
+    # 字符前导字节、连换行一起吃掉 ⇒ 两行并一行）。两边都写 -Encoding UTF8 只会让人以为"这边原本也有
+    # 同样的洞"，而它没有。
     $line = Select-String -Path $EnvFile -Pattern "^$key=" | Select-Object -Last 1
     if ($line) { return ($line.Line -split '=', 2)[1] }
   }
@@ -63,18 +68,35 @@ function Write-EnvKey([string]$key, [string]$value) {
   # 行就抛"未终止的 [] 集"⇒ 整个脚本终止（响亮，但为了一个与 .env 无关的理由）；`ARENA.TOK` 里的
   # `.` 是通配，会**静默删掉别人的行**（`ARENA_TOK=` 被当成同名旧行滤掉，新键照写，rc 一切正常）。
   if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') {
-    throw "Write-EnvKey 拒绝写入：键名 '$key' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 原文件一个字节都没动，新值也没写"
+    # 话要说准：首启时还没有原文件，"原文件一个字节都没动"在那一刻根本没有对象（与 start.sh 同判据）
+    $untouched = if (Test-Path $EnvFile) { '原文件一个字节都没动' } else { "这里还没有 $EnvFile，本次也没有创建它" }
+    throw "Write-EnvKey 拒绝写入：键名 '$key' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— $untouched，新值也没写"
   }
   if (-not (Test-Path $EnvFile)) { New-Item -ItemType File -Path $EnvFile | Out-Null }
   # 滤旧行换成**字面量**前缀比较（StartsWith），键名不再进正则 —— 与 sh 侧换成 awk 字面量比较同判据。
   $prefix = "$key="
-  $kept = @(Get-Content $EnvFile | Where-Object { -not $_.StartsWith($prefix) })
+  # 读必须显式 -Encoding UTF8：PS 5.1 不带 -Encoding 时按 ANSI 读，而**这台机器的 ANSI 是 GB2312/CP936**
+  # （实测 `[Text.Encoding]::Default.WebName` = gb2312）。于是无 BOM 的 UTF-8 .env 会被错映射成别的码点，
+  # 更糟的是双字节字符的"前导字节"会把紧跟的 0x0A 一起吃掉 ⇒ 相邻两行合并、那行的键从 .env 里消失
+  # （实测 3 行的基准文件读出来是 2 行；再按 UTF-8 写回去就是永久的数据损坏）。
+  # 反向的取舍写在这里，别以为没有：真·ANSI(GBK) 存的 .env 用 UTF8 读会得到 U+FFFD —— 但这两个脚本
+  # 写出去的一直是 UTF-8 无 BOM，compose 与 server/src/config.ts 读的也是 UTF-8，权威在这一侧。
+  $kept = @(Get-Content $EnvFile -Encoding UTF8 | Where-Object { -not $_.StartsWith($prefix) })
   # 写 tmp 再 move（与 sh 侧的 tmp+mv 同一个形状）：旧写法直接 WriteAllText($EnvFile) 会**先截断原文件**，
   # 中途失败（文件被占用 / 磁盘满）就把 .env 留在半截状态、旧内容找不回来 —— sh 侧早就堵掉了这条。
   # 显式 UTF-8 无 BOM + LF：compose 读 .env 时 BOM 会让第一行的键名多个隐形字符，CRLF 会把 \r 带进 token
   $tmp = "$EnvFile.tmp.$PID"
   try {
     [System.IO.File]::WriteAllText($tmp, (($kept + "$key=$value") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    # 权限要跟过去：Move-Item 保留的是 **tmp 的 ACL**（继承自所在目录，一般含 SYSTEM/Administrators 的
+    # FullControl），于是这次改写会把手工收紧过的 .env（例如"只允许当前用户、不继承"）静默降回继承默认
+    # —— 而 .env 里是桥 token 与 notebook 的 Jupyter token，那个 Jupyter 还是 entrypoint 里 --allow-root 起的。
+    # 有原文件就照抄它的 ACL。新建时不动：Windows 没有 umask 0600 的对等物，硬造一份 ACL 只会把人家的
+    # 文件改成谁也读不了的样子 —— 这条与 sh 侧的差别写在这，不是漏了一半。
+    if (Test-Path $EnvFile) {
+      try { Set-Acl -Path $tmp -AclObject (Get-Acl -Path $EnvFile) }
+      catch { Write-Host "[arena] 没能把 $tmp 的权限对齐 $EnvFile（将以默认权限改写 .env）：$($_.Exception.Message)" -ForegroundColor Yellow }
+    }
     Move-Item -Force -Path $tmp -Destination $EnvFile -ErrorAction Stop
   } catch {
     # 失败必须让调用方**停下**：throw 会穿过 Start-Bridge 直接终止脚本（等同 sh 侧的 `|| return 1`）。
@@ -84,6 +106,15 @@ function Write-EnvKey([string]$key, [string]$value) {
     $where = if (Test-Path $tmp) { "新内容在 $tmp，手工合并后删掉它" } else { '临时文件没写出来（磁盘满 / 权限？）' }
     Write-Host "[arena] 没能改写 $EnvFile（$where）：$($_.Exception.Message)" -ForegroundColor Red
     throw
+  }
+  # 后置条件：写完**读回来对一遍**（与 sh 侧同判据）。Move-Item 返回成功只证明"这次替换发生了"，
+  # 不证明 .env 里真是那个值 —— 磁盘满写半截、被别的进程同时改写、值里带换行只落下一行，
+  # 都是"短了但一切正常"。本项目在桥 token 上撞过的正是"两份不一致而两边都绿"（WI-86）。
+  $got = Read-EnvKey $key
+  if ($got -ne $value) {
+    $why = "[arena] $EnvFile 里读回的 '$key' 与刚写进去的不一致（读回 '$got' / 期望 '$value'）—— 别再往下跑：检查 $EnvFile 有没有被别的进程改写、值里是不是带了换行"
+    Write-Host $why -ForegroundColor Red
+    throw $why
   }
 }
 

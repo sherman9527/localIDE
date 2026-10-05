@@ -65,7 +65,12 @@ write_env_key() {
   # 一份缺键的 .env，失败时原文件一个字节都不动。
   case "$key" in
     '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*)
-      fail "拒绝改写 ${ENV_FILE}：键名 '${key}' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 原文件一个字节都没动，新值也没写"
+      # 话要说准：首启时还没有原文件，"原文件一个字节都没动"在那一刻根本没有对象（评审点名的一条）。
+      if [ -f "$ENV_FILE" ]; then
+        fail "拒绝改写 ${ENV_FILE}：键名 '${key}' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 原文件一个字节都没动，新值也没写"
+      else
+        fail "拒绝改写 ${ENV_FILE}：键名 '${key}' 不是合法环境变量名（只允许字母/数字/下划线，且不能以数字开头）—— 这里还没有 ${ENV_FILE}，本次也没有创建它"
+      fi
       return 1
       ;;
   esac
@@ -98,7 +103,30 @@ write_env_key() {
   # 返回值现在**有人接**了：两个调用点都 `|| return 1`，见 start_bridge。
   # 写不进去就停下，别带着"进程环境里是新 token、.env 里是旧 token"继续往下 —— 那正是本仓库
   # 在桥 token 上撞过的错配类（容器一路 401、主观题静默降级成人工自检表）。
+  # 权限要跟过去：`mv` 落下去的是 **tmp 的 mode**（shell 重定向按 umask 建，通常 0644），
+  # 于是这次改写会把人手加固过的 0600 .env 静默降回 0644 —— 而 .env 里是桥 token 与 notebook 的
+  # Jupyter token，那个 Jupyter 还是 entrypoint 里 `--allow-root` 起的。有原文件就照抄它的 mode，
+  # 没有就按最严的 0600 建。失败不致命（不是所有文件系统都支持 chmod），但要说一句，
+  # 别让人以为已经加固了。
+  # 诚实的边界：Windows/Git Bash 上 chmod 根本不改变 stat 报的 mode（实测 chmod 600 之后仍报 644），
+  # 所以这条在宿主上是 best-effort，真效果要到 Linux（容器档）才看得见。
+  # 闸门：server/test/regression/env-write-atomicity.test.ts（代码里这句在不在 = 永远跑的那条；
+  # 实际 mode 保不保得住 = 只在认 chmod 的文件系统上跑的那条，跳过了会在报告里写出来）。
+  if [ -f "$ENV_FILE" ]; then
+    chmod --reference="$ENV_FILE" "$tmp" 2>/dev/null || fail "没能把 ${tmp} 的权限对齐 ${ENV_FILE}（将以默认权限改写 .env）"
+  else
+    chmod 600 "$tmp" 2>/dev/null || fail "没能把 ${tmp} 设成 0600（将以默认权限新建 .env）"
+  fi
   mv "$tmp" "$ENV_FILE" || { fail "没能改写 ${ENV_FILE}（新内容在 ${tmp}，手工合并后删掉它）"; return 1; }
+  # 后置条件：写完**读回来对一遍**。mv 返回 0 只证明"这次替换发生了"，不证明 .env 里真是那个值 ——
+  # 磁盘满写半截、被别的进程同时改写、值里带换行只落下一行，都是"短了但 rc=0"。
+  # 这一道是"静默"那一类的最后一层：本项目在桥 token 上撞过的正是"两份不一致而两边都绿"（WI-86）。
+  local got
+  got="$(read_env_key "$key")"
+  if [ "$got" != "$val" ]; then
+    fail "${ENV_FILE} 里读回的 '${key}' 与刚写进去的不一致（读回 ${#got} 字节 / 期望 ${#val} 字节）—— 别再往下跑：检查 ${ENV_FILE} 有没有被别的进程改写、值里是不是带了换行"
+    return 1
+  fi
 }
 
 read_env_token() { read_env_key ARENA_LLM_BRIDGE_TOKEN; }
