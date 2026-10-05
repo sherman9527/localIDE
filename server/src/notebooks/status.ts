@@ -1,7 +1,13 @@
 import { config } from '../config.js';
 import type { NotebookKernel, NotebookStatusResponse } from '@arena/shared';
 
-const LOOPBACK = /^(127\.0\.0\.1|localhost)(:\d+)?$/i;
+/**
+ * 只有回环来源才附 token。**IPv6 的两种写法都要认**（评审 M7）：
+ * Host 头里是带方括号的 `[::1]:7788`，而某些实现（以及直接读 `req.socket.remoteAddress` 的调用方）
+ * 递过来的是裸 `::1`。漏掉它们的后果是 fail-closed（本机也拿不到 token ⇒ 用户得自己粘），
+ * 不是外泄 —— 但"在本机点开还要手贴 token"就是那句"链接照给但打不开"的静默降级。
+ */
+const LOOPBACK = /^(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d+)?$/i;
 const TOKEN_KEY = 'ARENA_JUPYTER_TOKEN';
 
 async function jupyterApi(path: string, token: string, doFetch: typeof fetch, timeoutMs: number): Promise<Response> {
@@ -53,7 +59,21 @@ function errorChain(err: unknown): { text: string; detail: string } {
 
 /** 超时/中止的样子：AbortSignal.timeout 给的是 DOMException(TimeoutError)，文案里有 timeout。 */
 function isTimeoutish(text: string): boolean {
+  // `abort` 这一支今天唯一能触发它的是我们自己那个 deadline；Task 8 会把路由层的请求取消
+  // （AbortController）接进来，那时"用户取消了"会被说成"探活超时"—— 到那一步要一起改这里。
   return /timeout|timed out|abort/.test(text);
+}
+
+/**
+ * HTTP 状态码 → 一句话。**两个端点共用同一个 builder**（评审 I-3）：
+ * `/api/kernelspecs` 原来不判状态码就直接 `json()`，于是 403/500 有两种坏法 ——
+ * ① HTML body 让 `json()` 抛 SyntaxError，被下面那个 catch 说成"Jupyter 未在监听"（它在监听，
+ *    是它答得不像话）；② body 恰好能解析 ⇒ `running:true, kernels:[]` 且没有 reason，
+ *    界面显示"没有可用 kernel"却一句解释都没有。真实场景就是 token 重新生成之后：
+ *    旧 token 的 403 被读成"kernel 就绪但列表是空的"。
+ */
+function httpReason(status: number): string {
+  return `Jupyter 返回 ${status}${status === 403 ? '（token 不匹配）' : ''}`;
 }
 
 /**
@@ -81,9 +101,13 @@ export async function notebookStatus(input: {
     // 判 `.ok` 会把"探到了、200"读成失败 —— 而假阴性最难查（症状是 running:false 加一句
     // "Jupyter 返回 200"，没人会去怀疑探活本身是好的）。
     if (status.status !== 200) {
-      return { ...empty, reason: `Jupyter 返回 ${status.status}${status.status === 403 ? '（token 不匹配）' : ''}` };
+      return { ...empty, reason: httpReason(status.status) };
     }
     const ks = await jupyterApi('/api/kernelspecs', token, doFetch, timeoutMs);
+    // 这一句是评审 I-3 补的：kernelspecs 的回话同样是外部输入，判据必须和 /api/status 那条一样。
+    if (ks.status !== 200) {
+      return { ...empty, reason: httpReason(ks.status) };
+    }
     const body = (await ks.json()) as { kernels?: Record<string, { spec?: { display_name?: string } }> };
     kernels = Object.entries(body.kernels ?? {}).map(([id, v]) => ({ id, label: v.spec?.display_name ?? id, ready: true }));
   } catch (err) {
@@ -93,7 +117,25 @@ export async function notebookStatus(input: {
     return { ...empty, reason: isTimeoutish(text) ? 'Jupyter 无响应（探活超时）' : `Jupyter 未在监听：${detail || String(err)}` };
   }
 
-  const url = new URL(`${config.notebook.publicUrl}/tree`);
-  if (LOOPBACK.test(input.hostHeader)) url.searchParams.set('token', token);
-  return { running: true, url: url.toString(), kernels, notebooks: [] };
+  // 链接是在**已经探到 Jupyter 在跑**之后拼的，所以这一步坏掉不许把结果说成"未在监听"，
+  // 更不许让 promise reject —— Task 8 会把这个函数直接挂在 GET 路由上，reject 出去就是 500，
+  // 而 500 没有 reason 可读（前端那句"kernel 就绪"会整块消失，读者看不到任何原因，正是本仓库最恨的静默）。
+  // 坏值来自 env（ARENA_NOTEBOOK_PUBLIC_URL），这里不写第二份默认值：那会造出端口的第五处真相，
+  // 而"给不出链接 + 说清是哪一行坏了"比"给一个可能是错的链接"更可行动。
+  let url: string;
+  try {
+    const u = new URL(`${config.notebook.publicUrl}/tree`);
+    if (LOOPBACK.test(input.hostHeader)) u.searchParams.set('token', token);
+    url = u.toString();
+  } catch {
+    return {
+      running: true,
+      kernels,
+      notebooks: [],
+      reason:
+        `Jupyter 在跑，但 ARENA_NOTEBOOK_PUBLIC_URL="${config.notebook.publicUrl}" 不是合法 URL ⇒ 给不出能点开的链接。` +
+        '这是那一行 env 坏了，不是 Jupyter 的故障',
+    };
+  }
+  return { running: true, url, kernels, notebooks: [] };
 }

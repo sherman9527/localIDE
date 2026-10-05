@@ -41,4 +41,19 @@ describe('seedNotebooks', () => {
     await writeFile(join(src, 'b.ipynb'), '{"cells":[]}', 'utf8');
     expect(await seedNotebooks({ srcDir: src, dstDir: dst })).toEqual([{ file: 'b.ipynb', seeded: true }]);
   });
+
+  /**
+   * 评审 M12：光看名字尾巴 `.ipynb` 会把**目录**也认成示例。
+   * 那不会只少一个文件 —— `copyFile` 对目录抛 EISDIR/EPERM，而这个函数没有兜底 catch，
+   * 于是整次 seed reject：一个示例都铺不出来，而调用方（Task 8 的 prepare）拿到的是一个 500。
+   * 目录从哪来的不重要（手工 `mkdir content/notebooks/foo.ipynb` 就能复现），重要的是它不该打断。
+   */
+  it('名字恰好以 .ipynb 结尾的目录不是示例：跳过它，且整次 seed 不许 reject', async () => {
+    const { src, dst } = await dirs();
+    await mkdir(join(src, 'not-a-notebook.ipynb'), { recursive: true });
+    await writeFile(join(src, 'keep.ipynb'), '{"cells":[],"metadata":{}}', 'utf8');
+    const out = await seedNotebooks({ srcDir: src, dstDir: dst });
+    expect(out, '目录被当成示例 ⇒ copyFile 会抛，整次 seed reject').toEqual([{ file: 'keep.ipynb', seeded: true }]);
+    await expect(readFile(join(dst, 'keep.ipynb'), 'utf8')).resolves.toContain('cells');
+  });
 });
