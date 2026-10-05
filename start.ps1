@@ -45,6 +45,9 @@ function Invoke-Step {
 # 读写逻辑只这一份：桥与 notebook 各一对 wrapper（与 start.sh 的 read_env_key / write_env_key 同判据）。
 # 分叉成两份的下场一定是"其中一份说假话"。
 function Read-EnvKey([string]$key) {
+  # 缺参数就炸，不要静默拿空串去匹配（与 start.sh 的 ${1:?} 同判据：PS 这边没有 set -u 兜着，
+  # 少传一个参数只会得到 $key = ''，于是 "^=" 谁也匹配不到 ⇒ 读回来是空 ⇒ 上层以为"没有 token"）
+  if (-not $key) { throw 'Read-EnvKey 需要键名' }
   if (Test-Path $EnvFile) {
     $line = Select-String -Path $EnvFile -Pattern "^$key=" | Select-Object -Last 1
     if ($line) { return ($line.Line -split '=', 2)[1] }
@@ -53,6 +56,8 @@ function Read-EnvKey([string]$key) {
 }
 
 function Write-EnvKey([string]$key, [string]$value) {
+  # 同上：缺键名会往 .env 里写一行 "=值"，而 compose 读到的是一行非法键
+  if (-not $key) { throw 'Write-EnvKey 需要键名' }
   if (-not (Test-Path $EnvFile)) { New-Item -ItemType File -Path $EnvFile | Out-Null }
   $kept = @(Get-Content $EnvFile | Where-Object { $_ -notmatch "^$key=" })
   # 显式 UTF-8 无 BOM + LF：compose 读 .env 时 BOM 会让第一行的键名多个隐形字符，CRLF 会把 \r 带进 token
@@ -226,7 +231,11 @@ function Report-Health {
   }
 }
 
-# notebook 的入口要说给人看（token 只打印到终端，不写进任何日志文件 —— .env 才是唯一来源）。
+# notebook 的入口要说给人看，但要说的是事实（与 start.sh 的 report_notebook 同判据）：
+# ① 不打印 token —— 旧注释那句"只打印到终端、不写进任何日志文件"在整个 run 被重定向时是假的；
+# ② 先探端口再报 —— "端口上真正应答的那个进程才是事实"（Get-BridgeState 的注释），
+#    探测故意不带 token：有任何 HTTP 应答就说明 7789 上确实有进程在听。它证明的是"有人在听"，
+#    不是"那是 jupyter 且 token 对得上"—— 后者归 Task 7 的 /api/notebook/status。
 # -Dev 分支不走这里：dev 服务故意不发布 notebook 端口，打印出来就是个打不开的地址（说假话）。
 function Report-Notebook {
   $token = Read-EnvJupyterToken
@@ -234,7 +243,20 @@ function Report-Notebook {
     Write-Host '[arena] Notebook 未就绪：.env 里没有 ARENA_JUPYTER_TOKEN（.\start.ps1 首启会生成）' -ForegroundColor Yellow
     return
   }
-  Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree?token=$token （页面第五项 Notebook 也能拿到）" -ForegroundColor Cyan
+  $code = 0
+  try {
+    $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:7789/login' -TimeoutSec 2 -UseBasicParsing
+    $code = [int]$resp.StatusCode
+  } catch {
+    # 非 2xx 也算"有进程应答"（与 start.sh 那边 curl 只看 http_code 同判据）；完全没有连接才是没起来。
+    $r = $_.Exception.Response
+    if ($r) { $code = [int]$r.StatusCode }
+  }
+  if ($code -eq 0) {
+    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版）。看 .\start.ps1 -Logs 里 entrypoint 那几行，必要时 .\start.ps1 -Rebuild' -ForegroundColor Yellow
+    return
+  }
+  Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan
 }
 
 if ($Down) {
@@ -253,6 +275,12 @@ if ($Verify) {
   Invoke-Step '镜像构建' { docker compose build --pull=false }
   Invoke-Step '启动容器' { docker compose up -d arena }
   Wait-Healthy 180
+  # start.sh 的 --verify 走 start_app ⇒ 健康栈、notebook、hook 提示三条都会打。
+  # 这里以前一个都不打：同一套判据的两个实现在"最容易被 agent/CI 调用那条路径"上说了不同的话，
+  # 而 --verify 恰恰是判题相关改动默认要跑的那条 —— notebook 没起来时它会看起来一切正常。
+  Report-Health
+  Report-Notebook
+  Warn-MissingHooks
   # 与 start.sh 同一判据：容器里没有 docker，E2E 起不了隔离实例，必须 SKIP_E2E=1，
   # 否则 --verify 会在最后一个阶段必挂（判题矩阵其实已经跑完）。
   Write-Host '[arena] 容器内验证跳过 E2E（容器里起不了隔离实例）；E2E 请在宿主跑：npm run e2e（用 Edge 验你真正看的界面）' -ForegroundColor Cyan

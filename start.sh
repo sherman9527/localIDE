@@ -44,16 +44,29 @@ BRIDGE_PID="data/llm-bridge.pid"
 # token 必须"宿主桥"和"容器"用的是同一个，所以把它落到 .env（已被 gitignore）当唯一来源。
 # 读写逻辑只这一份：桥与 notebook 各留一对 wrapper。分叉出第二份的下场是"其中一份说假话"
 # （历史上 sh 侧修了 hook 检测、ps1 还在报旧状态就是同一类漂移）。
-read_env_key() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -1; }
+# 入参用 ${1:?} / ${2:-} 兜住：这脚本是 `set -u`，旧写法里少传参数得到的是 bash 那句
+# "1: unbound variable"（然后整个脚本直接结束，因为这是非交互 shell）—— 现场看到的是一行
+# 与 .env 毫无关系的报错。${1:?说明} 把它换成"哪个函数缺了哪个参数"；val 用 ${2:-} 是因为
+# "把某个键写成空值"本身是合法用法（清空），而键名永远不可能是可选的。
+read_env_key() {
+  local key="${1:?read_env_key 需要键名}"
+  [ -f "$ENV_FILE" ] && sed -n "s/^${key}=//p" "$ENV_FILE" | tail -1
+}
 
 write_env_key() {
-  local key="$1" val="$2"
+  local key="${1:?write_env_key 需要键名}" val="${2:-}"
   touch "$ENV_FILE"
-  if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i.bak "s|^${key}=.*|${key}=${val}|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
-  else
-    printf '%s=%s\n' "$key" "$val" >>"$ENV_FILE"
-  fi
+  # **不用 sed 做替换**：值里带 `|`、`&`、`\` 时 sed 会把它们当作替换表达式的一部分
+  # （`&` 是"整段匹配"、`\` 是转义、分隔符本身直接截断），于是 .env 被悄悄写坏 ——
+  # 桥与容器各拿一份 token 的那类错配就是这么来的。改成"滤掉旧行 + 追加新行"整份重写，
+  # 与 ps1 那份对等实现同一个形状（那边一直是 filter+append，漂移的方向从来是 sh 侧偷懒）。
+  # 顺带堵掉另一个洞：旧写法 grep 命中但 sed 失败时会落到 append 分支 ⇒ .env 里两行同名键。
+  local tmp="${ENV_FILE}.tmp.$$"
+  grep -v "^${key}=" "$ENV_FILE" >"$tmp" 2>/dev/null || : >"$tmp"
+  printf '%s=%s\n' "$key" "$val" >>"$tmp"
+  # mv 失败时把话说响亮：静默 return 0 会让"改写成功"看起来成立，而 .env 里还是旧值
+  # （旧写法的 sed -i 失败就是同样地落在 append 分支上，等于把错误吞成了一份重复键）。
+  mv "$tmp" "$ENV_FILE" || { fail "没能改写 ${ENV_FILE}（新内容在 ${tmp}，手工合并后删掉它）"; return 1; }
 }
 
 read_env_token() { read_env_key ARENA_LLM_BRIDGE_TOKEN; }
@@ -216,18 +229,30 @@ report_health() {
   fi
 }
 
-# notebook 的入口要说给人看（token 只打印到终端，不写进任何日志文件 —— .env 才是唯一来源）。
+# notebook 的入口要说给人看，但**要说的是事实**：
+# ① 不打印 token。旧注释写"token 只打印到终端、不写进任何日志文件"，可整个 run 被重定向
+#   （`./start.sh > run.log`、agent 里跑、CI 里跑）时那句话就不成立了 —— 所以链接一律不带 token，
+#   要 token 的人自己去 .env 拿（唯一来源那句话本来就写在下面这行里）。
+# ② 先探端口再报。"7789 是真的能开"在当前镜像（没重新构建过的机器上是旧版）里每次运行都是假的，
+#   而本仓库对这件事早有判据："端口上真正应答的那个进程才是事实"（bridge_probe 的注释）。
+#   探测故意不带 token：只要有任何 HTTP 应答就说明 7789 上确实有个进程在听。
+#   注意它证明的是"有人在听"，不是"那是 jupyter 且 token 对得上"—— 后者归 Task 7 的 /api/notebook/status。
 # --dev 不走这里（它不经过 start_app）：dev 服务故意不发布 notebook 端口，
 # 打印出来就是个打不开的地址（说假话）。--verify / --ide 走 start_app，会打印 —— 那两个
-# 路径起的就是 arena 本身，7789 是真的能开。
+# 路径起的就是 arena 本身。
 report_notebook() {
-  local token
+  local token code
   token="$(read_env_jupyter_token)"
   if [ -z "$token" ]; then
     say "Notebook 未就绪：.env 里没有 ARENA_JUPYTER_TOKEN（./start.sh 首启会生成）"
     return 0
   fi
-  say "Notebook：http://127.0.0.1:7789/tree?token=${token}（页面第五项 Notebook 也能拿到）"
+  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/login" 2>/dev/null || true)"
+  if [ -z "$code" ] || [ "$code" = "000" ]; then
+    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版）。看 ./start.sh --logs 里 entrypoint 那几行，必要时 ./start.sh --rebuild"
+    return 0
+  fi
+  say "Notebook：http://127.0.0.1:7789/tree（7789 已应答 HTTP ${code}；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）—— 只打印一次，且不含 token"
 }
 
 # 起服务。落地页由各分支自己决定（up 开首页，--ide 直接开 IDE）。
