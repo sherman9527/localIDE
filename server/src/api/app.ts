@@ -571,7 +571,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   // MARK: /api/notebook/prepare-env（显式建 IDE 的 venv —— kernel 的 argv 指着它）
-  // 不挂在 GET 上：status 会被轮询，分钟级的 venv 创建塞进读路径是错的。
+  // 不挂在 GET 上：分钟级的 venv 创建塞进读路径是错的 —— 计划里 status 就是要被前端轮询的那个接口
+  // （Task 9 目前只给了「刷新状态」按钮，但它一旦变成定时器，这条就更要紧）。
   app.post(`${api}/notebook/prepare-env`, async (): Promise<NotebookPrepareResponse> => {
     try {
       const lang = findLanguage('python');

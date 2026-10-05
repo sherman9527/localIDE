@@ -15,6 +15,8 @@ import type {
   IdeEnvResetResponse,
   IdeRunRequest,
   IdeRunResponse,
+  NotebookPrepareResponse,
+  NotebookStatusResponse,
   ReplFeedRequest,
   ReplFeedResponse,
   ReplStartRequest,
@@ -281,6 +283,11 @@ export const api = {
     envCommandStream(body, onEvent, opts),
   ideEnvReset: (body: { language: string }, opts?: RequestOptions) =>
     post<IdeEnvResetResponse>('/ide/env/reset', body, { ...opts, label: '重置依赖环境' }),
+  // notebook（A1 档）：状态只读，建环境是显式动作 —— 与 IDE 同一套"重活不挂在 GET 上"
+  notebookStatus: (opts?: RequestOptions) =>
+    get<NotebookStatusResponse>('/notebook/status', { ...opts, label: '读取 notebook 状态' }),
+  notebookPrepareEnv: (opts?: RequestOptions) =>
+    post<NotebookPrepareResponse>('/notebook/prepare-env', {}, { ...opts, label: '准备依赖环境' }),
   grade: (body: GradePostRequest, opts?: RequestOptions) =>
     post<GradePostResponse>('/grade', body, { ...opts, label: '评分' }),
 };

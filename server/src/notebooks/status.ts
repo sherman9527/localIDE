@@ -53,28 +53,40 @@ function hexLittleEndianToIpv4(hex: string): string | null {
 }
 
 /**
+ * 从 `/proc/net/route` 的正文里取出**默认路由**的网关（小端十六进制）。
+ * 单独拆出来是因为 Docker 没起的这一档没法在真容器里验它：唯一能判住"这行解析对不对"的机会
+ * 就是拿真实的表文本喂给这个纯函数（`server/test/notebooks/status.test.ts` 的 `parseProcNetRoute` 那一组）。
+ * 只认 Destination=00000000 那些行；一张网卡都可能有多个默认路由（多路由表），逐条收齐。
+ * Gateway 写成 `00000000` 的那些行要跳过：那是"链路内直连、没有网关"的默认路由，
+ * 把 `0.0.0.0` 当成网关收进表里，等于给一个不存在的地址发凭据资格 —— 这条按 fail-closed 处理。
+ */
+export function parseProcNetRoute(text: string): string[] {
+  const found = new Set<string>();
+  for (const line of text.split('\n').slice(1)) {
+    const cols = line.trim().split(/\s+/);
+    if (cols[1] !== '00000000') continue;
+    if (cols[2] === '00000000') continue;
+    const gw = hexLittleEndianToIpv4(cols[2] ?? '');
+    if (gw) found.add(gw);
+  }
+  return [...found];
+}
+
+/**
  * 本进程所在网络命名空间的默认网关 = 宿主那一侧的网桥地址（容器部署里"本机"就长这个样子）。
  * 读的是 `/proc/net/route`，不是"我猜网段 +1"：那是内核告诉我谁是出口，不是我的猜测。
  * Windows / macOS 宿主上没有这个文件 ⇒ 空数组 ⇒ 退成"只认回环"（那些实例本来也没 token）。
- * 缓存一次就够：容器的网络在整个生命周期里不变，而这个判据每次 status 都要用（页面会轮询）。
+ * 缓存一次就够：容器的网络在整个生命周期里不变，而这个判据每次 status 都要用（页面会刷新它）。
  */
 let gatewayOnce: string[] | null = null;
 export function localGatewayAddresses(): string[] {
   if (gatewayOnce) return gatewayOnce;
-  const found = new Set<string>();
   try {
-    const text = readFileSync('/proc/net/route', 'utf8');
-    for (const line of text.split('\n').slice(1)) {
-      const cols = line.trim().split(/\s+/);
-      // 只认默认路由（Destination 00000000）；容器里通常就一条，但多张网卡时逐条收齐。
-      if (cols[1] !== '00000000') continue;
-      const gw = hexLittleEndianToIpv4(cols[2] ?? '');
-      if (gw) found.add(gw);
-    }
+    gatewayOnce = parseProcNetRoute(readFileSync('/proc/net/route', 'utf8'));
   } catch {
     // 没有 /proc（宿主）不是故障：这一路判据就是"只认回环"
+    gatewayOnce = [];
   }
-  gatewayOnce = [...found];
   return gatewayOnce;
 }
 

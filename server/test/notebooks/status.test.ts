@@ -2,7 +2,7 @@ import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import type { NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
-import { notebookStatus } from '../../src/notebooks/status.js';
+import { notebookStatus, parseProcNetRoute } from '../../src/notebooks/status.js';
 
 /**
  * 评审 M8：把"日志里不许出现 token"从**源码正则**换成**行为判据**。
@@ -401,5 +401,52 @@ describe('notebookStatus', () => {
     });
     expect(timedOut.reason).toMatch(/超时/);
     expect(timedOut.reason).not.toContain('ECONNREFUSED');
+  });
+});
+
+/**
+ * `parseProcNetRoute` 是"容器里那个 token 到底给不给"的输入源，而 Docker 没起的这一档没法在真容器里
+ * 跑它 —— 唯一能判住"这行解析对不对"的机会就是把**真实的表文本**喂给这个纯函数。
+ * 列依次是 Iface / Destination / Gateway / Flags / Ref / Use / Metric / Priority / State / Mask，
+ * 而网关是**小端十六进制**（`010012AC` = 172.18.0.1）。判四件事：
+ * ① 默认路由那行的网关被正确解出来；② 非默认路由（子网那一行）不许混进来；
+ * ③ 多张路由表 / 两张网卡时逐条收齐且去重；④"这一行根本没有网关"（Gateway=00000000）与坏值都不算网关。
+ * 第 ④ 条是 fail-closed：把 `0.0.0.0` 收进表里，等于给一个不存在的地址发"本机"资格。
+ */
+describe('parseProcNetRoute（容器里"本机"的判据来源）', () => {
+  const HEADER = 'Iface\tDestination\tGateway\tFlags\tRef\tUse\tMetric\tPriority\tState\tMask';
+  /** 按内核的列顺序拼一行；解析只看 Destination 与 Gateway 那两列，但形状要像真的表（列序错了这条就跟着红）。 */
+  const row = (iface: string, destination: string, gateway: string, flags = '0003'): string =>
+    [iface, destination, gateway, flags, '0', '0', '100', '0', iface].join('\t');
+  const table = (...rows: string[]): string => [HEADER, ...rows].join('\n');
+
+  it('docker 网桥那张表：默认路由的网关解成 172.18.0.1，子网那一行不进来', () => {
+    const text = table(row('eth0', '00000000', '010012AC'), row('eth0', '000012AC', '00000000', '0001'));
+    expect(parseProcNetRoute(text)).toEqual(['172.18.0.1']);
+  });
+
+  it('多个默认路由（多张路由表 / 两张网卡）逐条收齐，重复的那条不算两遍', () => {
+    const text = table(
+      row('eth0', '00000000', '010012AC'),
+      row('eth1', '00000000', '020012AC'),
+      row('eth0', '00000000', '010012AC'),
+    );
+    expect(parseProcNetRoute(text)).toEqual(['172.18.0.1', '172.18.0.2']);
+  });
+
+  it('Gateway=00000000 的默认路由（链路内直连，没有网关）不许把 0.0.0.0 当成网关', () => {
+    expect(parseProcNetRoute(table(row('eth0', '00000000', '00000000', '0001')))).toEqual([]);
+  });
+
+  it('只有表头 / 空文本 / 坏掉的十六进制 ⇒ 空表（读不出来就是"只认回环"，不是故障）', () => {
+    expect(parseProcNetRoute(HEADER)).toEqual([]);
+    expect(parseProcNetRoute('')).toEqual([]);
+    // 短一截、非 hex、整列缺失这三种坏行都不许造出一个地址
+    const junk = table(
+      row('eth0', '00000000', '010012A'),
+      row('eth0', '00000000', 'ZZZZZZZZ'),
+      ['eth0', '00000000', '0003'].join('\t'),
+    );
+    expect(parseProcNetRoute(junk)).toEqual([]);
   });
 });

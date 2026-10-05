@@ -11,6 +11,10 @@ const Question = lazy(() => import('./pages/Question'));
 const Bank = lazy(() => import('./pages/Bank'));
 const Progress = lazy(() => import('./pages/Progress'));
 const Ide = lazy(() => import('./pages/Ide'));
+// 第五页与 Bank/Progress 同一片：不许进首屏。判它的不是 check-bundle.mjs —— 那把尺子只比体积
+// （整片才 2.6KB gzip，静态 import 进来预算看不出来，实测照样 78.3KB/84KB 绿），
+// 真正会红的是 web/test/notebook.test.tsx 里那条"必须是 lazy 那一片"的源码形状判据。
+const Notebook = lazy(() => import('./pages/Notebook'));
 
 const PAGE_TITLE: Record<RouteName, string> = {
   today: '今日挑战',
@@ -18,6 +22,7 @@ const PAGE_TITLE: Record<RouteName, string> = {
   bank: '题库',
   progress: '进度',
   ide: '网页 IDE',
+  notebook: 'Notebook',
   unknown: '没这个页面',
 };
 
@@ -26,6 +31,7 @@ const NAV: { href: string; label: string; name: RouteName }[] = [
   { href: '/bank', label: '题库', name: 'bank' },
   { href: '/progress', label: '进度', name: 'progress' },
   { href: '/ide', label: '网页 IDE', name: 'ide' },
+  { href: '/notebook', label: 'Notebook', name: 'notebook' },
 ];
 
 export default function App() {
@@ -70,6 +76,12 @@ export default function App() {
         return (
           <Suspense fallback={<Loading label="正在加载网页 IDE…" cards={1} />}>
             <Ide />
+          </Suspense>
+        );
+      case 'notebook':
+        return (
+          <Suspense fallback={<Loading label="正在加载 Notebook…" cards={1} />}>
+            <Notebook />
           </Suspense>
         );
       case 'unknown':

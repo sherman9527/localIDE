@@ -7,10 +7,15 @@ const LOADERS: Record<string, () => Promise<unknown>> = {
   question: () => import('../pages/Question'),
   bank: () => import('../pages/Bank'),
   progress: () => import('../pages/Progress'),
+  notebook: () => import('../pages/Notebook'),
 };
 
-/** 顺序有意义：判题页最大也最可能被点开。 */
-const ORDER = ['question', 'bank', 'progress'] as const;
+/**
+ * 顺序有意义：判题页最大也最可能被点开。
+ * `ide` 不在这张表里 —— 它带着 CodeMirror 那一片（几百 KB），首屏画完之后趁空闲拉它
+ * 会把带宽从"用户正在点的题"上抢走；notebook 那页只有一张状态卡，便宜到值得预取。
+ */
+const ORDER = ['question', 'bank', 'progress', 'notebook'] as const;
 
 const settled = new Set<string>();
 
