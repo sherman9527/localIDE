@@ -15,6 +15,7 @@
     "PYSPARK_DRIVER_PYTHON": "/opt/arena-ide-env/python/bin/python"
   },
   "metadata": {
-    "arena_sync_note": "argv[0] 与 PYSPARK_DRIVER_PYTHON 的真相来源：venv 根 = compose.yml 的 ARENA_IDE_ENV_DIR，内部布局 python/bin/python = server/src/ide/env.ts 的 venvPythonPath（Linux 分支）。任一处改动都要同步本文件，并跑 server/test/regression/notebook-image.test.ts 核对。"
+    "arena_sync_note": "argv[0] 与 PYSPARK_DRIVER_PYTHON 的真相来源：venv 根 = compose.yml 的 ARENA_IDE_ENV_DIR，内部布局 python/bin/python = server/src/ide/env.ts 的 venvPythonPath（Linux 分支）。任一处改动都要同步本文件，并跑 server/test/regression/notebook-image.test.ts 核对。",
+    "arena_warehouse_note": "下面 PYSPARK_SUBMIT_ARGS 里的 /app/data/notebook-warehouse 是**绝对字面量**，不是模板：kernelspec 是构建期 COPY 进镜像的静态文件，运行时没人能改它。它与 server/src/config.ts 的 config.notebook.warehouseDir、docker/entrypoint.sh 的 ${nb_root} 只在“arena 容器没被显式设 ARENA_DATA_DIR”这一条件下重合（compose.yml 今天确实没设）。哪天给它设了，症状是 notebook 的目录在别处、而 spark 把表写进 /app/data/notebook-warehouse —— 界面看起来“铺了示例但没有表”。叶子名 notebooks / notebook-warehouse 的同步闸门：server/test/regression/notebook-contract.test.ts（按 config.notebook.* 派生期望值查 entrypoint 与 Dockerfile）。"
   }
 }

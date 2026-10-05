@@ -1,6 +1,7 @@
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { describe, expect, it, vi } from 'vitest';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
 
@@ -10,10 +11,51 @@ import { config } from '../../src/config.js';
  * 端口、目录这些一旦有两处各写一份，漂移的那处不会报错，只会让人拿到打不开的链接
  * （本项目在桥 token 上撞过同一次，WI-86）。
  *
- * `warehouseDir` 那条 `not.toContain('judge')` 是唯一的"负向"断言，也是最重要的一条：
- * 判题跑完会清空 `data/judge`，notebook 的 Spark warehouse / Derby 若落在同一棵树里，
- * 就是"做过一次题 → 笔记本里的表没了"或反过来互删。这种删除不会报错，只会静默丢数据。
+ * 三条"看着像断言、其实什么都没管"的坑，这一版各补了一条真判据：
+ * ① **派生**不能在同进程同 env 里比：`join(config.dataDir, …)` 当期望值时，
+ *    一个写死 `join(repoRoot,'data','notebooks')` 的实现照样绿（两边用的是同一份 env）。
+ *    ⇒ 下面那条用注入的 `ARENA_DATA_DIR` 重新 import config（`server/test/config.test.ts` 的现成路子）。
+ * ② **叶子名是第四处真相**：`notebooks` / `notebook-warehouse` 同时写在
+ *    `server/src/config.ts:92-93`、`docker/entrypoint.sh:82`、`docker/jupyter/kernels/arena-pyspark/kernel.json:13`
+ *    和测试里。只改 config.ts 的话 seed 会把示例铺进 Jupyter 不服务的目录 —— 症状是"铺了示例但页面里没有"，
+ *    静默。⇒ 有一条按 `config.notebook.*` 派生期望值去查 entrypoint 的文本。
+ * ③ **负向断言要看结构不是看字符串**：`warehouseDir` 里 `not.toContain('judge')` 有两种错法 ——
+ *    checkout 的路径本身含 "judge" 时冤红；把 `judgeWorkDir` 的叶子（config.ts:60）改名时反而永远抓不到。
+ *    ⇒ 换成"谁在谁的子树里"。
  */
+
+/** child 是否落在 parent 这棵子树里（路径包含关系，不是"字符串里出现过"）。 */
+function isInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  if (rel === '' || isAbsolute(rel)) return false;
+  return rel.split(/[\\/]/)[0] !== '..';
+}
+
+/** 注入 env 重新 import config（照 server/test/config.test.ts:30-36 的 harness）。 */
+async function loadConfigWith(env: Record<string, string | undefined>) {
+  vi.resetModules();
+  const saved: Record<string, string | undefined> = {};
+  for (const key of ['ARENA_DATA_DIR', 'ARENA_DB_FILE', 'ARENA_JUPYTER_TOKEN', 'ARENA_NOTEBOOK_PUBLIC_URL']) {
+    saved[key] = process.env[key];
+    if (env[key] === undefined) delete process.env[key];
+    else process.env[key] = env[key];
+  }
+  try {
+    return (await import('../../src/config.js')).config;
+  } finally {
+    Object.assign(process.env, saved);
+  }
+}
+
+/**
+ * 注入用的数据目录：故意取在**仓库之外**（宿主默认那份是 `<repoRoot>/data`），
+ * 这样"写死 repoRoot/data"与"写死 /app/data"两种实现都会跟期望值对不上。
+ */
+const INJECTED_DATA = resolve(join(homedir(), '.arena-notebook-envgate-data'));
+
+const ENTRYPOINT_REL = join('docker', 'entrypoint.sh');
+const entrypointText = () => readFileSync(join(config.repoRoot, ENTRYPOINT_REL), 'utf8');
+
 describe('notebook 契约与配置', () => {
   it('config.notebook 各字段都在 dataDir 下，且不碰判题沙箱目录', () => {
     expect(config.notebook.publicUrl).toBe('http://127.0.0.1:7789');
@@ -24,7 +66,30 @@ describe('notebook 契约与配置', () => {
     // ide-env-isolation.test.ts 用 join(config.dataDir, 'ide-env')。
     expect(config.notebook.workDir).toBe(join(config.dataDir, 'notebooks'));
     expect(config.notebook.warehouseDir).toBe(join(config.dataDir, 'notebook-warehouse'));
-    expect(config.notebook.warehouseDir, '混进判题沙箱目录就会互删（判题跑完要清空 data/judge）').not.toContain('judge');
+    // seedDir 是 config.notebook 里唯一一个"不从 dataDir 派生"的键（它是仓库里的只读示例），
+    // 加它之前这个键零覆盖：写错成 dataDir 下的话，seed 会把示例铺进可写目录、仓库里那份就没人看了。
+    expect(config.notebook.seedDir).toBe(join(config.repoRoot, 'content', 'notebooks'));
+  });
+
+  /**
+   * 上面那两条是"env 盲"的：期望值与实现在同一个进程、同一份 env 里算出来，
+   * `ARENA_DATA_DIR` 没设（宿主默认状态）时写死的实现也过。
+   * 这条把变量注进去再 import 一次，判据才真的叫"从 dataDir 派生"（WI-40：只换一半的那个故障）。
+   */
+  it('workDir / warehouseDir 跟着注入的 ARENA_DATA_DIR 走（不是写死的 data/）', async () => {
+    const injected = await loadConfigWith({ ARENA_DATA_DIR: INJECTED_DATA });
+    expect(injected.dataDir, '注入没生效 ⇒ 下面两条断言在空转').toBe(INJECTED_DATA);
+    expect(injected.notebook.workDir).toBe(join(INJECTED_DATA, 'notebooks'));
+    expect(injected.notebook.warehouseDir).toBe(join(INJECTED_DATA, 'notebook-warehouse'));
+    // 直接点名两种"写死"的形状，免得只看到"路径不相等"不知道该改哪：
+    expect(injected.notebook.workDir, 'workDir 写死在仓库默认 data/ 下 ⇒ 换数据目录只换了一半（WI-40）').not.toBe(
+      join(config.repoRoot, 'data', 'notebooks'),
+    );
+    expect(injected.notebook.warehouseDir, 'warehouseDir 写死了容器内的 /app/data ⇒ entrypoint 换目录时它不换').not.toBe(
+      '/app/data/notebook-warehouse',
+    );
+    // seedDir 是**故意不跟** dataDir 走的（仓库里的只读示例）：这条钉住"只有那两个目录跟着走"。
+    expect(injected.notebook.seedDir).toBe(join(config.repoRoot, 'content', 'notebooks'));
   });
 
   it('kernel id 只有一份真相（entrypoint、镜像、前端、测试都用这个常量）', () => {
@@ -43,5 +108,76 @@ describe('notebook 契约与配置', () => {
       `${NOTEBOOK_KERNELS.pyspark} 在 docker/jupyter/kernels/ 下没有同名目录 ⇒ 常量与镜像工件分叉了：` +
         'kernelspec 改名的话要同时改 shared/src/notebook.ts，否则前端列不出可用 kernel',
     ).toBe(true);
+  });
+
+  /**
+   * 叶子名的单一真相（评审 Important 3）。为什么只能按文本查 entrypoint：那是个 shell 脚本，
+   * 宿主上没法"import 一个 bash 变量"，而它的 `${nb_root}` 正是从 `ARENA_DATA_DIR` 派生的那一个
+   * （docker/entrypoint.sh:81）—— 与 config.ts 用的是同一个总开关，只差目录叶子名。
+   * 判据形状照 notebook-env-isolation.test.ts:233 那条（对 entrypoint 文本做结构断言）。
+   *
+   * 顺带写明一处**已知的巧合**，免得下一个人以为它也是动态的：
+   * `docker/jupyter/kernels/arena-pyspark/kernel.json` 里的 warehouse/Derby 路径是**绝对字面量**
+   * `/app/data/notebook-warehouse`（kernelspec 是构建期 COPY 进镜像的静态文件，运行时改不了），
+   * 它只在"arena 容器没被显式设 ARENA_DATA_DIR"时与这里的派生值重合。今天 compose 确实没设。
+   */
+  it('目录叶子名只有一份真相：entrypoint 里的路径就是从 config 派生出来的那两个', () => {
+    const entry = entrypointText();
+    expect(/\$\{nb_root\}/.test(entry), `${ENTRYPOINT_REL} 里已经没有 \${nb_root} 这个变量 ⇒ 本条判据的锚点没了（先修判据，别改目录名）`).toBe(true);
+    const workLeaf = basename(config.notebook.workDir);
+    const whLeaf = basename(config.notebook.warehouseDir);
+    // 空转防护：叶子名取空/取到 "." 时下面几条 toContain 会变得毫无意义
+    expect(workLeaf).toBe('notebooks');
+    expect(whLeaf).toBe('notebook-warehouse');
+    // 承重的那条是 **root_dir**：seed 铺进 config.notebook.workDir，Jupyter 服务的必须是同一个目录，
+    // 只查 mkdir 会漏掉"目录建了但服务的是别处"（症状就是"铺了示例但页面里没有"）。
+    expect(
+      entry,
+      `${ENTRYPOINT_REL} 的 --ServerApp.root_dir 不是 "\${nb_root}/${workLeaf}" ⇒ 它与 server/src/config.ts 的 ` +
+        'workDir 分叉了：notebook 的示例铺在一个目录、Jupyter 打开的是另一个，页面里就是空的，一声不响。',
+    ).toContain(`--ServerApp.root_dir="\${nb_root}/${workLeaf}"`);
+    // warehouse 的两个子目录由 entrypoint 建、kernel.json 按同名绝对路径写死（叶子名分叉 ⇒ spark 自己新建一份，
+    // 而界面按 config 那份清理工件 → 清了个寂寞）
+    for (const sub of ['wh', 'derby']) {
+      expect(
+        entry,
+        `${ENTRYPOINT_REL} 里没有 "\${nb_root}/${whLeaf}/${sub}" ⇒ warehouse 叶子名与 config.ts 分叉，两处会各建一棵目录树`,
+      ).toContain(`\${nb_root}/${whLeaf}/${sub}`);
+    }
+  });
+
+  /**
+   * notebook 与判题沙箱必须是两棵树（评审 Minor：把子串判据换成结构判据）。
+   * 判题跑完会清空 `data/judge`：notebook 的 Spark warehouse / Derby 混进去就是互删，且不报错。
+   */
+  it('notebook 的目录与判题沙箱互不包含（结构判据，与路径里有没有 "judge" 这个词无关）', () => {
+    const cases: Array<[string, string]> = [
+      [config.notebook.warehouseDir, 'notebook.warehouseDir'],
+      [config.notebook.workDir, 'notebook.workDir'],
+    ];
+    for (const [dir, label] of cases) {
+      expect(isInside(dir, config.judgeWorkDir), `${label} 落在 judgeWorkDir（${config.judgeWorkDir}）里面 ⇒ 判题收尾清空会连笔记的数据一起删`).toBe(false);
+      expect(isInside(config.judgeWorkDir, dir), `judgeWorkDir 落在 ${label} 里面 ⇒ notebook 侧的清理会删掉判题现场（红线一）`).toBe(false);
+    }
+    // 两个 notebook 目录自己也不许套在一起（warehouse 套住 workDir 的话，清 warehouse 会连笔记一起删）
+    expect(isInside(config.notebook.workDir, config.notebook.warehouseDir), '笔记文件落在 warehouse 里 ⇒ 清 warehouse 会删掉用户笔记').toBe(false);
+    expect(isInside(config.notebook.warehouseDir, config.notebook.workDir), 'warehouse 落在笔记目录里 ⇒ 界面"清空工作区"会删掉 spark 数据').toBe(false);
+  });
+
+  /**
+   * 常驻反例：把"为什么不用 `not.toContain('judge')`"变成可执行的判据（评审 Minor）。
+   * 前两条是被换掉的那条断言的两种错法，后两条是它本来就对的情形 —— 判据本身退化时这里会红。
+   */
+  it('isInside 本身认得那两种"名字判"会犯的错', () => {
+    const judge = join('/data', 'judge');
+    // ① 冤红：checkout 目录本身叫 judge-systems，notebook 与判题沙箱根本不在一棵树上
+    //    （子串判据在这里会红，而实际什么都没坏）
+    const checkout = join('/work', 'judge-systems', 'data');
+    expect(isInside(join(checkout, 'notebook-warehouse'), join(checkout, 'judge')), '路径里有 "judge" 这个词就被判红 ⇒ 那是名字巧合，不是包含关系').toBe(false);
+    // ② 漏判：judgeWorkDir 的叶子改名成 sandbox，warehouse 真的套在它里面，而字符串里没有 "judge"
+    expect(isInside(join(judge, 'notebook-warehouse'), judge), '真正的包含关系必须判红，不管叶子叫什么名').toBe(true);
+    expect(isInside(join('/data', 'sandbox', 'notebook-warehouse'), join('/data', 'sandbox'))).toBe(true);
+    // ③ 同一目录不是"在里面"（相等时 relative 得空串，别把它读成"互相包含"）
+    expect(isInside(judge, judge)).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
 
 /**
@@ -22,13 +23,30 @@ import { config } from '../../src/config.js';
  */
 
 const root = config.repoRoot;
-const kernel = JSON.parse(
-  readFileSync(join(root, 'docker', 'jupyter', 'kernels', 'arena-pyspark', 'kernel.json'), 'utf8'),
-) as { argv: string[]; display_name: string; env?: Record<string, string> };
+/**
+ * kernel 目录名从 `NOTEBOOK_KERNELS.pyspark` 派生，不写字面量：本闸门验的就是"只有一份真相"，
+ * 而它自己再抄一份的话，常量改了这条闸门反而看不见（还绿在旧目录上），
+ * 反过来把字面量当真相又会让"常量 ↔ 镜像工件"的分叉无人看管。
+ */
+const KERNEL_DIR = join(root, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.pyspark);
+const SPEC_FILE = join(KERNEL_DIR, 'kernel.json');
+// 分叉时报"哪个名字对不上"，不要只丢一句 ENOENT 让人去猜是哪一侧改的
+// （notebook-contract.test.ts 里有同一条判据、带同一句解释；这里再挡一次是因为本文件读得更深）。
+if (!existsSync(SPEC_FILE)) {
+  throw new Error(
+    `${SPEC_FILE} 不存在 ⇒ NOTEBOOK_KERNELS.pyspark（当前值 '${NOTEBOOK_KERNELS.pyspark}'）与 docker/jupyter/kernels/ 下的目录名分叉了：` +
+      '改常量要同时改目录（和 Dockerfile 的 COPY 目标），否则前端的 kernel 永远 ready:false',
+  );
+}
+const kernel = JSON.parse(readFileSync(SPEC_FILE, 'utf8')) as {
+  argv: string[];
+  display_name: string;
+  env?: Record<string, string>;
+};
 const compose = readFileSync(join(root, 'compose.yml'), 'utf8');
 const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8');
 
-describe('arena-pyspark kernelspec', () => {
+describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
   it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
     // 旧判据只吃三处（arena/dev/e2e，compose.yml:38/88/117）里的**第一处** ARENA_IDE_ENV_DIR，
     // dev/e2e 漂移无人看管；且 \S+ 会把 YAML 引号一并捕获，`ARENA_IDE_ENV_DIR: "/opt/arena-ide-env"`
@@ -64,8 +82,13 @@ describe('arena-pyspark kernelspec', () => {
     expect(args, 'PYSPARK_SUBMIT_ARGS 必须以独立 token pyspark-shell 收尾').toMatch(/ pyspark-shell$/);
     const beforeTail = args.slice(0, args.lastIndexOf(' pyspark-shell'));
     expect(beforeTail).toContain('--master local[2]');
-    expect(beforeTail).toContain('spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh');
-    expect(beforeTail).toContain('-Dderby.system.home=/app/data/notebook-warehouse/derby');
+    // warehouse/Derby 的**叶子名**从 config.notebook.warehouseDir 派生（第四处真相，见
+    // notebook-contract.test.ts 里那条同源判据）；`/app/data` 那半截是**故意写死**的字面量 ——
+    // kernelspec 是构建期 COPY 进镜像的静态文件，运行时改不了，它只在"arena 容器没被显式设
+    // ARENA_DATA_DIR"时与 entrypoint 的 ${nb_root} 重合（kernel.json 的 metadata 里也写了这条巧合）。
+    const whLeaf = basename(config.notebook.warehouseDir);
+    expect(beforeTail).toContain(`spark.sql.warehouse.dir=/app/data/${whLeaf}/wh`);
+    expect(beforeTail).toContain(`-Dderby.system.home=/app/data/${whLeaf}/derby`);
     expect(kernel.env?.SPARK_LOCAL_IP).toBe('127.0.0.1');
   });
 
@@ -76,8 +99,8 @@ describe('arena-pyspark kernelspec', () => {
     // 现在两刀都换成对**全体相关行**的判定。
     const kernelLines = dockerfile.split('\n').filter((l) => /jupyter\/kernels/.test(l));
     expect(
-      kernelLines.some((l) => /^COPY\s/.test(l) && l.includes('/usr/local/share/jupyter/kernels/arena-pyspark/')),
-      'Dockerfile 没有把 kernelspec 放进 /usr/local/share/jupyter/kernels/ 的 COPY 行',
+      kernelLines.some((l) => /^COPY\s/.test(l) && l.includes(`/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/`)),
+      `Dockerfile 没有把 kernelspec 放进 /usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/ 的 COPY 行`,
     ).toBe(true);
     expect(
       kernelLines.filter((l) => /arena-ide-env/.test(l)),
