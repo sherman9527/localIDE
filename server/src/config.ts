@@ -70,6 +70,29 @@ export const config = {
   redis: {
     url: process.env.ARENA_REDIS_URL ?? 'redis://127.0.0.1:6379',
   },
+  /**
+   * Jupyter notebook（A1 档）。形状照 `mysql` / `redis`：一组同类配置缩在一个键下，
+   * 而不是往顶层再撒四个 `notebookXxx`。
+   *
+   * - `token` **只从环境变量读、不给默认值**：唯一来源是 `.env`（`./start.sh` 首启生成，
+   *   compose 只把它透传给 arena / tools，e2e 与 dev 故意拿不到 ⇒ 它们不会起重复的 server 写真人笔记）。
+   *   这里若给个兜底默认值，容器与宿主就会各拿一份，症状是"打印出来的链接打不开"——
+   *   与 WI-86 的桥 token 漂移同一类，而两边都是绿色的。
+   * - `workDir` / `warehouseDir` 从 `dataDir` 派生（不是写死 `/app/data`）：这是 WI-40 的隔离纪律，
+   *   entrypoint 那侧用的是同一个变量。写死会让"换一个数据目录"只换一半。
+   * - `warehouseDir` 与 `judgeWorkDir`（`data/judge`）**必须是两棵树**：判题跑完会清空 data/judge，
+   *   notebook 的 Spark warehouse / Derby 混进去就是互删，且没有任何报错。
+   *   闸门：`server/test/regression/notebook-contract.test.ts`。
+   */
+  notebook: {
+    port: Number(process.env.ARENA_JUPYTER_PORT ?? 8888),
+    // 宿主机上的地址：compose 把 8888 发布到 127.0.0.1:7789，前端拿它拼链接
+    publicUrl: process.env.ARENA_NOTEBOOK_PUBLIC_URL ?? 'http://127.0.0.1:7789',
+    token: process.env.ARENA_JUPYTER_TOKEN ?? '',
+    workDir: join(dataDir, 'notebooks'),
+    warehouseDir: join(dataDir, 'notebook-warehouse'),
+    seedDir: join(repoRoot, 'content', 'notebooks'),
+  },
   /** 主观题评分 provider 链，按顺序尝试 */
   llm: {
     providers: (process.env.ARENA_LLM_PROVIDERS ?? 'qodercli,copilot,manual').split(',').map((s) => s.trim()),

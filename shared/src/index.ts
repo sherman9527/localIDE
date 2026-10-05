@@ -6,3 +6,4 @@ export * from './game.js';
 export * from './day.js';
 export * from './ide.js';
 export * from './api.js';
+export * from './notebook.js';
