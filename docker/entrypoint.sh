@@ -62,6 +62,34 @@ init_mysql || exit 1
 start_mysql || exit 1
 start_redis || exit 1
 
+# Jupyter 是"可以不起"的服务：起不来不许拖垮做题与判题（它跟 mysqld/redis 的关键性不同），
+# 所以失败只 log 一行，由 /api/notebook/status 如实报 running:false + reason。
+start_jupyter() {
+  mkdir -p /app/data/notebooks /app/data/notebook-warehouse/wh /app/data/notebook-warehouse/derby
+
+  # 没有 token 就**不起**，而不是起一个无鉴权的：.env 是唯一来源（start.sh 首启生成）。
+  # 静默降级成空 token 会让"回环 + 无鉴权"这个本来已经说清楚的例外，再多一个没人知道的口子。
+  if [ -z "${ARENA_JUPYTER_TOKEN:-}" ]; then
+    log "Jupyter 未启动：缺 ARENA_JUPYTER_TOKEN（用 ./start.sh 启动会自动生成到 .env）"
+    return 0
+  fi
+
+  # venv 前置到 PATH：notebook 里 `!pip3 install X` 走 shell，命中哪个 pip 由 PATH 决定。
+  # 不加这一句包会写进系统 site-packages —— 而判题用的正是那个解释器（红线一延伸，判据见
+  # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
+  PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
+  jupyter notebook --allow-root --no-browser \
+    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 \
+    --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
+    --ServerApp.root_dir=/app/data/notebooks \
+    >/var/log/jupyter.log 2>&1 &
+
+  log "Jupyter 已拉起（容器内 127.0.0.1:8888）"
+  return 0
+}
+
+start_jupyter
+
 # PySpark 判题用的常驻 worker 由 spark-pool 按需拉起，这里只保证目录存在。
 mkdir -p /app/data/judge /app/data/spark-warehouse
 export ARENA_PORT
