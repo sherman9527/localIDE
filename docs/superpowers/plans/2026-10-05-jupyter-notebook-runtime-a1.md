@@ -638,17 +638,22 @@ const fake = () =>
       ? { status: 200, json: async () => ({ default: 'python', kernels: { 'arena-pyspark': { name: 'arena-pyspark', spec: { display_name: 'PySpark (arena)' } } } }) }
       : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) }) as unknown as typeof fetch;
 
+// 每条用例都显式给 tokenOverride：宿主上 config.notebook.token 是空的（compose 才设它），
+// 不显式覆盖的话第 1 条会在"没配 token 就 running:false"那条早退分支上红 —— 那是环境差，不是实现错。
+const TOK = { tokenOverride: 'test-token' };
+
 describe('notebookStatus', () => {
   it('服务在跑：running + 带 token 的本机地址 + kernel 就绪', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake() });
+    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), ...TOK });
     expect(res.running).toBe(true);
-    expect(res.url).toContain('http://127.0.0.1:7789/tree?token=');
+    expect(res.url).toContain('http://127.0.0.1:7789/tree?token=test-token');
     expect(res.kernels).toEqual([{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }]);
   });
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
     const res = await notebookStatus({
       hostHeader: '127.0.0.1:7788',
+      ...TOK,
       fetchImpl: (vi.fn(async () => { throw new Error('ECONNREFUSED'); }) as unknown) as typeof fetch,
     });
     expect(res.running).toBe(false);
@@ -657,13 +662,22 @@ describe('notebookStatus', () => {
   });
 
   it('非回环来源拿不到 token（链接照给，token 不外泄）', async () => {
-    const res = await notebookStatus({ hostHeader: '192.168.1.20:7788', fetchImpl: fake() });
+    const res = await notebookStatus({ hostHeader: '192.168.1.20:7788', fetchImpl: fake(), ...TOK });
     expect(res.url).toBeDefined();
     expect(res.url).not.toContain('token=');
   });
 
+  it('超时与"没起"给的 reason 必须不同（同一个 reason 会让人去查错的地方）', async () => {
+    const res = await notebookStatus({
+      hostHeader: '127.0.0.1:7788',
+      ...TOK,
+      fetchImpl: (vi.fn(async () => { throw new Error('This operation was aborted'); }) as unknown) as typeof fetch,
+    });
+    expect(res.reason).toMatch(/超时/);
+  });
+
   it('没配 token 时如实报，不假装能用', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' } as never);
+    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/ARENA_JUPYTER_TOKEN/);
   });
@@ -733,7 +747,7 @@ export async function notebookStatus(input: {
 }
 ```
 
-- [ ] **Step 4: 跑测试转绿** → 5 passed。
+- [ ] **Step 4: 跑测试转绿** → 6 passed。
 
 - [ ] **Step 5: 破坏性验证**：`LOOPBACK.test` 改成恒真 ⇒ 第 3 条红；删掉 `AbortSignal.timeout` ⇒ 第 2 条红（reason 变成 reject 的其它文案）。各还原。
 
@@ -943,7 +957,10 @@ Expected: 3 passed；产物预算仍绿（首屏仍 1 JS + 1 CSS）。
 ```ts
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
+import { config } from '../../src/config.js';
+import { ensureIdeEnv } from '../../src/ide/env.js';
+import { findLanguage } from '../../src/ide/languages.js';
 
 /**
  * Task 1 的结构断言说的是"entrypoint 写了那行 PATH"；这里说的是"它真的生效"：
@@ -954,9 +971,22 @@ import { describe, expect, it } from 'vitest';
 const KERNEL = '/usr/local/share/jupyter/kernels/arena-pyspark/kernel.json';
 const inContainer = process.env.ARENA_IN_CONTAINER === '1';
 
+// kernel 的 argv 指着 venv，而 venv 是**懒创建**的：全新卷上它还不存在，nbconvert 会挂在
+// "解释器文件找不到" —— 症状长得像 kernel 坏了，其实是前置条件没满足。先建出来（幂等）。
+beforeAll(async () => {
+  if (!inContainer) return;
+  const lang = findLanguage('python');
+  expect(lang, '语言表里没有 python ⇒ 本文件的前置条件不成立').toBeTruthy();
+  await ensureIdeEnv(lang!);
+}, 200_000);
+
 describe('arena-pyspark kernel 在容器里真能起 Spark', () => {
   it('kernel 文件在镜像级目录', () => {
     expect(existsSync(KERNEL), `${KERNEL} 不存在 —— 本条只在容器里成立（宿主没有它）`).toBe(true);
+  });
+
+  it('venv 的解释器真的在（缺它就是"kernel 起不来"的假象来源）', () => {
+    expect(existsSync(`${config.ideEnvDir}/python/bin/python`)).toBe(true);
   });
 
   it('smoke notebook 跑完并打出 venv ok（证明解释器落在 IDE venv，Spark 起得来）', () => {
@@ -970,8 +1000,8 @@ describe('arena-pyspark kernel 在容器里真能起 Spark', () => {
     expect(out).not.toMatch(/Traceback/);
   }, 200_000);
 
-  // 常驻解释断言：没有容器标记时上面两条根本不该跑，但"为什么没跑"必须有人管。
-  it('不在容器里 ⇒ 上面两条不该跑；容器里 ⇒ 必须跑（形状同 publish-identity）', () => {
+  // 常驻解释断言：没有容器标记时上面几条根本不该跑，但"为什么没跑"必须有人管。
+  it('不在容器里 ⇒ 上面的断言不该跑；容器里 ⇒ 必须跑（形状同 publish-identity）', () => {
     if (inContainer) return;
     expect(existsSync(KERNEL), '有 ARENA_IN_CONTAINER=1 却没有 kernel 文件 ⇒ 镜像没按 Dockerfile 构建').toBe(false);
   });
