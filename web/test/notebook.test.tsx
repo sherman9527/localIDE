@@ -294,11 +294,13 @@ describe('Notebook 第五页', () => {
 
 /**
  * 这一组不在 DOM 里，判的是**打包形状**：第五页必须还是那片懒加载的。
- * 为什么要在测试里读源码，而不是交给 `scripts/check-bundle.mjs`：那把尺子只比体积。
- * 实测（Task 9 的破坏性验证）：把 `lazy` 换成静态 import 之后 `check-bundle.mjs` **照样绿** ——
- * 首屏从 76.2KB 涨到 78.3KB gzip（预算 84KB），1 JS + 1 CSS 的形状没变，Notebook 那片 2.6KB 只是
- * 从"按需加载"列表里消失，页面与产物检查都说不出"它被拖回首屏了"。所以"不许进首屏"这条判据
- * 只能写在源码形状上（与 Task 8 那条路由判据同一类：看结构，不看包含）。
+ * 两条断言各守一头：第一条（`const Notebook = lazy(...)` 必须独立成行）才是"懒加载"本身的判据 ——
+ * 换成静态 import、并进注释都会让它红；第二条钉的是 App.tsx 自己没有 `import Notebook` 这一行。
+ * 但它们都只读得到 App.tsx，看不见"别的页面把 Notebook 静态拉回去"这种**传导性拖回** ——
+ * 那一半由 `scripts/check-bundle.mjs` 的 `FORBIDDEN_IN_ENTRY['notebook-page']`（产物层，
+ * 判这一页自己的 data-testid）接管。实测（本轮破坏性验证）：把 `lazy` 换成静态 import、重新构建后
+ * check-bundle **exit 1**，红在首屏 chunk 命中 "notebook-page" 那一行（体积那关反而过得去：
+ * 78.5KB/84KB —— 所以盯住它的确实是包含判据而不是预算）。源码形状 + 产物包含，两把尺子各管一段。
  */
 describe('Notebook 的打包与路由形状', () => {
   /**

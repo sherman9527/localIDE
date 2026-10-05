@@ -592,6 +592,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       notebooks = await seedNotebooks();
     } catch (err) {
       seedError = `示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：${(err as Error).message}`;
+      // 响应字段只给"恰好打开了页面的人"看；这条 warn 才是给运维的（log.ts 的头一条纪律：出故障要能 trace，
+      // 只读挂载 / ENOSPC 应当躺在 data/logs/ 里）。调用形状照 /api/grade 的失败日志（traceId + errorFields）。
+      logWarn('notebook', 'seed.failed', { traceId: (request as TracedRequest).traceId, ...errorFields(err) });
     }
     const payload: NotebookStatusResponse = { ...base, notebooks };
     if (seedError) payload.seedError = seedError;

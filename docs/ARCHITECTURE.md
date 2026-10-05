@@ -425,6 +425,8 @@ MySQL 等待上限给到 180s 而不是 60s：容器被 kill 过一次之后 Inn
 | `e2e` | `e2e` | `127.0.0.1:7798:7788` | `ARENA_DATA_DIR=/app/data/e2e`，`content` **只读**挂载 |
 | `tools` | `tools` | — | 容器内构建与测试的工具位 |
 
+端口一列的 `127.0.0.1` 前缀不只是题库的边界：`GET /api/notebook/status` 释放 token 的"对端 == 默认网关"那一支，安全性**派生自这条绑定** —— 去掉前缀的那天它就退化成局域网内任意进程可得的凭据泄露（闸门 `server/test/regression/compose-ports.test.ts`）。
+
 三个 compose 环境锚点值得知道：`x-llm-env` 让 arena / dev / e2e 共用同一份 LLM 配置
 （漏一处就是"`--dev` 下主观题永远只能人工自检"）；`ARENA_LLM_BRIDGE_URL` 指向
 `http://host.docker.internal:7799`，配 `x-host-gateway` 的 `host.docker.internal:host-gateway` 才连得到宿主；

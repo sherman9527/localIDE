@@ -217,6 +217,31 @@ describe('GET /api/notebook/status', () => {
     expect((body.seedError ?? '').trim(), '静默返回 [] ⇒ 读者以为"没有示例"，而事实是"铺不进去"').not.toBe('');
   });
 
+  /**
+   * `seedError` 只进响应的另一半代价（评审二轮 Minor）：故障只对"恰好打开了页面的人"可见 ——
+   * 只读挂载 / ENOSPC 躺在 `data/logs/` 里应当有记录（`server/src/log.ts` 的头一条纪律：
+   * 出故障要能 trace）。这一条判的是**真的落了盘**：flush 之后读本实例的日志文件，
+   * 找那条 warn 级 notebook/seed.failed —— 路由里删掉 logWarn 就会红在这里。
+   */
+  it('seed 失败必须往日志文件落一条 warn（故障不能只给开着页面的人看）', async () => {
+    jupyterUp();
+    const { app, dataDir } = await injectApp({ token: CANARY });
+    // 复用评审 I-1 的破坏性夹具：workDir 堵成普通文件 ⇒ 真 mkdir(recursive) 当场 reject
+    await writeFile(join(dataDir, 'notebooks'), '这一行挡住了 mkdir（日志落盘判据的夹具）', 'utf8');
+    await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '127.0.0.1' });
+    // injectApp 之后没有再 resetModules ⇒ 这里 import 到的就是路由写日志用的**那一份** log 模块
+    // （与文件顶部静态 import 不是同一实例 —— 那条写在仓库默认 data/ 里，排空它判不到本用例）。
+    const { flushLogs, logFileFor } = await import('../../src/log.js');
+    await flushLogs();
+    const records = readFileSync(logFileFor(), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const warn = records.find((r) => r.level === 'warn' && r.module === 'notebook' && r.event === 'seed.failed');
+    expect(warn, 'seedError 只是响应字段 ⇒ 日志里查不到这次失败，只读挂载就没人知道').toBeTruthy();
+    expect(String(warn!.msg ?? ''), 'warn 记录里连 msg 都没有 ⇒ trace 无从下手（errorFields 没接上）').not.toBe('');
+  });
+
   it('伪造 Host: 127.0.0.1 的非本机对端拿不到 token（评审 M-1：Host 头是客户端写的）', async () => {
     jupyterUp();
     const { app, cfg } = await injectApp({ token: CANARY });
