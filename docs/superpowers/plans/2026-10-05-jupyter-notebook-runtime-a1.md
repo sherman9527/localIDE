@@ -1000,6 +1000,26 @@ describe('arena-pyspark kernel 在容器里真能起 Spark', () => {
     expect(out).not.toMatch(/Traceback/);
   }, 200_000);
 
+  /**
+   * 这条才是"PATH 前缀真的生效"的行为证据，nbconvert 给不了它：
+   * nbconvert 是**测试进程**自己起的子进程，继承的是测试的 env；而 Task 3 那条
+   * `PATH=... jupyter notebook ...` 是命令前缀，只进 notebook 服务那个进程。
+   * 于是"结构断言写了但没人守"的风险就在这里 —— 直接读那个活进程的 environ。
+   * 内核起的所有 kernel 都从它 fork，所以 PATH 首项对了，`!pip3 install` 就落在 venv。
+   */
+  it('运行中的 jupyter 进程，PATH 的第一项就是 venv 的 python/bin', () => {
+    const pids = execFileSync('bash', ['-c', "pgrep -f 'jupyter notebook' || true"], { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean);
+    expect(pids.length, '容器里没有正在跑的 jupyter ⇒ 前置条件不成立（Task 3/4 没落地或 token 缺失）').toBeGreaterThan(0);
+    const paths = pids.map((pid) =>
+      execFileSync('bash', ['-c', `tr '\\0' '\\n' < /proc/${pid}/environ | sed -n 's/^PATH=//p'`], { encoding: 'utf8' }).trim(),
+    );
+    for (const p of paths) {
+      const first = (p.split(':')[0] ?? '').replace(/\/$/, '');
+      expect(first, `jupyter 进程的 PATH 首项不是 venv：${p.slice(0, 120)}`).toMatch(/\/python\/bin$/);
+    }
+  });
+
   // 常驻解释断言：没有容器标记时上面几条根本不该跑，但"为什么没跑"必须有人管。
   it('不在容器里 ⇒ 上面的断言不该跑；容器里 ⇒ 必须跑（形状同 publish-identity）', () => {
     if (inContainer) return;
