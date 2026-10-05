@@ -3,7 +3,8 @@
  * 前端产物预算（WI-28）。
  * 拆包是一次性的，"以后又被拖回首屏"是持续的 —— 所以这里钉死三件事：
  *   1) 首屏必须只有 1 个 JS + 1 个 CSS，且 gzip 不超过预算；
- *   2) zod 与 CodeMirror 不许出现在首屏那份 JS 里（它们各自 13KB/248KB gzip，是历史上进过首屏的常客）；
+ *   2) zod 与 CodeMirror 不许出现在首屏那份 JS 里（它们各自 13KB/248KB gzip，是历史上进过首屏的常客），
+ *      第五页 Notebook 也不许（它是懒加载那片，判据是它自己的 data-testid 串）；
  *   3) 判题页那份 chunk 必须**确实**带着 CodeMirror —— 否则说明切分假了，而不是变好了。
  * 先跑 npm run build -w web（脚本不替你构建，避免"校验的却是旧 dist"）。
  */
@@ -17,10 +18,18 @@ const ASSETS = join(DIST, 'assets');
 
 /** 首屏 JS 的 gzip 预算（当前实测 ~77KB：react-dom + 应用代码 + shared 常量）。 */
 const ENTRY_GZIP_BUDGET = 86_000;
-/** 只要这些串出现在首屏 JS，就说明对应的重依赖没被切出去。 */
+/**
+ * 只要这些串出现在首屏 JS，就说明对应的重依赖没被切出去。
+ * `notebook-page` 是第五页自己的 `data-testid`（评审 Fix-1 的 Minor 补进来的）：
+ * `web/test/notebook.test.tsx` 那条"App.tsx 里 Notebook 必须是 lazy"只比源码形状，改一下写法
+ * （例如从别的页面静态 import 一次 Notebook）就能绕过去，而这把尺子看的是**产物**——
+ * 页面被谁拉回来的都跑不掉。代价是它只认这一个串：日后真把 Notebook 页整页改名，
+ * 这里会跟着一起改，不会静默失效。
+ */
 const FORBIDDEN_IN_ENTRY = {
   ZodError: 'zod（shared 的 schema 不该被浏览器端拉进来）',
   'cm-editor': 'CodeMirror（判题页才需要）',
+  'notebook-page': 'Notebook 第五页（懒加载那片，首屏不许带）',
 };
 
 const fail = (msg) => {

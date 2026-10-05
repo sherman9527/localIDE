@@ -119,6 +119,10 @@ describe('Notebook 第五页', () => {
     expect(text).not.toContain('没在运行');
     expect(screen.getByTestId('notebook-status').textContent).toContain('地址给不出来');
     expect(text, '坏的是哪一行 env 必须点名，否则读者只会去重启一个正在好好干的服务').toContain('ARENA_NOTEBOOK_PUBLIC_URL');
+    // 评审 Fix-1 的 Minor：这一态是"配置坏了"的诊断，不是"某个操作失败了"。
+    // `role="alert"` 会让屏幕阅读器**打断**当前朗读来播报它 —— 邻块（down / tokenless / spec-missing）
+    // 说的是同一类事，用的是同一档语气，不该只有这一块被升级成报警。
+    expect(screen.getByTestId('notebook-nolink').getAttribute('role')).toBe('status');
   });
 
   /**
@@ -156,36 +160,97 @@ describe('Notebook 第五页', () => {
   });
 
   /**
+   * 评审 Fix-1 的 Minor：「准备环境」那句话讲的是**那一轮**动作。
+   * 成功之后留着"环境建好了，正在重读…"，用户再手动刷新一次，界面就成了"这句话在替新一轮说话"——
+   * 那是最轻的一种假话，但仍然是假话（而且它会一直挂着到下一次点按钮）。
+   */
+  it('手动刷新状态时收掉上一轮「准备环境」那句话', async () => {
+    status.mockResolvedValue({
+      running: true,
+      url: 'http://127.0.0.1:7789/tree',
+      kernels: [{ id: 'python3', label: 'Python 3', ready: false, reason: '解释器不存在' }],
+      notebooks: [],
+    });
+    prepare.mockResolvedValue({ ok: true });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-prepare')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('notebook-prepare'));
+    await waitFor(() => expect(screen.getByTestId('notebook-prepare-result')).toBeTruthy());
+    fireEvent.click(screen.getByTestId('notebook-reload'));
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(3));
+    expect(
+      screen.queryByTestId('notebook-prepare-result'),
+      '上一轮"环境建好了，正在重读…"还挂在页面上 ⇒ 它现在在替这一轮说话',
+    ).toBeNull();
+  });
+
+  /**
+   * 评审 I-1 的前端那一半：`seedError` 是"示例铺不进去"，与"没有示例"是两件事。
+   * 混起来的症状很难查：磁盘只读 / ENOSPC 时界面写着"没有示例"，读者就会去翻示例目录，
+   * 而该修的是挂载。这一行必须是**一句 config/IO 诊断**，不许读成"服务坏了"，
+   * 也不许抢走运行时那一块（状态卡此刻仍然照说"运行中"）。
+   */
+  it('示例铺不进去：单独说一句原因，且不许说成"没有示例"', async () => {
+    status.mockResolvedValue({
+      running: true,
+      url: 'http://127.0.0.1:7789/tree?token=x',
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      notebooks: [],
+      seedError: '示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：EEXIST: file already exists, mkdir',
+    });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-seed-error')).toBeTruthy());
+    const line = screen.getByTestId('notebook-seed-error');
+    expect(line.textContent).toContain('EEXIST');
+    // role 必须是 status：它是"某一半没做成"，不是"整个服务不可用"（alert 会把朗读打断成故障）
+    expect(line.getAttribute('role')).toBe('status');
+    // 两种"空"不许同时出现，否则读者分不清是没有还是铺失败
+    expect(screen.queryByTestId('notebook-files-empty')).toBeNull();
+    // 运行时那一半不许被带跑：seed 坏了 Jupyter 照样在跑
+    expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
+  });
+
+  /** 对照的那一态：真的一个示例都没有（源目录是空的）⇒ 只许说"没有"，不许凭空报一个铺失败的错。 */
+  it('没有示例 ≠ 铺不进去：没有 seedError 时只说"没有"，不渲染那句诊断', async () => {
+    status.mockResolvedValue({
+      running: true,
+      url: 'http://127.0.0.1:7789/tree?token=x',
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      notebooks: [],
+    });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-files-empty')).toBeTruthy());
+    expect(screen.queryByTestId('notebook-seed-error'), '没有失败却报一句失败 = 最响的假警报').toBeNull();
+  });
+
+  /**
    * 三句话一条都不能省（Step 4），而且**换一态再看**：
    * 只在"在跑"那态显示，等于在用户最该看见的时候（他要开始装包 / 开 notebook 了）把它收走。
+   * 评审 Fix-1 的 Minor：一态一个 `it` —— 一个循环里三态共用一条用例名，红的时候只知道
+   * "有一句不在"，得再翻代码才知道是哪一态掉的。
    */
-  it('三句边界话在每一态都常驻', async () => {
-    const sentences = [
-      '这些包与 IDE 共用同一份环境，判题器看不到',
-      'notebook 里能读到题库的参考答案',
-      '这不是安全边界',
-      '只在浏览器本机打开：地址是 127.0.0.1，手机 / iPad 访问不了',
-    ];
-    const cases: Array<[string, unknown]> = [
-      ['在跑', up],
-      ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
-      [
-        '在跑但没链接',
-        { running: true, reason: 'ARENA_NOTEBOOK_PUBLIC_URL 不是合法 URL', kernels: [], notebooks: [] },
-      ],
-    ];
-    for (const [label, value] of cases) {
+  const boundarySentences = [
+    '这些包与 IDE 共用同一份环境，判题器看不到',
+    'notebook 里能读到题库的参考答案',
+    '这不是安全边界',
+    '只在浏览器本机打开：地址是 127.0.0.1，手机 / iPad 访问不了',
+  ];
+  const boundaryCases: Array<[string, unknown]> = [
+    ['在跑', up],
+    ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
+    ['在跑但没链接', { running: true, reason: 'ARENA_NOTEBOOK_PUBLIC_URL 不是合法 URL', kernels: [], notebooks: [] }],
+  ];
+  for (const [label, value] of boundaryCases) {
+    it(`三句边界话在「${label}」这一态都常驻`, async () => {
       status.mockResolvedValue(value);
       render(<Notebook />);
       await waitFor(() => expect(screen.getByTestId('notebook-page')).toBeTruthy());
       const text = screen.getByTestId('notebook-page').textContent ?? '';
-      for (const s of sentences) {
+      for (const s of boundarySentences) {
         expect(text, `${label} 这一态少了那句：${s}`).toContain(s);
       }
-      cleanup();
-      vi.clearAllMocks();
-    }
-  });
+    });
+  }
 
   /**
    * 「kernel 表里没有 arena-pyspark」与「kernel 没就绪」是两种坏法，修的是不同东西：

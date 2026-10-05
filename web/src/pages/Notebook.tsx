@@ -19,6 +19,9 @@ import { Badge, Loading } from '../components/AsyncState';
  * 三句话常驻，不随状态切换收起（IDE 那边同一课）：①环境共用、②答案可读不是安全边界、
  * ③只在本机打得开。用户在"要装包"和"要撞墙"的两个时刻都需要它们，而那正是状态最难看的时候。
  *
+ * 还有一条**与上面四态正交**的诊断：`seedError`（示例铺不进去，评审 I-1）。它不许并进那四态里 ——
+ * 并进去就把"磁盘/挂载的事"说成"服务的事"了；状态那一行此刻照旧说实话，这一句只在示例那一块说。
+ *
  * 这里**不做定时轮询**：状态一栏有个「刷新状态」按钮，「准备环境」完成后自动重读一次。
  * 理由是那个 GET 会顺手铺示例（`server/src/api/app.ts` 的路由里），定时轮询=定时做一遍磁盘 I/O；
  * 而"这一页开着不动时状态本来就不会自己变"。真要轮询，等 Task 10 拿着容器里的数据再决定。
@@ -75,6 +78,17 @@ export default function Notebook() {
     }
   }, [reload]);
 
+  /**
+   * 「刷新状态」要把上一轮那句话收掉（评审 Fix-1 的 Minor）：
+   * `prepareLog` 讲的是**那一轮动作**的结果，手动刷新之后它还挂在页面上，就是在替新一轮说话。
+   * 注意 `prepare()` 里用的仍是原 `reload()`：那次自动重读正是"环境建好了，正在重读…"所指向的事，
+   * 自己把它擦掉就成了"按了按钮什么都没发生"。
+   */
+  const reloadStatus = useCallback(() => {
+    setPrepareLog(null);
+    reload();
+  }, [reload]);
+
   return (
     <div data-testid="notebook-page">
       <div className="page-head">
@@ -86,7 +100,7 @@ export default function Notebook() {
         <div className="card-head">
           <h3 className="card-title">运行时</h3>
           <span className="spacer" />
-          <button type="button" className="btn btn-sm" onClick={reload} disabled={loading} data-testid="notebook-reload">
+          <button type="button" className="btn btn-sm" onClick={reloadStatus} disabled={loading} data-testid="notebook-reload">
             {loading ? '读取中…' : '刷新状态'}
           </button>
         </div>
@@ -116,9 +130,12 @@ export default function Notebook() {
         ) : null}
 
         {/* ④ 这一态单独一块：给不出链接 ≠ 没在跑。坏的是 ARENA_NOTEBOOK_PUBLIC_URL 那一行 env。
-            措辞刻意绕开"没在运行"那四个字 —— 它们是另一态的话，两句同时出现读者就分不清了。 */}
+            措辞刻意绕开"没在运行"那四个字 —— 它们是另一态的话，两句同时出现读者就分不清了。
+            role 用 status 不用 alert（评审 Fix-1 的 Minor）：这是"配置坏了"的诊断，不是"你刚才那次
+            操作失败了"；alert 会打断屏幕阅读器当前的朗读，而邻块（down / tokenless / spec-missing）
+            说的同一类事并没有各自升级成报警。 */}
         {view.kind === 'nolink' ? (
-          <p className="banner banner-warning" data-testid="notebook-nolink" role="alert">
+          <p className="banner banner-warning" data-testid="notebook-nolink" role="status">
             <span>Jupyter 确实在答话，只是这个实例拼不出能点开的链接 ⇒ 别按"服务没起"去处理，重启它修不了这一态。</span>
             <span className="tiny mono">{view.reason}</span>
           </p>
@@ -199,6 +216,23 @@ export default function Notebook() {
               </span>
             ))}
           </div>
+        ) : null}
+
+        {/* 评审 I-1 的前端那一半：后端现在把"示例铺不进去"单独成一个字段（`seedError`），
+            因为它与"没有示例"修的是不同东西 —— 前者查挂载/磁盘/权限，后者本来就没示例。
+            混着说的症状是读者去翻示例目录，而该修的是只读挂载。
+            语气仍按"配置/IO 诊断"写：运行时那一块（上面几行）此刻照旧说实话，这一行不宣称服务坏了。 */}
+        {data?.seedError ? (
+          <p className="banner banner-warning" data-testid="notebook-seed-error" role="status">
+            <span>示例这次没能铺进工作目录 —— 这是"铺不进去"，不是"没有示例"，也与 Jupyter 在不在跑无关。</span>
+            <span className="tiny mono">{data.seedError}</span>
+          </p>
+        ) : null}
+
+        {data && !data.seedError && data.notebooks.length === 0 ? (
+          <p className="tiny faint" data-testid="notebook-files-empty">
+            工作目录里现在没有示例：那是<span className="mono">没有</span>，不是铺失败（铺失败上面会单独点名原因）。
+          </p>
         ) : null}
       </section>
 
