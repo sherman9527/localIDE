@@ -67,6 +67,7 @@ import type {
   IdeLanguagesResponse,
   IdeRunRequest,
   IdeRunResponse,
+  NotebookFile,
   NotebookPrepareResponse,
   NotebookStatusResponse,
   ReplFeedRequest,
@@ -102,6 +103,14 @@ export interface AppDeps {
   logger?: boolean;
   /** 前端产物目录（测试可注入临时目录验证 SPA 回退） */
   webDist?: string;
+  /**
+   * 「哪些对端地址算这张网桥的网关」—— 只给**测试**用（评审 I-3a）。
+   * 不传 = 生产路径 = `notebooks/status.ts` 自己读 `/proc/net/route`（内核说了算，不是猜的）。
+   * 为什么只能从这里注入：那一半判据的输入是**容器自己的网络命名空间**，宿主上的单测永远读不到它，
+   * 于是"网关那条分支真被走过吗"在 api 层本来是无判据的。这个口子只在 buildApp 时开，
+   * 不是请求参数 ⇒ 客户端碰不到它，也换不到 token（判据依旧是 socket 对端）。
+   */
+  notebookGatewayAddresses?: string[];
 }
 
 interface ApiError {
@@ -563,11 +572,30 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   // 这里不读 `request.ip`：那是 Fastify 在 `trustProxy` 打开后会改口的封装，而本服务没设过 trustProxy，
   // 用 raw socket 是"只有一个输入"的写法 —— 将来真上反向代理，也得在这儿显式决定信谁的转发头。
   app.get(`${api}/notebook/status`, async (request): Promise<NotebookStatusResponse> => {
-    const base = await notebookStatus({ peerAddress: request.raw.socket.remoteAddress ?? '' });
+    const base = await notebookStatus({
+      peerAddress: request.raw.socket.remoteAddress ?? '',
+      // 不传 = 走 `localGatewayAddresses()`（生产路径）。见 AppDeps.notebookGatewayAddresses 的注释。
+      gatewayAddresses: deps.notebookGatewayAddresses,
+    });
     // 顺带铺示例：打开页面这件事本身就该保证示例在位，而不是另加一个 POST。
     // 读路径做 I/O 这件事是计划里故意的（几个文件的 stat + 偶发 copyFile），
     // Task 10 的"页面开着停 60 秒"用数据判它是否被轮询放大；现在不加缓存那一套（YAGNI）。
-    return { ...base, notebooks: await seedNotebooks() };
+    //
+    // 但这一半**必须接住异常**（评审 I-1）：`seedNotebooks()` 是故意让 mkdir/copyFile 冒出来的，
+    // 而它是磁盘 I/O —— 只读挂载 / ENOSPC / 权限坏掉都会 reject。让它逃出路由 = 这个 GET 变 500
+    // = 页面掉到"状态读不到"，运行时卡片整块消失，**而 Jupyter 其实好好的**。那等于把 Task 7
+    // 在 status.ts 里挡掉的静默降级搬到上一层重演一遍，而且更响（连 reason 都没处写）。
+    // 也不许就地 `catch { notebooks: [] }`：空列表说的是"没有示例"，读者看不到"铺不进去"这件事。
+    let notebooks: NotebookFile[] = [];
+    let seedError: string | undefined;
+    try {
+      notebooks = await seedNotebooks();
+    } catch (err) {
+      seedError = `示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：${(err as Error).message}`;
+    }
+    const payload: NotebookStatusResponse = { ...base, notebooks };
+    if (seedError) payload.seedError = seedError;
+    return payload;
   });
 
   // MARK: /api/notebook/prepare-env（显式建 IDE 的 venv —— kernel 的 argv 指着它）

@@ -120,14 +120,17 @@ describe('notebookStatus', () => {
    * ② **旧判据的假阳性必须单独钉**：`::1:7788` 是一条合法 IPv6 地址（展开成 `0:0:0:0:0:0:1:7788`），
    *    而旧那条 `...|::1)(:\d+)?$` 把它当"回环 + 端口"⇒ 一个非本机字面量换到了 token。
    *    socket 地址永远不带端口，所以这里不给任何"尾巴上带冒号就当端口"的宽容。
+   * ③ 同一条道理（评审 Fix-1 的 Minor）：`remoteAddress` 也**永远不是主机名**，所以 `'localhost'`
+   *    这个字面量不该有本机资格 —— 旧正则里那个 `|localhost` 分支是从 Host 头时代抄过来的死代码，
+   *    留着它等于给"哪天有人把某个自报字符串塞进对端地址"预留一条通到凭据的路。
    * 方向也要各断一边：漏认本机 = 用户得手贴 token（那条静默降级）；多认外来者 = 泄漏。
    */
-  it('本机对端的认法覆盖 IPv6 两种写法，而 `::1:7788` 这种字面量不在其内', async () => {
-    for (const peer of ['::1', '127.0.0.1', '127.0.0.42', '::ffff:127.0.0.1', 'localhost']) {
+  it('本机对端的认法覆盖 IPv6 两种写法，而 `::1:7788` / `localhost` 这类字面量不在其内', async () => {
+    for (const peer of ['::1', '127.0.0.1', '127.0.0.42', '::ffff:127.0.0.1']) {
       const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
       expect(res.url, `${peer} 是本机 ⇒ 不给 token 就得让用户手贴`).toContain('token=test-token');
     }
-    for (const peer of ['192.168.1.20', '::ffff:192.168.1.20', '::1:7788', '10.0.0.1', '', '127', '127.0.0']) {
+    for (const peer of ['192.168.1.20', '::ffff:192.168.1.20', '::1:7788', '10.0.0.1', '', '127', '127.0.0', 'localhost']) {
       const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
       expect(res.url, `${peer} 不是本机 ⇒ token 不许出现在响应里`).not.toContain('token=');
     }

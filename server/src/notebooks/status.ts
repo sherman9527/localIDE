@@ -93,6 +93,10 @@ export function localGatewayAddresses(): string[] {
 /**
  * 对端地址是不是"这台机器自己"。`gateways` 做成参数是为了让判据可注入、可测
  * （默认那条走 `localGatewayAddresses()`，测试不必依赖跑它的那台机器有什么网络）。
+ * 输入只有 `socket.remoteAddress`：它是内核给的**地址字面量**，不是名字 —— 所以这里不接受
+ * `'localhost'` 这类主机名（评审 Fix-1 Minor：旧 LOOPBACK 正则里那个 `|localhost` 分支是从
+ * Host 头时代抄过来的死代码，今天永远匹配不上，留着它只是给"哪天有人往对端地址里塞自报字符串"
+ * 预留一条通向凭据的路）。要认的就按地址族认，认不上就不给。
  */
 export function isLocalPeer(rawAddress: string | undefined, gateways: string[] = localGatewayAddresses()): boolean {
   const addr = (rawAddress ?? '').trim().toLowerCase();
@@ -100,10 +104,17 @@ export function isLocalPeer(rawAddress: string | undefined, gateways: string[] =
   // 双栈监听时 Node 把 IPv4 对端写成 `::ffff:127.0.0.1`
   const ip = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
   if (ip === '::1') return true;
-  if (ip === 'localhost') return true;
   const n = ipv4ToInt(ip);
   // 127.0.0.0/8 整段都是回环（`127.1`、`127.0.0.2` 都到本机），但四段必须齐全
   if (n !== null && (n >>> 24) === 127) return true;
+  /**
+   * 网桥那一半（容器部署里"本机"唯一的形状）。**它的安全性是派生的，不是自证的**：
+   * 成立的前提是 compose 里每一个发布端口都只绑在宿主的 `127.0.0.1` 上
+   * （闸门 `server/test/regression/compose-ports.test.ts`）—— 那个不变量一旦破（哪天有人写
+   * `"8888:8888"` 或去掉 `127.0.0.1:` 前缀），"能打到这个服务"就不再等价于"已经在宿主上了"，
+   * 而同一张网桥上的任意进程都能拿 `172.18.0.1` 这个源地址来要凭据 ⇒ 这一支的信任面随之变大。
+   * 改 compose 端口的人看不见这条注释就等于没写过，所以动那一侧时把它一起读一遍。
+   */
   return gateways.some((gw) => gw.toLowerCase() === ip);
 }
 

@@ -48,6 +48,19 @@ export interface NotebookStatusResponse {
   reason?: string;
   kernels: NotebookKernel[];
   notebooks: NotebookFile[];
+  /**
+   * 「**这一次**铺示例失败了」的原因；成功时这个键不出现（评审 I-1）。
+   *
+   * 为什么要单独一个字段，而不是让路由把 `seedNotebooks()` 的异常冒出去：
+   * 那个函数是**故意**不吞 mkdir/copyFile 的异常的（`server/src/notebooks/seed.ts`），
+   * 而它挂在只读的 GET 上 ⇒ 只读挂载 / ENOSPC / 权限坏掉 = 整个 `/api/notebook/status` 变 500
+   * = 页面掉到"状态读不到"，**在 Jupyter 明明在跑的时候**把运行时卡片整块抹掉。
+   * 所以运行时那一半必须活着返回（200），失败的那一半自己说一句话。
+   * 也不许静默吞成 `notebooks: []`：「没有示例」与「铺不进去」修的是不同东西
+   * （前者是示例目录本来就是空的，后者是磁盘/权限有问题）。
+   * 存的是**给人读的一句话**，不是 Error 对象 —— 它是响应体的一部分，跨进程边界。
+   */
+  seedError?: string;
 }
 
 /**
