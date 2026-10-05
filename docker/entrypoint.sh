@@ -65,26 +65,43 @@ start_redis || exit 1
 # Jupyter 是"可以不起"的服务：起不来不许拖垮做题与判题（它跟 mysqld/redis 的关键性不同），
 # 所以失败只 log 一行，由 /api/notebook/status 如实报 running:false + reason。
 start_jupyter() {
-  mkdir -p /app/data/notebooks /app/data/notebook-warehouse/wh /app/data/notebook-warehouse/derby
-
   # 没有 token 就**不起**，而不是起一个无鉴权的：.env 是唯一来源（start.sh 首启生成）。
   # 静默降级成空 token 会让"回环 + 无鉴权"这个本来已经说清楚的例外，再多一个没人知道的口子。
+  # 顺序有讲究：这道守卫在 mkdir **之前** —— 拿不到 token 的实例（e2e / dev 已不再透传，见
+  # compose.yml）连目录都不该在真人的 ./data 里留下，否则"不参与 notebook"的服务还在改人家文件系统。
   if [ -z "${ARENA_JUPYTER_TOKEN:-}" ]; then
     log "Jupyter 未启动：缺 ARENA_JUPYTER_TOKEN（用 ./start.sh 启动会自动生成到 .env）"
     return 0
   fi
+
+  # notebook 的工作区、warehouse、日志都从 ARENA_DATA_DIR 派生，**不写死 /app/data**：
+  # WI-40 的隔离纪律是"可写状态全在本实例自己的数据目录里"，notebook 也是可写状态。
+  # 写死的话，任何一个真的起了 jupyter 的实例（e2e 挂的是同一个 ./data）就有了一条通往
+  # 真人笔记的读写路径 —— 而现有那条隔离判据只 hash data/arena.db-wal，看不见 notebooks。
+  local nb_root="${ARENA_DATA_DIR:-/app/data}"
+  mkdir -p "${nb_root}/notebooks" "${nb_root}/notebook-warehouse/wh" "${nb_root}/notebook-warehouse/derby"
+
+  # IDE venv 是**懒创建**的：命名卷第一次进来时那个目录是空的。bash 不会为"PATH 上有个不存在
+  # 的目录"报错，于是前置静默失效 —— 服务器照样起来、日志照样"已拉起"，而 notebook 里的
+  # `!pip3 install` 命中的是系统 pip（=判题用的那个解释器）。这条检查不改变行为，
+  # 它只是把这个"看不见的降级"在 Task 10 的行为证据抓到之前，先在人眼前摆一次。
+  [ -x "${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin/pip3" ] || log "IDE venv 尚未创建：notebook 里的 pip 会落到系统解释器（与判题同一个）"
 
   # venv 前置到 PATH：notebook 里 `!pip3 install X` 走 shell，命中哪个 pip 由 PATH 决定。
   # 不加这一句包会写进系统 site-packages —— 而判题用的正是那个解释器（红线一延伸，判据见
   # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
   PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
   jupyter notebook --allow-root --no-browser \
-    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 \
+    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 --ServerApp.port_retries=0 \
     --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
-    --ServerApp.root_dir=/app/data/notebooks \
-    >/var/log/jupyter.log 2>&1 &
+    --ServerApp.root_dir="${nb_root}/notebooks" \
+    >"${nb_root}/notebook-server.log" 2>&1 &
 
-  log "Jupyter 已拉起（容器内 127.0.0.1:8888）"
+  # port_retries=0：8888 被占时 jupyter 默认会**换个端口**继续起（8889），而宿主映射钉的是
+  # 7789:8888 —— 静默换端口等于那条映射变成死的，日志却照样"已拉起"。宁可让它起不来并报错。
+  # 日志落在数据目录里（不是 /var/log）：./start.sh --logs 只看 compose 的 stdout，
+  # 而 jupyter 自己的输出要能在宿主 data/ 下直接翻到。
+  log "Jupyter 已拉起（容器内 127.0.0.1:8888；日志 ${nb_root}/notebook-server.log）"
   return 0
 }
 

@@ -44,8 +44,10 @@ services:
       ARENA_PORT: "7788"
       # notebook 的 token 只做透传、不给默认值：唯一来源是 .env（./start.sh 首启生成）。
       # 缺了就该由 entrypoint 决定"不起"（见 docker/entrypoint.sh），而不是悄悄起一个无鉴权的。
-      # 每一个用这张镜像的服务都要带上这一行（entrypoint 是镜像级的，dev/e2e 也会起 jupyter）：
-      # 漏一处的判据由 notebook-compose.test.ts 钉，不靠人记。闸门：server/test/regression/notebook-compose.test.ts
+      # **谁拿到这一行，就等于谁起一个 jupyter**（entrypoint 是镜像级的）：所以只有 arena 与 tools
+      # 拿到它，dev / e2e 故意不给（各自的块里写了原因）。这条"该给的必须给、不该给的必须不给"
+      # 由 notebook-compose.test.ts 的 ⑤⑥ 钉住，不靠人记 —— 漏一面都是静默的。
+      # 闸门：server/test/regression/notebook-compose.test.ts
       ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
       <<: *llm-env
     extra_hosts: *host-gateway
@@ -101,7 +103,11 @@ services:
       ARENA_DB_FILE: /app/data/arena.db
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
-      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
+      # dev **故意不透传** ARENA_JUPYTER_TOKEN：entrypoint 的守卫（缺 token 就不起）因此让 dev
+      # 里根本没有 jupyter。理由不是"省内存"，是隔离 —— dev 挂的是 `./:/app` 与 `./data`（读写），
+      # 而它又没有 notebook 端口，起一个 server 等于"多一个能读写真人笔记的进程、且没人能从外面
+      # 访问它"，纯增加面。要 dev 也能用 notebook，得先给它自己的端口与自己的数据目录，
+      # 那时这条判据（notebook-compose.test.ts ⑥）要跟着改并写下理由。
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
@@ -135,9 +141,12 @@ services:
       ARENA_HIDDEN_FILE: /app/data/e2e/hidden.json
       ARENA_BANK_DIR: /app/content/questions
       ARENA_PORT: "7788"
-      # 同一个 entrypoint 会给 e2e 也起一个 jupyter（只监听容器内，不发布到宿主 —— notebook 端口
-      # 归 arena 一个服务发布，判据见 notebook-compose.test.ts）。缺 token 它就不起，所以这里也得透传。
-      ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
+      # e2e **故意不透传** ARENA_JUPYTER_TOKEN ⇒ entrypoint 的"缺 token 就不起"守卫让这个实例
+      # 里没有 jupyter。这是 WI-40 那条隔离纪律的一部分，不是漏接线：e2e 挂的是 `./data`（读写），
+      # 给它 token 就等于给隔离实例开一条通往真人笔记的读写路径，而现有那条隔离判据只 hash
+      # data/arena.db-wal，看不见 notebooks —— 它不会替我们红。等 Task 8 的服务端代理落地，
+      # 这条路径会从"今天没有端口暴露"变成"真的打得开"，所以现在就把它堵在 token 上。
+      # 判据：notebook-compose.test.ts ⑥（e2e/dev 必须拿不到）与 ③（e2e 不许出现 notebook 端口）。
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true

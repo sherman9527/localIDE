@@ -4,19 +4,25 @@ import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
 
 /**
- * 四条各守一个真出过事的形状，加一条"别漏服务"：
+ * 六条各守一个真出过事的形状：
  * ① 7789 必须绑回环（compose-ports 整仓管全局，这里补"这条映射确实存在 + 端口号没被复用作别的"）；
  * ② token 是 `${VAR:-}` 透传而不是字面量 —— WI-86 的教训：判形状不判值；
- * ③ e2e 服务不许映射 7789：E2E 不该依赖一个真 notebook 服务器，也不该跟真人实例抢同一端口号；
+ * ③ e2e 服务不许出现 notebook 端口（7789 与容器内 8888 都算）：E2E 不该依赖一个真 notebook 服务器，
+ *    也不该跟真人实例抢同一端口号；
  * ④ 宿主端口不许被两个**可能同时在跑**的服务抢（理由见 MUTUALLY_EXCLUSIVE_GROUPS 那段）；
- * ⑤ 每个服务都透传了 token —— ENTRYPOINT 是镜像级的，漏一个服务就等于那个实例的 notebook 永远起不来，
- *    而症状（"页面第五项说没起来"）离原因（compose 少一行）隔着两个子系统。
+ * ⑤ arena 与 tools 必须透传 token —— 服务端要读同一个值（Task 7 的 status、Task 10 的容器档 kernel 测试）；
+ * ⑥ e2e 与 dev 必须**拿不到** token —— entrypoint 是镜像级的，"谁拿到谁起 jupyter"，而这两个服务
+ *    挂的都是真人的 `./data`（读写）。
+ * ⑤⑥ 是同一条裁决的两半：**"不透传给隔离实例"是 WI-40 的隔离规则本身，不是漏接线**。
+ * 只写 ⑤（"每个服务都得有"）会把这条隔离判据反着钉死 —— 那才是 review 抓到的地方：e2e 拿到 token
+ * ⇒ 起一个 root_dir 指向真人笔记的 server，而现有的隔离判据只 hash data/arena.db-wal，看不见 notebooks。
+ * 今天它没有发布端口所以进不去，但 Task 8 一加服务端代理就变成真路径，所以现在就堵在 token 上。
  */
 
 /**
  * 服务名 → 它的整段配置文本。只在顶格键是 `services:` 时把缩进 2 的键当服务，
  * 否则文件末尾的顶层 `volumes:` 里那两条（`arena-ide-env:` / `arena-ide-env-e2e:`）
- * 会被当成"两个没有 token 的服务"，把 ⑤ 撞成与判题无关的假红。
+ * 会被当成"两个服务"，把 ①（服务清单必须恰好是这四个）撞成与判题无关的假红。
  */
 function serviceBlocks(yaml: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -51,6 +57,21 @@ const compose = readFileSync(join(config.repoRoot, 'compose.yml'), 'utf8');
 const blocks = serviceBlocks(compose);
 const arena = blocks.get('arena') ?? '';
 const e2e = blocks.get('e2e') ?? '';
+const dev = blocks.get('dev') ?? '';
+const tools = blocks.get('tools') ?? '';
+
+/**
+ * 这个服务**真的**有没有那一行透传（丢掉整行注释再找）。
+ * 判据只看配置行、不看注释，否则"在注释里写一句 ARENA_JUPYTER_TOKEN"就能同时骗过 ⑤ 与 ⑥ ——
+ * 而 ⑥ 的整个用处就是"这个服务不许起 jupyter"，那是 compose 里的一行 env，不是文档里的措辞。
+ */
+function tokenPassThrough(block: string): string | undefined {
+  return block
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'))
+    .find((l) => /^ARENA_JUPYTER_TOKEN\s*:/.test(l));
+}
 
 /**
  * 判据④取"同一个宿主端口不许被两个可能同时在跑的服务抢"，不是"不许出现重复端口号"。
@@ -59,6 +80,8 @@ const e2e = blocks.get('e2e') ?? '';
  * `http://127.0.0.1:7788`，把 dev 那份端口改掉等于直接改坏 ./start.sh --dev。
  * 所以这里把"互斥服务组"写成显式白名单：新端口想跟别人共用必须先挤进这个列表，
  * 而挤进来就得回答"这两个服务真的互斥吗"。（计划里那版是全局查重，一跑就红在 7788 上。）
+ * 白名单是**按组**判的，不是按服务判的：抢同一个端口的那些服务必须整个落在同一个组里
+ * （判据本体下面写了为什么按服务判等于没判）。
  */
 const MUTUALLY_EXCLUSIVE_GROUPS: string[][] = [['arena', 'dev']];
 
@@ -78,14 +101,17 @@ describe('notebook 的端口与 token 接线', () => {
   });
 
   it('token 是透传形状，不是字面量', () => {
-    const line = arena.split('\n').find((l) => l.includes('ARENA_JUPYTER_TOKEN'));
+    const line = tokenPassThrough(arena);
     expect(line, 'arena 没透传 ARENA_JUPYTER_TOKEN ⇒ entrypoint 永远缺 token，notebook 起不来').toBeTruthy();
     expect(line).toMatch(/\$\{ARENA_JUPYTER_TOKEN:-\}/);
     expect(line).not.toMatch(/:\s*[A-Za-z0-9_-]{16,}/);
   });
 
-  it('e2e 不发布 7789', () => {
+  it('e2e 不发布 notebook 端口（宿主 7789 与容器内 8888 都不许出现在它的块里）', () => {
     expect(e2e).not.toContain('7789');
+    // 光禁 7789 会漏掉"把 8888 直接发出去"这个更糟的形状（同一个 server、换个宿主端口号而已）。
+    // 判据是纯文本包含、连注释一起算，钝是故意的：端口号出现在 e2e 块里就该被看一眼。
+    expect(e2e).not.toContain(':8888');
   });
 
   it('宿主端口号没有被两个会同时跑的服务抢（互斥服务组内共用除外）', () => {
@@ -106,14 +132,35 @@ describe('notebook 的端口与 token 接线', () => {
         conflicts.push(`${port} 在 ${uniq.join('、')} 里映射了两次`);
         continue;
       }
-      const allAliasable = uniq.every((s) => MUTUALLY_EXCLUSIVE_GROUPS.some((g) => g.includes(s)));
+      // 关键：必须是"**同一个**组里装着所有这些服务"。写成 uniq.every(s => GROUPS.some(g => g.includes(s)))
+      // 的话，arena（组 1）与 tools（组 2）各被自己的组认领、于是 every 通过 ⇒ 两个会同时跑的
+      // 服务抢同一个宿主端口而这条判据是绿的。共用端口的前提是它们本来就不可能并存，
+      // 这个前提只在"整组都在同一个互斥集合里"时才成立。
+      const allAliasable = MUTUALLY_EXCLUSIVE_GROUPS.some((g) => uniq.every((s) => g.includes(s)));
       if (uniq.length > 1 && !allAliasable) conflicts.push(`${port} ← ${uniq.join('、')}`);
     }
     expect(conflicts, `抢同一个宿主端口、又不在互斥服务组里：${conflicts.join('; ')}`).toEqual([]);
   });
 
-  it('每一个服务都透传了 ARENA_JUPYTER_TOKEN（漏一处 = 那个实例的 notebook 永远起不来）', () => {
-    const missing = [...blocks.keys()].filter((svc) => !/\bARENA_JUPYTER_TOKEN: \$\{ARENA_JUPYTER_TOKEN:-\}/.test(blocks.get(svc) ?? ''));
+  it('arena 与 tools 都透传了 ARENA_JUPYTER_TOKEN（漏一处 = 那个实例读不到同一个 token）', () => {
+    // arena：服务端与 entrypoint 要用同一个值；tools：Task 10 的容器档 kernel 测试在这个容器里跑。
+    const mustHave: Array<[string, string]> = [['arena', arena], ['tools', tools]];
+    const missing = mustHave
+      .filter(([, block]) => !/\$\{ARENA_JUPYTER_TOKEN:-\}/.test(tokenPassThrough(block) ?? ''))
+      .map(([svc]) => svc);
     expect(missing, `这些服务没透传 token：${missing.join(', ')}`).toEqual([]);
+  });
+
+  it('e2e 与 dev 拿不到 token ⇒ entrypoint 的守卫让它们不起 jupyter（这是隔离规则，不是漏接线）', () => {
+    // 这一条看起来像"接线接反了"，所以把裁决写在断言旁边：透传给谁 = 让谁起一个 jupyter，
+    // 而 e2e/dev 挂的都是真人的 ./data（读写）。少给不是 bug，是多给才是 bug。
+    // 另一半见上面那条 ⑤：arena/tools 少给才是真的漏接线。
+    const mustNotHave: Array<[string, string]> = [['e2e', e2e], ['dev', dev]];
+    for (const [svc, block] of mustNotHave) {
+      expect(tokenPassThrough(block), `${svc} 拿到了 ARENA_JUPYTER_TOKEN ⇒ 那个实例会起一个 jupyter，root_dir 指向真人挂载进来的 data/（WI-40 要堵的正是这类"隔离实例能写进真人数据"）`).toBeUndefined();
+    }
+    // 空转防护：dev/e2e 两个块都得真的扫到过，否则上面两条断言在 blocks 解析坏掉时会一起绿
+    expect(dev, 'dev 块没扫到 ⇒ 上面那条断言在空转（先修 serviceBlocks）').toContain('ARENA_PORT');
+    expect(e2e, 'e2e 块没扫到 ⇒ 上面那条断言在空转（先修 serviceBlocks）').toContain('ARENA_DATA_DIR');
   });
 });
