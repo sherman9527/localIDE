@@ -12,12 +12,15 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  * Task 8：notebook 的两个路由 + 接线形状。
  *
  * 这里判的**不是**"notebookStatus 算得对不对"（那是 `server/test/notebooks/status.test.ts` 的活），
- * 而是三件只有"挂上 HTTP 之后"才成立的事：
+ * 而是四件只有"挂上 HTTP 之后"才成立的事：
  * ① 路由真的存在（WI-87 的学费：一次编辑把 `app.post(...)` 并进注释，整条路由被吞掉，
  *    而"切片里 indexOf 路径字符串"的断言照样绿 ⇒ 判据必须是**行首**，不是包含）；
- * ② token 的释放判据是**内核给的 socket 对端地址**，不是客户端自报的 Host 头（评审 M-1）；
+ * ② token 的释放判据是**内核给的 socket 对端地址**，不是客户端自报的 Host 头（评审 M-1）——
+ *    含容器那一半：对端是这张网桥的**网关**时也算本机（评审 I-3a，靠 `gatewayAddresses` 那个 seam）；
  * ③ `notebookStatus` 的第三种响应形状（Jupyter 在跑但 publicUrl 配坏 ⇒ running:true + reason + 没有 url）
- *    必须被路由**原样透传**，不许在路由里被抹平成"要么给链接、要么没在跑"两态（评审第二条裁定）。
+ *    必须被路由**原样透传**，不许在路由里被抹平成"要么给链接、要么没在跑"两态（评审第二条裁定）；
+ * ④ 挂在同一个 GET 上的 `seedNotebooks()` 失败时不许把整个接口拖成 500（评审 I-1）：
+ *    运行时那一半必须活着返回，坏掉的那一半单独占一个 `seedError` 字段。
  */
 
 /** `ensureIdeEnv` 的替身：它在容器里是分钟级的真活，单测里只许被"看见有没有被调用"。 */
