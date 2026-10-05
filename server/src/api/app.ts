@@ -46,7 +46,10 @@ import { DEBUG_IDLE_MS, DEBUG_MAX_SESSIONS, debugSessions, startDebug, stepDebug
 import { runEnvCommand } from '../ide/env-command.js';
 import { readInventory } from '../ide/env-inventory.js';
 import { resetIdeEnv } from '../ide/reset.js';
+import { ensureIdeEnv } from '../ide/env.js';
 import { findLanguage } from '../ide/languages.js';
+import { notebookStatus } from '../notebooks/status.js';
+import { seedNotebooks } from '../notebooks/seed.js';
 import type {
   DebugAction,
   DebugSessionsResponse,
@@ -64,6 +67,8 @@ import type {
   IdeLanguagesResponse,
   IdeRunRequest,
   IdeRunResponse,
+  NotebookPrepareResponse,
+  NotebookStatusResponse,
   ReplFeedRequest,
   ReplFeedResponse,
   ReplSessionsResponse,
@@ -549,6 +554,34 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     } finally {
       clearInterval(keepAlive);
       if (!closed) raw.end();
+    }
+  });
+
+  // MARK: /api/notebook/status（第五页的唯一事实来源：服务在不在、kernel 就绪没有）
+  // 对端地址取的是 `request.raw.socket.remoteAddress` —— **不是** Host 头（评审 M-1）：
+  // 头是客户端写的，`Host: 127.0.0.1:7788` 就能换到一条带 token 的链接；socket 地址由三次握手决定。
+  // 这里不读 `request.ip`：那是 Fastify 在 `trustProxy` 打开后会改口的封装，而本服务没设过 trustProxy，
+  // 用 raw socket 是"只有一个输入"的写法 —— 将来真上反向代理，也得在这儿显式决定信谁的转发头。
+  app.get(`${api}/notebook/status`, async (request): Promise<NotebookStatusResponse> => {
+    const base = await notebookStatus({ peerAddress: request.raw.socket.remoteAddress ?? '' });
+    // 顺带铺示例：打开页面这件事本身就该保证示例在位，而不是另加一个 POST。
+    // 读路径做 I/O 这件事是计划里故意的（几个文件的 stat + 偶发 copyFile），
+    // Task 10 的"页面开着停 60 秒"用数据判它是否被轮询放大；现在不加缓存那一套（YAGNI）。
+    return { ...base, notebooks: await seedNotebooks() };
+  });
+
+  // MARK: /api/notebook/prepare-env（显式建 IDE 的 venv —— kernel 的 argv 指着它）
+  // 不挂在 GET 上：status 会被轮询，分钟级的 venv 创建塞进读路径是错的。
+  app.post(`${api}/notebook/prepare-env`, async (): Promise<NotebookPrepareResponse> => {
+    try {
+      const lang = findLanguage('python');
+      if (!lang) return { ok: false, reason: '语言表里没有 python' };
+      await ensureIdeEnv(lang);
+      return { ok: true };
+    } catch (err) {
+      // 200 + ok:false + 原因，而不是 500：500 里读者看不到"为什么没建成"，
+      // 而"点了没反应"是本项目反复付过代价的那类静默（与 IdeEnvResetResponse 同一条纪律）。
+      return { ok: false, reason: (err as Error).message };
     }
   });
 

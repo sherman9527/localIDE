@@ -85,7 +85,7 @@ async function withTokenKey(value: string | undefined, run: () => Promise<Notebo
 
 describe('notebookStatus', () => {
   it('服务在跑：running + 带 token 的本机地址 + kernel 就绪', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), ...TOK });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
     expect(res.running).toBe(true);
     // 期望值从 config 派生（评审 M9）：原来这里写死 `http://127.0.0.1:7789`，
     // 于是"宿主端口换个号"会同时改掉 compose 与 config 而这条测试独自红 —— 那是冤红，
@@ -96,7 +96,7 @@ describe('notebookStatus', () => {
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
     const res = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: (vi.fn(async () => {
         throw new Error('ECONNREFUSED');
@@ -107,32 +107,70 @@ describe('notebookStatus', () => {
     expect(res.kernels).toEqual([]);
   });
 
-  it('非回环来源拿不到 token（链接照给，token 不外泄）', async () => {
-    const res = await notebookStatus({ hostHeader: '192.168.1.20:7788', fetchImpl: fake(), ...TOK });
+  it('非本机对端拿不到 token（链接照给，token 不外泄）', async () => {
+    const res = await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), ...TOK });
     expect(res.url).toBeDefined();
     expect(res.url).not.toContain('token=');
   });
 
   /**
-   * 评审 M7（钉上新加的那两支，否则"补了 IPv6"只是注释里的一句话）：
-   * IPv6 本机有两种写法 —— Host 头带方括号 `[::1]:7788`，或裸 `::1`。
-   * 漏认的后果是 fail-closed（本机也得自己粘 token，那次摩擦正是这条链接要消灭的），
-   * 而反过来把局域网地址认成回环才是泄漏 —— 所以两边都要断言，不能只断一边。
+   * 评审 M-1 的两半（旧的 LOOPBACK 正则换成按地址族判定）：
+   * ① 认法要覆盖 IPv6 的真形状 —— socket 给的是裸 `::1`，双栈监听时 IPv4 对端写成
+   *    `::ffff:127.0.0.1`，`127.0.0.0/8` 整段都是本机（不止 .1）；
+   * ② **旧判据的假阳性必须单独钉**：`::1:7788` 是一条合法 IPv6 地址（展开成 `0:0:0:0:0:0:1:7788`），
+   *    而旧那条 `...|::1)(:\d+)?$` 把它当"回环 + 端口"⇒ 一个非本机字面量换到了 token。
+   *    socket 地址永远不带端口，所以这里不给任何"尾巴上带冒号就当端口"的宽容。
+   * 方向也要各断一边：漏认本机 = 用户得手贴 token（那条静默降级）；多认外来者 = 泄漏。
    */
-  it('回环的认法覆盖 IPv6 两种写法，且局域网/域名照样被挡在外面', async () => {
-    for (const host of ['::1', '[::1]:7788', 'localhost:7788', '127.0.0.1']) {
-      const res = await notebookStatus({ hostHeader: host, fetchImpl: fake(), ...TOK });
-      expect(res.url, `${host} 是本机 ⇒ 不给 token 就得让用户手贴`).toContain('token=test-token');
+  it('本机对端的认法覆盖 IPv6 两种写法，而 `::1:7788` 这种字面量不在其内', async () => {
+    for (const peer of ['::1', '127.0.0.1', '127.0.0.42', '::ffff:127.0.0.1', 'localhost']) {
+      const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
+      expect(res.url, `${peer} 是本机 ⇒ 不给 token 就得让用户手贴`).toContain('token=test-token');
     }
-    for (const host of ['192.168.1.20:7788', '::ffff:192.168.1.20', 'arena.example.com:7788']) {
-      const res = await notebookStatus({ hostHeader: host, fetchImpl: fake(), ...TOK });
-      expect(res.url, `${host} 不是回环 ⇒ token 不许出现在响应里`).not.toContain('token=');
+    for (const peer of ['192.168.1.20', '::ffff:192.168.1.20', '::1:7788', '10.0.0.1', '', '127', '127.0.0']) {
+      const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
+      expect(res.url, `${peer} 不是本机 ⇒ token 不许出现在响应里`).not.toContain('token=');
     }
+  });
+
+  /**
+   * 容器那一半：`./start.sh` 起的 arena 里，宿主浏览器的请求经 docker-proxy / NAT 进来，
+   * 对端是**这张网桥的网关**（172.18.0.1 那一类），永远不会是 127.0.0.1。
+   * 只认回环的判据不会报错，它会安静地让容器里的页面永远拿不到 token ⇒ 点开就是 Jupyter 登录页，
+   * 而界面一片绿 —— 正是本仓库付过学费的那类静默降级。
+   * 判据仍不是客户端给的：网关地址来自 `/proc/net/route`（内核告诉我谁是出口），测试走注入的那一份。
+   */
+  it('对端是本容器自己的默认网关（docker 网桥）⇒ 视为本机，给 token', async () => {
+    const gw = { gatewayAddresses: ['172.18.0.1'] };
+    const via = await notebookStatus({ peerAddress: '172.18.0.1', fetchImpl: fake(), ...TOK, ...gw });
+    expect(via.url, '容器部署里这就是"本机点开"的唯一形状 ⇒ 不给 token 等于功能没上').toContain('token=test-token');
+    // 同一台机器上的另一个容器地址不是网关 ⇒ 不给（这条判据不是"172.x 都算本机"）
+    const sibling = await notebookStatus({ peerAddress: '172.18.0.7', fetchImpl: fake(), ...TOK, ...gw });
+    expect(sibling.url).not.toContain('token=');
+  });
+
+  /**
+   * Host 头彻底退出判定（评审 M-1 的原话）。这里钉两层：
+   * ① 类型层面塞不进去（`@ts-expect-error` 若哪天不再报错，说明有人把 hostHeader 加回了入参
+   *    ⇒ 两个机制并存，迟早只改一个）；
+   * ② 行为层面伪造得再像也换不到 token，而真本机换什么都不换。
+   */
+  it('Host 头不再是 notebookStatus 的入参：想按头说话也说不成', async () => {
+    const spoofed = await notebookStatus({
+      peerAddress: '203.0.113.9',
+      fetchImpl: fake(),
+      ...TOK,
+      // @ts-expect-error 这个键已经不在契约里；它不该编译，更不该改变结论
+      hostHeader: '127.0.0.1:7788',
+    });
+    expect(spoofed.url).not.toContain('token=');
+    const local = await notebookStatus({ peerAddress: '::1', fetchImpl: fake(), ...TOK });
+    expect(local.url).toContain('token=test-token');
   });
 
   it('超时与"没起"给的 reason 必须不同（同一个 reason 会让人去查错的地方）', async () => {
     const res = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: (vi.fn(async () => {
         throw new Error('This operation was aborted');
@@ -142,7 +180,7 @@ describe('notebookStatus', () => {
   });
 
   it('没配 token 时如实报，不假装能用', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/ARENA_JUPYTER_TOKEN/);
   });
@@ -155,7 +193,7 @@ describe('notebookStatus', () => {
    * 因为"服务在跑但不认识我"是唯一一句读者能直接行动的失败。
    */
   it('Jupyter 答 403 ⇒ running:false，且明说 token 不匹配（不许读成"kernel 就绪"）', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: statusDeny(), ...TOK });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(), ...TOK });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/403/);
     expect(res.reason, '只说"返回 403" ⇒ 读者不知道该去重新拿 token 还是去重启服务').toMatch(/token 不匹配/);
@@ -172,14 +210,14 @@ describe('notebookStatus', () => {
    * "403 发生在哪个端点上，说出来的话一字不差"，否则两条文案各漂移一份没人知道。
    */
   it('kernelspecs 的回话同样判状态码：500 的 HTML body 不许被说成"未在监听"', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: kernelspecsBoom(500), ...TOK });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: kernelspecsBoom(500), ...TOK });
     expect(res.running).toBe(false);
     expect(res.reason).toBe('Jupyter 返回 500');
     expect(res.reason, '把 HTTP 状态说成"未在监听" ⇒ 让人去查一个正在答话的服务').not.toMatch(/未在监听|Unexpected|SyntaxError/);
     expect(res.kernels).toEqual([]);
 
-    const ks403 = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: kernelspecsBoom(403), ...TOK });
-    const st403 = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: statusDeny(403), ...TOK });
+    const ks403 = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: kernelspecsBoom(403), ...TOK });
+    const st403 = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(403), ...TOK });
     expect(ks403.reason, '两个端点各写一份 403 的文案 ⇒ 将来只改一处，读者看到的两句话不一样').toBe(st403.reason);
   });
 
@@ -191,13 +229,13 @@ describe('notebookStatus', () => {
    */
   it('每一条 running:false 都带一句非空的 reason（不变式，逐条覆盖失败形状）', async () => {
     const probes: Array<[string, () => Promise<NotebookStatusResponse>]> = [
-      ['没给 token', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' })],
-      ['token 键存在但为空', () => withTokenKey('', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' }))],
-      ['连不上（ECONNREFUSED）', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: refuses('connect ECONNREFUSED 127.0.0.1:8888'), ...TOK })],
-      ['探活超时', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: refuses('The operation was aborted due to timeout'), ...TOK })],
-      ['/api/status 403', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: statusDeny(403), ...TOK })],
-      ['/api/status 500', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: statusDeny(500), ...TOK })],
-      ['kernelspecs 500 + HTML body', () => notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: kernelspecsBoom(500), ...TOK })],
+      ['没给 token', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' })],
+      ['token 键存在但为空', () => withTokenKey('', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }))],
+      ['连不上（ECONNREFUSED）', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED 127.0.0.1:8888'), ...TOK })],
+      ['探活超时', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('The operation was aborted due to timeout'), ...TOK })],
+      ['/api/status 403', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(403), ...TOK })],
+      ['/api/status 500', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(500), ...TOK })],
+      ['kernelspecs 500 + HTML body', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: kernelspecsBoom(500), ...TOK })],
     ];
     const ran: Array<{ label: string; res: NotebookStatusResponse }> = [];
     for (const [label, probe] of probes) ran.push({ label, res: await probe() });
@@ -223,7 +261,7 @@ describe('notebookStatus', () => {
     let res: NotebookStatusResponse;
     try {
       const mod = await import('../../src/notebooks/status.js');
-      res = await mod.notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), ...TOK });
+      res = await mod.notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
     } finally {
       if (saved === undefined) delete process.env.ARENA_NOTEBOOK_PUBLIC_URL;
       else process.env.ARENA_NOTEBOOK_PUBLIC_URL = saved;
@@ -247,9 +285,9 @@ describe('notebookStatus', () => {
       ].join('\n');
     try {
       // 三条分支各走一遍：成功（url 里就躺着 token）、非回环（url 给但不带 token）、失败（reason 可能拼进 url）
-      await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: CANARY });
-      await notebookStatus({ hostHeader: '192.168.1.20:7788', fetchImpl: fake(), tokenOverride: CANARY });
-      await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY });
+      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY });
+      await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), tokenOverride: CANARY });
+      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY });
       const seen = collect();
       expect(seen, `有日志调用把 token 打印出来了 ⇒ 它会留在 data/logs 里，删不掉历史：\n${seen}`).not.toContain(CANARY);
       // 判据自己也要被判（否则"什么都没收集到"也看起来像成功）：
@@ -271,10 +309,10 @@ describe('notebookStatus', () => {
    */
   it('token 缺席分两种成因：刻意不给（dev/e2e）不许读起来像故障，从没生成才给修复指令', async () => {
     const noKey = await withTokenKey(undefined, () =>
-      notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' }),
+      notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }),
     );
     const emptyKey = await withTokenKey('', () =>
-      notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' }),
+      notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }),
     );
     expect(noKey.running).toBe(false);
     expect(emptyKey.running).toBe(false);
@@ -311,7 +349,7 @@ describe('notebookStatus', () => {
     // 20ms 在原机上靠的是"下一拍一定还没到点"这个概率 —— 宿主满载（判题/构建同时在跑）时
     // 那个"没中止"的断言会冤红，而冤红的门禁教人的是"重跑一次"，不是"这里真坏了"。
     // 500 > 200 留了两倍余量，仍然判得住"删掉 AbortSignal.timeout"那一次变异。
-    await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: recorder, timeoutMs: 200, ...TOK });
+    await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: recorder, timeoutMs: 200, ...TOK });
     expect(handed, '没把 AbortSignal 交给 fetch ⇒ "在听但不答"的 Jupyter 会永远拖住这个探活请求（删掉 AbortSignal.timeout 本条就该红）').toBeTruthy();
     expect(handed!.aborted, 'timeoutMs 比这条 fake 的耗时还长，不该一出去就已中止').toBe(false);
     await new Promise((r) => setTimeout(r, 500));
@@ -328,7 +366,7 @@ describe('notebookStatus', () => {
       });
     }) as unknown as typeof fetch;
 
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: hang, timeoutMs: 30, ...TOK });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: hang, timeoutMs: 30, ...TOK });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/超时/);
     expect(res.reason).not.toMatch(/ECONNREFUSED|未在监听|不会自己结束/);
@@ -347,7 +385,7 @@ describe('notebookStatus', () => {
       }) as unknown) as typeof fetch;
 
     const refused = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: wrapped(new Error('connect ECONNREFUSED 127.0.0.1:8888')),
     });
@@ -357,7 +395,7 @@ describe('notebookStatus', () => {
     // 同一层包装、换掉 cause ⇒ 分类必须跟着换（这就是"顺着链看"与"只看顶层"的差别）。
     // cause 用真形状：AbortSignal.timeout 到点放进 signal.reason 的就是这个 DOMException。
     const timedOut = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: wrapped(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
     });
