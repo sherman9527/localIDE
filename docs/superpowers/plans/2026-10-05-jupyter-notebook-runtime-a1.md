@@ -615,7 +615,16 @@ print("venv ok")
 
 ---
 
-### Task 7: status —— 探活、kernelspecs、token 只给本机同源
+### Task 7: status —— 探活、kernelspecs、token 只给本机对端
+
+> **更正（实施时 · 评审 M-1）**：本节原稿把"链接里附不附 token"判在 **Host 头**上，而那个头是客户端自己写的 ——
+> 局域网里任何请求把 `Host:` 填成 `127.0.0.1:7788` 就换到一条带凭据的链接。现在写进代码的判据是**内核给的对端地址**
+> （`request.raw.socket.remoteAddress`），Host 头只用于展示、不参与判定。"本机"有两种形状：宿主直跑 = 对端是回环；
+> compose（唯一拿到 token 的实例）里宿主浏览器经 docker-proxy / NAT 从网桥进来，对端是**本进程自己的默认网关**
+> （读 `/proc/net/route`，不是猜网段 +1）—— 只认回环不会报错，它让这功能在唯一启用它的部署里静默失效。
+> 也不拿正则扫地址串：`::1:7788` 是合法 IPv6 而非"回环+端口"，`'localhost'` 是名字不是地址，按地址族逐条判。
+> 下面各段已按此改写；钉住它的是 `server/test/notebooks/status.test.ts`（那句 `@ts-expect-error` 让 `hostHeader`
+> 再也进不了入参）与 `server/test/api/notebook-api.test.ts`。
 
 **Files:**
 - Create: `server/src/notebooks/status.ts`
@@ -623,7 +632,7 @@ print("venv ok")
 
 **Interfaces:**
 - Consumes: `config.notebook.{port,publicUrl,token}`、Jupyter 的 `/api/status` 与 `/api/kernelspecs`
-- Produces: `export async function notebookStatus(input: { hostHeader: string; fetchImpl?: typeof fetch; timeoutMs?: number }): Promise<NotebookStatusResponse>`
+- Produces: `export async function notebookStatus(input: { peerAddress: string; fetchImpl?: typeof fetch; timeoutMs?: number; tokenOverride?: string; gatewayAddresses?: string[] }): Promise<NotebookStatusResponse>`（`peerAddress` 是唯一决定要不要附 token 的输入；没有 `hostHeader` 这个参数）
 
 - [ ] **Step 1: 写失败测试（注入 fetch，宿主可跑，不依赖真 Jupyter）**
 
@@ -646,7 +655,7 @@ const TOK = { tokenOverride: 'test-token' };
 
 describe('notebookStatus', () => {
   it('服务在跑：running + 带 token 的本机地址 + kernel 就绪', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), ...TOK });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
     expect(res.running).toBe(true);
     expect(res.url).toContain('http://127.0.0.1:7789/tree?token=test-token');
     expect(res.kernels).toEqual([{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }]);
@@ -654,7 +663,7 @@ describe('notebookStatus', () => {
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
     const res = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: (vi.fn(async () => { throw new Error('ECONNREFUSED'); }) as unknown) as typeof fetch,
     });
@@ -663,15 +672,36 @@ describe('notebookStatus', () => {
     expect(res.kernels).toEqual([]);
   });
 
-  it('非回环来源拿不到 token（链接照给，token 不外泄）', async () => {
-    const res = await notebookStatus({ hostHeader: '192.168.1.20:7788', fetchImpl: fake(), ...TOK });
+  it('非本机对端拿不到 token（链接照给，token 不外泄）', async () => {
+    const res = await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), ...TOK });
     expect(res.url).toBeDefined();
     expect(res.url).not.toContain('token=');
   });
 
+  // 实施时补的两条（评审 M-1 / I-3a）：判据的两半各要一条，缺任何一半都不会有人发现。
+  it('对端是本容器自己的默认网关（docker 网桥）⇒ 视为本机，给 token', async () => {
+    const gw = { gatewayAddresses: ['172.18.0.1'] };
+    const via = await notebookStatus({ peerAddress: '172.18.0.1', fetchImpl: fake(), ...TOK, ...gw });
+    expect(via.url).toContain('token=test-token');
+    // 同网段里别的容器地址不是网关 ⇒ 不给（这条判据不是"172.x 都算本机"）
+    const sibling = await notebookStatus({ peerAddress: '172.18.0.7', fetchImpl: fake(), ...TOK, ...gw });
+    expect(sibling.url).not.toContain('token=');
+  });
+
+  it('Host 头不再是 notebookStatus 的入参：想按头说话也说不成', async () => {
+    const spoofed = await notebookStatus({
+      peerAddress: '203.0.113.9',
+      fetchImpl: fake(),
+      ...TOK,
+      // @ts-expect-error 这个键已经不在契约里；它不该编译，更不该改变结论
+      hostHeader: '127.0.0.1:7788',
+    });
+    expect(spoofed.url).not.toContain('token=');
+  });
+
   it('超时与"没起"给的 reason 必须不同（同一个 reason 会让人去查错的地方）', async () => {
     const res = await notebookStatus({
-      hostHeader: '127.0.0.1:7788',
+      peerAddress: '127.0.0.1',
       ...TOK,
       fetchImpl: (vi.fn(async () => { throw new Error('This operation was aborted'); }) as unknown) as typeof fetch,
     });
@@ -679,7 +709,7 @@ describe('notebookStatus', () => {
   });
 
   it('没配 token 时如实报，不假装能用', async () => {
-    const res = await notebookStatus({ hostHeader: '127.0.0.1:7788', fetchImpl: fake(), tokenOverride: '' });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/ARENA_JUPYTER_TOKEN/);
   });
@@ -702,7 +732,26 @@ describe('notebookStatus', () => {
 import { config } from '../config.js';
 import type { NotebookKernel, NotebookStatusResponse } from '@arena/shared';
 
-const LOOPBACK = /^(127\.0\.0\.1|localhost)(:\d+)?$/i;
+/**
+ * 「这个请求是不是这台机器自己发的」—— 判据只能是内核给的对端地址，不是客户端自报的 Host 头。
+ * 两半缺一不可：宿主直跑是对端为回环（`::1`、`127.0.0.0/8` 整段、双栈时的 `::ffff:127.0.0.1`），
+ * compose 里宿主浏览器经 docker-proxy / NAT 从网桥进来 ⇒ 对端是**本进程自己的默认网关**（`/proc/net/route` 读的），
+ * 永远不会是 127.0.0.1。只认回环不报错，它只会让这功能在唯一启用了它的部署里静默失效。
+ * 不拿正则扫地址串：`::1:7788` 是合法 IPv6 字面量（旧 LOOPBACK 会把它当"回环+端口"⇒ 外来者换到 token），
+ * 而 `'localhost'` 是名字不是地址。`gateways` 做成参数是为了判据可注入、可测。
+ * 完整实现（含 `parseProcNetRoute` 的 fail-closed 那一半）见 `server/src/notebooks/status.ts`。
+ */
+export function isLocalPeer(rawAddress: string | undefined, gateways: string[] = localGatewayAddresses()): boolean {
+  const addr = (rawAddress ?? '').trim().toLowerCase();
+  if (!addr) return false;
+  // 双栈监听时 Node 把 IPv4 对端写成 `::ffff:127.0.0.1`
+  const ip = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
+  if (ip === '::1') return true;
+  const n = ipv4ToInt(ip); // 四段不齐 / 非四段 → null（宁可不给 token，也不给错人）
+  // 127.0.0.0/8 整段都是回环（`127.1`、`127.0.0.2` 都到本机），但四段必须齐全
+  if (n !== null && (n >>> 24) === 127) return true;
+  return gateways.some((gw) => gw.toLowerCase() === ip);
+}
 
 async function jupyterApi(path: string, token: string, doFetch: typeof fetch, timeoutMs: number): Promise<Response> {
   return doFetch(`http://127.0.0.1:${config.notebook.port}${path}`, {
@@ -717,10 +766,13 @@ async function jupyterApi(path: string, token: string, doFetch: typeof fetch, ti
  * （IDE 同样把 ensureIdeEnv 挂在显式动作上，不挂在语言列表上）。
  */
 export async function notebookStatus(input: {
-  hostHeader: string;
+  /** 真实对端地址（Fastify 的 `request.raw.socket.remoteAddress`）—— token 释放判据的唯一输入 */
+  peerAddress: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   tokenOverride?: string;
+  /** 注入点：默认取本容器自己的默认网关；测试靠它把"网桥网关"那一类判住而不依赖机器 */
+  gatewayAddresses?: string[];
 }): Promise<NotebookStatusResponse> {
   const doFetch = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 1500;
@@ -744,14 +796,14 @@ export async function notebookStatus(input: {
   }
 
   const url = new URL(`${config.notebook.publicUrl}/tree`);
-  if (LOOPBACK.test(input.hostHeader)) url.searchParams.set('token', token);
+  if (isLocalPeer(input.peerAddress, input.gatewayAddresses)) url.searchParams.set('token', token);
   return { running: true, url: url.toString(), kernels, notebooks: [] };
 }
 ```
 
-- [ ] **Step 4: 跑测试转绿** → 6 passed。
+- [ ] **Step 4: 跑测试转绿** → 8 passed（原稿 6 条 + 实施时补的网关那一半与 Host 头那一半）。
 
-- [ ] **Step 5: 破坏性验证**：`LOOPBACK.test` 改成恒真 ⇒ 第 3 条红；删掉 `AbortSignal.timeout` ⇒ 第 2 条红（reason 变成 reject 的其它文案）。各还原。
+- [ ] **Step 5: 破坏性验证**：`isLocalPeer` 改成恒真 ⇒ 第 3 条红（新加的那两条各守它的另一半：网关那一半、Host 头那一半，恒真时一起红）；删掉 `AbortSignal.timeout` ⇒ 第 2 条红（reason 变成 reject 的其它文案）。各还原。
 
 - [ ] **Step 6: 提交**
 
@@ -800,8 +852,10 @@ describe('notebook 路由接线', () => {
 
 ```ts
   // MARK: /api/notebook/status（第五页的唯一事实来源：服务在不在、kernel 就绪没有）
+  // 对端地址取 `request.raw.socket.remoteAddress` —— **不是** Host 头（评审 M-1）：头是客户端写的，
+  // `Host: 127.0.0.1:7788` 就能换到一条带 token 的链接；socket 地址由三次握手决定。
   app.get(`${api}/notebook/status`, async (request): Promise<NotebookStatusResponse> => {
-    const base = await notebookStatus({ hostHeader: String(request.headers.host ?? '') });
+    const base = await notebookStatus({ peerAddress: request.raw.socket.remoteAddress ?? '' });
     // 顺带铺示例：打开页面这件事本身就该保证示例在位，而不是另加一个 POST
     return { ...base, notebooks: await seedNotebooks() };
   });

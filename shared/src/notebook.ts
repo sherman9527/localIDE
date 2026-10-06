@@ -64,7 +64,9 @@ export interface NotebookStatusResponse {
 }
 
 /**
- * `POST /api/notebook/prepare`（铺示例）的响应。
+ * `POST /api/notebook/prepare-env`（显式建 IDE 那个 venv —— `arena-pyspark` kernel 的 argv 指着它）的响应。
+ * 成功只有一个 `{ok:true}`，失败是 200 + `{ok:false, reason}`（venv 建到一半抛的那句话）。
+ * 铺示例不在这一条路上：那是只读 GET `/api/notebook/status` 顺带做的，坏在那一半写进 `seedError`。
  * 与 IDE 那边 `IdeEnvResetResponse` 同一条纪律：`ok:false` 时 `reason` 必填，
  * "点了没反应"是最糟的反馈。
  */

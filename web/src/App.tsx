@@ -11,9 +11,9 @@ const Question = lazy(() => import('./pages/Question'));
 const Bank = lazy(() => import('./pages/Bank'));
 const Progress = lazy(() => import('./pages/Progress'));
 const Ide = lazy(() => import('./pages/Ide'));
-// 第五页与 Bank/Progress 同一片：不许进首屏。判它的不是 check-bundle.mjs —— 那把尺子只比体积
-// （整片才 2.6KB gzip，静态 import 进来预算看不出来，实测照样 78.3KB/84KB 绿），
-// 真正会红的是 web/test/notebook.test.tsx 里那条"必须是 lazy 那一片"的源码形状判据。
+// 第五页与 Bank/Progress 同一片：不许进首屏。两把尺子各管一段 —— web/test/notebook.test.tsx 判的是 App.tsx 的源码形状
+// （必须是 lazy 那一片），而 check-bundle.mjs 的 FORBIDDEN_IN_ENTRY['notebook-page'] 判的是**产物**：它不比体积
+// （整片才 2.6KB gzip，静态 import 进来预算看不出来），是命中这一页自己的 data-testid —— 从别处静态拉回它也照样红。
 const Notebook = lazy(() => import('./pages/Notebook'));
 
 const PAGE_TITLE: Record<RouteName, string> = {
