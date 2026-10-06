@@ -437,7 +437,7 @@ export interface NotebookKernel { id: string; label: string; ready: boolean; rea
 export interface NotebookFile { file: string; seeded: boolean }
 export interface NotebookStatusResponse {
   running: boolean;
-  url?: string;          // 带 token 的本机地址；非回环来源拿到的 url 不含 token
+  url?: string;          // url 是本机地址；带不带 token 判的是 socket 对端地址：回环或本进程默认网关 ⇒ 带（compose 里宿主浏览器经网桥 NAT 进来，对端是网关而非回环），其余对端拿到的不含；网关那一半的安全性是派生的，前提是发布端口全绑 127.0.0.1（闸门 compose-ports.test.ts）
   reason?: string;       // running:false 时必填
   kernels: NotebookKernel[];
   notebooks: NotebookFile[];
