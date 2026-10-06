@@ -1138,6 +1138,21 @@
 
 ## IN PROGRESS
 
+- [ ] WI-89 Jupyter 运行时（子项目 A1）：**Task 1–9 完成，Task 10/11 未做，卡在 Docker 引擎**。
+  分支 `jupyter-a1`，HEAD `348f480`，**未 push**，工作树干净；宿主 `npm run verify:fast` EXIT=0。
+  交付内容：镜像里的 Jupyter + `arena-pyspark` kernel（argv 指向 IDE venv，所以 `!pip3` 下一格就能 import）、
+  entrypoint 常驻起在容器内 `127.0.0.1:8888` / 宿主 `127.0.0.1:7789`、token 走 `.env` 管线且**只按 socket
+  对端释放**（回环或本进程默认网关；`Host` 头那版被评审否了）、notebook 私有 warehouse/Derby 与判题侧隔离、
+  `shared` 契约 + `server/src/notebooks/{seed,status}` + 两个路由 + 第 5 个页面（懒加载，首屏仍 1 JS + 1 CSS）。
+  ｜**还没验的**（这三条一条都不许当成已过）：① 容器档 `./start.sh --verify` 与判题矩阵 `0 skipped`；
+  ② kernel 真跑 —— `nbconvert` 出 `venv ok` 与 `rows 15`、`/proc/<pid>/environ` 里 PATH 首项是 venv、
+  arena 容器里 `ARENA_JUPYTER_TOKEN` 这个 key 确实存在、容器 netns 里真读得到 `/proc/net/route`；
+  ③ 第五页的**真浏览器**验收（console error 与 warning 都要 0、切一次状态再看 DOM、故意停顿几十秒看进程还在）。
+  ｜**恢复点**：计划 `docs/superpowers/plans/2026-10-05-jupyter-notebook-runtime-a1.md`（Task 10 的指令已订正过，
+  `:1120` 那条假的"非回环不出现打开链接"已改掉）；ledger `.superpowers/sdd/2026-10-05-jupyter-notebook-runtime-a1/progress.md`
+  （gitignored）里有全部裁定与每条 "carried to Task 10"；明细在同目录 `task-9-report.md` / `task-11-docs-report.md`。
+  ｜**卡点判据**：`docker info` 现在挂到超时，后端日志 `connect tcp 192.168.65.7:2375: operation timed out`
+  （VM 半死，GUI 看不出来）⇒ 重启机器或 `wsl --shutdown` 后重开 Docker Desktop，等 `docker info` 秒回再跑 Task 10。
 - [ ] WI-56 公司扩充（长期项）：目标 **每家 25-30 题**（2026-09-22 用户拍板，取代 commit `2b71a0d`
   消息里那句"6 家各 ≥50"；2026-09-23 追到 30）。
   **当前实测（2026-09-25 批：Airbnb +1、DeepSeek +1，题库共 254）：六家全部达 30 ——
@@ -1220,7 +1235,20 @@
 
 ## TODO
 
-
+- [ ] WI-90 企业级 PySpark 教程 notebook（子项目 B，**排在 A1 之后**）：spec
+  `docs/superpowers/specs/2026-10-05-pyspark-enterprise-notebooks-design.md` 已批准。第一轮 3 篇打样
+  （`01-skew-and-hot-keys` / `02-small-files-and-partitioning` / `03-reading-the-plan-and-aqe`），难度 senior，
+  定位是"边查边学"：语法/调参/troubleshooting 三段式，每篇锚到现有题库的 `bd-pyspark-0001/0002/0005/0010`。
+  **交付档是硬的那一条**：每篇必须在容器里 `nbconvert --execute` 真跑过、且含**方向性 assert**（不是"跑不挂"，
+  是"调错参数必须看到变差"）才算绿 —— 这条要有闸门，不能靠人说跑过了。
+- [ ] WI-91 真交互式 Scala kernel（子项目 A2，**必需项，不是可选**）：用户明确否掉了"没有 Scala kernel 也行"。
+  三条路各给一个时间盒，按顺序试：**Almond → Toree（preview 那一档）→ 自己包一层 IMain kernel**。
+  撞穿第一条就停下记账，不要在第二条上继续烧时间盒。注意与 WI-89 的两处耦合：kernel 的 `argv` 同样要落在
+  IDE 那一侧的环境，且 Scala notebook 的 warehouse/Derby 也必须与判题侧分开（同 `arena-pyspark` 的做法）。
+- [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例在 pre-commit 里随机红（BA 里程碑记下的那条会冤红的闸门）：
+  "JavaScript 行断点（CDP）stepIn/stepOut" 报"起不来：没能开始调试"，单跑与整轮 `verify:fast` 都绿。
+  要修的是它的**启动竞态**（CDP 服务未就绪就发指令那一类），**不是** skip —— 冤红教人重跑，重跑久了闸门就没了。
+  判据建议：把"重试到 ready 为止 + 一个上限"做成可断言的行为，而不是加 sleep。
 
 - [ ] 【已决议：暂不做 · 2026-09-20 用户拍板】WI-38 JDK 21 与 Spark 并存的取舍（WI-26② 的评估结论）：镜像里 Spark 是 3.5.5，官方支持矩阵到 Java 17（21 要 Spark 4.0），而**同一个 JDK 既跑 javac/java 判算法题又跑 Spark**，整体升到 21 会把 pyspark / spark-scala 推到未支持路径。可行做法是并装 `openjdk-21-jdk-headless`（约 +400MB、stack 层要全量重建），只让 `java-junit` 用 21、Spark 继续用 17，并给 `RunnerConfig` 加 `jdk` 选项。
   当前损失面评估：record / sealed / switch 表达式在 17 就能编译，真正判不了的是**虚拟线程（21 正式）与 sequenced collections（21）**；而虚拟线程这类题本来就不适合"纯函数 + 用例"判分，所以先不付这个体积与重建成本。（"Spark 3.5 不支持 21"引自官方发布说明，本机未验证 —— 镜像里没有第二个 JDK）

@@ -3139,3 +3139,97 @@ commit 元数据它看不见；两个判据根本不相交，所以"发布闸门
 | 宿主快档 | ✅ 两次 commit 各跑一遍（pre-commit），含新增 7 条 |
 | 推送 | `origin/main = e52a6f0`，GitHub 侧回读 17 条 commit 全 noreply |
 | 容器交付档 | `./start.sh --verify` ✅ `EXIT=0`；判题矩阵 **451 passed / 452 total**、158 道代码题跳过 0；**新加的 7 条署名用例在镜像里全绿** —— 那里没有 `.git` 也没有 git config，"临时仓库 + `git var` 兜底"这条路照样成立 |
+
+---
+
+## 里程碑 BA：Jupyter 运行时 A1 —— 代码到 Task 9，交付档与浏览器一条都没跑（2026-10-06）
+
+先把状态钉在最前面，免得下一个 session 把"东西都在"读成"验过了"：**宿主快档全绿；容器交付档一次没跑，
+第五页从没在真浏览器里打开过。** 卡点是 Docker Desktop 的 Linux 引擎起不来（文末有证据）。A1 剩 Task 10
+（容器档 + 浏览器 + E2E）与 Task 11 的实测回填。
+
+### 这轮是什么
+
+两份 spec（`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`、
+`docs/superpowers/specs/2026-10-05-pyspark-enterprise-notebooks-design.md`）+ 一份 11 任务的计划
+（`docs/superpowers/plans/2026-10-05-jupyter-notebook-runtime-a1.md`）。交付顺序 **A1 → B（3 篇企业级
+PySpark notebook，每篇在容器里真跑、含方向性 assert）→ A2（真交互式 Scala kernel）**。
+用户原话点的是"使用 spark 3.4"，谈下来是**不引第二份 Spark、沿用镜像里的 3.5.5**：判题侧的 `spark-judge`
+与整张判题矩阵都钉在 3.5.5，装第二份等于把判题环境也变成变量 —— "spark 为什么要这么多版本，保留一个可以嘛"
+是用户自己拍回来的。
+
+### 拍下来的边界（代码注释与计划里都有，记一遍省得重新讨论）
+
+- Jupyter **常驻**，由 entrypoint 起，只听容器内 `127.0.0.1:8888`，发布成宿主 `127.0.0.1:7789`。
+- kernel 复用 IDE 那个 venv（`/opt/arena-ide-env/python/bin/python -m ipykernel_launcher`），所以 shell 里
+  `!pip3 install` 装的包下一格就能 import —— 这是红线①的一条**延伸**：notebook 的 shell 必须落在 IDE venv，
+  不是镜像的系统 python。
+- notebook 用自己的 warehouse 与 Derby（`/app/data/notebook-warehouse/{wh,derby}`），否则和判题侧常驻的
+  Spark worker 抢 Derby 锁。
+- 入口是**第 5 个页面**（懒加载，首屏仍是 1 JS + 1 CSS），不是 iframe。B 第一轮只打样 3 篇。不做手机版。
+
+### 评审抓出来的四条，每条都值得单独记
+
+1. **token 释放的判据一开始挂在客户端可伪造的 `Host` 头上。** 局域网里任何人发一个
+   `Host: 127.0.0.1:7788` 就能换到带 token 的 URL。改成判 **socket 对端**（`request.raw.socket.remoteAddress`），
+   `Host` 头只用于显示，并用一条 `@ts-expect-error` 把"把它当参数传进来"这条路堵死在类型层。
+   顺带发现旧的正则会把**非回环字面量** `::1:7788` 认成本机 ⇒ 判地址不能靠正则凑。
+2. **同一个坑在上一层被重新造出来一次。** Task 7 刚把 `status.ts` 的失败路径硬化过，Task 8 的路由写的是
+   `{ ...base, notebooks: await seedNotebooks() }` —— 第二个 `await` 没有兜底，而 `seed.ts` 是**故意**让
+   `mkdir`/`copyFile` 往外抛的。于是只读挂载或写满时 `/api/notebook/status` 直接 500，把整张状态卡抹掉，
+   **而 Jupyter 其实活得好好的**。修法是 catch 之后 200 + `notebooks: []` + 契约里一个可选 `seedError`，
+   页面把"铺不进去"与"没有示例"说成两句互斥的话。教训：**"上一层硬化过"不清除"这一层裸 await"的风险。**
+3. **一条会偶发冤红的闸门比没有闸门更坏。** 新的 API 测试 `afterAll` 删临时目录时和文件日志的异步写抢，
+   间歇 `ENOTEMPTY`，而这文件被 `verify:fast` **和** pre-commit 双重认领 —— 冤红的代价是教会人重跑，
+   重跑久了就等于没有闸门。按仓库里 `log.test.ts` 的 `flushLogs` 先例排空再删，不许 `it.skipIf`。
+4. **文档会把执行者带回被否掉的做法。** 计划正文里有 9 处还写着 Host 头判据；`web/src/App.tsx` 那句
+   "判它的不是 check-bundle.mjs"已被新加的 `notebook-page` 产物标记证伪；`shared` 契约里把一个路由写成了
+   不存在的 `/prepare`；还有一句"非回环来源拿到的 url 不含 token" —— 在网关分支下**把边界画错了**
+   （容器部署里非回环的 docker 网关恰恰拿得到 token）。最坏的一条是计划 `:1120` 那条 E2E 指令：它让
+   Task 10 断言"非回环时不出现打开链接"，照它写必然红，**红了就容易有人去改页面**把无 token 时的链接藏掉 ——
+   那正是 `web/test/notebook.test.tsx` 明令守住的静默降级那一类。⇒ 这条不是"文档洁癖"，所以我没等 Task 11，
+   提前把它清了（`21db3da`、`71defc4`、`348f480`）。
+
+### 网关那一半：为什么放行
+
+compose 里宿主浏览器进容器时已被 docker-proxy SNAT 成网桥网关，只认回环会让 token 在**唯一启用它的那个部署**里
+永远不释放（点开是 Jupyter 登录页而界面全绿 —— 那是最难发现的一种假话）。所以加了"对端 == 本进程默认网关"，
+网关从 `/proc/net/route` 读（不是猜网段 +1）。它比回环宽得多，安全性是**派生的**：派生自"发布端口全绑
+`127.0.0.1`"这条不变量（闸门 `compose-ports.test.ts`），端口一旦放开它就变成局域网凭据泄露。这句话现在同时
+写在 `status.ts` 的注释、`README.md` 与 `docs/ARCHITECTURE.md` 里 —— 因为改 compose 端口的人落在文档，
+不落在 `status.ts`。
+
+### 又发现一条会周期性冤红的旧闸门
+
+`server/test/ide/debug.test.ts` 的"JavaScript 行断点（CDP）stepIn/stepOut"在 pre-commit 里随机红
+（"起不来：没能开始调试"），单跑与两次 `verify:fast` 都绿。该修它的启动竞态，不是 skip。另记一条 Windows
+观察：`plans/`、`specs/`、`status.test.ts` 在工作树里整体是 CRLF，改这几份的人要把改动那几行补回 CRLF，
+否则下一次归一化会造出上千行的假 diff（CR 闸门只管 `.sh`，这条不在闸门里，靠人记）。
+
+### 恢复点（给下一个 session，也给我自己）
+
+- 分支 `jupyter-a1`，HEAD `348f480`，**未 push**，工作树干净。Task 1–9 完成，Task 10/11 未做。
+- ledger：`.superpowers/sdd/2026-10-05-jupyter-notebook-runtime-a1/progress.md`（gitignored，不随 push 出去）。
+  里面有每条 "carried to Task 10" 与全部裁定；`task-9-report.md` 与 `task-11-docs-report.md` 是明细。
+- 引擎就绪后的顺序：`./start.sh --rebuild` → `./start.sh --verify`（判题矩阵必须 `0 skipped`）→ 宿主
+  `npm run e2e` → 真浏览器开 `/notebook`（console 的 error **与 warning** 都要 0；切一次状态再看 DOM；
+  再故意停顿几十秒看进程还在不在）→ Task 11 回填 spec §11 的实测、写里程碑与 WI。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 宿主快档 | ✅ `npm run verify:fast` EXIT=0 —— 我在 `541c843` 独立跑过，文档轮之后在 `348f480` 再跑；每个 commit 的 pre-commit 各又跑一遍 |
+| 本轮用例 | `notebook-image` / `notebook-compose` / `notebook-contract` / `notebook-env-isolation` / `env-write-atomicity` / `seed` / `status` 20 / `notebook-api` 14 / `web notebook` 19 —— 全绿，输出干净（日志抢那条修完之后 `写日志失败` 计数为 0） |
+| **容器交付档** | ❌ **没跑**。Docker 引擎不可达 ⇒ `--verify`、判题矩阵那个 `0 skipped`、kernel 真跑、`/proc/net/route` 真读，本轮**没有一条有实测证据** |
+| **真浏览器** | ❌ 没跑。第五页从未在浏览器里打开过（含新文案 `notebook-files-empty` 与 `role` 取值） |
+| 破坏性 | 每个新闸门执行者当场改坏被测物验过；复审独立复核了几条最关键的：删掉 `logWarn` ⇒ 那条用例红；`lazy`→静态 import ⇒ `check-bundle` 在 `notebook-page` 标记上红（不是体积那条）；去掉路由里的 `catch` ⇒ 那条 API 用例回到 500 |
+| 复审轮数 | Task 8+9：2 轮（第 1 轮 3 Important + 5 Minor，第 2 轮清残留）；文档订正：1 轮（复审自己抓出两处它扫漏的同类 stale 文字，已修） |
+
+### Docker 起不来的证据（别下次又当成"用户没开"）
+
+Docker Desktop 的 GUI 与 `com.docker.backend` 都在跑、`wsl -l -v` 里 `docker-desktop` 是 Running，但
+`docker info/version/ps` 全部挂到超时；后端日志反复 `connect tcp 192.168.65.7:2375: operation timed out`
+（VM 内部 IP 换了而后端还指着旧地址），`wsl -d docker-desktop -u root sh -c ...` 也挂 ⇒ VM 半死。
+预备动作：`wsl --shutdown`（会顺带关掉本来就已 Stopped 的 Ubuntu-20.04）后重启 Docker Desktop，或直接重启机器。
+判据只看一件事：`docker info` 能在几秒内返回 —— 在它返回之前，任何 `--verify` 的结果都不许写进记忆。
