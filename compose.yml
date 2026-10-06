@@ -55,6 +55,19 @@ services:
       # 由那条常驻解释断言与 verify.sh 的阶段一起判）。容器档验证走 `./start.sh --verify`，
       # 它 exec 进的是这个 arena 服务 —— 那一组真正要验的就是这里。
       ARENA_IN_CONTAINER: "1"
+      # 服务身份标记（评审 I-2）：上面那条只说"这是容器"，而 arena / dev / tools 三台都是；
+      # 容器那一组的**前置条件**（跑着的 jupyter、透传进来的 token、镜像级 kernel 文件）却只有 arena 满足：
+      #   · tools 覆盖了 entrypoint ⇒ 没有跑着的 jupyter，而且它连 ARENA_IDE_ENV_DIR 都没有
+      #     （那三处 = arena / dev / e2e，由 notebook-image.test.ts 钉住）⇒ config.ideEnvDir 退回
+      #     dataDir/ide-env = Windows 的 bind mount（本文件上面那条 IDE 卷注释记的 87.2s vs 1.76s），
+      #     那一组会先在那里试建 venv 把 200s 预算吃掉，再红一句"venv 创建失败"；
+      #   · dev 有卷、也是 arena 那个镜像（kernel 文件在），但它按设计拿不到 token（见下面 ⑥ 那段）
+      #     ⇒ entrypoint 的守卫让它根本没有 jupyter ⇒ PATH / token 键 / 路由表那三条会红在"错服务"上。
+      # 两种红都错认了对象。所以 kernel.test.ts 的门控读的是**合取**（容器标记 && 服务标记），
+      # 这一行只给 arena。谁给第二行由 notebook-compose.test.ts ⑦ 判。
+      # ⚠ 别改用"`/proc` 里有没有 `--ServerApp.root_dir=` 进程"来分辨：那正是那一组要找的东西，
+      #   拿它当门控 = 断言自我循环（那条判据自己就红了不算，它还永远不会红）。
+      ARENA_NOTEBOOK_SERVICE: "1"
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
@@ -81,12 +94,18 @@ services:
       - ./docker:/app/docker
       - ./docker-cache/npm:/root/.npm
     environment:
-      # tools 覆盖了 entrypoint（下面那条 `entrypoint: ["bash","-lc"]`），自己不会起 jupyter，
-      # 但 Task 10 的容器档 notebook 测试要在这个容器里读到同一个 token ⇒ 只透传，不加端口。
+      # tools 覆盖了 entrypoint（下面那条 `entrypoint: ["bash","-lc"]`），自己不会起 jupyter。
+      # token 照透传（Task 4 起就是这一行，且 notebook-compose.test.ts ⑤ 钉着"arena 与 tools 必须给同一份"）：
+      # 它现在的价值是"同一个人、同一台机器上只有一个 notebook token"，在这里跑的服务端代码读的
+      # 也是同一个值。**注意**：Task 10 的容器档 kernel 那一组**不再**在这个容器里跑（评审 I-2 ——
+      # tools 没有 ARENA_IDE_ENV_DIR，那一组读的是合取门控，在这里干净跳过），所以别再拿"kernel 测试
+      # 要在 tools 里读 token"给这一行当理由。只透传，不加端口。
       ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
       # 容器标记见 arena 块那段注释。tools 里 entrypoint 被覆盖 ⇒ **没有**跑着的 jupyter，
-      # 所以那一组在这里会红在"前置条件不成立"那两句上（说的就是实情）；容器档的正解是
-      # `./start.sh --verify`（exec 进 arena）。标记照给：它说的是"这是容器"，不是"jupyter 在跑"。
+      # 且它没有 ARENA_IDE_ENV_DIR ⇒ IDE 环境会退回 bind mount 上那份 data/ide-env（87s 那条）。
+      # 所以这里只给容器标记、**不给** ARENA_NOTEBOOK_SERVICE：kernel.test.ts 那一组读的是合取，
+      # 在这个容器里干净跳过（报告写出 "N skipped"），不会去 data/ 上试建 venv 再报一条错认了对象的
+      # "venv 创建失败"（评审 I-2）。容器档的正解仍是 `./start.sh --verify`（exec 进 arena）。
       ARENA_IN_CONTAINER: "1"
     init: true
     entrypoint: ["bash", "-lc"]
@@ -118,8 +137,10 @@ services:
       # 而它又没有 notebook 端口，起一个 server 等于"多一个能读写真人笔记的进程、且没人能从外面
       # 访问它"，纯增加面。要 dev 也能用 notebook，得先给它自己的端口与自己的数据目录，
       # 那时这条判据（notebook-compose.test.ts ⑥）要跟着改并写下理由。
-      # 容器标记照给（见 arena 块那段注释）：dev 里没有 jupyter ⇒ kernel.test.ts 那一组会红在
-      # "前置条件不成立"与"没有 token 键"那两句上，说的都是实情 —— 容器档的正解是 --verify（arena）。
+      # 容器标记照给（见 arena 块那段注释）：dev 用的就是 arena 那个镜像 ⇒ kernel 文件**在**，
+      # 但它没有 token ⇒ entrypoint 不起 jupyter。`ARENA_NOTEBOOK_SERVICE` 故意不给：那一组读的是
+      # 合取（容器标记 && 服务标记），在 dev 里干净跳过并报告写出 "N skipped"（评审 I-2）——
+      # 容器档的正解是 --verify（arena），在这里承诺"会在跑"只会多一条错认对象的红。
       ARENA_IN_CONTAINER: "1"
       <<: *llm-env
     extra_hosts: *host-gateway

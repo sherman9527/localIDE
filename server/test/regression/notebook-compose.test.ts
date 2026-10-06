@@ -10,17 +10,21 @@ import { config } from '../../src/config.js';
  * ③ e2e 服务不许出现 notebook 端口（7789 与容器内 8888 都算）：E2E 不该依赖一个真 notebook 服务器，
  *    也不该跟真人实例抢同一端口号；
  * ④ 宿主端口不许被两个**可能同时在跑**的服务抢（理由见 MUTUALLY_EXCLUSIVE_GROUPS 那段）；
- * ⑤ arena 与 tools 必须透传 token —— 服务端要读同一个值（Task 7 的 status、Task 10 的容器档 kernel 测试）；
+ * ⑤ arena 与 tools 必须透传 token —— 服务端要读同一个值（Task 7 的 status；tools 那份是
+ *    "同一台机器只有一个 token"，不是"kernel 那一组会在 tools 跑"，见 ⑤ 本体旁边那条订正）；
  * ⑥ e2e 与 dev 必须**拿不到** token —— entrypoint 是镜像级的，"谁拿到谁起 jupyter"，而这两个服务
  *    挂的都是真人的 `./data`（读写）。
  * ⑤⑥ 是同一条裁决的两半：**"不透传给隔离实例"是 WI-40 的隔离规则本身，不是漏接线**。
  * 只写 ⑤（"每个服务都得有"）会把这条隔离判据反着钉死 —— 那才是 review 抓到的地方：e2e 拿到 token
  * ⇒ 起一个 root_dir 指向真人笔记的 server，而现有的隔离判据只 hash data/arena.db-wal，看不见 notebooks。
  * 今天它没有发布端口所以进不去，但 Task 8 一加服务端代理就变成真路径，所以现在就堵在 token 上。
- * ⑦ Task 10 补的容器标记 `ARENA_IN_CONTAINER`（arena / dev / tools 有、e2e 没有）：
- *    少给 arena 那一半，`server/test/notebooks/kernel.test.ts` 整组会**静默降级成 skip** ——
+ * ⑦ Task 10 补的两个容器标记的**分布**（评审 I-2 之后是两条 key，不是一条）：
+ *    `ARENA_IN_CONTAINER`（"这是一个容器"）arena / dev / tools 有、e2e 没有；
+ *    `ARENA_NOTEBOOK_SERVICE`（"这就是那个跑着 notebook 服务的实例"）**只有 arena 有**。
+ *    少给 arena 任何一条，`server/test/notebooks/kernel.test.ts` 整组会**静默降级成 skip** ——
  *    那个文件自己有一条常驻解释断言会在容器档跑时撞红，但它要等一次 `./start.sh --verify` 才看得见；
- *    compose 档是每天跑的那一侧，所以这里也钉一份。理由与 e2e 不许有它，见 ⑦ 那条断言旁边。
+ *    compose 档是每天跑的那一侧，所以这里也钉一份。多给 dev / tools / e2e 第二条，
+ *    等于让那一组在没有 jupyter、没有 token、IDE 环境不在卷上的实例里承诺自己会跑（理由见 ⑦ 本体）。
  */
 
 /**
@@ -73,13 +77,30 @@ function tokenPassThrough(block: string): string | undefined {
   return configLine(block, 'ARENA_JUPYTER_TOKEN');
 }
 
-/** 同上（判配置行不判注释）：给 ⑦ 用的通用版。 */
+/**
+ * 同上（判配置行不判注释）：给 ⑦ 用的通用版。
+ * ⚠ 还要把**行尾的随行注释**剥掉（`KEY: "1"  # 说明` 在 YAML 里是真配置行）：
+ * 只滤掉整行注释的话，`KEY: "1" # ...` 会被下面的值判据当成"这一行不是 1"⇒「这个服务不许有」
+ * 那半变成假绿（本仓库的 mutation m5 实测撞到的：给 tools 加上 `ARENA_NOTEBOOK_SERVICE: "1" # ...`
+ * 之后 ⑦ 全绿，而容器那一组在那个服务里**真的会跑起来**）。剥注释统一在这一个原语里做，
+ * 免得每个调用方各自再记一遍"要剥注释"。形状判据钉在下面那条「configLine 的原语本身」。
+ */
 function configLine(block: string, key: string): string | undefined {
   return block
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.trim().replace(/\s+#.*$/, '')) // 行尾随行注释不是值的一部分（前面必须有空白，避免切进值里的 #）
     .filter((l) => l !== '' && !l.startsWith('#'))
     .find((l) => new RegExp(`^${key}\\s*:`).test(l));
+}
+
+/**
+ * 这个服务**真的**把 `<key>: "1"` 写上了吗（值不是 1 也算没有）。
+ * key 从同一个参数进来，定位与判值用的是**同一个** key（评审 I-7 minor）：
+ * 判据若写成 `configLine(block, KEY)` 定位、却拿一条写死的 `/^ARENA_IN_CONTAINER:/` 判值，
+ * 那么这个 helper 换 key 时两边会各说一套 —— 加第二条标记时正好是这种形状。
+ */
+function markerIsOne(key: string, block: string): boolean {
+  return new RegExp(`^${key}:\\s*"?1"?\\s*$`).test(configLine(block, key) ?? '');
 }
 
 /**
@@ -152,7 +173,11 @@ describe('notebook 的端口与 token 接线', () => {
   });
 
   it('arena 与 tools 都透传了 ARENA_JUPYTER_TOKEN（漏一处 = 那个实例读不到同一个 token）', () => {
-    // arena：服务端与 entrypoint 要用同一个值；tools：Task 10 的容器档 kernel 测试在这个容器里跑。
+    // arena：服务端与 entrypoint 要用同一个值；tools：同一个人、同一台机器上只该有一份 token，
+    // 在这里跑的服务端代码读的也是同一个值。
+    // ⚠ 这一行原来写的理由是"Task 10 的容器档 kernel 测试要在 tools 里读它"—— 那个前提在评审 I-2
+    //   之后不成立了（那一组读的是合取门控，tools 里没有 ARENA_NOTEBOOK_SERVICE ⇒ 干净跳过），
+    //   判据本身不变（⑤ 仍是"arena 与 tools 必须有"），但别再拿 kernel 测试给它当理由。
     const mustHave: Array<[string, string]> = [['arena', arena], ['tools', tools]];
     const missing = mustHave
       .filter(([, block]) => !/\$\{ARENA_JUPYTER_TOKEN:-\}/.test(tokenPassThrough(block) ?? ''))
@@ -174,24 +199,69 @@ describe('notebook 的端口与 token 接线', () => {
   });
 
   /**
-   * ⑦ Task 10 的容器标记。方向两边都要判：
-   * - **arena 少给** ⇒ `server/test/notebooks/kernel.test.ts` 那一整组（真跑 smoke notebook、读运行中的
+   * ⑦ 两个标记的分布。方向两边都要判，而且现在判的是**两条 key**：
+   * - **arena 少给任何一条** ⇒ `server/test/notebooks/kernel.test.ts` 那一整组（真跑 smoke notebook、读运行中的
    *   jupyter 进程的 PATH、token 键、/proc/net/route）在容器档里也只是"被跳过"，而容器档的默认 reporter
    *   会把这一行和别的跳过混在一起 —— 那条闸门就变成装饰（本仓库为这类形状记过一次：provenance.test.ts
    *   躺在被认领的目录里但那一条阶段从没设过它的变量）。compose 这一侧每天跑，所以在这里钉住。
-   * - **e2e 多给** ⇒ 那个实例按设计没有 token、按设计不起 jupyter（⑥），标上"这是容器、容器档可以在这里跑"
-   *   等于让那一组在一个必然撞前置条件的地方承诺自己会跑；而 e2e 是宿主 Playwright 打的隔离实例，
-   *   容器档从来不该在那里跑（真跑走 `./start.sh --verify`，exec 进 arena）。
-   * dev / tools 照给：标记得准的事实是"这是容器"，不是"jupyter 在跑"，
-   * 那两个容器里那一组会红在"前置条件不成立"那两句上 —— 那是实情，不是要瞒的东西。
+   * - **dev / tools / e2e 多给 `ARENA_NOTEBOOK_SERVICE`** ⇒ 那一组会在"按设计不是 notebook 服务"的实例里
+   *   承诺自己会跑。两台各有各的坏法（compose 的 arena 块那段把这两种都写了）：
+   *   tools 连 `ARENA_IDE_ENV_DIR` 都没有（那三处 = arena / dev / e2e，`notebook-image.test.ts` 钉着）
+   *   ⇒ `config.ideEnvDir` 退回 `dataDir/ide-env` = Windows 的 bind mount（compose.yml 自己记的 87.2s vs 1.76s）
+   *   ⇒ 先在真人的 `./data` 上试建 venv、再红一句"venv 创建失败"，而真正的毛病是"跑错了服务"
+   *   （评审 I-2 说的 misattributed red，预算也是从这里被吃掉的）；
+   *   dev 有卷、也是 arena 那个镜像（kernel 文件在），但它按 ⑥ 拿不到 token ⇒ 没有跑着的 jupyter
+   *   ⇒ PATH / token 键 / 路由表那三条红在"错服务"上。
+   * ⚠ 分辨"是不是那个服务"**不能**用「`/proc` 里有没有带 `--ServerApp.root_dir=` 的进程」：
+   *   那正是容器那一组要**找**的东西，拿它当门控会让断言自我循环（控制器追加的裁决）。
+   * `ARENA_IN_CONTAINER` 对 dev / tools 照给：它得说的是"这是容器"，不是"jupyter 在跑"，
+   * 那一组在那两个容器里按合取条件干净跳过（`kernel.test.ts` 顶部那段写了为什么不再红）。
    */
-  it('容器标记 ARENA_IN_CONTAINER 只给 arena / dev / tools，不给 e2e（少给 arena = 容器档静默 skip）', () => {
-    const KEY = 'ARENA_IN_CONTAINER';
-    const mustHave: Array<[string, string]> = [['arena', arena], ['dev', dev], ['tools', tools]];
-    const missing = mustHave
-      .filter(([, block]) => !/^ARENA_IN_CONTAINER:\s*"?1"?\s*$/.test(configLine(block, KEY) ?? ''))
-      .map(([svc]) => svc);
-    expect(missing, `这些服务没有 ARENA_IN_CONTAINER: "1"（或值不是 1）：${missing.join(', ')}`).toEqual([]);
-    expect(configLine(e2e, KEY), 'e2e 拿到了容器标记 ⇒ 容器档那一组会以为可以在这个没有 token、没有 jupyter 的隔离实例里跑').toBeUndefined();
+  it('容器标记 ARENA_IN_CONTAINER 给 arena / dev / tools，notebook 服务标记 ARENA_NOTEBOOK_SERVICE 只给 arena（少给 arena = 容器档静默 skip）', () => {
+    const DISTRIBUTION: Array<{ key: string; yes: string[]; no: string[] }> = [
+      { key: 'ARENA_IN_CONTAINER', yes: ['arena', 'dev', 'tools'], no: ['e2e'] },
+      { key: 'ARENA_NOTEBOOK_SERVICE', yes: ['arena'], no: ['dev', 'tools', 'e2e'] },
+    ];
+    for (const { key, yes, no } of DISTRIBUTION) {
+      // 空转防护：表里的服务名写错 = 那条断言在空气上判（blocks 里查不到就会被 `?? ''` 洗成"没有这一行"）。
+      const unknown = [...new Set([...yes, ...no])].filter((svc) => !blocks.has(svc));
+      expect(unknown, `判据表里的服务名在 compose 里不存在（写错名字等于没判）：${unknown.join(', ')}`).toEqual([]);
+
+      const missing = yes.filter((svc) => !markerIsOne(key, blocks.get(svc) ?? ''));
+      expect(missing, `这些服务没有 ${key}: "1"（或值不是 1）：${missing.join(', ')} ⇒ 容器档那一组会在该跑的地方只是被跳过`).toEqual([]);
+
+      for (const svc of no) {
+        expect(
+          markerIsOne(key, blocks.get(svc) ?? ''),
+          `${svc} 拿到了 ${key}: "1" ⇒ 它按设计不是那个跑 notebook 服务的实例（没有 token / entrypoint 被覆盖 / 隔离实例），` +
+            '容器档那一组却会在这里 promise 自己会跑，并先在 bind mount 上试建 venv',
+        ).toBe(false);
+      }
+    }
   });
+
+  /**
+   * ⑦ 用的那**两个原语**自己也要判住（mutation m5 撞出来的：`ARENA_NOTEBOOK_SERVICE: "1" # 说明`
+   * 这种带随行注释的写法在 YAML 里是真配置行，而 `configLine` 当时只滤整行注释 ⇒ 值判据看到的还是
+   * 带注释的原文 ⇒ `markerIsOne` 判 false ⇒「dev / tools / e2e 不许有这一行」那半**假绿**，
+   * 而容器那一组在那个服务里真的会跑（正是 I-2 要拦的形状）。
+   * 这类"判据的判据"写在这里而不是只在注释里说"记得剥注释"：下一位加第三条 key 的人
+   * 不会重读这段历史，但他一定会复用这两个函数。
+   */
+  it('configLine / markerIsOne 的原语形状（随行注释不算值、整行注释不算配置、定位与判值用同一个 key）', () => {
+    expect(configLine('  KEY: "1" # 随行注释', 'KEY'), '随行注释没剥掉 ⇒ 「这个服务不许有」那半会假绿').toBe('KEY: "1"');
+    expect(configLine('  KEY: "a#b"', 'KEY'), '值里的 # 前面没有空白 ⇒ 不许被当成注释切掉').toBe('KEY: "a#b"');
+    expect(configLine('# KEY: "1"', 'KEY'), '整行注释被当成了配置行 ⇒ 在注释里写一句就能骗过 ⑤⑥').toBeUndefined();
+    expect(configLine('  OTHER: "1"', 'KEY')).toBeUndefined();
+    expect(configLine('  KEYX: "1"', 'KEY'), '前缀匹配：KEYX 不是 KEY').toBeUndefined();
+
+    expect(markerIsOne('KEY', '  KEY: "1" # 给 tools 也加一份'), 'm5 的形状必须判成"这一行真的设了"').toBe(true);
+    expect(markerIsOne('KEY', '  KEY: 1')).toBe(true);
+    expect(markerIsOne('KEY', '  KEY: "0"'), '值不是 1 ⇒ 不算设过').toBe(false);
+    expect(markerIsOne('KEY', '  KEY: yes'), 'YAML 的 yes 不是这一档用的写法（compose 里两条标记都写成 "1"）').toBe(false);
+    // minor 7 的正题：定位与判值用的是**同一个** key —— 传错 key 时不许"碰巧"判中另一条
+    expect(markerIsOne('ARENA_IN_CONTAINER', 'ARENA_NOTEBOOK_SERVICE: "1"')).toBe(false);
+    expect(markerIsOne('ARENA_NOTEBOOK_SERVICE', 'ARENA_IN_CONTAINER: "1"')).toBe(false);
+  });
+
 });

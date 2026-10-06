@@ -20,19 +20,46 @@ import { findLanguage } from '../../src/ide/languages.js';
  * 本来就把整个 `server/test/notebooks/` 扫进**宿主档**（`npm run verify:fast` 也走它）。
  * 所以「只在容器阶段点名这个文件」根本挡不住宿主跑它 —— 文件一放进这个目录宿主就会跑它，
  * 而宿主既没有 arena-pyspark 的 kernel 文件、也没有 jupyter CLI、更没有跑着的 Jupyter。
- * ⇒ 判据必须自己知道「现在在不在容器里」：容器那一组用 `describe.skipIf(!IN_CONTAINER)`
- *   （报告会写「N skipped」，「跳过」这件事看得见），另留一组**永远会跑**的解释断言，
+ * ⇒ 判据必须自己知道「现在在不在该跑它的那个容器里」：容器那一组用
+ *   `describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)`（**合取**，评审 I-2；报告会写「N skipped」，
+ *   「跳过」这件事看得见），另留一组**永远会跑**的解释断言，
  *   说出「为什么会跳过」并且两个方向都判得住（本仓库的规矩：`try/catch → return` 式的静默早退
  *   不算闸门，见 `.qoder/rules/dev_verify_workflow.md` 第 3 条与 `publish-identity.test.ts` 的先例）。
- *   常驻那条同时判两个方向：标了容器标记却没有 kernel 文件 ⇒ 红（镜像没按 Dockerfile 构建，
- *   或有人在宿主上手动设了这个变量）；有 kernel 文件却没标 ⇒ 红（这一档会在**本该跑它的地方**静默跳过）。
+ *
+ * **为什么是合取，不是单看 `ARENA_IN_CONTAINER`**（评审 I-2 采纳自复核者，且覆盖上一轮的裁决）：
+ * compose 给 arena / dev / tools 三台都标了「这是容器」，而 `tools` 是这仓库**写在文档里的验证机位**
+ * （compose.yml 那段 + start.sh 记的「在 tools 里跑曾经静默跳掉 mysql/redis 判题」），
+ * 人在里面 `npm run verify` 是既成行为不是假设。可它没有 `ARENA_IDE_ENV_DIR`（只有 arena/dev/e2e 三处有）
+ * ⇒ `config.ideEnvDir` 退回 `dataDir/ide-env` = Windows 的 bind mount（compose.yml 自己记的 87.2s vs 1.76s）
+ * ⇒ 下面那个 `beforeAll` 会先在真人的 `data/` 上试建 venv、再撞穿 200s 预算，报出来的是「venv 创建失败」，
+ * 而真正的毛病是「跑错了服务」——一条错认对象的红比一条不跑更贵。
+ * 分辨服务身份**不能**用「`/proc` 里有没有带 `--ServerApp.root_dir=` 的进程」：那正是下面那条 PATH 判据要
+ * **找**的东西，拿它当门控 = 自我循环（它永远不会红，也证明不了任何事）。所以用 compose 给的第二个标记
+ * `ARENA_NOTEBOOK_SERVICE`，分布由 `notebook-compose.test.ts` ⑦ 钉（只给 arena）。
+ * 常驻那两条（下面「门控本身」那一组）判的是合取的两半各自能不能圆不上：
+ * 标了服务身份却没有 kernel 文件 ⇒ 红（镜像没按 Dockerfile 构建）；
+ * kernel 文件在场却连容器标记都没有 ⇒ 红（那一整组会在**本该跑它的地方**静默跳过）。
+ * dev / tools（容器标记有、服务标记没有）两条都不许红 —— 那正是 I-2 要的形状。
  */
 
 /** kernel 落在镜像级目录（不是 venv 里）—— 见 Dockerfile 那条 COPY 与 notebook-image.test.ts。 */
 const KERNEL_FILE = `/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/kernel.json`;
 const TOKEN_KEY = 'ARENA_JUPYTER_TOKEN';
+/**
+ * ⚠ 这两个标识符的**大小写是承重的**（评审 I-4）：`verify-coverage.test.ts` 的 `gateVars()` 用
+ * `\b([A-Z][A-Z0-9_]{2,})\b` 从 `skipIf(...)` 的条件回指 `const` 声明，再从中取 `process.env.X`。
+ * 把它们改成计划里的小写 `inContainer` / `notebookService`，`gateVars()` 就解不出变量名 ⇒
+ * 这个文件从「孤儿检查」里静默退出、阶段命令上的 `env` 前缀降级成装饰、
+ * 容器那一组可以永远不再跑而**零条红** —— 正是本仓库记过的「闸门一直是装饰」那一类。
+ * （`gateVars()` 本身不动：把它扩到 camelCase 是对共享闸门的分支级改动，控制器已记入终审台账。）
+ */
 /** compose 的 arena / dev / tools 各设 `ARENA_IN_CONTAINER: "1"`；宿主永不设（宿主档靠它门控）。 */
 const IN_CONTAINER = process.env.ARENA_IN_CONTAINER === '1';
+/** compose **只给 arena** 设 `ARENA_NOTEBOOK_SERVICE: "1"`（服务身份，见上面那段与 notebook-compose ⑦）。 */
+const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
+/** 有没有真 `/proc` 可读：Windows / macOS 宿主没有。下面那条「真 /proc 发现」靠它显式 skip（评审 I-3）。 */
+const HAS_PROC = existsSync('/proc');
+
 
 // ──────────────────────────── /proc 扫描（不用 pgrep，见下面那段注释） ────────────────────────────
 
@@ -122,12 +149,73 @@ function redactArgv(argv: string[]): string {
   return argv.map((a) => (a.startsWith('--ServerApp.token=') ? '--ServerApp.token=<REDACTED>' : a)).join(' ');
 }
 
+/** nbconvert 那份输出里，断言消息最多可以带走这么多字符（评审 minor：别把 32MB 打进报告）。 */
+const EVIDENCE_CAP = 400;
+
+/**
+ * 从 `jupyter nbconvert --to notebook --execute --stdout` 的输出里只取**两样**：
+ * cell 打到 stdout 的那些行，和出错 cell 的异常名。
+ * 那份输出是「执行后的整本 notebook」（JSON，里面还有富输出／base64），`maxBuffer` 给到 32MB ——
+ * 断言直接压在整串上时，一次失败会把整个 JSON 抄进测试报告（评审 I-4/minor：
+ * 「`expect(out).toContain('venv ok')` 失败时会 dump 整本 notebook」）。
+ * notebook 的导语对用户承诺的就三行（`python …` / `rows 15` / `venv ok`），判据压在那几行上，
+ * 结论一样强（少一行照样红），报告里能读。
+ * 解析不出 JSON 时给的是**截断后**的原文，不是全文 —— 「看不懂它输出了什么」也要看得见，但不能拿 32MB 换。
+ * 形状判据在常驻那一组（`假 executed-notebook JSON`），所以这条 plumbing 在宿主上就有牙，
+ * 不必等容器（容器里那次真跑只是它的一个用例）。
+ */
+function executedNotebookEvidence(raw: string): { stdout: string[]; errors: string[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { stdout: [], errors: [`输出不是 notebook JSON：${raw.slice(0, EVIDENCE_CAP)}`] };
+  }
+  const cells = (parsed as { cells?: unknown })?.cells;
+  if (!Array.isArray(cells)) return { stdout: [], errors: [`notebook JSON 里没有 cells 数组：${raw.slice(0, EVIDENCE_CAP)}`] };
+  const stdout: string[] = [];
+  const errors: string[] = [];
+  cells.forEach((cell, i) => {
+    const outputs = (cell as { outputs?: unknown })?.outputs;
+    if (!Array.isArray(outputs)) return;
+    for (const entry of outputs) {
+      const o = entry as { output_type?: string; name?: string; text?: string | string[]; ename?: string };
+      if (o.output_type === 'stream' && o.name === 'stdout') {
+        // `text` 按 nbformat 可以是「一整块字符串」也可以是「一行一个元素的数组」，两种都要收。
+        const text = Array.isArray(o.text) ? o.text.join('') : (o.text ?? '');
+        stdout.push(...text.split('\n').map((l) => l.trim()).filter((l) => l !== ''));
+      } else if (o.output_type === 'error') {
+        // 只留 cell 号与异常名：traceback 正文可以任意长，它进报告就等于没进。
+        errors.push(`cell ${i}: ${o.ename ?? '(没有 ename)'}`);
+      }
+    }
+  });
+  return { stdout, errors };
+}
+
 // ──────────────────────────── 容器档：真跑 ────────────────────────────
 
-describe.skipIf(!IN_CONTAINER)('arena-pyspark kernel 在容器里真能起 Spark', () => {
+/**
+ * 门控是**合取**（评审 I-2）：`ARENA_IN_CONTAINER` 说的是「这是容器」（arena / dev / tools 都是），
+ * `ARENA_NOTEBOOK_SERVICE` 说的才是「这就是那个跑着 notebook 服务的实例」（compose 只给 arena）。
+ * 少一条都会让这一组在**没有那些前置条件的服务**里跑起来，而两台的坏法不同（compose 的 arena 块各写了一遍）：
+ * tools 连 `ARENA_IDE_ENV_DIR` 都没有（那三处 = arena / dev / e2e）⇒ 下面那个 `beforeAll` 会先在
+ * `./data`（bind mount，87.2s vs 1.76s）上试建 venv，报出来的是「venv 创建失败」而毛病是「跑错了服务」；
+ * dev 有卷、用的也是 arena 那个镜像（kernel 文件在），但它按 notebook-compose ⑥ 拿不到 token
+ * ⇒ 没有跑着的 jupyter ⇒ PATH / token 键 / 路由表那三条红在「错服务」上。
+ * 两个条件都不成立时这一组整片 skip，报告写出「N skipped」，常驻那两条解释为什么。
+ */
+describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容器里真能起 Spark', () => {
   /** kernel 的解释器是**懒创建**的 venv，warehouse 目录由 entrypoint 建 —— 都是前置条件，不是被测物。 */
   let venvPrepareError: string | null = null;
 
+  /**
+   * ⚠ 重复 round-1 §2.2 那种「宿主强行带标记」的形状证明时，两个变量都要指到临时目录，**不只 IDE**：
+   * `ARENA_IDE_ENV_DIR=<临时>` 之外还要 `ARENA_DATA_DIR=<临时>` —— 这个 `beforeAll` 在任何前置检查
+   * **之前**就会建 `notebook-warehouse/{wh,derby}`（评审 minor），只换 IDE 目录的那次 demo
+   * 已经把两个空目录写进了真人的 `data/`。它们本身无害（entrypoint 也会建），但「为了试闸门脏一次数据目录」
+   * 是本仓库不想要的形状（E2E 的隔离纪律同理）。
+   */
   beforeAll(async () => {
     // 全新卷上 venv 还不存在，nbconvert 会挂在「解释器文件找不到」——
     // 症状长得像 kernel 坏了，其实是前置条件没满足。先建出来（幂等，同一处实现的锁在 env.ts 里）。
@@ -170,14 +258,25 @@ describe.skipIf(!IN_CONTAINER)('arena-pyspark kernel 在容器里真能起 Spark
   it('smoke notebook 跑完并打出 venv ok（证明解释器落在 IDE venv，Spark 起得来）', () => {
     const notebook = join(config.notebook.seedDir, '00-smoke-pyspark.ipynb');
     expect(existsSync(notebook), `${notebook} 不在 ⇒ content/ 那份只读挂载没进来，本条没有对象`).toBe(true);
-    const out = execFileSync(
+    const raw = execFileSync(
       'jupyter',
       ['nbconvert', '--to', 'notebook', '--execute', '--stdout', notebook],
       { encoding: 'utf8', timeout: 180_000, maxBuffer: 32 * 1024 * 1024 },
     );
-    expect(out).toContain('venv ok');
-    expect(out).toMatch(/rows 15/); // cell 3 打的是 spark.range(6) 的 id **之和** = 0+1+2+3+4+5 = 15（行数会是 6 —— 评审 I-1 把两边对齐成同一个算式）
-    expect(out).not.toMatch(/Traceback/);
+    // 断言压在「notebook 导语承诺的那三行」上，不压在整本执行后 notebook 上（见 executedNotebookEvidence 那段）：
+    // 少任何一行照样红，而失败消息只带那几行，不带 32MB。
+    const { stdout, errors } = executedNotebookEvidence(raw);
+    expect(errors, `执行时抛异常的 cell（只有 cell 号与异常名，不带 traceback 正文）：${errors.join(' / ')}`).toEqual([]);
+    const shown = JSON.stringify(stdout);
+    expect(stdout, `少「venv ok」⇒ 红线①那条 assert 没成立（解释器不在 IDE venv 里），实际 stdout 行：${shown}`).toContain('venv ok');
+    // rows 15 = spark.range(6) 的 id **之和** 0+1+2+3+4+5（行数会是 6 —— 评审 I-1 把两边对齐成同一个算式）
+    expect(stdout, `少「rows 15」⇒ Spark 那次聚合没真跑（15 是 range(6) 的 id 之和，不是行数 6），实际 stdout 行：${shown}`).toContain('rows 15');
+    const pythonLine = stdout.filter((l) => l.startsWith('python '));
+    expect(pythonLine, `「python <解释器>」应当恰好一条（cell 2 打的是 sys.executable），实际：${JSON.stringify(pythonLine)}`).toHaveLength(1);
+    // 旧写法是 `expect(out).not.toMatch(/Traceback/)`（扫整本 JSON）。这条把它收进"小集合"里：
+    // stdout 不许出现 Traceback 字样，判据强度不丢，但失败消息只带那几行。
+    // 真出异常时走的是上面那条 errors（nbformat 把它落成 output_type=error），这条兜的是"异常被当成文本打出来"。
+    expect(stdout.filter((l) => l.includes('Traceback')), `stdout 里出现了 Traceback 字样：${shown}`).toEqual([]);
   }, 200_000);
 
   /**
@@ -216,7 +315,7 @@ describe.skipIf(!IN_CONTAINER)('arena-pyspark kernel 在容器里真能起 Spark
    * **键在不在**（`status.ts` 的 `missingTokenReason()`），而此前它只有 compose 插值那行的推断撑着。
    * 这里把它变成闸门：arena 容器里这个键必须存在（值可以是空的 —— 「接上了但从没生成」也是它该说的另一句话）。
    */
-  it('容器里 ARENA_JUPYTER_TOKEN 这个**键**存在（只判形状，绝不回显值）', () => {
+  it('容器里 ARENA_JUPYTER_TOKEN 这个键存在（只判形状，绝不回显值）', () => {
     // 值可能是真的凭据：断言一律走布尔，消息里不插值 —— vitest 失败时打印的是 true/false，不是它。
     expect(TOKEN_KEY in process.env, `${TOKEN_KEY} 这个键不在容器进程环境里 ⇒ compose 那一行透传被删了；` +
       '而 status.ts 的 missingTokenReason() 会因此从「token 从没生成（有得修）」漂成「这个实例按设计不参与 notebook」' +
@@ -258,20 +357,41 @@ describe.skipIf(!IN_CONTAINER)('arena-pyspark kernel 在容器里真能起 Spark
 
 describe('容器档的门控本身（常驻，宿主也跑）', () => {
   /**
-   * 「为什么上面那组没跑」必须有人管，而且两个方向都判得住（同 `publish-identity.test.ts` 的形状）：
-   * 这条在宿主上判的是「没标记 ⇒ 这里确实没有 kernel 文件」，在容器里判的是「标了 ⇒ 镜像真是按
-   * Dockerfile 建的那个」，在「有人在容器外手动设了变量」时判的是「那是假前提」。
+   * 「为什么上面那组没跑」必须有人管，而且合取的**两半各自**都要判得住（同 `publish-identity.test.ts` 的形状）。
+   * 上面那一组的门控是 `IN_CONTAINER && NOTEBOOK_SERVICE`，所以这里不能只留一条等式：
+   * 等式 `IN_CONTAINER === hasKernel` 在 dev 里会**假红**（dev 用的就是 arena 那个镜像 ⇒ kernel 文件在，
+   * 而它按设计不是那个跑 notebook 服务的实例），在「compose 把 ARENA_NOTEBOOK_SERVICE 那行删了」的
+   * arena 里又**判不出**任何东西（标记与文件都还在，等式照样成立）。评审 I-2 要的是两个方向分开、
+   * 各自都真能红：
+   * ① 服务身份 ⇔ 它的**前置产物**：标了 `ARENA_NOTEBOOK_SERVICE` 却没有镜像级 kernel 文件 ⇒ 红。
+   *    只有 arena 会走到这一半（compose 只给它），红了说的是「镜像没按 Dockerfile 构建」，
+   *    而那正是 `./start.sh --rebuild` 能修的东西（arena 有 `build:`  stanza；tools 的
+   *    `arena-deps:dev` 没有，所以旧形状那句建议在 tools 里根本用不上 —— 现在也不会在 tools 红）。
+   * ② 前置产物 ⇐ 容器标记：kernel 文件在场却连 `ARENA_IN_CONTAINER` 都没有 ⇒ 红（这一档会在
+   *    **本该跑它的地方**静默跳过，那就是装饰）。
+   * dev / tools 两条都为真而不红：它们有容器标记 ⇒ ② 真；没有服务标记 ⇒ ① 真。
+   * 宿主两条也都为真：没有服务标记、也没有那个文件。
+   * 写成两个 `expect` 而不是 `if (...) expect(...)`：永远会跑的断言里不许有早退（本仓库第 3 条硬约束），
+   * 条件不成立的那一半以「为真」的形式参与判定，报告里看到的仍然是一条跑过的断言。
    */
-  it('容器标记与 kernel 文件必须同时成立 / 同时不成立', () => {
+  it('服务标记 / 容器标记与 kernel 文件必须互相圆得上（合取的两半各自能红）', () => {
     const hasKernel = existsSync(KERNEL_FILE);
     expect(
-      IN_CONTAINER,
-      hasKernel
-        ? `这台机器上有 ${KERNEL_FILE}，却没设 ARENA_IN_CONTAINER=1 ⇒ 上面那一整组会在**本该跑它的地方**静默跳过` +
-          '（compose 里那三行 env 漂移了，或验证跑在了一个没被标记的容器里）'
-        : `标了 ARENA_IN_CONTAINER=1 却没有 ${KERNEL_FILE} ⇒ 要么镜像没按 Dockerfile 构建（该 ./start.sh --rebuild），` +
-          '要么这台根本不是容器（宿主机上手动设了这个变量 —— 容器档的门控不能这么试）',
-    ).toBe(hasKernel);
+      !NOTEBOOK_SERVICE || hasKernel,
+      `标了 ARENA_NOTEBOOK_SERVICE=1 却没有 ${KERNEL_FILE} ⇒ 这个容器自称是跑 notebook 服务的那个实例，` +
+        '镜像里却没有 kernels COPY：要么镜像没按 Dockerfile 构建（该 ./start.sh --rebuild —— 对 arena 有效，' +
+        'tools 那个 arena-deps:dev 没有 build stanza，重建它得另外走），要么这一档跑在没按 compose 起的容器里。' +
+        '症状：上面那一组会红在「kernel 文件在镜像级目录」那句上，而它说的前置条件本来就缺',
+    ).toBe(true);
+    expect(
+      !hasKernel || IN_CONTAINER,
+      `这台机器上有 ${KERNEL_FILE}，却没设 ARENA_IN_CONTAINER=1 ⇒ 上面那一整组会在**本该跑它的地方**静默跳过` +
+        '。三种可能，按顺序排：① compose 里 arena 那行容器标记漂移了（notebook-compose.test.ts ⑦ 会先在这里红）；' +
+        '② 这一档跑在一个没被重建／没被标记的容器里（./start.sh --verify 会 up -d 重建，正常路径不该见到）；' +
+        '③ **这台宿主上的 MSYS / Linux 类安装真的把 arena-pyspark 放进了 /usr/local/share/jupyter/kernels**' +
+        '（那是本机自己的 kernel 目录，与 compose 无关 —— 别去改那三行 env，改的是这一条判据的适用范围，' +
+        '并把这句话写进它旁边的注释）',
+    ).toBe(true);
   });
 
   /**
@@ -380,17 +500,87 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
       expect(pathOfPid(pidServer, dir)).toBe('/opt/arena-ide-env/python/bin:/usr/local/bin:/usr/bin');
       expect(pathOfPid(pidNoEnviron, dir), '读不到 environ 要给 null：给空串会被读成"PATH 首项不是 venv"，两种故障就分开了').toBeNull();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      // maxRetries 不是装饰：Windows 上杀毒/索引服务会临时按住刚写出来的文件句柄，
+      // `rmSync(recursive)` 这时给的是 EPERM/EBUSY —— 一条**宿主档**的闸门会因为"清理没扫干净"翻脸，
+      // 而本仓库对"会周期性假红"的闸门有明确过敏记录（写死假 pid 撞上活 pid 那条是同一类）。
+      // 重试三次（每次 100ms）之后还删不掉，那才是真出了问题，让它红。
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     }
   });
 
   /**
-   * 真 /proc 上跑一遍同一个发现函数（评审 T10-2 要求的「宿主侧自检」）：
-   * **发起查询的进程永远不许出现在结果里**。宿主上没有 /proc ⇒ 结果是空表，这条同样成立；
-   * 在 Linux 宿主（没起容器、但 Node 看得见 /proc）上它扫的是真进程表，判据一样。
+   * 从 nbconvert 那份「执行后 notebook」里取证据的那一半（`executedNotebookEvidence`）也判在宿主上，
+   * 理由与上面那条一样：容器里那条真跑的断言现在压在「notebook 承诺的三行」上，
+   * 而**这层提取**在 Docker 起来之前唯一能判住的地方就是喂一份假的执行后 notebook。
+   * 它判的是两件事，缺一件都会让容器那条红变得没法读：
+   * ① 只收 stdout 的行（stderr 与富输出不许混进来 —— 混进来 `toContain('venv ok')` 就又开始吃整本 JSON）；
+   * ② 出错 cell 要有名字，而**解析不了输入时消息里只能带截断后的原文**（评审 minor：
+   *   原来那条 `expect(out).toContain('venv ok')` 失败时把 maxBuffer 那份 32MB 全抄进报告）。
    */
-  it('真 /proc 发现：结果里不含本进程，且每个命中者都像服务', () => {
+  it('假 executed-notebook JSON：只取 stdout 行、error 给 cell 号与异常名、解析不了要给截断', () => {
+    const good = JSON.stringify({
+      cells: [
+        { cell_type: 'markdown', outputs: [] },
+        { cell_type: 'code', outputs: [{ output_type: 'stream', name: 'stdout', text: ['python /opt/arena-ide-env/python/bin/python\n'] }] },
+        {
+          cell_type: 'code',
+          outputs: [
+            { output_type: 'stream', name: 'stderr', text: ['26/05/01 00:00:00 WARN NativeCodeLoader: ...\n'] },
+            { output_type: 'stream', name: 'stdout', text: 'rows 15\n' }, // text 也可以是一整串（不只有数组形态）
+            { output_type: 'execute_result', data: { 'text/plain': ['6'] } },
+          ],
+        },
+        { cell_type: 'code', outputs: [{ output_type: 'stream', name: 'stdout', text: ['venv ok\n'] }] },
+      ],
+    });
+    const ev = executedNotebookEvidence(good);
+    expect(ev.errors, '正常的执行结果不该报 error cell').toEqual([]);
+    // stderr 那条 WARN 与 execute_result 都不许进 stdout 行集合（否则"三行"这个判据就被污染成整本 JSON）
+    expect(ev.stdout, '只该收到 notebook 承诺的那三行 stdout').toEqual([
+      'python /opt/arena-ide-env/python/bin/python',
+      'rows 15',
+      'venv ok',
+    ]);
+
+    // 出错 cell：--execute 通常会直接抛，但"错误被 notebook 吃掉"那份 JSON 也算得上一份证据，
+    // 这时消息里要看得见是哪个 cell 的哪个异常，而不是靠 traceBack 全文。
+    const bad = JSON.stringify({
+      cells: [
+        { cell_type: 'code', outputs: [{ output_type: 'error', ename: 'AssertionError', evalue: 'assert 落地在系统解释器', traceback: ['x'.repeat(5000)] }] },
+      ],
+    });
+    expect(executedNotebookEvidence(bad).errors, 'error 输出要落成「cell 号: 异常名」').toEqual(['cell 0: AssertionError']);
+    expect(executedNotebookEvidence(bad).stdout, 'error 里的 traceback 不该被当成 stdout 行').toEqual([]);
+
+    // 解析不了（被 maxBuffer 截断 / 根本不是 notebook）：证据必须**有界**，否则一次失败就是一条没法读的报告
+    const huge = `${'y'.repeat(10_000)}`;
+    const broken = executedNotebookEvidence(`{ 这不是 JSON …（尾部还有 ${huge}）`);
+    expect(broken.stdout, '解析不了就不该有"stdout 行"').toEqual([]);
+    expect(broken.errors.length, '解析不了要给一条 error').toBe(1);
+    const only = broken.errors[0] ?? '';
+    expect(only, 'error 要说清是解析不了').toContain('不是 notebook JSON');
+    expect(only.length, `失败消息的长度被上限判住（实际 ${only.length}）`).toBeLessThan(1000);
+  });
+
+  /**
+   * 真 /proc 上跑一遍同一个发现函数（评审 T10-2 要求的「宿主侧自检」）：
+   * **发起查询的进程永远不许出现在结果里**。
+   * 但它**必须有判据对象**才算数（评审 I-3）：本机是 Windows，Node 看不见 `/proc` ⇒
+   * `readdirSync('/proc')` 抛 ENOENT ⇒ `listProcs()` 给空表 ⇒ `found` 为空 ⇒
+   * `not.toContain(process.pid)` 空过、下面那个循环一行都没执行。
+   * round-1 的报告把它写成「宿主侧实测证据」，而它在这里是一条看不见的 no-op ——
+   * 正是本仓库那条「看起来跑了其实没跑」的失败类。
+   * ⇒ 按规矩用 `it.skipIf(!HAS_PROC)`，让报告自己写出「N skipped」（不是 `try/catch → return`）。
+   * 顺带把「有 /proc 就必须真读到进程」钉上：那条 `readdir` 抛/被 hidepid 挡住的形状给的是红，
+   * 不是又一层空转。plumbing 的真判据仍然是上面那条**假 /proc 树**（d7/d8 两次变异证明它有牙）。
+   */
+  it.skipIf(!HAS_PROC)('真 /proc 发现：结果里不含本进程，且每个命中者都像服务', () => {
     const procs = listProcs();
+    expect(
+      procs.length,
+      `/proc 存在（existsSync 判过）却一个进程都读不到 ⇒ 本条没有判据对象：` +
+        '要么 readdir 被权限/hidepid 挡住，要么这台根本不是 Linux（那这条本来就该 skip）',
+    ).toBeGreaterThan(0);
     const found = jupyterServerPids(procs, process.pid);
     expect(found, `发现结果里出现了本进程 pid ${process.pid} ⇒ 判据会把自己当成 jupyter 服务，PATH 那条必红`).not.toContain(process.pid);
     for (const pid of found) {

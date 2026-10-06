@@ -32,7 +32,29 @@ run "typecheck" npm run typecheck
 # NODE_ENV 要显式 production：上面为 RTL 导出的 test 会让 vite 打进 dev 版 react-dom（多 ~60KB gzip），预算就量歪了。
 run "前端构建" env NODE_ENV=production npm run build -w web
 run "前端产物预算" node scripts/check-bundle.mjs
-run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+
+# ── notebook 服务身份：一个判据管两件事（评审 I-1 + I-2），必须同真同假 ──────────
+# 读 ARENA_NOTEBOOK_SERVICE 而不是 ARENA_IN_CONTAINER：后者 arena / dev / tools 三台都有（compose 里
+# 写了为什么照给），而"真跑 notebook"只有在**那个跑着 notebook 服务的实例**里才成立 —— 只有 arena 有这一行。
+# ① 专门阶段要不要跑（跑 = 由它认领 kernel.test.ts）；
+# ②「单元测试」那条要不要把这个文件从扫描里摘出去（摘 = 交给①）。
+# 两边必须用同一个判据：只在①真时摘，dev / tools 里两条阶段都不跑它 ⇒ 那批常驻断言（宿主档也跑的那些）
+# 静默消失，正是本仓库记过的"闸门一直是装饰"那一类；反过来①假时也摘，同一批断言在容器档里就没人跑了。
+if [ "${ARENA_NOTEBOOK_SERVICE:-0}" = "1" ]; then NB_SERVICE=1; else NB_SERVICE=0; fi
+
+# 评审 I-1（去重）：容器里这条"单元测试"阶段扫的是整个 `server/test/notebooks/`，而下面那条专门阶段
+# 又点名 `kernel.test.ts` ⇒ 同一个真 Spark 会话被起**两次**（一次 40–90s）。更糟的是它坏的时候先红在
+# 「单元测试」这个标签下、整轮就地终止，人本该读的那句「Notebook 运行时（kernel 真跑）」根本不会出现。
+# 修法只在**这一侧**（另一侧都错：删掉专门阶段会撞 verify-coverage 那条认领判据；
+# 把目录从 :35 的清单里去掉会静默搬走 18 条宿主档常驻断言）。宿主走 else，行为与今天逐字节一致。
+if [ "$NB_SERVICE" = "1" ]; then
+  # `--exclude` 的值**不要**写成 `"${ARR[@]}"`：verify-coverage.test.ts 收集认领路径时丢掉以 `-` 开头的
+  # token（所以那个 flag 本身不会被当成路径），但以引号开头的 `"${ARR[@]}"` 会被记成一条**假路径**。
+  # 这里展开后是裸路径，最坏只是多一条永远匹配不上文件的模式，不会误认领。
+  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+else
+  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+fi
 run "题库只增不减（基线取 git 跟踪数）" node scripts/check-bank.mjs --count-only
 # 整个 bank 目录都要在 FULL_GATE 下跑：只点名 content 的话，
 # bank/provenance.test.ts（skipIf ARENA_FULL_GATE）就永远只是"被跑过"而从未真跑。
@@ -40,17 +62,19 @@ run "题库闸门（含覆盖度与出处审计）" env ARENA_FULL_GATE=1 npx vi
 run "游戏后端与前端测试" npx vitest run server/test/game server/test/api server/test/llm web/test
 run "网页 IDE（执行内核与解耦边界）" npx vitest run server/test/ide web/test/ide.test.tsx
 
-# notebook kernel 真跑：只在容器里点名（宿主既没有 arena-pyspark kernel，也没起 Jupyter）。
-# 不给它单开 SKIP_ 开关。"漏跑"的兜底不是 assert-ran.mjs（那条只读判题矩阵的 json），而是这个测试
-# 文件里那条常驻解释断言：容器里有 kernel 文件却没设标记 ⇒ 它当场红，跳过不会是无声的。
-# 门控写在**文件里**（describe.skipIf）而不是只写在这个 if 上：上面那条"单元测试"阶段本来就扫
-# server/test/notebooks/，宿主一样会跑到这个文件 —— 只靠阶段名点是挡不住的（评审 T10-1）。
-# 变量在阶段命令里再显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
+# notebook kernel 真跑：只在**那个跑着 notebook 服务的容器**里点名（判据是上面那个 NB_SERVICE，
+# compose 只给 arena `ARENA_NOTEBOOK_SERVICE: "1"`；dev / tools 有容器标记但没有服务身份，理由见那里）。
+# 不给它单开 SKIP_ 开关。"漏跑"的兜底不是 assert-ran.mjs（那条只读判题矩阵的 json），而是
+# 这个测试文件里那两条常驻解释断言（标了服务身份却没有 kernel 文件 ⇒ 当场红），加上
+# `notebook-compose.test.ts` ⑦（compose 那一侧每天在宿主跑，标记漂移在那里红，不用等一次 --verify）。
+# 门控写在**文件里**（describe.skipIf 的合取）而不是只写在这个 if 上：上面那条"单元测试"阶段本来就扫
+# server/test/notebooks/，宿主与 dev / tools 一样会跑到这个文件 —— 只靠阶段名点是挡不住的（评审 T10-1）。
+# 两个变量在阶段命令里都显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
 # '设了那个变量'的阶段认领"读的是**阶段命令行**，容器环境里已有的那份它看不见（照它的报错接线）。
-if [ "${ARENA_IN_CONTAINER:-0}" = "1" ]; then
-  run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 npx vitest run server/test/notebooks/kernel.test.ts
+if [ "$NB_SERVICE" = "1" ]; then
+  run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/kernel.test.ts
 else
-  printf '\n\033[33m跳过 notebook kernel 真跑（宿主无 Jupyter）—— ./start.sh --verify 必须补跑\033[0m\n'
+  printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\033[0m\n'
 fi
 
 if [ "${SKIP_JUDGE:-0}" != "1" ]; then
