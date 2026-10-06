@@ -287,7 +287,7 @@ describe('notebookStatus', () => {
         ...consoleSpies.flatMap((s) => s.mock.calls.map((c) => argsText(c as unknown[]))),
       ].join('\n');
     try {
-      // 三条分支各走一遍：成功（url 里就躺着 token）、非回环（url 给但不带 token）、失败（reason 可能拼进 url）
+      // 三条分支各走一遍：成功（url 里就躺着 token）、非本机且非网关（url 给但不带 token）、失败（reason 可能拼进 url）
       await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY });
       await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), tokenOverride: CANARY });
       await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY });

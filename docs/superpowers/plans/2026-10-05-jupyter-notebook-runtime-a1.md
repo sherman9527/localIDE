@@ -1117,7 +1117,8 @@ Expected: 两个都是 0；容器日志里 notebook 阶段绿，判题矩阵仍 
 
 - [ ] **Step 5: 宿主 E2E**
 
-先写 `tests/e2e/notebook-page.spec.ts`：打开 `#/notebook`，断言①有 `notebook-status` 文本、②非回环/服务没起时不出现 `notebook-open`、③console error 与 warning 均为 0。
+先写 `tests/e2e/notebook-page.spec.ts`：打开 `#/notebook`，断言①有 `notebook-status` 文本、②服务没起（`running:false`）与 `ARENA_NOTEBOOK_PUBLIC_URL` 配坏这两态下不出现 `notebook-open`、③console error 与 warning 均为 0。
+**更正（实施时 · 对齐已经落地的页面）**：原稿②里的"非回环"不是一条会成立的条件 —— 无 token 但服务在跑时页面**照样渲染** `notebook-open`（钉住它的是 `web/test/notebook.test.tsx:65-72`；另两态各有一条 `queryByTestId('notebook-open')).toBeNull()`：`:87` 是 `running:false`、`:117` 是 publicUrl 配坏），而容器里非回环的那个对端正是**拿得到 token** 的一支（判据 = 回环或本进程默认网关，`server/src/notebooks/status.ts:101-119`；e2e 实例本来就没被给予 token ⇒ 它坏在 `running:false` 那一半，不是坏在对端）。照原稿把"非回环"写成断言它会红，而最省事的"修法"是给非本机用户把链接藏掉 —— 那正是前面那三条断言守着不许发生的静默降级。
 Run: `npm run e2e` → 全绿。
 
 - [ ] **Step 6: 真浏览器（改了前端必须看过）**
