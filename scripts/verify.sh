@@ -40,6 +40,19 @@ run "题库闸门（含覆盖度与出处审计）" env ARENA_FULL_GATE=1 npx vi
 run "游戏后端与前端测试" npx vitest run server/test/game server/test/api server/test/llm web/test
 run "网页 IDE（执行内核与解耦边界）" npx vitest run server/test/ide web/test/ide.test.tsx
 
+# notebook kernel 真跑：只在容器里点名（宿主既没有 arena-pyspark kernel，也没起 Jupyter）。
+# 不给它单开 SKIP_ 开关。"漏跑"的兜底不是 assert-ran.mjs（那条只读判题矩阵的 json），而是这个测试
+# 文件里那条常驻解释断言：容器里有 kernel 文件却没设标记 ⇒ 它当场红，跳过不会是无声的。
+# 门控写在**文件里**（describe.skipIf）而不是只写在这个 if 上：上面那条"单元测试"阶段本来就扫
+# server/test/notebooks/，宿主一样会跑到这个文件 —— 只靠阶段名点是挡不住的（评审 T10-1）。
+# 变量在阶段命令里再显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
+# '设了那个变量'的阶段认领"读的是**阶段命令行**，容器环境里已有的那份它看不见（照它的报错接线）。
+if [ "${ARENA_IN_CONTAINER:-0}" = "1" ]; then
+  run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 npx vitest run server/test/notebooks/kernel.test.ts
+else
+  printf '\n\033[33m跳过 notebook kernel 真跑（宿主无 Jupyter）—— ./start.sh --verify 必须补跑\033[0m\n'
+fi
+
 if [ "${SKIP_JUDGE:-0}" != "1" ]; then
   # 判题套件在宿主机（无 JDK/MySQL/Redis/Spark）会整片 it.skip 且仍然 exit 0 ——
   # 所以除了 vitest 自己，还要断言"真的执行过用例"，否则"全绿"毫无意义。

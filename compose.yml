@@ -49,6 +49,12 @@ services:
       # 由 notebook-compose.test.ts 的 ⑤⑥ 钉住，不靠人记 —— 漏一面都是静默的。
       # 闸门：server/test/regression/notebook-compose.test.ts
       ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
+      # 容器标记：`server/test/notebooks/kernel.test.ts` 那一组（真跑 notebook、读运行中的
+      # jupyter 进程的 PATH、查 token 键与 /proc/net/route）只有在容器里才成立，门控写在文件里
+      # （describe.skipIf），宿主档就不会被它们撞红。宿主**永不设**这个变量（哪台设了哪台没设，
+      # 由那条常驻解释断言与 verify.sh 的阶段一起判）。容器档验证走 `./start.sh --verify`，
+      # 它 exec 进的是这个 arena 服务 —— 那一组真正要验的就是这里。
+      ARENA_IN_CONTAINER: "1"
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true
@@ -78,6 +84,10 @@ services:
       # tools 覆盖了 entrypoint（下面那条 `entrypoint: ["bash","-lc"]`），自己不会起 jupyter，
       # 但 Task 10 的容器档 notebook 测试要在这个容器里读到同一个 token ⇒ 只透传，不加端口。
       ARENA_JUPYTER_TOKEN: ${ARENA_JUPYTER_TOKEN:-}
+      # 容器标记见 arena 块那段注释。tools 里 entrypoint 被覆盖 ⇒ **没有**跑着的 jupyter，
+      # 所以那一组在这里会红在"前置条件不成立"那两句上（说的就是实情）；容器档的正解是
+      # `./start.sh --verify`（exec 进 arena）。标记照给：它说的是"这是容器"，不是"jupyter 在跑"。
+      ARENA_IN_CONTAINER: "1"
     init: true
     entrypoint: ["bash", "-lc"]
     command: ["echo '用 docker compose run --rm tools <命令>'"]
@@ -108,6 +118,9 @@ services:
       # 而它又没有 notebook 端口，起一个 server 等于"多一个能读写真人笔记的进程、且没人能从外面
       # 访问它"，纯增加面。要 dev 也能用 notebook，得先给它自己的端口与自己的数据目录，
       # 那时这条判据（notebook-compose.test.ts ⑥）要跟着改并写下理由。
+      # 容器标记照给（见 arena 块那段注释）：dev 里没有 jupyter ⇒ kernel.test.ts 那一组会红在
+      # "前置条件不成立"与"没有 token 键"那两句上，说的都是实情 —— 容器档的正解是 --verify（arena）。
+      ARENA_IN_CONTAINER: "1"
       <<: *llm-env
     extra_hosts: *host-gateway
     init: true

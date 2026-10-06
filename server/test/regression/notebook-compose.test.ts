@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
 
 /**
- * 六条各守一个真出过事的形状：
+ * 七条各守一个真出过事（或真会静默降级）的形状：
  * ① 7789 必须绑回环（compose-ports 整仓管全局，这里补"这条映射确实存在 + 端口号没被复用作别的"）；
  * ② token 是 `${VAR:-}` 透传而不是字面量 —— WI-86 的教训：判形状不判值；
  * ③ e2e 服务不许出现 notebook 端口（7789 与容器内 8888 都算）：E2E 不该依赖一个真 notebook 服务器，
@@ -17,6 +17,10 @@ import { config } from '../../src/config.js';
  * 只写 ⑤（"每个服务都得有"）会把这条隔离判据反着钉死 —— 那才是 review 抓到的地方：e2e 拿到 token
  * ⇒ 起一个 root_dir 指向真人笔记的 server，而现有的隔离判据只 hash data/arena.db-wal，看不见 notebooks。
  * 今天它没有发布端口所以进不去，但 Task 8 一加服务端代理就变成真路径，所以现在就堵在 token 上。
+ * ⑦ Task 10 补的容器标记 `ARENA_IN_CONTAINER`（arena / dev / tools 有、e2e 没有）：
+ *    少给 arena 那一半，`server/test/notebooks/kernel.test.ts` 整组会**静默降级成 skip** ——
+ *    那个文件自己有一条常驻解释断言会在容器档跑时撞红，但它要等一次 `./start.sh --verify` 才看得见；
+ *    compose 档是每天跑的那一侧，所以这里也钉一份。理由与 e2e 不许有它，见 ⑦ 那条断言旁边。
  */
 
 /**
@@ -66,11 +70,16 @@ const tools = blocks.get('tools') ?? '';
  * 而 ⑥ 的整个用处就是"这个服务不许起 jupyter"，那是 compose 里的一行 env，不是文档里的措辞。
  */
 function tokenPassThrough(block: string): string | undefined {
+  return configLine(block, 'ARENA_JUPYTER_TOKEN');
+}
+
+/** 同上（判配置行不判注释）：给 ⑦ 用的通用版。 */
+function configLine(block: string, key: string): string | undefined {
   return block
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l !== '' && !l.startsWith('#'))
-    .find((l) => /^ARENA_JUPYTER_TOKEN\s*:/.test(l));
+    .find((l) => new RegExp(`^${key}\\s*:`).test(l));
 }
 
 /**
@@ -162,5 +171,27 @@ describe('notebook 的端口与 token 接线', () => {
     // 空转防护：dev/e2e 两个块都得真的扫到过，否则上面两条断言在 blocks 解析坏掉时会一起绿
     expect(dev, 'dev 块没扫到 ⇒ 上面那条断言在空转（先修 serviceBlocks）').toContain('ARENA_PORT');
     expect(e2e, 'e2e 块没扫到 ⇒ 上面那条断言在空转（先修 serviceBlocks）').toContain('ARENA_DATA_DIR');
+  });
+
+  /**
+   * ⑦ Task 10 的容器标记。方向两边都要判：
+   * - **arena 少给** ⇒ `server/test/notebooks/kernel.test.ts` 那一整组（真跑 smoke notebook、读运行中的
+   *   jupyter 进程的 PATH、token 键、/proc/net/route）在容器档里也只是"被跳过"，而容器档的默认 reporter
+   *   会把这一行和别的跳过混在一起 —— 那条闸门就变成装饰（本仓库为这类形状记过一次：provenance.test.ts
+   *   躺在被认领的目录里但那一条阶段从没设过它的变量）。compose 这一侧每天跑，所以在这里钉住。
+   * - **e2e 多给** ⇒ 那个实例按设计没有 token、按设计不起 jupyter（⑥），标上"这是容器、容器档可以在这里跑"
+   *   等于让那一组在一个必然撞前置条件的地方承诺自己会跑；而 e2e 是宿主 Playwright 打的隔离实例，
+   *   容器档从来不该在那里跑（真跑走 `./start.sh --verify`，exec 进 arena）。
+   * dev / tools 照给：标记得准的事实是"这是容器"，不是"jupyter 在跑"，
+   * 那两个容器里那一组会红在"前置条件不成立"那两句上 —— 那是实情，不是要瞒的东西。
+   */
+  it('容器标记 ARENA_IN_CONTAINER 只给 arena / dev / tools，不给 e2e（少给 arena = 容器档静默 skip）', () => {
+    const KEY = 'ARENA_IN_CONTAINER';
+    const mustHave: Array<[string, string]> = [['arena', arena], ['dev', dev], ['tools', tools]];
+    const missing = mustHave
+      .filter(([, block]) => !/^ARENA_IN_CONTAINER:\s*"?1"?\s*$/.test(configLine(block, KEY) ?? ''))
+      .map(([svc]) => svc);
+    expect(missing, `这些服务没有 ARENA_IN_CONTAINER: "1"（或值不是 1）：${missing.join(', ')}`).toEqual([]);
+    expect(configLine(e2e, KEY), 'e2e 拿到了容器标记 ⇒ 容器档那一组会以为可以在这个没有 token、没有 jupyter 的隔离实例里跑').toBeUndefined();
   });
 });
