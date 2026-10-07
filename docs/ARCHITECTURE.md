@@ -41,10 +41,10 @@
 `sql-formatter`（SQL 美化）、`prettier`（Java/TS 格式化）。
 
 **路由**：不用 react-router —— `web/src/router.tsx` 是一个 ~60 行的 hash 路由，
-用 `useSyncExternalStore` 订阅 `hashchange`，把 `#/`、`#/q/:id`、`#/bank`、`#/progress`、`#/ide` 解析成 `Route`。
+用 `useSyncExternalStore` 订阅 `hashchange`，把 `#/`、`#/q/:id`、`#/bank`、`#/progress`、`#/ide`、`#/notebook` 解析成 `Route`。
 少一个依赖，也少一份"路由库版本升级"的维护面。
 
-**拆包**（WI-28）：首屏只同步加载 `Today`；`Question`/`Bank`/`Progress`/`Ide` 走 `lazy()` + `Suspense`。
+**拆包**（WI-28）：首屏只同步加载 `Today`；`Question`/`Bank`/`Progress`/`Ide`/`Notebook` 走 `lazy()` + `Suspense`。
 理由很具体 —— 判题页要拖 CodeMirror。`scripts/check-bundle.mjs` 实测（`npm run build -w web` 后，
 文件名的 hash 每次构建都会变，所以只记体积）：
 
@@ -87,6 +87,8 @@ TypeScript 5.7 strict，`tsc -b` 三栈引用构建（`shared → server → web
 | POST | `/ide/run` | 网页 IDE 执行一次（与判题共用沙箱、白名单与并发闸，但不写 attempt） |
 | GET·POST | `/ide/repl*`、`/ide/debug*` | 两类**跨请求存活的子进程**：逐句求值（WI-77）与行断点单步（WI-81）。都是一问一答（每条命令都有天然的结束点），端点形状见下面两段 |
 | GET·POST | `/ide/env`、`/ide/env/command`、`/ide/env/reset` | 依赖环境（WI-87）：清单（GET，含占用字节）、命令窗口（POST，SSE 逐行回显）、回到镜像默认（POST reset）。落点在命名卷，**判题看不到**（见 `docs/JUDGING.md`） |
+| GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + 拼给宿主的链接。token **只按 socket 对端附上**（`isLocalPeer`：回环或本进程默认网关；不是 `Host` 头，那玩意客户端想写什么就写什么）；非本机对端照样给链接、只是里面没有凭据。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
+| POST | `/notebook/prepare-env` | 显式建 IDE 那个 venv（`arena-pyspark` kernel 的 argv 指着它）。成功只有 `{ok:true}`，失败是 `200 + {ok:false, reason}`。**铺示例不在这条路上** —— 那是上面那个 GET 顺带做的，两件事坏的是不同的东西 |
 | POST | `/judge` | 同步判题（兜底路径） |
 | POST | `/judge/stream` | 同一链路的 SSE 形态：`queued → log* → result` |
 | POST | `/grade` | 主观题评分 |
@@ -274,6 +276,43 @@ c/cpp 的依赖只能 apt 预装、mysql/redis 的"依赖"是那个服务本身�
 pyspark 的解释器由**与判题共用**的常驻池持有（单独开环境会撞红线一）。
 红线本身的落地与验证见 `docs/JUDGING.md` 最后一段。
 
+### Notebook：第五页只做入口，真界面是容器里那个 Jupyter
+
+A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`）。
+`server/src/notebooks/` 两个文件：
+`seed.ts`（`content/notebooks/*.ipynb` → `data/notebooks/`，**缺失才复制**，绝不覆盖用户改过的那份）与
+`status.ts`（探活 + 解 `/api/kernelspecs` + 拼给宿主的链接 + `isLocalPeer`）。前端 `web/src/pages/Notebook.tsx`
+是**入口不是 iframe**：状态卡、kernel 徽标、一个能点开的地址、三句常驻的边界话。
+
+四条边界，每条都有闸门，不是约定：
+
+- **token 按 socket 对端释放，不按 Host 头**。对端 = 回环（`::1` / `127.0.0.0/8`，双栈先剥 `::ffff:`）
+  或 = 本进程的默认网关（读 `/proc/net/route`，不是猜网段 +1）。为什么必须有网关那一支：compose 部署里
+  宿主浏览器的流量经 docker-proxy/NAT 进来，容器看到的对端**永远是网桥网关而不是回环** —— 只认回环不报错，
+  它让这个功能在唯一启用它的部署里静默失效（点开撞 Jupyter 登录页而界面全绿）。网关那一支的安全性是
+  **派生的**：派生自"每条发布端口都只绑宿主 `127.0.0.1`"（闸门 `compose-ports.test.ts`）。
+- **绑法与它带出的那道守卫**。容器内监听 `0.0.0.0:8888`：发布的端口是 DNAT 到**容器的 eth0**、不是转到它的
+  回环，所以"只听容器内 127.0.0.1"与"宿主经 7789 打开"互相矛盾（实测 loopback 302 / eth0 000 / 宿主 000，
+  而容器档全绿 —— 它每次探活都走 loopback）。改绑之后必须一起钉 `--ServerApp.allow_remote_access=False`：
+  `jupyter_server` 2.21 把那个默认值算成 `not addr.is_loopback`，非回环绑定时它自己变 True，而 `check_host()`
+  第一行就因此整块放过防 DNS rebinding 的守卫（实测 `Host: rebinding.example:7789` → 302）。两条断言各判一半：
+  浏览器形状的 Host 放行、rebinding 形状的 Host 拒 403。
+- **"有人在听"与"接受这次请求"是两件事**。可达性那两条闸门把 403 **算作有监听**（403 恰恰证明包转到了、
+  有 jupyter 在按 Host 做决定），而鉴权语义那一条不许把 403 当通过。这个决定第一次被真实场景验到是在破坏性
+  证明里：`--ServerApp.local_hostnames=[]` 之下"DNAT 目标有人在听"照旧绿、"浏览器形状放行"那半红。
+- **kernel 注册在镜像级**（`/usr/local/share/jupyter/kernels/arena-pyspark/kernel.json`），argv 指向
+  IDE 那个命名卷 venv 的 python，所以 notebook 里 `!pip3 install` 下一格就能 import；**不注册进 venv** 是因为
+  WI-87 的 reset 会删掉整个 venv 目录，那样"重置环境"会顺手删掉 kernel 而界面不解释为什么。
+  kernelspec 与 notebook 的 warehouse/Derby（`data/notebook-warehouse/`）都与判题侧分开。
+
+容器档那一组（`server/test/notebooks/kernel.test.ts`，30 条，门控写成文件内部的 `it.skipIf` + 一条永远会跑的
+伴生断言）判的是**真服务与真文件系统**，不是 mock：`nbconvert --execute` 真跑 `00-smoke-pyspark.ipynb`
+（`venv ok` / `rows 15`）、读活进程 `/proc/<pid>/environ` 的 PATH 首项、探 DNAT 目标上有没有人听、
+**直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter** 解 kernelspecs（同文件里那组假 `/proc` 树 /
+假 executed-notebook JSON 的用例是宿主侧的 plumbing，另一码事）。
+`GET` 顺手铺示例是**故意**留在读路径上的（页面不做定时轮询 ⇒ 那点 `stat`/`copyFile` 只随点击发生，
+这是计划自查里挂给 Task 10 用数据判的那条，结论：保持现状）。
+
 ---
 
 ## 4. 判题
@@ -416,11 +455,18 @@ docker build -f docker/Dockerfile --target stack -t arena-stack:dev .   # 只验
 MySQL 等待上限给到 180s 而不是 60s：容器被 kill 过一次之后 InnoDB 要做崩溃恢复，
 60s 会把"起得来但慢"误判成"起不来"。
 
+**第三个常驻进程是 `jupyter notebook`**（`--allow-root`，监听 `0.0.0.0:8888`，绑法的理由见上面 Notebook 那一节），
+但它与前两个**关键性不同**：起不来不许拖垮做题与判题，所以 entrypoint 只 log 一行，由
+`/api/notebook/status` 照实报 `running:false` + `reason`；缺 `ARENA_JUPYTER_TOKEN` 就**不起**，
+而不是起一个无鉴权的。**它没有看门狗**（故意的）：进程掉了以后 `./start.sh` 在镜像没变时救不回它
+（实测 `Recreate` 计数 0、宿主 `127.0.0.1:7789` 一直 000），横幅给的是那条真能修好这个症状的命令
+`docker compose up -d --force-recreate arena`，而执行由人决定 —— 重建容器会带走正在跑的 IDE 调试会话与判题任务。
+
 **compose.yml 的四个服务共用同一个镜像**（`tools` 除外，它用 `arena-deps:dev` 依赖层）：
 
 | 服务 | profile | 端口 | 说明 |
 | --- | --- | --- | --- |
-| `arena` | 默认 | `127.0.0.1:7788:7788` | 日常使用；挂 `data` / `docker-cache` / `content` |
+| `arena` | 默认 | `127.0.0.1:7788:7788` + `127.0.0.1:7789:8888`（notebook） | 日常使用；挂 `data` / `docker-cache` / `content` |
 | `dev` | `dev` | `127.0.0.1` 上的 `7788` + `5173` | 挂载整个仓库跑 `npm run dev`（vite + 后端 watch），不是第二个镜像 |
 | `e2e` | `e2e` | `127.0.0.1:7798:7788` | `ARENA_DATA_DIR=/app/data/e2e`，`content` **只读**挂载 |
 | `tools` | `tools` | — | 容器内构建与测试的工具位 |
@@ -432,6 +478,10 @@ MySQL 等待上限给到 180s 而不是 60s：容器被 kill 过一次之后 Inn
 `http://host.docker.internal:7799`，配 `x-host-gateway` 的 `host.docker.internal:host-gateway` 才连得到宿主；
 `e2e` 必须**同时**显式给 `ARENA_DATA_DIR` / `ARENA_DB_FILE` / `ARENA_HIDDEN_FILE` 三条
 （少一条就会静默写回真人那份 `data/arena.db`，实测踩过）。
+`ARENA_JUPYTER_TOKEN` 与桥 token 同一条纪律：唯一来源是 `.env`（`start.sh` 首启生成 —— 新建按 0600，
+改写时对齐原文件的 mode，别把人手动加固过的 0600 静默降回 0644），`arena` 与 `tools` 透传**同一份**，
+`dev` / `e2e` **故意不透传** ——
+entrypoint 那条"缺 token 就不起"的守卫因此让那两个实例干净地没有 Jupyter，而不是各给一个无鉴权的。
 
 **镜像里改了源码不会自动生效**：`docker cp` 进去的东西只活在当前容器实例，`compose up -d` / `--rebuild`
 会按镜像重建。收尾必须 `./start.sh --rebuild` 让"跑着的"= HEAD。判断线上进程是不是当前代码，
@@ -546,11 +596,12 @@ localLearning/
 │  ├─ bank/             loader / hide（软删除）/ ingest（append-only）
 │  ├─ judge/            registry / workspace / process / guards / runners/*(6)
 │  ├─ ide/              runner / languages / 执行内核（与做题共用一个容器，边界由 boundary.test.ts 把住）
+│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + token 按 socket 对端释放）
 │  ├─ llm/              rubric / provider / providers/*(4) / cli / settings
 │  ├─ game/             daily / review / xp / streak / weekly / adaptive / achievements
 │  ├─ db/               node:sqlite（WAL + user_version 迁移）
 │  └─ config.ts / log.ts / ports.ts
-├─ web/src/             pages(5：Today/Bank/Progress/Question/Ide) / components(13) / lib / styles / router.tsx
+├─ web/src/             pages(6：Today/Bank/Progress/Question/Ide/Notebook) / components(13) / lib / styles / router.tsx
 ├─ content/             questions(7 类 252 题) / knowledge / curriculum / jd-cache / hidden.json
 ├─ data/                arena.db(.wal) / logs / judge / e2e / llm-bridge.log   ← 不进 git
 ├─ docker-cache/        npm / pip / maven 缓存（依赖全留在仓库内）
@@ -575,6 +626,16 @@ localLearning/
 - **Flink 相关题目不做真跑**，走 `llm-rubric`：mini-cluster 的体积与启动代价不划算。
 - **主观题评分依赖宿主已登录 CLI**：桥没起来时不会报错，只会静默降级成人工自检表 —— 所以 `start.sh`
   起服务后必须把栈可用性摊开说一次，`npm run logs -- --module grade --level warn` 能查到降级痕迹。
+- **notebook 里能读到题库的参考答案 —— 这不是安全边界**：Jupyter 以 `--allow-root` 起，工作目录设在
+  `data/notebooks` 只是让默认视图干净，绝对路径 `/app/content/questions/...` 读得到参考解与 rubric 要点。
+  真正的边界是"API 不吐答案"（`rule.md` C7），容器内部本来就读得到。这句话常驻在第五页，不随状态切换收起。
+- **notebook 只在浏览器本机打得开**：7788 与 7789 都只绑**宿主**回环（手机 / iPad 打不开，用户已确认不需要）。
+  容器内部反而是 `0.0.0.0:8888` —— 发布的端口 DNAT 到容器的 eth0，绑容器回环的话宿主侧永远连不上（§3 Notebook）。
+- **Jupyter 没有看门狗**（故意的，`HANDOVER.md` WI-93）：进程掉了以后 `./start.sh` 救不回它 —— 镜像没变时
+  compose 报 `Recreate` 计数 0，要 `docker compose up -d --force-recreate arena`，而那会带走正在跑的 IDE 调试
+  会话与判题任务 ⇒ **加不加守护是一次决定，不是一次修复**。横幅只负责把这条命令说出口。
+- **notebook 与判题各有 warehouse / Derby**（`data/notebook-warehouse/`）：notebook 里建的表 IDE 与判题都看不见，
+  刻意的隔离（否则两边抢同一把 Derby 锁）。
 
 ---
 

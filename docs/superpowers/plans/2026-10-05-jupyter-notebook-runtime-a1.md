@@ -4,7 +4,7 @@
 
 **Goal:** 在现有单镜像里加一个常驻 Jupyter Notebook 服务 + 一个复用 IDE venv 的 PySpark kernel，并在前端新开第五页作为入口。
 
-**Architecture:** Jupyter 由 `docker/entrypoint.sh` 与 mysqld/redis 同级拉起，只听容器内 `127.0.0.1:8888`，宿主机经 `127.0.0.1:7789:8888` 访问；服务端新增 `server/src/notebooks/`（探活 + 示例复制），前端 `web/src/pages/Notebook.tsx` 只做入口不嵌 iframe。PySpark kernel 的解释器指向 IDE 的命名卷 venv，于是"IDE 里装的包 notebook 能 import"成立，而判题仍然看不到那份环境（红线一不变）。
+**Architecture:** Jupyter 由 `docker/entrypoint.sh` 与 mysqld/redis 同级拉起，监听容器内 `0.0.0.0:8888`（**更正 · Task 10 实测**：原稿这句写的是"只听容器内 `127.0.0.1:8888`"，而它与下一句互相矛盾 —— 发布端口 DNAT 到的是**容器的 eth0 地址**、不是容器的回环，于是绑在 loopback 上的监听永远打不通 `7789`：实测容器里 loopback 302 / eth0 000 / 宿主 000，而容器档照样全绿，因为它每一次探活走的都是 loopback），宿主机经 `127.0.0.1:7789:8888` 访问 —— 真正的边界是**宿主侧那条 `127.0.0.1:` 绑定**（闸门 `server/test/regression/compose-ports.test.ts`）加上必填的 token，容器内那句 ip 只是实现手段，而且被证明是错的那一种；服务端新增 `server/src/notebooks/`（探活 + 示例复制），前端 `web/src/pages/Notebook.tsx` 只做入口不嵌 iframe。PySpark kernel 的解释器指向 IDE 的命名卷 venv，于是"IDE 里装的包 notebook 能 import"成立，而判题仍然看不到那份环境（红线一不变）。
 
 **Tech Stack:** Docker/Ubuntu 22.04、bash、Jupyter Notebook 7.x + ipykernel、PySpark 3.5.5（pip 包，非独立发行版）、Fastify、TypeScript、React 19 + Vite、Vitest、Playwright。
 
@@ -240,7 +240,7 @@ Expected: 4 passed。`npm run verify:fast` 仍在 Task 1 那两条上红（预�
 
 **Interfaces:**
 - Consumes: 镜像里的 `jupyter` CLI、`$ARENA_IDE_ENV_DIR`、`$ARENA_JUPYTER_TOKEN`
-- Produces: 容器内 `127.0.0.1:8888` 的 Jupyter（Task 4 映射它，Task 7 探它）
+- Produces: 容器内 `0.0.0.0:8888` 的 Jupyter（Task 4 映射它，Task 7 探它。原稿这里写 `127.0.0.1:8888` —— 见下面 Step 1 的更正：绑容器回环的话，Task 4 那条发布端口永远打不到它）
 
 - [ ] **Step 1: 实现**
 
@@ -260,14 +260,24 @@ start_jupyter() {
   # venv 前置到 PATH：notebook 里 `!pip3 install X` 走 shell，命中哪个 pip 由 PATH 决定。
   # 不加这一句包会写进系统 site-packages —— 而判题用的正是那个解释器（红线一延伸，判据见
   # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
+  # 更正（Task 10 实测）：原稿下面那行写的是 --ServerApp.ip=127.0.0.1，而"绑容器回环"与"宿主经发布端口访问"
+  # 这两件事不可能同时成立 —— 发布端口 DNAT 到的是容器的 eth0 地址，不是它的 127.0.0.1（实测容器里 loopback 302 /
+  # eth0 000 / 宿主 000，而容器档全绿，因为它所有探活都走 loopback）。真边界是宿主侧那条 127.0.0.1 绑定 + token。
+  # 改到 0.0.0.0 的**连带后果必须一起钉住**：jupyter_server 2.21 把 allow_remote_access 的默认值算成
+  # `not addr.is_loopback` ⇒ 非回环绑定时那道防 DNS rebinding 的 Host 守卫整块被关掉（实测
+  # `Host: rebinding.example:7789` 得 302），所以它要显式写 False。闸门在
+  # server/test/notebooks/kernel.test.ts：「发布端口的 DNAT 目标（容器自己的非回环 IPv4）上也必须有人在听」与
+  # 「Host 守卫在位：rebinding 形状的 Host 被拒（403），而浏览器形状的 Host 照旧放行」。
+  # 这段更正留在 PATH 那两行**之前**，不是插在 `VAR=… \` 与命令之间 —— 续行符后面接一行注释会把整条命令
+  # 吞成"只有赋值、没有命令"，PATH 前缀当场丢失，而那正是上面"必须写在命令之前"在防的事。
   PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
   jupyter notebook --allow-root --no-browser \
-    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 \
+    --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888 \
     --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
     --ServerApp.root_dir=/app/data/notebooks \
     >/var/log/jupyter.log 2>&1 &
 
-  log "Jupyter 已拉起（容器内 127.0.0.1:8888）"
+  log "Jupyter 已拉起（监听 0.0.0.0:8888 ⇒ 宿主 127.0.0.1:7789 那条 DNAT 的目标是**本容器的 eth0**，不是它的回环）"
   return 0
 }
 

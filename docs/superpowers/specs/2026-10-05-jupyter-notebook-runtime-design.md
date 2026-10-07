@@ -35,9 +35,9 @@
 容器 daily-arena
  ├─ mysqld / redis-server                       （现有）
  ├─ node server/dist/index.js        :7788       （现有）
- └─ jupyter notebook                 127.0.0.1:8888   ← 新增
+ └─ jupyter notebook                 0.0.0.0:8888   ← 新增（原稿此处为 127.0.0.1，被 Task 10 实测证伪，见下面那段更正）
       --allow-root
-      --ServerApp.ip=127.0.0.1 --ServerApp.port=8888
+      --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888
       --ServerApp.token=$ARENA_JUPYTER_TOKEN
       --ServerApp.root_dir=/app/data/notebooks
       PATH=/opt/arena-ide-env/python/bin:$PATH          ← 不是装饰，见 §7
@@ -49,6 +49,19 @@
   data/notebook-warehouse/     notebook 专属 Spark warehouse + Derby home
   data/jupyter-token           自动生成的 token（data/ 已在 .gitignore）
 ```
+
+> **更正（实施时 · Task 10 实测）**：这一节原稿写的是"只听容器内 `127.0.0.1:8888`"，而它与 §2-3 那句
+> "宿主机 `127.0.0.1:7789:8888`"**不可能同时成立** —— 发布的端口是 DNAT 到**容器的 eth0 地址**，不是转到容器的
+> 回环，于是绑在容器 loopback 上的监听永远打不通 `7789`。实测（容器内，故意不带 token）：`127.0.0.1:8888` → 302、
+> `$(hostname -i):8888` → 000、宿主 `127.0.0.1:7789` → 000，**而容器档整轮全绿** —— 因为它每一次探活走的都是
+> loopback，那条路当然是通的。⇒ 现在容器内绑 `0.0.0.0:8888`，真正的边界是宿主侧那条 `127.0.0.1:` 绑定（§7-2，
+> 闸门 `server/test/regression/compose-ports.test.ts`）加上必填的 token：容器内那句 ip 从来不是边界，它只是手段，
+> 而被证明是错的那一种手段。还有一条**必须与它一起钉**的副作用：`jupyter_server` 2.21 把
+> `allow_remote_access` 的默认值算成 `not addr.is_loopback` ⇒ 非回环绑定时它自己变成 True，而 `check_host()`
+> 第一行就因此整块放过那道防 DNS rebinding 的 Host 守卫（实测 `Host: rebinding.example:7789` 得 302）——
+> 所以 `--ServerApp.allow_remote_access=False` 要显式写，判据是 `server/test/notebooks/kernel.test.ts`
+> 「Host 守卫在位：rebinding 形状的 Host 被拒（403），而浏览器形状的 Host 照旧放行」（两半各一条断言，
+> 破坏性验过：`--ServerApp.local_hostnames=[]` 之下"浏览器形状"那半红、rebinding→403 那半仍绿）。
 
 选 `notebook`（7.x）而不是 JupyterLab：少一套前端产物，练习场景要的是"打开一个 .ipynb 改改重跑"。
 
@@ -191,7 +204,12 @@ argv=venv python → import pyspark 命中系统 site-packages（venv 的 --syst
 - 不装 JupyterHub / Enterprise Gateway / 多用户与配额（单机自用，账号体系在需求池里就被否过）。
 - 不引第二份 Spark、不降级到 3.4（版本差异作为 B 的**内容**讲，不作为运行时）。
 - 不做 notebook 的在线协同、评论、版本历史（git 已经在 `content/notebooks/`）。
-- 不把 Jupyter 反代进 7788（WebSocket 反代是另一件事，收益只是"少一次跳转"）。
+- 不把 Jupyter 反代进 7788（WebSocket 反代是另一件事，收益只是"少一次跳转"）。**A1 收尾时这条被重新提起**：
+  同源反代 `/jupyter/*` + `--ServerApp.base_url=/jupyter/` + 服务端注入 token 的设计已批准、**未实施**，
+  登记为 `HANDOVER.md` WI-94。它的硬前提是 7788 那侧补上 Host 白名单 + `Sec-Fetch-Site` 判据（fail-closed，
+  只在这个子树上加）—— 一旦由 7788 注入 token，"谁能打开 7788"就等价于"谁能在容器里执行代码"。
+  顺带记一条**等用户点头的开放事实**（它不是 WI-94 的前置，它今天就已经成立）：7788 一条 Host 白名单都没有，
+  所以对那张未鉴权的题库做 DNS rebinding 现在就行得通 —— 这一条与 notebook 无关，是 7788 自己的边界。
 - 不在 notebook 里做判题/答题闭环（那是 IDE 与做题系统的边界，`ide/boundary.test.ts` 的白名单会拦住）。
 
 ## 11. 待实测清单（文档阶段不许假装知道）
@@ -199,10 +217,14 @@ argv=venv python → import pyspark 命中系统 site-packages（venv 的 --syst
 这份 spec 里下面几个数是**预估**，实现时必须量出来并把实测值写回本文档与 `docker/BUILDINFO.md`；
 量不出来或与设计冲突时，改设计而不是改数字：
 
+> 回填于 A1 收尾（分支 `jupyter-a1`，HEAD `c208524`）。**两行仍是"未测"，那就照写"未测"** ——
+> 收尾那几轮不动镜像栈（`--rebuild` 是 10–20 分钟的冷构建，而容器档验的是已经跑着的那个新镜像），
+> 没有前后对照就没有数字，编一个进记忆文件比留空更坏。下面每一格的出处都是 `memo.md` 里程碑 BB 的验证表。
+
 | 项 | 现在的说法 | 怎么量 |
 | --- | --- | --- |
-| 镜像增量 | +120~200MB（A1）、A2 再 +80~150MB | 构建前后 `docker images daily-arena` 对比 |
-| 常驻内存 | +200~400MB | 起与不起 Jupyter 两种状态下 `docker stats --no-stream` |
-| kernel 启动耗时 | 未给数（"点开通常要等"不可接受） | 真起一次 `arena-pyspark` kernel，测 `SparkSession` 就绪时间 |
-| `/api/notebook/status` 探活超时 1.5s | 拍的 | 与 mysqld/redis 那套 probe 同一形状，实测后定；探活不能在页面轮询时把 CPU 吃掉 |
-| Almond 的 classpath 会不会撞 `ARG_MAX` | 未知，A2 的主要风险 | spike 里 `getconf ARG_MAX` + 实际 kernel.json argv 长度 |
+| 镜像增量 | **未测**（+120~200MB 仍是预估，A2 那一档更没开工）。理由见上面那段：本轮没有做构建前后对照，不拿预估冒充实测量 | 构建前后 `docker images daily-arena` 对比 |
+| 常驻内存 | **未测**（+200~400MB 仍是预估）。旁证只有形状性的：容器 `running / healthy`、`FailingStreak:0`，页面开着约 7 分钟不动之后 `GET /api/notebook/status` 仍 200 —— 那说的是"没崩"，不是"占多少 RSS" | 起与不起 Jupyter 两种状态下 `docker stats --no-stream` |
+| kernel 启动耗时 | **有数，两条口径**：① 容器档那条 `nbconvert --execute` 跑完整本 smoke（含 `SparkSession` 真起来 + 三行输出落地）**8975ms**（`fcd709b` 那一轮；`c208524` 那一轮整个文件 30 条合计 **8754ms**）。② 真浏览器里点「Restart the kernel and run all cells」到三行输出落进来约 **25s** —— 那是"人等到看见结果"，含模态框确认，**不是**内核冷启动的口径，别把两个数混着用 | 真起一次 `arena-pyspark` kernel，测 `SparkSession` 就绪时间 |
+| `/api/notebook/status` 探活超时 1.5s | **实现取 1500ms**（`server/src/notebooks/status.ts:202`，`timeoutMs` 可注入，容器档那条用的是 5s 的 `PROBE_TIMEOUT_MS`）。"轮询会不会把 CPU 吃掉"这一问**在落地形状下没有对象**：第五页不做定时轮询，状态是手动「刷新状态」+「准备环境」完成后重读一次（`web/src/pages/Notebook.tsx:25-27`），所以那个"GET 顺手铺示例"的磁盘 I/O 只随点击发生 —— 计划自查里挂给 Task 10 用数据判的那条，结论是**保持现状**（不改 seed 的落点） | 与 mysqld/redis 那套 probe 同一形状，实测后定；探活不能在页面轮询时把 CPU 吃掉 |
+| Almond 的 classpath 会不会撞 `ARG_MAX` | **未测** —— A2（WI-91）没开工，spike 一次都没跑。这一行留在表里就是为了不让下一个人以为已经排过雷 | spike 里 `getconf ARG_MAX` + 实际 kernel.json argv 长度 |

@@ -3160,7 +3160,12 @@ PySpark notebook，每篇在容器里真跑、含方向性 assert）→ A2（真
 
 ### 拍下来的边界（代码注释与计划里都有，记一遍省得重新讨论）
 
-- Jupyter **常驻**，由 entrypoint 起，只听容器内 `127.0.0.1:8888`，发布成宿主 `127.0.0.1:7789`。
+- Jupyter **常驻**，由 entrypoint 起，监听容器内 `0.0.0.0:8888`，发布成宿主 `127.0.0.1:7789`。
+  **里程碑 BA 当时写的是"只听容器内 `127.0.0.1:8888`"，那句在 Task 10 被实测证伪**：发布的端口是 DNAT 到
+  **容器的 eth0 地址**、不是转到容器的回环，所以绑容器 loopback 的监听永远打不通发布端口（实测 loopback 302 /
+  eth0 000 / 宿主 7789 也 000，而容器档全绿 —— 它在容器里的探活全走 loopback）。真正的边界从来是**宿主侧那条
+  `127.0.0.1:` 绑定**（闸门 `compose-ports.test.ts`）+ token 必填；非回环绑定的副作用（`allow_remote_access`
+  默认翻成 True、Host 守卫整块关掉）由 `--ServerApp.allow_remote_access=False` 显式钉住。细节见下一里程碑 BB。
 - kernel 复用 IDE 那个 venv（`/opt/arena-ide-env/python/bin/python -m ipykernel_launcher`），所以 shell 里
   `!pip3 install` 装的包下一格就能 import —— 这是红线①的一条**延伸**：notebook 的 shell 必须落在 IDE venv，
   不是镜像的系统 python。
@@ -3233,3 +3238,162 @@ Docker Desktop 的 GUI 与 `com.docker.backend` 都在跑、`wsl -l -v` 里 `doc
 （VM 内部 IP 换了而后端还指着旧地址），`wsl -d docker-desktop -u root sh -c ...` 也挂 ⇒ VM 半死。
 预备动作：`wsl --shutdown`（会顺带关掉本来就已 Stopped 的 Ubuntu-20.04）后重启 Docker Desktop，或直接重启机器。
 判据只看一件事：`docker info` 能在几秒内返回 —— 在它返回之前，任何 `--verify` 的结果都不许写进记忆。
+
+---
+
+## 里程碑 BB：Jupyter A1 收尾（Task 10 + Task 11）—— 两个"三档全绿"抓不到的缺陷，只有真连一次才现形（2026-10-08）
+
+先把状态钉在最前面，与里程碑 BA 那句"交付档一条都没跑"对齐：**这次跑了**。容器档在 `c208524` 整轮
+`CV_EXIT=0`（`/tmp/cv15.log`），宿主 E2E 74 passed，真浏览器两趟（我们自己的页面 0 error / 0 warning），
+交互式内核在浏览器里真跑出那三行。Task 1–11 全部关闭，A1 交付。
+
+### 两条只有"真连一次"才现形的缺陷（它们都活着穿过了全绿的档位）
+
+1. **绑法自相矛盾 —— 错的是 spec 自己**。原稿写"只听容器内 `127.0.0.1:8888` + 发布成宿主 `127.0.0.1:7789`"，
+   这两个条件不可能同时成立：**发布的端口是 DNAT 到容器的 eth0 地址**，不是转到容器的回环。实测（容器内，
+   故意不带 token）：loopback `302` / `$(hostname -i):8888` `000` / 宿主 `127.0.0.1:7789` `000` ——
+   **而容器档整轮全绿**，因为它每一次探活走的都是 loopback，那条路当然是通的。⇒ 容器内改绑 `0.0.0.0:8888`，
+   真边界从来是宿主侧那条 `127.0.0.1:` 绑定（闸门 `compose-ports.test.ts`）+ token 必填，容器内那句 ip 只是手段。
+   教训两层：① **"服务在容器里可达"证不了"用户能打开它"** —— 可达性的探针必须打在真实路径的那个地址上
+   （新闸门：`kernel.test.ts`「发布端口的 DNAT 目标（容器自己的非回环 IPv4）上也必须有人在听」）；
+   ② spec 里两条要求可以互相矛盾，而**验证绿发现不了矛盾，把功能连一次能**。
+2. **`kernels` vs `kernelspecs`：mock 与 bug 同源 ⇒ 三档一起骗人**。`status.ts` 读 `body.kernels`，
+   而真回话顶层是 `{default, kernelspecs}`，标签嵌在 `[<id>].spec.display_name`。单测那份 fixture 是**照着
+   实现的形状写的**，于是 mock 与 bug 同形、全绿；用户在真浏览器里看到的是一条横幅，建议他去跑
+   `./start.sh --rebuild` —— 拆掉一个**本来好好的镜像**（那个 kernel 注册着，而且刚被容器档真跑通 Spark）。
+   ⇒ 容器档那一组现在不经过任何 mock（直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter），
+   且基准改成**盘上那份 kernel.json 的 `display_name`**（`label` 与它逐字相等）—— 抄写漂移被根除，
+   而不是"改了值继续抄"。教训：**fixture 照实现的形状写 = 给 bug 作证**；被用户读到的那句话也是判据对象。
+
+### 非回环绑定的另一半：那道被默认值关掉的守卫（不是"顺便加固"）
+
+`jupyter_server` 2.21.1 把 `allow_remote_access` 的默认值算成 `not addr.is_loopback` ⇒ 绑 `0.0.0.0` 之后它
+**自己**变成 True，而 `base/handlers.py` 的 `check_host()` 第一行 `if settings["allow_remote_access"]: return True`
+就整块放过了防 DNS rebinding 的守卫（实测 `Host: rebinding.example:7789` → `302`）。
+⇒ entrypoint 显式 `--ServerApp.allow_remote_access=False`，两条断言各判一半：**浏览器形状的 Host 必须放行**
+与 **rebinding 形状的 Host 必须被拒（403）**。破坏性验过它们的独立性：`--ServerApp.local_hostnames=[]` 之下
+前者红（`Host: localhost:7789` 得 403 而期望 200/302）、后者同跑仍绿。
+还有一条**故意的判据分工**：可达性那两条把 **403 算作"有人在听"**（403 恰恰证明包转到了、有 jupyter 在按
+Host 做决定），但 403 **不**算"这次请求被接受" —— 不许为了让那条闸门显示 302 就把守卫松回去。
+
+### 证据的四条教训（每条都付过账，不是格言）
+
+- **区间可能根本不存在**：我把 `awk` 空区间上的 `grep -c skip = 0` 读成"这一档全跑且无跳过"，而那一轮
+  （`/tmp/cv14.log`）那条阶段**压根没执行到** —— `scripts/verify.sh` 是 `set -e` 顺序跑，网页 IDE 在 `:63`、
+  notebook 那档在 `:75`，IDE 那条抖动红把整轮在 notebook 之前中止了。**数字是真的，结论是无意义的。**
+  ⇒ 凡"计数为 0 所以没事"的判据，必须同时证明"区间/文件非空"。
+- **判浏览器要看 asset 哈希与 DOM 形状，不要看图片**：我按一张截图断定执行者把桌面顶栏改坏了，实际是
+  浏览器缓存了旧样式表（加载的是 `index-DmnCSBgE.css`，新的那份叫 `index-CsYirOYE.css`，而 DOM 里
+  `.topbar-main` 根本不存在）。带 cache-buster 重看才是新形状 —— 仓库那条"看行为不看文件"要再加这半句。
+- **会印出来但从不判红的横幅 = "验证通过"与"用户点不开"可以同时成立**：`start.sh` 的 `report_notebook`
+  原来只 `say` 一句再 `return 0`。把它换成一条**会红**的闸门（上面那条 DNAT 判据）之后，它才第一次在
+  交付档里挡住了东西；横幅本身只留"说清症状 + 说清哪条命令真能修好"。
+- **证据不落盘等于没跑**：Step 6 那趟真浏览器（kill → 刷新状态、浏览器里 Run All、75 秒停顿）全跑过，
+  但只活在会话里，于是被评审判成"没跑"；写进 `task-10-browser-evidence.md` 之后那次评审才闭合。
+  同族的一条本轮补掉：`.superpowers/` 没被 `.dockerignore` 排掉，而 `docker/Dockerfile` 的 app 阶段是
+  `COPY . .` ⇒ 会话笔记被烤进本地镜像、每写一次 ledger 就脏一次构建上下文（那一行现在有了）。
+
+### Docker/WSL 的诊断路径（别再重新推一遍）
+
+- **GUI 在跑 ≠ 引擎可用**。上一轮 `com.docker.backend` 活着、`wsl -l -v` 里 `docker-desktop` 是 Running，
+  但 `docker info/version/ps` 全部挂到超时；后端日志反复
+  `connect tcp 192.168.65.7:2375: operation timed out`（VM 内部 IP 换了而后端还指着旧地址）。
+  **决定性的一招是 `wsl -l -v --all`**：它挂死，而 `wsl -l -v` 秒回 ⇒ 卡住的就是那个 `--all`
+  （枚举全部 distro 要问那台半死的 VM），而后端日志点名的 bootstrap 失败正是这一个调用（控制者实测）。
+  判据仍只看一件事：`docker info` 能不能几秒内返回 —— 在它返回之前任何 `--verify` 的结果都不许写进记忆。
+- **引擎会自己升级**：重启前 API v1.47（engine 27.x），重启后 `docker version` 报 CLIENT/SERVER = **29.8.1**。
+  "昨晚还能构建"不是今天的条件。
+- **`mirrors.aliyun.com` 对 jammy 整片 pocket 回 403**（这台机器/IP 侧的条件：宿主直接 curl `http` 与
+  `https` 都是 403），而其余外部源逐个实测 200（npmmirror / nodejs.org / maven.aliyun / repo1.maven.org /
+  download.redis.io / pypi.tuna）⇒ **被卡住的只有 apt 这一层**。所以 `MIRROR_APT` 被提成构建旋钮
+  （`docker/Dockerfile:20-21` + compose 的 `build.args`，**默认值一字未动**，三处同值由
+  `dockerfile-pins.test.ts` 钉住）。值必须写 **`http://`**：被 pin 的 `ubuntu:22.04` 基座里没有 CA 证书包，
+  走 https 时 `apt-get update` **退出 0 而一个列表都没拿到**（实测 `GET_LINES=0`；设成 http 的 ustc 那一次
+  `GET_LINES=18`），下一层才以 `E: Unable to locate package tzdata/locales/...` 暴露 —— 看起来像"包名写错了"，
+  其实是源没生效。本机那行是 `MIRROR_APT=http://mirrors.ustc.edu.cn`（tuna 同形），它留在 gitignored 的
+  `.env` 里，**不再有脚本替你写它**（上一轮那个 `ensure_build_mirror` 把"给这台机器记一份"做成了
+  "每份 clone 第一次构建都自动写 ustc"，是越界，已撤 —— 见 `1b3eff5`）。
+
+### 用户最初要的那件事：交互式内核真跑起来了
+
+浏览器里点 `notebook-open` → `/tree` 的标题是 Home（**不是登录页**）→ 双击 `00-smoke-pyspark.ipynb` →
+工具条「Restart the kernel and run all cells」→（**又弹一次 "Restart Kernel?" 模态框** —— 第一次点没生效
+就是被它挡的）→ Confirm → 等 25s：
+
+```
+prompts  ["", "[1]:", "[2]:", "[3]:"]                 ← markdown 那一格没有提示符
+outputs  [1] python /opt/arena-ide-env/python/bin/python
+         [2] Setting default log level to "WARN". … | rows 15
+         [3] venv ok
+服务端：GET /api/kernels → 2 条，name 均 arena-pyspark，execution_state=idle
+        ps              → /opt/arena-ide-env/python/bin/python -m ipykernel_launcher
+```
+
+⇒ 红线① 与"复用 IDE venv"第一次由**交互式内核**证明（不是 nbconvert、不是文件形状）。
+`prompts` 那一路顺带钉死一条事实：**markdown 格不占 `In` 号** ⇒ 0 基下标 3 那一格显示的就是 `In[3]`，
+**数值相等是"它前面恰好只有一格 markdown"的巧合**，不是"`In[n]` 从 1 数所以界面上是第 4 格" ——
+`kernel.test.ts` 那句注释原来就是这么写错的，本轮改掉（连同另外三条注释级 minor）。
+Jupyter 自己那页有 4 error / 9 warning，逐条读过：全部来自它自带的调试面板与 yjs 扩展（上游噪音），
+不影响执行；**我们自己的页面是 0 error / 0 warning**（五个宽度 + 点开 Jupyter + 一次内核 restart 全程）。
+
+### 验证（HEAD `c208524`；日志都在 `/tmp`）
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 容器交付档 | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` | `CV_EXIT=0`、`✓ verify 全部通过`。**判据本身站得住**：`Notebook 运行时（kernel 真跑）` 出现 **1** 次、区间非空（18 行）、区间内 `skip` **0** 次，`✓ server/test/notebooks/kernel.test.ts (30 tests) 8754ms` → `Tests 30 passed (30)`（`/tmp/cv15.log`） |
+| 判题矩阵 | 同一轮 | `[matrix] 代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道`，栈全 true（java-junit / react-vitest / mysql / redis / pyspark / spark-scala / llm-rubric）；`判题矩阵：513 passed / 7 skipped / 520 total ✓` —— 那 7 条是既有的 env 门控（`publish-identity` 1 + `env-write-atomicity` 6），不是本轮新债 |
+| 宿主 E2E | `npm run e2e` | **74 passed**（`/tmp/e2e18.log`），含新加进采样面的 480 / 600 / 1100 与那条顶栏几何判据 |
+| 宿主快档 | `npm run verify:fast` | 每个 commit 由 pre-commit 各跑一遍；`fcd709b` 独立跑 `EXIT=0`（`/tmp/vf16.log`）；**本轮文档收尾之后** `EXIT=0`（`/tmp/vf18.log` 改动树 + `/tmp/vf19.log` 收尾） |
+| 真浏览器 | Playwright（宿主），两趟 | 320/390/480/768/1440 五档 meta 与 brand 全部同行、`metaGapToRowRight` 与 `overflowX` 全 **0**、`order` 全 0/0/0、console **0/0**；交互式内核见上一节（`task-10-closing2-evidence.md`） |
+
+**一次红的整轮照实记**：同一个 HEAD 上先跑的那次（`/tmp/cv14.log`）`CV_EXIT=1`，红在
+`server/test/ide/debug.test.ts > 后端接缝本身 > 写进一个刚退出的调试进程`，失败消息是那条用例自己的
+fail-closed 守卫（`后端起不来，这条用例没有意义`）；单文件重跑 38 passed（`/tmp/dbg_rerun.log`）。
+它的**爆炸半径**比"偶发冤红"大：那条阶段在 `verify.sh:63`，notebook 那档在 `:75` ⇒ **整轮中止的那一次
+根本没走到 kernel 真跑**，而那正是 `c208524` 当时唯一的容器档证据 ⇒ WI-92 从"pre-commit 偶尔拦我"
+升级为"交付档会被它打断"。不许拿"单文件绿"冒充"整轮绿"，`cv15` 才是收尾证据。
+
+### 破坏性证明（每条都亲眼看到红）
+
+| 故意改坏的东西 | 必须红的那条 | 实测到了什么 |
+| --- | --- | --- |
+| `kernel.json` 的 `argv[0]` 与 `PYSPARK_DRIVER_PYTHON` 都改成 `/usr/bin/python3`（+ 重建） | 「smoke notebook 跑完并打出 venv ok」 | 红，且红在**结构化证据** `cell 3: AssertionError` ⇒ `--ExecutePreprocessor.allow_errors=True` 那次改动不是橡皮图章，有界证据路径真的在失败时跑了 |
+| entrypoint 加 `--ServerApp.local_hostnames=[]`（+ 重建） | 「Host 守卫在位」 | 红在 `Host: localhost:7789` 得 403（期望 200/302）= "浏览器形状要放行"那一半；rebinding→403 那一半同跑仍绿 ⇒ 两半各自独立被判住，且报错直接给出"该改 `local_hostnames`，不许把 `allow_remote_access` 松回 True" |
+| 同上（同一轮） | 「DNAT 目标上也必须有人在听」 | **计划外的收获**：它照旧绿 —— 403 被算作"有人在听" ⇒ "403 = 活着"这个决定第一次被真实场景验到，而不是只写在注释里 |
+| fixture 里把 `spec` 降一层 | `status.test.ts` 的 `label === display_name` | 红得很精确：期望 `"PySpark (arena)"` 实得 `"arena-pyspark"`。（复审判定我原先给的写法**指错了文件** —— 容器那条不读 fixture，改 fixture 判不住它） |
+| e2e 里 `page.route` 伪造 `running:true` + `url` | `notebook-open` 的 `toHaveCount(0)` | `Expected: 0, Received: 1` ⇒ 那条断言判的是产品行为，不是 fixture 自己保证的空话 |
+| 还原两个被变异文件 + 重建 | 全档复绿 | `kernel.test.ts (30 tests) 8495ms` → 30 passed，`local_hostnames` 计数 0，`git status` 空 |
+
+E2E 隔离那条按仓库规矩补成了"能证明坏了我看得见"的形状：正向 `npm run e2e` 56 passed 而真人
+`arena.db` / `arena.db-wal` 的 sha256 一字未动 —— 但真 WAL 是 **0 字节**（那是空输入的哈希），
+"没变"本身量不到东西 ⇒ 改用**正向对照**：`ARENA_E2E_KEEP=1` 那一跑之后 `data/e2e/arena.db-wal` =
+**173,072 字节**（测试真的在写），同一时刻真实例 WAL 仍 0 字节、DB 哈希未动。没有拿"两边都没写"当隔离成功。
+
+### 本轮（Task 11）做的文字订正
+
+都是"下一个人会照它做错事"那一类，不是措辞：`memo.md` 里程碑 BA 那句绑法、计划的 `:7` / Task 3 的
+`--ServerApp.ip` 片段与那条启动日志（连同 `Produces:` 那行）、spec §3 那张图与 §11 的待实测表（镜像增量与
+常驻内存照实写**未测**，不编数），四处注释级 minor（`In[n]` 的换算、"两条一起红"不可观察、崩溃证据只读
+`code` 不读 `signal`/`killed` 且漏了 180s 超时那一档、"必须真打出去才拿得到"言过其实），
+`docker/BUILDINFO.md` 里那条指向**未跟踪**会话报告的死引用（换成事实本身）。
+README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个字都没有**：第五页那一节、两个路由、
+`0.0.0.0` 的绑法与它带出的守卫、"答案可读不是安全边界"、"Jupyter 没有看门狗"这次都补上了。
+**`--notebook` 这个开关不存在**，所以文档里也没有它（计划简报里那句"命令表加 notebook"按事实否掉了）——
+`start.sh` 在 `./start.sh` / `--ide` / `--rebuild` / `--verify` 之后打印那一行地址，`--dev` 不打印。
+
+### 已知问题 / 留给下一个 session 的东西
+
+- **Jupyter 无守护**（WI-93）：实测 `Recreate` 计数 0 ⇒ 掉掉的进程靠 `./start.sh` 起不回来，要
+  `docker compose up -d --force-recreate arena`。加不加守护是一次**决定**（重建会带走正在跑的 IDE 调试会话
+  与判题任务），不是修复，本轮只把命令说出口。
+- **notebook 内嵌的设计已批准、未实施**（WI-94）：同源反代 `/jupyter/*` → 容器 8888 + `--ServerApp.base_url=/jupyter/`
+  + token 由服务端注入（HTTP header；websocket 必须走 `?token=`，浏览器给不了 ws 的请求头），**不引新依赖**
+  —— `ws` 只是被 hoist 上来的传递包、不是 `server` 声明的依赖 ⇒ 用 `http`/`net` + `upgrade` 事件手写。
+  硬前提：被代理的那棵子树上必须有 `Host` 白名单 + `Sec-Fetch-Site ∈ {same-origin, none}`，**fail-closed** ——
+  注入 token 之后"谁能打开 7788"就等价于"谁能在容器里执行代码"。**另有一条今天就已成立的开放事实**（等用户
+  点头，不是 WI-94 的前置）：7788 没有任何 Host 白名单 ⇒ 对那张未鉴权的题库做 DNS rebinding 现在就行得通。
+- **CDP 那条抖动**（WI-92）：见上面"一次红的整轮"。要修的是它的会话启动竞态，不是给它加 skip。
+- **未测的两项**：镜像增量、常驻内存（要 `docker images` / `docker stats` 前后对照，收尾轮不动栈）⇒
+  spec §11 里写"未测"，没有数字就不写数字。
+- **交付顺序照旧**：A1 完 ⇒ B（3 篇企业级 notebook，WI-90，每篇必须容器里 `nbconvert --execute` 真跑过
+  且含**方向性 assert**）⇒ A2（真交互式 Scala kernel，WI-91，必需项）。分支 `jupyter-a1`，**未 push**。

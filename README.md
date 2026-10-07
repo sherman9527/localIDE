@@ -30,6 +30,9 @@
 
 启动成功后会打印**判题栈可用性**：健康检查过了不等于什么都能判 —— `llm-rubric:false` 会让主观题
 静默降级成人工自检表，所以这一步必须说出来，而不是等你答完题才发现没评分。
+同一批输出里还有一行 **Notebook** 的地址（不含 token），7789 没应答时它会把"为什么打不开 + 哪条命令真能修好它"
+说出口。**故意没有 `--notebook` 这个开关**：第五页不是一个独立服务，`./start.sh`、`--ide`、`--rebuild`、`--verify`
+都会打印那一行，而 `--dev` 不打印 —— dev 服务不发布 notebook 的端口，打出来就是个打不开的地址（说假话）。
 
 ## 每天怎么用
 
@@ -110,6 +113,28 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
   与一个 `重置环境`。Java / Spark Scala 没有"一条命令装对传递依赖"这种好事，所以那里不给输入框，
   而是告诉你把 jar 放进哪个目录（放进去就会进 classpath）。三条边界：**这些包只影响 IDE**（判题看不到）、
   **命令窗口不是 shell**（分号与管道在这里只是字符）、**reset 会关掉这门语言活着的 REPL / 调试会话**。
+
+## Notebook
+
+顶栏第五项 **Notebook**（`#/notebook`，懒加载 —— 首屏仍然是 1 JS + 1 CSS）。这一页**不是**嵌进来的 Jupyter，
+它只做三件事：说清服务在不在、给 kernel 徽标、给一个能点开的地址
+（`http://127.0.0.1:7789/tree?token=…` —— token 只在你本机点开的那次通信里附上去，判据是 **socket 对端地址**，
+不是浏览器自报的 `Host` 头；非本机对端照样给链接，只是里面没有凭据）。真界面是容器里那个 Jupyter，
+由 `docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起。
+
+- **kernel 就是网页 IDE 那份环境**：`PySpark (arena)` 的 argv 指向 `/opt/arena-ide-env/python/bin/python`，
+  所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。**这条同时是判题那条红线的第二个入口**
+  —— 包只进 IDE 那套 site-packages，判题器看不到（两道保险见 `docs/JUDGING.md` 最后一段）。
+- **示例**在 `content/notebooks/*.ipynb`（进 git、可 diff）。启动时"缺失才复制"进 `data/notebooks/`，
+  **绝不覆盖你改过的那份**；铺不进去（只读挂载 / 磁盘满）会单独说成一句话，不伪装成"没有示例"。
+- **Spark 的表与判题分开**：notebook 用自己的 warehouse 与 Derby（`data/notebook-warehouse/`），
+  你在 notebook 里建的表 IDE 与判题都看不见 —— 刻意的隔离，否则两边抢同一把 Derby 锁。
+- **Jupyter 掉了不会自己回来**：`./start.sh` 在镜像没变时不重建容器（实测 `Recreate` 计数 0），
+  横幅会点名那条真能修好这个症状的命令 `docker compose up -d --force-recreate arena`。**故意不给它加看门狗**：
+  重建容器会带走正在跑的 IDE 调试会话与判题任务，那一次执行是你的决定（`HANDOVER.md` WI-93）。
+- 服务起不来**不挡做题与判题**：状态卡照实说"没在运行"+ 原因（判题不经过这个服务）。
+- 想验证环境真在工作：打开 `00-smoke-pyspark.ipynb`，右上角选 `PySpark (arena)`，Run All，
+  预期三行 `python /opt/arena-ide-env/...`、`rows 15`、`venv ok`（那个 15 是 `range(6)` 里 id 的**和**，不是行数 6）。
 
 ## 主观题评分与"CLI 桥"
 
@@ -226,6 +251,15 @@ tests/       Playwright E2E
   和进度暴露给同局域网的人。**代价：手机 / iPad 访问不了**（已确认不需要）。
   要临时开出去调试得显式改 `compose.yml`，而 `server/test/regression/compose-ports.test.ts` 会先把你说清楚。
   ⇒ notebook 的 token 释放判据里"对端 == 默认网关"那一支，安全性正是**派生自这条绑定**：发布端口一旦不再只绑 `127.0.0.1`，那一支当场变成局域网级的凭据泄露。
+- **notebook 里能读到题库的参考答案 —— 这不是安全边界**：Jupyter 以 `--allow-root` 起，工作目录设在
+  `data/notebooks` 只是让默认视图干净，绝对路径 `/app/content/questions/...` 读得到参考解与 rubric 要点。
+  它是练习工具，不是考官；真正的边界是"API 不吐答案"（`rule.md` C7）。这句话常驻第五页，不随状态切换收起。
+- **notebook 同样只在浏览器本机打得开**（7788 与 7789 都只绑**宿主**回环 ⇒ 手机 / iPad 打不开）。
+  容器内部反而是监听 `0.0.0.0:8888`：发布的端口 DNAT 到的是容器的 eth0 地址，绑容器回环的话宿主永远连不上
+  （而容器档验证全绿 —— 它每次探活都走 loopback）。边界从来是宿主侧那条绑定 + 必填 token，不是容器内那句 ip；
+  A1 的第一版把它写错成"只听容器内 127.0.0.1"，细节与教训记在 `memo.md` 里程碑 BB。
+- **Jupyter 没有看门狗**（故意的，不是漏配）：进程掉了 `./start.sh` 救不回它（镜像没变 ⇒ compose 不重建容器），
+  要 `docker compose up -d --force-recreate arena` —— 而那会带走正在跑的 IDE 调试会话与判题任务，所以加不加守护是一次决定。
 
 ## 更多文档
 

@@ -158,3 +158,13 @@ B 全局：服务进程自己干净；B2 机制：摘掉这个动作本身有效
 C 源码：判题目录不许引用、IDE 目录不许写 `process.env`）。
 这条闸门是**在容器里跑红之后才修对的**：宿主档位上那个变量本来就不存在，四层全绿而容器里漏成一片 ——
 所以 `./start.sh --verify` 那一档不是可选项。
+
+**notebook 是这条红线的第二个入口**（A1，机制见 `docs/ARCHITECTURE.md` 的 Notebook 一节）：cell 里的
+`!pip3 install X` 走的是 **shell**，命中哪个 pip 由 `PATH` 决定 —— 不处理就写进系统 site-packages，
+而判题用的正是那个解释器，于是"重建镜像即可复现判题"这条承诺当场作废。堵法与 IDE 那一族同形、但落在不同处：
+entrypoint 给 jupyter 那个进程前置 `PATH=/opt/arena-ide-env/python/bin:$PATH`（**必须写在那条启动语句之前**），
+`arena-pyspark` 的 kernel argv[0] 也是同一个 venv 的 python。两条判据一条结构一条行为：
+`server/test/regression/notebook-env-isolation.test.ts`（那一行在不在、位置对不对，注释里提一句不算）与
+`server/test/notebooks/kernel.test.ts`（容器档：`nbconvert` 真跑 `00-smoke-pyspark.ipynb` 打出 `venv ok`，
+外加读那个活进程 `/proc/<pid>/environ` 的 PATH 首项 —— nbconvert 是测试进程自己起的子进程，继承的是测试的
+env，它证明不了服务进程那一侧）。

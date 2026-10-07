@@ -168,6 +168,13 @@ const STDERR_TAIL = 800;
  * 后者现在是数据（`output_type=error` → `executedNotebookEvidence` 报「cell 号 + 异常名」），不再是异常。
  * 这里不许把 node 原样的 `err.message` 抛出去：它整段拼进了 stderr（Spark 的 stderr 无上界），
  * 一次失败就把测试报告写成日志转储 —— 那正是本文件把断言从整本 notebook 收进「三行」的同一个理由。
+ *
+ * 一条**已知的局限**（评审 minor：只记账，不改行为）：这里只读 `e.code`，不读 `e.signal` 与 `e.killed`，
+ * 而下面那句"非 0 退出说的是这一档跑不起来"枚举的四条原因里**漏了 `timeout: 180_000`** ——
+ * `execFileSync` 超时是 SIGTERM 杀进程（`code` 是 undefined、`killed` 是 true），所以真撞超时的时候
+ * 这句话会印成 `code=(没有 code)` 再附上四条此刻并不成立的原因。看到那行时**先想超时**
+ * （Spark 冷启动撑到 180s 是现实可能，本文件那条用例的预算也只有 200s），别按那四条去查 kernel 注册。
+ * 把 signal/killed 一起判读要动行为，留给有测试兜着的那一轮做。
  */
 function nbconvertCrashEvidence(err: unknown): string {
   const e = err as { code?: number | string; stdout?: unknown; stderr?: unknown };
@@ -412,9 +419,12 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     expect(
       errors,
       '执行时抛异常的 cell（只有 cell 号与异常名，不带 traceback 正文）。' +
-        '⚠ 这里的 cell 号是 **0 基的 cells 数组下标**（提取器按 forEach 的下标报的），' +
-        'notebook 界面右上角那个 In[n] 与导语里的"第 4 格"都从 1 数 —— 所以「cell 3」= 界面上的第 4 格 = ' +
-        `那句 venv assert 所在的格子。实测内容：${errors.join(' / ')}`,
+        '⚠ 这里的 cell 号是 **0 基的 cells 数组下标**（提取器按 forEach 的下标报的）。' +
+        '别拿"In[n] 从 1 数 ⇒ 下标 = 界面第 n+1 格"去换算：**markdown 格不占 `In` 号**' +
+        '（实测这一本的 prompts 是 `["", "[1]:", "[2]:", "[3]:"]` —— 首格是 markdown，没有提示符），' +
+        '所以下标 3 那格显示的是 `In[3]`，**数值相等只是"它前面恰好只有一格 markdown"的巧合**，' +
+        '导语或界面多一格少一格 markdown 就对不上了。那句 venv assert 就在下标 3 这一格。' +
+        `实测内容：${errors.join(' / ')}`,
     ).toEqual([]);
     const shown = JSON.stringify(stdout);
     expect(stdout, `少「venv ok」⇒ 红线①那条 assert 没成立（解释器不在 IDE venv 里），实际 stdout 行：${shown}`).toContain('venv ok');
@@ -439,9 +449,13 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
         '它就是 kernel.json 的 argv[0] ⇒ 去查 kernelspec/entrypoint 的 PATH，别改这里的期望值）。' +
         `这是同一件事的两处证据，第一处是 notebook 里 cell 4（0 基下标是 cell 3）那条 assert。` +
         `两处各有一个来源：那条 assert 比的是 notebook 源文件里写死的 /opt/arena-ide-env/ 字面量，` +
-        `这条比的是本容器实际的 config.ideEnvDir ⇒ **只红一条**就说明这两个来源分叉了` +
-        `（compose 改了 ARENA_IDE_ENV_DIR 而 kernelspec 没跟着改，或反过来 —— notebook-image.test.ts 拦的就是这个），` +
-        `两条一起红才是"解释器真的落回系统 python"。此刻 errors 数组：${JSON.stringify(errors)}`,
+        `这条比的是本容器实际的 config.ideEnvDir ⇒ 判据是**红在哪一条**，不是"两条一起红"` +
+        `（那句不可观察：vitest 在第一个失败的 expect 处就结束本条用例，而上面那条 errors 断言排在前面 ——` +
+        `notebook 里那句 assert 真挂了的话它以 \`cell 3: AssertionError\` 先红，这条压根执行不到）。` +
+        `红在这里说明 errors 是空的（= notebook 那句 assert 过了）⇒ 是**两个来源分叉**：解释器在 ` +
+        `kernel.json argv[0] 那个前缀下，而 compose 的 ARENA_IDE_ENV_DIR 与 notebook 写死的字面量不是同一个串` +
+        `（notebook-image.test.ts 拦的就是这个）；红在 notebook 那条才是"解释器真的落回系统 python"=红线①破了。` +
+        `此刻 errors 数组：${JSON.stringify(errors)}`,
     ).toBe(true);
     // 旧写法是 `expect(out).not.toMatch(/Traceback/)`（扫整本 JSON）。这条把它收进"小集合"里：
     // stdout 不许出现 Traceback 字样，判据强度不丢，但失败消息只带那几行。
@@ -641,10 +655,14 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
      * 真值一直就在旁边：`KERNEL_FILE` 是本组第一条断言的对象（镜像级那份 kernelspec，Dockerfile COPY 进去的），
      * Jupyter 在 `/api/kernelspecs` 的 `spec` 那一层回的就是它的键，所以 `display_name` 应当逐字相等。
      *
-     * 顺带一条派单让记下来的好处：这条判的是「解析值 == 一份文件里的值」，
-     * 于是**同一个文件里将来谁加一句 `vi.stubGlobal('fetch')` 也替不了它** ——
+     * 顺带一条派单让记下来的好处（评审 minor 把这句说到位：原稿写的"必须真打出去才拿得到"言过其实）：
+     * 这条判的是「解析值 == 一份文件里的值」，所以**一份没读这份文件的 mock 替不了它** ——
      * 旧的"只要不同于 id"任何一份 mock 都满足得了（包括一份与实现同源地写错的 mock，
-     * 那正是本轮 `kernels` / `kernelspecs` 那次全绿却对用户撒谎的形状），而"等于盘上这份"必须真打出去才拿得到。
+     * 那正是本轮 `kernels` / `kernelspecs` 那次全绿却对用户撒谎的形状）。
+     * 但别把它读成"这一条逼得出网络"：一条同样 `readFileSync` 这份 kernel.json 的 `vi.stubGlobal('fetch')`
+     * 就能把解析值与基准一起喂上，一个包都不用发。真正逼得出真 Jupyter 的是**本条开头那次调用**
+     * （`notebookStatus()` 打的就是这个容器里跑着的 jupyter，前面两条探活动的闸门也一样打真服务），
+     * 这条断言买到的是"基准不在 mock 手里"，不是"必然走了网络"。
      *
      * 诚实的边界（不是漏判，写出来免得下一个人以为这里还留着牙）：如果哪天 `display_name` 恰好等于 id，
      * 这条就分不出「读到了 spec.display_name」与「`?? id` 兜底」——但那时两种解析的结果是同一个字符串，

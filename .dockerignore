@@ -12,6 +12,8 @@ playwright-report
 memo.md
 HANDOVER.md
 docs
+# 与 docs / memo.md / HANDOVER.md 同族（会话笔记与 ledger，不是运行时产物）：漏掉它 = `COPY . .` 把 session 笔记烤进本地镜像，且每写一次 ledger 就脏一次构建上下文
+.superpowers
 **/*.tsbuildinfo
 npm-debug.log*
 .env
