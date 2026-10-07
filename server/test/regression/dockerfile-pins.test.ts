@@ -54,6 +54,28 @@ it('选版本的 ARG 都有默认值（空默认会让构建悄悄装到镜像�
   }
 });
 
+/**
+ * MIRROR_APT 的默认值抄在三处（mirrors.sh 的实际默认、Dockerfile 的 ARG、compose 的 build.args），
+ * 三处一旦分叉就会出现"看不出来在装哪个站"的构建：镜像里 ARG 的默认值覆盖脚本的默认值，
+ * 而 compose 那份只在你用 `docker compose build` 时生效 —— 直接 `docker build` 的人拿到的是第三个值。
+ * 判"相等"不判"等于某个字面量"：换默认源本身是合法的（写这份的人决定），分叉才是要拦的。
+ */
+it('MIRROR_APT 的默认值三处一致（Dockerfile 的 ARG ↔ mirrors.sh 的兜底 ↔ compose 的 build.args）', () => {
+  const mirrors = readFileSync(join(config.repoRoot, 'docker', 'mirrors.sh'), 'utf8');
+  const composeYaml = readFileSync(join(config.repoRoot, 'compose.yml'), 'utf8');
+  const fromScript = /^MIRROR_APT="\$\{MIRROR_APT:-([^}]*)\}"/m.exec(mirrors)?.[1];
+  const fromDockerfile = /^ARG MIRROR_APT=(.*)$/m.exec(dockerfile)?.[1];
+  const fromCompose = /^\s*MIRROR_APT:\s*\$\{MIRROR_APT:-([^}]*)\}\s*$/m.exec(composeYaml)?.[1];
+  // 三条都得真的读到（正则失效 = 这条在空转，两个 undefined 相等照样绿）
+  expect({ fromScript, fromDockerfile, fromCompose }, '有一处 MIRROR_APT 默认值没被解析到 ⇒ 写法变了，先修这条判据').toEqual({
+    fromScript: expect.any(String),
+    fromDockerfile: expect.any(String),
+    fromCompose: expect.any(String),
+  });
+  expect(fromDockerfile, 'Dockerfile 的 ARG 默认值与 mirrors.sh 分叉了').toBe(fromScript);
+  expect(fromCompose, 'compose 的 build.args 默认值与 mirrors.sh 分叉了').toBe(fromScript);
+});
+
 it('npm 依赖有 lockfile 且被 git 跟踪（镜像里 `npm install` 靠它）', () => {
   expect(existsSync(join(config.repoRoot, 'package-lock.json'))).toBe(true);
   expect(readFileSync(join(config.repoRoot, 'package-lock.json'), 'utf8')).toContain('"lockfileVersion"');

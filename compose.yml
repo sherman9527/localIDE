@@ -14,6 +14,9 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        # apt 镜像站在某些网络里整片 jammy pocket 回 403（外部条件，会挡住构建）：MIRROR_APT=http://… ./start.sh --rebuild 就换源（用 http，基座里没有 CA 证书，见 docker/mirrors.sh:6-9），默认值与 docker/Dockerfile 的 ARG、docker/mirrors.sh:10 三处同值 ⇒ 环境变量不设时构建与今天一字不差。
+        MIRROR_APT: ${MIRROR_APT:-http://mirrors.aliyun.com}
     image: daily-arena:0.1
     container_name: daily-arena
     ports:

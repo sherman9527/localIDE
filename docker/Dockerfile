@@ -16,6 +16,9 @@ ARG NODE_VERSION=24.10.0
 ARG SPARK_VERSION=3.5.5
 ARG JUNIT_VERSION=1.11.4
 ARG SCALA_VERSION=2.13.16
+# apt 源是唯一"不改被跟踪文件就换不了"的外部依赖：mirrors.aliyun.com 对 jammy 整片 pocket 回 403（这台机器/IP 侧的条件，不是仓库坏了）时，--build-arg 指到可用的站就能构建，默认值与 docker/mirrors.sh:10 同值 ⇒ 不传它构建结果一字不差。写成 ENV 而不是只留 ARG：本层两处 arena-mirrors（apt / pip+maven+env）都从环境读它，而 ARG 出了本 stage 就没了、ENV 才会随 deps/app 继承下去。
+ARG MIRROR_APT=http://mirrors.aliyun.com
+ENV MIRROR_APT=${MIRROR_APT}
 ENV DEBIAN_FRONTEND=noninteractive \
     TZ=Asia/Shanghai \
     LANG=C.UTF-8 \
