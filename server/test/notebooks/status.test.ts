@@ -1,6 +1,8 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
-import type { NotebookStatusResponse } from '@arena/shared';
+import { NOTEBOOK_KERNELS, type NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
 import { notebookStatus, parseProcNetRoute } from '../../src/notebooks/status.js';
 
@@ -29,10 +31,26 @@ function argsText(args: unknown[]): string {
 }
 
 /**
- * `GET /api/kernelspecs` 的**真回话**（2026-10-08 从跑着的 arena 容器里 curl 出来的键结构，
- * 逐字对照过，不是我按实现的样子编的）：
- * `{"default":"python3","kernelspecs":{"python3":{"name":…,"spec":{"display_name":"Python 3 (ipykernel)",…},"resources":{…}},
- * "arena-pyspark":{"name":…,"spec":{"display_name":"PySpark (arena)",…}}}}`
+ * `GET /api/kernelspecs` 的回话。这份 fixture 的自我声明是"世界实际发的是什么"的那份记录，
+ * 所以它**不许在被声称逐字的情况下带编造值**（评审 I-5 —— 上一版就是这么坏的：
+ * `arena-pyspark` 的 `env` 是手抄的，而且抄错了：真值除了 warehouse.dir 还带
+ * `--conf spark.driver.extraJavaOptions=-Dderby.system.home=…`、`--master local[2]`、
+ * `--driver-memory 512m` 与 `pyspark-shell` 尾缀，env 里也漏了 `SPARK_LOCAL_IP` 与
+ * `PYSPARK_DRIVER_PYTHON`。把我们自己发出去的那个 kernel 引错，正是这一轮要停止做的事）。
+ *
+ * 现在分两层保真，各按各自的方式：
+ * ① `arena-pyspark` 那一条的 `argv` / `env` / `display_name` / `language` / `interrupt_mode` /
+ *   `metadata` 是**读**出来的（`docker/jupyter/kernels/arena-pyspark/kernel.json`，就是 Dockerfile
+ *   COPY 进镜像的那份）—— Jupyter 在 `spec` 那一层回的就是这个文件的键，所以这一支不可能与真值漂移。
+ * ② `python3` 那一条是 ipykernel 自带的、仓库里没有对应文件，所以它是**抄的**，抄的是 2026-10-08
+ *   从跑着的 arena 容器里 `curl -H "Authorization: token $…" http://127.0.0.1:8888/api/kernelspecs`
+ *   拿到的原值（`argv:["python","-m","ipykernel_launcher","-f","{connection_file}"]`、`env:{}`、
+ *   `display_name:"Python 3 (ipykernel)"`、`language:"python"`、`interrupt_mode:"signal"`、
+ *   `metadata:{debugger:true}`、`kernel_protocol_version:""`）。
+ *   ⚠ `kernel_protocol_version` 那个**空串是真值**，不是编的（评审 I-5 说它是编的 —— 那一条不成立：
+ *   jupyter 对没在 kernel.json 里声明这一键的 spec 就回空串，实测连 `arena-pyspark` 那一支也是 `""`，
+ *   所以下面 ① 那支也补了一个 `''`，两支形状一致）。这一支会随 ipykernel 版本漂 —— 漂了不影响
+ *   任何断言（没有解析器读这些叶子），但别把它当成"当下实测过的值"。
  *
  * ⚠ 顶层那个映射叫 **`kernelspecs`**，不叫 `kernels`。这份 fixture 以前按 `kernels` 写，
  * 于是 mock 与实现**同一个错**：十一条 tests 全绿，而第五页在用户眼前说
@@ -40,13 +58,30 @@ function argsText(args: unknown[]): string {
  * 那个 kernel 其实注册着，并且刚在容器档里真跑通过 Spark（评审实测）。
  * 按想象中的键名写的 fixture 修不了这个 bug，它只会替 bug 作证。
  * 真正判住"解析的键必须与真回话同源"的是容器档那条 `kernel.test.ts`
- * 「对着真 Jupyter 解出 arena-pyspark」—— 它不经过任何 mock。
+ * 「对着真 Jupyter 解 kernelspecs」—— 它不经过任何 mock，基准是盘上那份 kernel.json。
  *
  * 三个容易写错的形状都留在这份 fixture 里：
  * ① 标签嵌在 `kernelspecs[<id>].spec.display_name`，不在 entry 顶层；
  * ② `default` 指着的 `python3` 本身也是一条 kernel（少收一条 = 界面列的与 Jupyter 自己列的不是一回事）；
  * ③ entry 还带着 `name` / `resources` 两个兄弟键（解析按 entries 走，多余键不该改变结果）。
  */
+const SHIPPED_KERNEL_FILE = join(config.repoRoot, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.pyspark, 'kernel.json');
+// 读不到就响亮地停在这里（同 notebook-image.test.ts 的先例）：这一支 fixture 的真值只有这一个来源，
+// 悄悄退回一份手抄的常量 = 把评审 I-5 刚修掉的那个坏形状重新请回来。
+if (!existsSync(SHIPPED_KERNEL_FILE)) {
+  throw new Error(
+    `${SHIPPED_KERNEL_FILE} 不存在 ⇒ NOTEBOOK_KERNELS.pyspark（当前值 '${NOTEBOOK_KERNELS.pyspark}'）` +
+      '与 docker/jupyter/kernels/ 下的目录名分叉了：改常量要同时改目录（和 Dockerfile 的 COPY 目标）。',
+  );
+}
+const SHIPPED_KERNEL_SPEC = JSON.parse(readFileSync(SHIPPED_KERNEL_FILE, 'utf8')) as {
+  argv: string[];
+  display_name: string;
+  language: string;
+  interrupt_mode?: string;
+  env?: Record<string, string>;
+  metadata?: Record<string, unknown>;
+};
 const KERNELSPECS_BODY = {
   default: 'python3',
   kernelspecs: {
@@ -64,12 +99,11 @@ const KERNELSPECS_BODY = {
       resources: {},
     },
     'arena-pyspark': {
-      name: 'arena-pyspark',
+      name: NOTEBOOK_KERNELS.pyspark,
       spec: {
-        argv: ['/opt/arena-ide-env/python/bin/python', '-m', 'ipykernel_launcher', '-f', '{connection_file}'],
-        env: { PYSPARK_SUBMIT_ARGS: '--conf spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh pyspark-kernel' },
-        display_name: 'PySpark (arena)',
-        language: 'python',
+        ...SHIPPED_KERNEL_SPEC,
+        // jupyter 给每一条 spec 都补这一键（实测 ""，见上面 ②），而 kernel.json 里没有它 ⇒ 单独补。
+        kernel_protocol_version: '',
       },
       resources: {},
     },
