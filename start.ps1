@@ -320,6 +320,12 @@ function Report-Health {
 #   可以同时成立（Task 10 实测正是这样，而当时列的那两个原因——缺 token / 旧镜像——都指错了方向）。
 #   会红的那条在容器档：server/test/notebooks/kernel.test.ts「发布端口的 DNAT 目标」。
 #   这里保持只打印（裁决 R4：横幅不改成退出码，闸门归测试），且与 start.sh 说同一套原因。
+# ④ 给出去的操作必须真能修好这个症状。行为与 start.sh 的注释 ④ 必须一致（2026-10-08 实测两次）：
+#   镜像没变时把容器里的 jupyter 杀掉再跑 .\start.ps1 ⇒ compose 报 0 行 Recreate、7789 一直 000，
+#   所以旧文案那句"必要时 .\start.ps1 -Rebuild"对"进程掉了"是 10-20 分钟的空等（那是 --no-cache 冷构建，
+#   修的是"镜像里没带 Jupyter"）。补救是换新容器：docker compose up -d --force-recreate arena。
+#   只报命令、不代你执行：重建容器会带走正在跑的 IDE 调试会话与判题任务，这个副作用该由用户决定。
+#   同样不做的事：不给 jupyter 加看门狗/守护循环（改进程生命周期 ⇒ 单独工作项、单独评审）。
 # -Dev 分支不走这里：dev 服务故意不发布 notebook 端口，打印出来就是个打不开的地址（说假话）。
 function Report-Notebook {
   $token = Read-EnvJupyterToken
@@ -337,7 +343,7 @@ function Report-Notebook {
     if ($r) { $code = [int]$r.StatusCode }
   }
   if ($code -eq 0) {
-    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。看 .\start.ps1 -Logs 里 entrypoint 那几行，必要时 .\start.ps1 -Rebuild；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
+    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
     return
   }
   Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan

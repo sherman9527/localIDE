@@ -336,6 +336,17 @@ report_health() {
 #   真原因是绑定地址：发布端口 DNAT 到容器 eth0，只听回环等于没发布）。会红的那条在容器档：
 #   server/test/notebooks/kernel.test.ts「发布端口的 DNAT 目标上也必须有人在听」。
 #   这里按裁决 R4 保持只打印（闸门归测试，横幅不掺和退出码），但第三个原因必须写出来。
+# ④ 它给的操作必须是**真能修好这个症状**的那一个（2026-10-08 实测两次，为了确定不是巧合）：
+#   镜像变了的时候 ./start.sh 会重建容器、jupyter 跟着回来；镜像**没**变的时候
+#   先在容器里把 jupyter 杀掉、再跑 ./start.sh ⇒ `docker compose` 报 **0 行 Recreate**，
+#   而宿主 `curl http://127.0.0.1:7789/tree` 一直是 000 —— 也就是说**掉进去的 jupyter 靠 ./start.sh 起不回来**，
+#   旧文案那句"必要时 ./start.sh --rebuild"对这个症状是 10-20 分钟的空等（--rebuild 是 --no-cache 冷构建，
+#   修的是"镜像里没带 Jupyter"，不是"镜像里有、进程没了"）。真正的补救是换一个**新容器**：
+#   `docker compose up -d --force-recreate arena`。
+#   这里只报命令、不代你执行：重建容器会带走正在跑的 IDE 调试会话与判题任务，
+#   这种副作用该由用户决定什么时候承担（同样理由见本文件不自动 restart 的每一处）。
+#   另一件事明确**不在这里做**：给 jupyter 加看门狗/守护循环 —— 那改的是进程生命周期，
+#   要单独一条工作项单独评审，不由横幅顺带带出来。
 # --dev 不走这里（它不经过 start_app）：dev 服务故意不发布 notebook 端口，
 # 打印出来就是个打不开的地址（说假话）。--verify / --ide 走 start_app，会打印 —— 那两个
 # 路径起的就是 arena 本身。
@@ -348,7 +359,7 @@ report_notebook() {
   fi
   code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/login" 2>/dev/null || true)"
   if [ -z "$code" ] || [ "$code" = "000" ]; then
-    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。看 ./start.sh --logs 里 entrypoint 那几行，必要时 ./start.sh --rebuild；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
+    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（按 ./start.sh 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，start.sh 不代你做。只有怀疑镜像本身没带 Jupyter 时才值得 ./start.sh --rebuild（10-20 分钟的冷构建）。先跑 ./start.sh --logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
     return 0
   fi
   say "Notebook：http://127.0.0.1:7789/tree（7789 已应答 HTTP ${code}；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）—— 只打印一次，且不含 token"
