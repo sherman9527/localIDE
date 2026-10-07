@@ -145,7 +145,7 @@ textarea.answer,
   top: 0;
   z-index: 10;
   /* min-height 而不是 height，且 flex-wrap 无条件开着 —— 判据与理由写在下面那段
-     「窄屏顶部导航」的注释里（② 那半）。装得下时这两条与原来一字不差：单行、高度就是 var(--header-h)。 */
+     「顶栏换行」的注释里。装得下时这两条与最早那版一字不差：单行、高度就是 var(--header-h)。 */
   min-height: var(--header-h);
   display: flex;
   flex-wrap: wrap;
@@ -155,6 +155,16 @@ textarea.answer,
   background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--line);
+}
+
+/* 第一行那个原子盒子：brand + spacer + head-meta。内部不换行（flex-wrap 默认 nowrap），
+   所以「meta 掉到左边」这件事在结构上不可能发生；它能长的只有 flex-grow，
+   而 grow 出来的空间全被 .spacer 吃掉 ⇒ meta 永远贴在自己那一行的右端。 */
+.topbar-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-4);
 }
 
 .brand {
@@ -176,6 +186,10 @@ textarea.answer,
 .nav {
   display: flex;
   gap: var(--space-1);
+  /* 无条件开着（原来只写在 @media (max-width: 430px) 里）：五个链接的 max-content 约 370px，
+     比 320 视口减去内边距之后的可用宽度还宽 —— 不让它自己折行，顶栏就会把整页顶出横向滚动。
+     "什么时候放不下"由链接条数决定，不由某个视口数字决定，所以这条不能留在媒体查询里。 */
+  flex-wrap: wrap;
 }
 
 .nav a {
@@ -204,58 +218,47 @@ textarea.answer,
   color: var(--text-muted);
 }
 
-/* 窄屏顶部导航（2026-10-08，Task 10 的 E2E 撞出来的，红的是分支自己的账不是那次的改动）。
-   上面那个 .topbar 是 brand → nav → spacer → head-meta 的一行 flex，
-   它的最小宽度由导航项的条数决定：Task 9（commit 6264fb8）加了第五项 Notebook 之后
-   `npm run e2e` 的「视口 320px」六条集体红在 `documentElement.scrollWidth 390 > clientWidth 320`。
-   实测（Edge，每个宽度一个新 context，摘元素前后各量一次）：
-     320px：brand right=56 · nav [72,345] w=273 · head-meta 被挤成 w=13 且 right=390
-     摘掉 Notebook 那一颗 ⇒ scrollWidth 回到 320 ⇒ 顶破整页的是第五项，不是页面内容。
-   三条约束决定了写法：
-   ① **不藏任何东西** —— 五个导航项与那句「本机 · 单人」都得还在（把内容藏掉换数字变绿，
-      就是本项目反复踩的那类静默降级；响应式那条闸门自己也判 OFFSCREEN，藏不住也没用）；
-   ② **装不下就换行，而"什么时候装不下"是内容决定的，不是某个视口宽度决定的** ⇒
-      `flex-wrap: wrap` 与 `min-height` 都写在 .topbar 上（无条件），媒体查询里那个数字不再承担防溢出。
-      评审 minor 点的正是原来那版的形状：防溢出写在 `@media (max-width: 430px)` 里，等于留了一段
-      没人看的窗口 —— 431–767px 之间多一个导航项、或某个标签长一点，整页照样被顶破，
-      而 `responsive.spec.ts` 只量 320/390/768/1440 这四个宽度配当前这五项（`WIDTHS`，
-      判据是 `documentElement.scrollWidth > clientWidth + 1`），那个窗口里什么都没有。
-      现在装得下时与原来一字不差（单行、高度 = var(--header-h)），装不下时换行 —— 换行永远比
-      横向滚动条好。`height` 必须一起改成 `min-height`：固定高度 + 真换行 = 第二行被裁掉，
-      那是另一种静默降级（比顶破更隐蔽，因为 scrollWidth 那条闸门看起来仍是绿的）。
-   ③ `order`（下面媒体查询里）仍然必需，但它现在只管**好不好看**，不管会不会溢出：
-      DOM 顺序里 nav 排在 spacer 与 head-meta 前面，不换 order 就会贪心填成三行。
-      两行版式是「brand + spacer + head-meta 一行（meta 靠 spacer 顶到**右边**，与桌面端同一套读法；
-      评审 minor：上一版写成 head-meta:1 / spacer:2，它被挤到 brand 旁边去了）+ nav 独占第二行」，
-      nav 独占一行靠的是它自己的 `width: 100%`，不是靠某个宽度。
-   媒体查询那个 430 因此只圈"两行版式"的作用范围（窄屏统一两行，比让 390px 停在"刚好没破"的
-   边界上更好看也更可测）；把它改成别的数字、甚至整段删掉，都不会让任何宽度重新顶破 —— 那由 ② 负责。
-   `--header-h` 的其它用法（下面 `.q-side` 那条 `position: sticky`，在 ≥1100px 的媒体查询里）
-   不受这里影响：它用的是变量值，不是 .topbar 的实测高度。
-   （引用写类名不写行号：上一版这里写的是 `:771-772`，上面插入几行注释就把它指到了别的东西上，
-   而那条注释看起来仍然一本正经 —— 那类"描述与现实分叉的注释"本轮按真实缺陷处理。） */
+/* 顶栏换行（2026-10-08 第二次修，补齐 fcd709b 那半截）。
+
+   历史：
+   - 第一版（Task 10 的 E2E 撞出来的）：.topbar 是 brand → nav → spacer → head-meta 的一行 flex，
+     第五个导航项 Notebook 加进来（6264fb8）之后 320px 整页被顶出横向滚动
+     （实测 nav w=273 → 五项后 ~370，head-meta 被挤成 w=13）。
+   - 第二版 fcd709b：把 `flex-wrap: wrap` 与 `min-height` 提到无条件，但把 `order`
+     与 `.nav { width: 100% }` **留在了 @media (max-width: 430px) 里**。
+     ⇒ 换行在 431px 起就开始，而重排规则要到 430px 才生效：431–634 这一带被切成四行，
+     head-meta 掉到最左（实测 480px：四行、每个孩子的 computed order 都是 0、meta left=24 right=87、
+     topbar 高 112）。这一段没人采样（WIDTHS 只有 320/390/768/1440），所以它一路绿着进了 HEAD。
+
+   现在这一版不再"把阈值挪个位置"，而是让阈值消失：DOM 里 brand + spacer + head-meta
+   包进 .topbar-main 成为**一个原子 flex 项**，nav 是它的兄弟。flex-wrap 只可能在这两个盒子
+   之间断开 ⇒ 第一行永远是「brand …… meta」（meta 靠 .spacer 顶到该行的右边），
+   装不下时 nav 整块掉到第二行 —— 不需要 order，也不需要任何视口数字。
+
+   为什么 nav 不留在 brand 与 meta 中间（即为什么桌面版式从 `brand nav …… meta`
+   变成 `brand …… meta nav`）：flex 收集行时，每一行收的是**源顺序里的连续一段**。
+   窄屏要 {brand, meta} 同行而 nav 在别的行 ⇒ 收集顺序必须是 brand、meta、…、nav；
+   而同一条顺序在宽屏把三个盒子放到同一行时，nav 只能排在 meta 的**右边**。
+   也就是说「nav 夹在 brand 与 meta 之间」与「meta 跟着 brand 换行」不能同时成立 ——
+   这正是第二版要靠 order 的原因。去掉 order 的代价就是桌面读法变一下，
+   两行都仍然是同一行 52px（见下），sticky 那条账不受影响。
+
+   还留着的两条"看起来像阈值"的东西，各自理由：
+   ① 下面媒体查询里的 padding/gap：纯呼吸空间（12px 内边距让 row 1 的
+      brand+meta 在 320px 不必把中文品牌名断到第二行）。把它删了或改成别的数字，
+      任何宽度都不会重新顶破，也不会把 meta 甩到左边 —— 那由 .topbar-main 负责，
+      不像第二版那样承载正确性。
+   ② .nav 的 flex-wrap 已经提到无条件（见上面 .nav 那条）：五项链接的 max-content
+      比 320 的可用宽度还宽，是**内容**放不下，不是视口窄。
+   `--header-h`(52px) 的消费方只有 .q-side 的 `position: sticky`（在 @media (min-width: 1100px) 里）：
+   ≥1100px 时 brand+meta(约 268) + gap + nav(约 370) = 约 654px 远小于 1052px 的可用宽度
+   ⇒ 顶栏仍是**一行、高度 = var(--header-h)**，量过的：1100 与 1440 都是 52px 一行。
+   （引用写类名不写行号 —— 上一版这里写的 `:771-772` 被上面插入的注释顶到了别的东西上。） */
 @media (max-width: 430px) {
   .topbar {
     padding: var(--space-2) var(--space-3);
     column-gap: var(--space-3);
     row-gap: var(--space-1);
-  }
-
-  /* brand(0) → spacer(1) → head-meta(2)：meta 仍在第一行最右；nav 排最后并占满整行。 */
-  .topbar .spacer {
-    order: 1;
-  }
-
-  .topbar .head-meta {
-    order: 2;
-  }
-
-  /* 整行给导航，且让它自己也能换行：273px 的内容在 320 - 2×12 = 296 里放得下，
-     但字体渲染一宽就放不下 —— 让它换第二行，而不是把整页顶出横向滚动。 */
-  .topbar .nav {
-    order: 3;
-    flex-wrap: wrap;
-    width: 100%;
   }
 }
 

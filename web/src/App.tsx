@@ -104,11 +104,21 @@ export default function App() {
       <button type="button" className="skip-link" onClick={focusMain}>
         跳到主内容
       </button>
+      {/* 顶栏的形状（2026-10-08 补齐 fcd709b 的半截修复）：brand + spacer + head-meta 是**一个原子行**，
+          nav 是它的兄弟。于是"换行"不需要 order 也不需要断点：flex-wrap 只会在这两个盒子之间断开，
+          第一行永远是「brand …… meta」，装不下时 nav 自己掉到第二行。
+          为什么 nav 不在 .topbar-main 里面：见 base.css 那段"flex 换行只收连续前缀"的证明 ——
+          把 nav 夹在 brand 与 meta 中间，窄屏就不可能让 brand 与 meta 同行（那正是 order 存在的理由）。
+          head-meta 是不可聚焦的 span，包一层不新增 tab 停靠点；DOM 里第一个可聚焦元素仍是 nav 的第一个链接。 */}
       <header className="topbar">
-        <span className="brand">
-          <span className="dot" aria-hidden="true" />
-          每日刷题竞技场
-        </span>
+        <div className="topbar-main">
+          <span className="brand">
+            <span className="dot" aria-hidden="true" />
+            每日刷题竞技场
+          </span>
+          <span className="spacer" />
+          <span className="head-meta">本机 · 单人</span>
+        </div>
         <nav className="nav" aria-label="主导航">
           {NAV.map((item) => (
             <a key={item.href} href={toHref(item.href)} aria-current={route.name === item.name ? 'page' : undefined}>
@@ -116,8 +126,6 @@ export default function App() {
             </a>
           ))}
         </nav>
-        <span className="spacer" />
-        <span className="head-meta">本机 · 单人</span>
       </header>
       <main id="main" ref={mainRef} tabIndex={-1}>
         {content}
