@@ -146,6 +146,26 @@ write_env_token() { write_env_key ARENA_LLM_BRIDGE_TOKEN "$1"; }
 read_env_jupyter_token() { read_env_key ARENA_JUPYTER_TOKEN; }
 write_env_jupyter_token() { write_env_key ARENA_JUPYTER_TOKEN "$1"; }
 
+# apt 镜像站的**本机默认值**，落在 .env 里（compose 的插值自己会读 .env，不需要 shell 前缀）。
+# 为什么要这一份：compose.yml 写的是 `${MIRROR_APT:-http://mirrors.aliyun.com}`，而这台机器上
+# aliyun 对 jammy 的**整片 pocket 回 403**（外部条件，不是仓库坏了）⇒ 裸 `./start.sh` 会重跑 apt
+# 然后死在 stack 阶段，只有 `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh …` 能构建。
+# "只有带前缀那条路能过"就是给下一个 session 挖的坑：构建旋钮记在人脑里等于没记。
+# 只在**这一行还不存在**时写：人手改过/删过都是表态 —— 删掉它想回默认值的人，别跟他抢那一行
+# （回的代价就是下一次裸构建撞 403，那是他自己的选择，这段解释够他读了）。
+# 临时换源不用改文件：compose 插值里 shell 变量优先于 .env，`MIRROR_APT=… ./start.sh` 照样一句话生效。
+# ⚠ 改这个值的代价要说清：它是 stack 阶段那份 ENV 的一部分（Dockerfile 顶部），
+#   而后每一层的缓存键都含它 ⇒ 下一次构建是**冷构建**。见 docker/BUILDINFO.md。
+# ⚠ .env 里另有两条 token：这一份文件不许 cat、不许进日志，取值只走 read_env_key/write_env_key。
+MIRROR_APT_LOCAL_DEFAULT="http://mirrors.ustc.edu.cn"
+ensure_build_mirror() {
+  [ -n "$(read_env_key MIRROR_APT)" ] && return 0
+  write_env_key MIRROR_APT "$MIRROR_APT_LOCAL_DEFAULT" || return 1
+  say "已把构建用的 apt 源记进 .env 的 MIRROR_APT（这台机器上 aliyun 对 jammy 整片 pocket 回 403，" \
+      "裸 ./start.sh 要靠这一行才建得起来）。换源改那一行即可，shell 前缀优先级更高；" \
+      "改它会作废 stack 层及其后每一层的缓存 ⇒ 下一次是冷构建，见 docker/BUILDINFO.md"
+}
+
 # 端口上真正应答的那个进程才是事实。pid 文件会骗人：Windows 的 Git Bash 里
 # `kill -0 <错位的 pid>` 哪怕对应的是别的进程也返回真 —— 于是"孤儿桥 + 新 token"这种状态下
 # 旧逻辑照样打印"CLI 桥已在运行"直接返回，容器一路 401、评分静默降级成人工自检表。
@@ -339,6 +359,7 @@ report_notebook() {
 # 吞掉构建失败则连"跑的是旧代码"都看不出来 —— 这两个坑本项目都踩过。
 start_app() {
   start_bridge || return 1
+  ensure_build_mirror || return 1
   say "构建镜像（命中缓存则很快）…"
   docker compose build --pull=false || { fail "构建失败：没有起新代码，先修构建再跑"; return 1; }
   docker compose up -d arena || return 1
@@ -351,6 +372,7 @@ start_app() {
 case "${1:-up}" in
   --rebuild)
     start_bridge || exit 1
+    ensure_build_mirror || exit 1
     say "重新构建镜像（首次约 10-20 分钟，含 Spark/MySQL/JDK）"
     docker compose build --pull=false --no-cache || exit 1
     docker compose up -d arena || exit 1
@@ -364,6 +386,7 @@ case "${1:-up}" in
     ;;
   --dev)
     start_bridge || exit 1
+    ensure_build_mirror || exit 1
     docker compose build --pull=false || exit 1
     docker compose --profile dev up -d dev || exit 1
     say "开发模式：前端 http://localhost:5173 ，后端 ${APP_URL}"

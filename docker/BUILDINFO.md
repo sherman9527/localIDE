@@ -29,6 +29,20 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 | Redis | `ARG REDIS_VERSION` + **构建后断言版本号** | 7.2.7（不是 7.x 就构建失败） |
 | JDK / MySQL | **主版本断言**（apt 点版本不钉，见下） | 17.0.20 / 8.0.46 |
 | npm 依赖 | `package-lock.json`（仓库跟踪） | — |
+| apt 镜像站 | `ARG MIRROR_APT`（唯一"不改被跟踪文件就换不了"的那层；shell env > `.env` > 这里的默认值，闸门 `dockerfile-pins.test.ts` 钉三处默认值一致） | 默认 `http://mirrors.aliyun.com` |
+
+**换这个镜像站时的两条事实**（都是实测，不是规矩）：
+
+1. 值要写 `http://`，不是 `https://`。钉住的 `ubuntu:22.04` 基座里**没有 CA 证书包**
+   （`ca-certificates` 正是这一层 apt 才装上的），走 https 时 `apt-get update` 会**退出 0 而一个列表都没拿到**，
+   紧跟着整层报 `E: Unable to locate package tzdata/locales/...` —— `docker/mirrors.sh:6-9` 记的就是第一次这样炸的现场。
+2. 改这个值 = **冷构建**。它在 stack 阶段顶部被写成 `ENV`（`docker/Dockerfile:20-21`），
+   其后每一层的缓存键都含它，所以换一次源就要重跑 apt、pip、maven、Redis 源码编译与 notebook 安装（本机 9–10 分钟）。
+
+本机（aliyun 对 jammy 整片 pocket 回 403，是网络侧条件不是仓库坏了）把可用的那一个记在**gitignored 的 `.env`** 里
+（`MIRROR_APT=http://mirrors.ustc.edu.cn`），所以裸 `./start.sh` 与带前缀的那条走的是同一个值 ——
+旋钮记在人脑里等于没记，这是上一轮 `./start.sh` 单独不可用的原因。那一行由 `start.sh` 的
+`ensure_build_mirror` 在第一次构建前写进去（已存在就不抢），要临时换源仍然可以用 shell 前缀，它优先级更高。
 
 ## 钉不住什么，以及为什么不硬钉
 

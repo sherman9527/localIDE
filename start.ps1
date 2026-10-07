@@ -138,6 +138,19 @@ function Write-EnvToken([string]$token) { Write-EnvKey 'ARENA_LLM_BRIDGE_TOKEN' 
 function Read-EnvJupyterToken { return Read-EnvKey 'ARENA_JUPYTER_TOKEN' }
 function Write-EnvJupyterToken([string]$token) { Write-EnvKey 'ARENA_JUPYTER_TOKEN' $token }
 
+# apt 镜像站的**本机默认值**，落在 .env 里（compose 的插值自己会读 .env，不需要 shell 前缀）。
+# 与 start.sh 的 ensure_build_mirror 是**同一套判据的两个实现**：那段注释（aliyun 对 jammy 整片
+# pocket 回 403 ⇒ 裸 ./start.sh 死在 stack 阶段、只有带前缀那条能过 = 给下一个 session 挖的坑；
+# 只在"这一行还不存在"时写，人手改过/删过都是表态；shell 前缀优先级高于 .env；改这个值会让
+# stack 层及其后每一层的缓存键变 ⇒ 冷构建，见 docker/BUILDINFO.md；.env 里另有两条 token，不许 cat）
+# 全文写在 start.sh 那边，这里不抄第二份 —— 但**行为与那句话必须一致**，漂移过一次就是"其中一个实现说假话"。
+$MirrorAptLocalDefault = 'http://mirrors.ustc.edu.cn'
+function Ensure-BuildMirror {
+  if (Read-EnvKey 'MIRROR_APT') { return }
+  Write-EnvKey 'MIRROR_APT' $MirrorAptLocalDefault
+  Write-Host '[arena] 已把构建用的 apt 源记进 .env 的 MIRROR_APT（这台机器上 aliyun 对 jammy 整片 pocket 回 403，裸 .\start.ps1 要靠这一行才建得起来）。换源改那一行即可，shell 前缀优先级更高；改它会作废 stack 层及其后每一层的缓存 ⇒ 下一次是冷构建，见 docker/BUILDINFO.md' -ForegroundColor Cyan
+}
+
 function Write-TextFile([string]$path, [string]$text) {
   [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot $path), $text + "`n", (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -343,6 +356,7 @@ if ($Verify) {
   # **先起新代码，再验**（与 start.sh --verify 同一判据）：`docker compose exec` 进的是当前跑着的
   # 容器，而它用的是被创建时那个镜像 —— 只 build 不 up -d 等于验旧代码。
   Start-Bridge
+  Ensure-BuildMirror
   Invoke-Step '镜像构建' { docker compose build --pull=false }
   Invoke-Step '启动容器' { docker compose up -d arena }
   Wait-Healthy 180
@@ -373,6 +387,7 @@ if ($E2E) {
 }
 
 Start-Bridge
+Ensure-BuildMirror
 if ($Rebuild) { Invoke-Step '镜像重建' { docker compose build --pull=false --no-cache } }
 else { Invoke-Step '镜像构建' { docker compose build --pull=false } }
 
