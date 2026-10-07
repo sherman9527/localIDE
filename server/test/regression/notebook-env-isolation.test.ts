@@ -168,12 +168,21 @@ describe('notebook 的 shell 必须落进 IDE 的 venv（红线一延伸）', ()
  */
 type Fixture = { name: string; text: string; expect: FailCode | 'ok' };
 
+/**
+ * 这份 fixture 里的 `--ServerApp.ip` 写的是 **0.0.0.0**，不是当初计划里的 `127.0.0.1`。
+ * 一句话为什么：那个旧字面量是个陷阱 —— 发布端口是 DNAT 到**容器的 eth0 地址**的，
+ * 只听容器回环 = 宿主打不开（Task 10 实测：容器内 302、eth0 与宿主 7789 都是 000）。
+ * 本闸门判的是 **PATH 前缀的结构**，从不看 ip 的值（judge() 里没有这条判据），
+ * 所以这里改的只是"别让下一位照抄一个错的启动行"；ip 的不变量钉在
+ * `notebook-contract.test.ts`（不许监听在容器回环）与 `notebooks/kernel.test.ts`
+ * （DNAT 目标上必须有人在听）那两处。
+ */
 const PLAN_SHAPE = [
   '# venv 前置到 PATH：notebook 里 !pip3 install X 走 shell，命中哪个 pip 由 PATH 决定。',
   'start_jupyter() {',
   '  PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \\',
   '  jupyter notebook --allow-root --no-browser \\',
-  '    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 \\',
+  '    --ServerApp.ip=0.0.0.0 --ServerApp.port=8888 \\',
   '    >/var/log/jupyter.log 2>&1 &',
   '  return 0',
   '}',

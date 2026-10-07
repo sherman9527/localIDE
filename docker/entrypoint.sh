@@ -92,16 +92,36 @@ start_jupyter() {
   # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
   PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
   jupyter notebook --allow-root --no-browser \
-    --ServerApp.ip=127.0.0.1 --ServerApp.port=8888 --ServerApp.port_retries=0 \
+    --ServerApp.ip=0.0.0.0 --ServerApp.port=8888 --ServerApp.port_retries=0 \
     --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
     --ServerApp.root_dir="${nb_root}/notebooks" \
     >"${nb_root}/notebook-server.log" 2>&1 &
+
+  # 为什么 ip 是 0.0.0.0 而不是 127.0.0.1（Task 10 实测到的缺陷，不是推理）：
+  # 发布的端口是 **DNAT 到容器的 eth0 地址**（compose 那条 127.0.0.1:7789:8888 把宿主的请求转给
+  # 172.18.0.x:8888），**不是**转到容器的回环 —— 于是监听在容器 loopback 上的 jupyter
+  # 永远打不通发布端口：容器里 curl 127.0.0.1:8888 得 302，curl $(hostname -i):8888 得 000，
+  # 宿主上 7789 也是 000，而容器档全绿（它的判据全走回环）。
+  # 闸门：server/test/notebooks/kernel.test.ts 那条「发布端口的 DNAT 目标上也必须有人在听」
+  # —— 它是这次唯一会红的东西；start.sh 的横幅只打印不判红，不算闸门。
+  # 真正的边界从来不在这个 ip 上，下面两道一条都没放松：
+  # ① 宿主侧只绑回环 127.0.0.1:7789（闸门 server/test/regression/compose-ports.test.ts
+  #    与 notebook-compose.test.ts ①）⇒ 局域网里别的机器照样打不到；
+  # ② token 必填（上面那道守卫：拿不到 token 干脆不起）。
+  # 残余风险照实写：bind 到 0.0.0.0 之后，**compose 网桥上的同伴服务**（dev / tools / e2e，
+  # 以及任何挂进这张网络的容器）能路由到 8888 —— 但它们必须拿到 token 才能做任何事，
+  # 而同伴跑的是同一个镜像、同一个 .env、同一个信任级；这道口子换来的是"用户真能点开链接"。
+  # 附带一条 jupyter 自己的行为（实测 jupyter_server 2.21.1）：ip 不是回环时它把
+  # ServerApp.allow_remote_access 的默认值算成 True，于是 Host 头守卫（防 DNS rebinding）随之关闭。
+  # 我们那条真实路径的 Host 本来就是 127.0.0.1:7789，不依赖这个默认值，所以这里不另加参数、
+  # 只在文档与报告里把这条说清楚（要收紧就显式 --ServerApp.allow_remote_access=False，
+  # 那条会让 eth0 上的探测得到 403 —— 仍算"有人在听"，kernel.test.ts 那条判据就是这么写的）。
 
   # port_retries=0：8888 被占时 jupyter 默认会**换个端口**继续起（8889），而宿主映射钉的是
   # 7789:8888 —— 静默换端口等于那条映射变成死的，日志却照样"已拉起"。宁可让它起不来并报错。
   # 日志落在数据目录里（不是 /var/log）：./start.sh --logs 只看 compose 的 stdout，
   # 而 jupyter 自己的输出要能在宿主 data/ 下直接翻到。
-  log "Jupyter 已拉起（容器内 127.0.0.1:8888；日志 ${nb_root}/notebook-server.log）"
+  log "Jupyter 已拉起（监听 0.0.0.0:8888 ⇒ 宿主 127.0.0.1:7789 那条 DNAT 的目标是**本容器的 eth0**，不是它的回环；日志 ${nb_root}/notebook-server.log）"
   return 0
 }
 

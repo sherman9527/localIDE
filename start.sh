@@ -311,6 +311,11 @@ report_health() {
 #   而本仓库对这件事早有判据："端口上真正应答的那个进程才是事实"（bridge_probe 的注释）。
 #   探测故意不带 token：只要有任何 HTTP 应答就说明 7789 上确实有个进程在听。
 #   注意它证明的是"有人在听"，不是"那是 jupyter 且 token 对得上"—— 后者归 Task 7 的 /api/notebook/status。
+# ③ 它是**横幅，不是闸门**：探到 000 也只打印一行就 return 0 ⇒ "验证通过"与"用户的链接是死的"
+#   可以同时成立（Task 10 实测正是这样，而当时列的那两个原因——缺 token / 旧镜像——都指错了方向，
+#   真原因是绑定地址：发布端口 DNAT 到容器 eth0，只听回环等于没发布）。会红的那条在容器档：
+#   server/test/notebooks/kernel.test.ts「发布端口的 DNAT 目标上也必须有人在听」。
+#   这里按裁决 R4 保持只打印（闸门归测试，横幅不掺和退出码），但第三个原因必须写出来。
 # --dev 不走这里（它不经过 start_app）：dev 服务故意不发布 notebook 端口，
 # 打印出来就是个打不开的地址（说假话）。--verify / --ide 走 start_app，会打印 —— 那两个
 # 路径起的就是 arena 本身。
@@ -323,7 +328,7 @@ report_notebook() {
   fi
   code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/login" 2>/dev/null || true)"
   if [ -z "$code" ] || [ "$code" = "000" ]; then
-    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版）。看 ./start.sh --logs 里 entrypoint 那几行，必要时 ./start.sh --rebuild"
+    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。看 ./start.sh --logs 里 entrypoint 那几行，必要时 ./start.sh --rebuild；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
     return 0
   fi
   say "Notebook：http://127.0.0.1:7789/tree（7789 已应答 HTTP ${code}；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）—— 只打印一次，且不含 token"

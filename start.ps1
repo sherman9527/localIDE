@@ -303,6 +303,10 @@ function Report-Health {
 # ② 先探端口再报 —— "端口上真正应答的那个进程才是事实"（Get-BridgeState 的注释），
 #    探测故意不带 token：有任何 HTTP 应答就说明 7789 上确实有进程在听。它证明的是"有人在听"，
 #    不是"那是 jupyter 且 token 对得上"—— 后者归 Task 7 的 /api/notebook/status。
+# ③ 它是**横幅，不是闸门**：探到"没有应答"也只打印一行就 return ⇒ "验证通过"与"用户的链接是死的"
+#   可以同时成立（Task 10 实测正是这样，而当时列的那两个原因——缺 token / 旧镜像——都指错了方向）。
+#   会红的那条在容器档：server/test/notebooks/kernel.test.ts「发布端口的 DNAT 目标」。
+#   这里保持只打印（裁决 R4：横幅不改成退出码，闸门归测试），且与 start.sh 说同一套原因。
 # -Dev 分支不走这里：dev 服务故意不发布 notebook 端口，打印出来就是个打不开的地址（说假话）。
 function Report-Notebook {
   $token = Read-EnvJupyterToken
@@ -320,7 +324,7 @@ function Report-Notebook {
     if ($r) { $code = [int]$r.StatusCode }
   }
   if ($code -eq 0) {
-    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版）。看 .\start.ps1 -Logs 里 entrypoint 那几行，必要时 .\start.ps1 -Rebuild' -ForegroundColor Yellow
+    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。看 .\start.ps1 -Logs 里 entrypoint 那几行，必要时 .\start.ps1 -Rebuild；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
     return
   }
   Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan

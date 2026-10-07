@@ -56,6 +56,23 @@ const INJECTED_DATA = resolve(join(homedir(), '.arena-notebook-envgate-data'));
 const ENTRYPOINT_REL = join('docker', 'entrypoint.sh');
 const entrypointText = () => readFileSync(join(config.repoRoot, ENTRYPOINT_REL), 'utf8');
 
+/**
+ * 启动行里 `--ServerApp.ip=` 的**值是不是容器回环**。判的是回环这一类，不是某个具体字面量：
+ * 127.0.0.0/8 整段（不止 .1）、`::1`、`localhost` 三个写法都算同一个陷阱。
+ */
+const CONTAINER_LOOPBACK = /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\]|localhost|ip6-localhost)$/i;
+
+/** entrypoint 的**代码视图**里所有 --ServerApp.ip= 的取值（丢掉整行注释，同 notebook-env-isolation 的 ①）。 */
+function serverAppIpValues(text: string): string[] {
+  const code = text
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
+  return [...code.matchAll(/--ServerApp\.ip=(\S+)/g)]
+    .map((m) => (m[1] ?? '').replaceAll(/["']/g, ''))
+    .filter((v) => v !== '');
+}
+
 describe('notebook 契约与配置', () => {
   it('config.notebook 各字段都在 dataDir 下，且不碰判题沙箱目录', () => {
     expect(config.notebook.publicUrl).toBe('http://127.0.0.1:7789');
@@ -144,6 +161,63 @@ describe('notebook 契约与配置', () => {
         `${ENTRYPOINT_REL} 里没有 "\${nb_root}/${whLeaf}/${sub}" ⇒ warehouse 叶子名与 config.ts 分叉，两处会各建一棵目录树`,
       ).toContain(`\${nb_root}/${whLeaf}/${sub}`);
     }
+  });
+
+  /**
+   * 监听地址的不变量（Task 10 实测到的缺陷；裁决 R1 + R3）。
+   * **为什么不是把旧字面量 `127.0.0.1` 换成 `0.0.0.0` 就收工**（R3 明令不许只是翻字符串）：
+   * 计划原文那两条 —— "只听容器内 127.0.0.1:8888" 与 "发布成宿主 127.0.0.1:7789" —— **本身就互相矛盾**：
+   * 发布的端口是 DNAT 到**容器的 eth0 地址**的，不是转到它的回环，所以前者一成立后者就必然打不通
+   * （实测：容器里 `curl 127.0.0.1:8888/tree` → 302，`curl $(hostname -i):8888/tree` → 000，宿主 7789 → 000，
+   * 而容器档那一片判据全走回环 ⇒ 整片绿、用户的链接是死的）。
+   * ⇒ 钉的是**真正要紧的那两条不变量**，各自有归属：
+     * ① 宿主侧的发布映射绑回环 ⇒ `compose-ports.test.ts`（全局）+ `notebook-compose.test.ts` ①（这条映射本身），
+   *    这一处**不放松**，本条也不碰它；
+   * ② 容器里的监听必须答得出 DNAT 目标 ⇒ 终判是 `server/test/notebooks/kernel.test.ts`
+   *    「发布端口的 DNAT 目标上也必须有人在听」（要 Docker、要真容器），**本条是它的静态前身**：
+   *    不依赖 Docker 就拦住"有人把 ip 改回回环那一类"与"把这一项删掉"
+   *    —— 删掉比改回更阴：jupyter 自己的默认 ip 就是 `localhost`，症状与当初一字不差。
+   * 局限也写清楚（别把它当成终判）：值若是变量展开（`--ServerApp.ip="${X:-0.0.0.0}"`），静态这层看不出来，
+   * 那一档由 ② 的行为判据兜。判据只看代码行（整行注释不算），否则注释里写一句就骗绿 —— 同 notebook-env-isolation ①。
+   */
+  it('entrypoint 不许把 jupyter 只监听在容器回环上（发布端口 DNAT 到 eth0；只听回环等于没发布）', () => {
+    const values = serverAppIpValues(entrypointText());
+    expect(
+      values.length,
+      `${ENTRYPOINT_REL} 的启动行里没有 --ServerApp.ip= 这一项 ⇒ jupyter 退回它自己的默认值 "localhost"，` +
+        '那就是只听容器回环：宿主 127.0.0.1:7789 永远 000（DNAT 的目标是容器的 eth0 地址），' +
+        '而容器档的判据全走回环 ⇒ 看起来一切正常、功能其实打不开。把这一项加回来（不能是回环那一类），' +
+        '行为侧的终判在 server/test/notebooks/kernel.test.ts 的「DNAT 目标」那条',
+    ).toBeGreaterThan(0);
+    const loopback = values.filter((v) => CONTAINER_LOOPBACK.test(v));
+    expect(
+      loopback,
+      `--ServerApp.ip=${loopback.join(', ')} 是**容器回环** ⇒ 这正是 Task 10 那个缺陷的形状：` +
+        'compose 把 127.0.0.1:7789:8888 DNAT 到容器的 eth0，回环上的监听收不到那条转发。' +
+        '旧计划写的那个字面量就是陷阱本身（"只听容器内回环"与"发布到宿主"不能同时成立）；' +
+        '真正的边界一直是「宿主侧绑回环 + token 必填」那两道，改 ip 请连同它们的注释一起想清楚',
+    ).toEqual([]);
+  });
+
+  /**
+   * 上面那条的判据本身（常驻反例，喂的是**字符串**不是仓库文件）：
+   * 三种"看着像有闸门其实什么都没判"的形状各一条 —— 正则解不出值、注释骗绿、回环写法漏网。
+   * 没有这一组的话，把 filter 的 `^\s*#` 去掉、或把 CONTAINER_LOOPBACK 写宽一点，都不会有任何东西翻脸。
+   */
+  it('监听地址判据自己的反例：解得出值、认得回环那一类、注释不算配置', () => {
+    const launch = '  jupyter notebook --allow-root --ServerApp.ip=%s --ServerApp.port=8888 \\\n';
+    expect(serverAppIpValues('  jupyter notebook --allow-root --ServerApp.port=8888 \\\n'), '没有 --ServerApp.ip= 时不该解出值（那条"删掉这一项"的红另有其句）').toEqual([]);
+    for (const bad of ['127.0.0.1', '127.0.0.42', '::1', 'localhost', 'IP6-localhost']) {
+      expect(CONTAINER_LOOPBACK.test(bad), `${bad} 是回环那一类，判据不许放过它`).toBe(true);
+    }
+    for (const ok of ['0.0.0.0', '*', '172.18.0.2']) {
+      expect(CONTAINER_LOOPBACK.test(ok), `${ok} 不是回环，判成陷阱就是冤红`).toBe(false);
+    }
+    // 整行注释里的陷阱写法不算配置（与 notebook-env-isolation ① 同一个道理）
+    expect(serverAppIpValues('#   jupyter notebook --ServerApp.ip=127.0.0.1\n'), '注释被当成了启动行 ⇒ 在注释里写一句就能骗绿').toEqual([]);
+    expect(serverAppIpValues(launch.replace('%s', '0.0.0.0')), '真正的启动行必须解得出值').toEqual(['0.0.0.0']);
+    // 引号包裹的写法也要能识别成回环（值里的引号先剥掉，否则 "127.0.0.1" 会躲过判据）
+    expect(serverAppIpValues(launch.replace('%s', '"127.0.0.1"')), '带引号的回环写法躲过了判据').toEqual(['127.0.0.1']);
   });
 
   /**

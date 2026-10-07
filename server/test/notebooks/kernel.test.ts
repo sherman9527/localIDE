@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
@@ -193,6 +193,54 @@ function executedNotebookEvidence(raw: string): { stdout: string[]; errors: stri
   return { stdout, errors };
 }
 
+// ──────────────────── DNAT 目标探测（"发布端口打不到 loopback 监听"的判据） ────────────────────
+
+/** 一次探测的等待上限：同一个 bridge 网络里的往返是毫秒级；超过这个值就按"没人听"处理。 */
+const PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * 本容器 netns 里的**非回环 IPv4**（eth0 那一类）—— 那正是发布端口被 DNAT 过去的目标地址。
+ *
+ * **为什么选 `os.networkInterfaces()` 而不是 `hostname -i`，也不用解析 `/proc/net/fib`**
+ * （裁决 R2 要我说清选的是哪个、为什么）：
+ * ① `hostname -i` 走的是 hostname 解析（/etc/hosts + resolver）。镜像里 hostname 一旦被写成解析到
+ *    127.0.0.1（`--add-host`、`network_mode: host`、某些 base 镜像的 hosts 行都会），它给的就是**回环** ——
+ *    于是"判据自己先坏"，而且坏的形状与它要判的那个 bug 一模一样（看起来像在回环上就通了）。
+ * ② `/proc/net/fib*` 要解析内核的十六进制路由/前缀树，列序与格式随内核版本漂；本文件读 /proc
+ *    是因为进程 PATH **只有**那里一个来源，而接口表有正经 API，没理由换更脆的那条路。
+ * ③ `networkInterfaces()` 直接来自这个 netns，并用 `internal` 把回环单独标出来 ⇒
+ *    "只听回环"与"根本没起来"能各说各话 —— 而这两种故障正是下面两条探测要分开的东西。
+ */
+function nonLoopbackIpv4Addresses(): string[] {
+  return Object.values(networkInterfaces())
+    .flatMap((addrs) => addrs ?? [])
+    .filter((a) => a.family === 'IPv4' && !a.internal)
+    .map((a) => a.address);
+}
+
+/**
+ * 探一次 HTTP。**只区分两种结果**，因为这个缺陷的判据就是这一刀：
+ * `{status}` ⇒ 有人在听（200/302/403 都算 —— 302 是"要 token"，403 可能是 jupyter 的 Host 守卫，
+ * 两种都是"端口上有 jupyter 应答"，与"连不上"是完全不同的故障）；
+ * `{error}` ⇒ 没人听（ECONNREFUSED / 超时 / DNS 形状错误）。
+ * 故意**不带 token**：带 token 就要把凭据拼进 URL、拼进错误消息，而这里判的是"有没有人在听"。
+ * （`start.sh` 的 `report_notebook` 用的是同一个判据形状：只看有没有 HTTP 应答，不判语义。）
+ */
+async function probeHttp(url: string): Promise<{ status: number } | { error: string }> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), redirect: 'manual' });
+    return { status: res.status };
+  } catch (err) {
+    const e = err as { name?: string; message?: string; cause?: { code?: string; message?: string } };
+    const cause = e.cause?.code ?? e.cause?.message ?? '';
+    return { error: [`${e.name ?? 'Error'}: ${e.message ?? String(err)}`, cause].filter(Boolean).join(' / ') };
+  }
+}
+
+/** 探测结果的一行可读证据（失败消息靠它把"两种故障"分开说）。 */
+const probeLine = (url: string, r: { status: number } | { error: string }): string =>
+  `${url} ⇒ ${'status' in r ? `HTTP ${r.status}（有人在听）` : `没有 HTTP 应答（${r.error}）`}`;
+
 // ──────────────────────────── 容器档：真跑 ────────────────────────────
 
 /**
@@ -351,6 +399,54 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
       expect(gw !== '0.0.0.0', '网关是 0.0.0.0 ⇒ parseProcNetRoute 那条「直连默认路由没有网关」的 fail-closed 被绕过了').toBe(true);
     }
   });
+
+  /**
+   * 这两条是「从宿主 / 浏览器点进去」那一侧在容器档里的唯一代表（裁决 R2：要一条**会红的**闸门，
+   * 不要一条横幅）。为什么横幅不算：`start.sh` 的 `report_notebook` 探到 7789 没应答只打印一行就
+   * `return 0` ⇒ 「./start.sh --verify 通过」与「用户的链接是死的」可以同时成立，而且这次**确实同时成立了**。
+   *
+   * 缺陷本体（实测，不是推理）：发布的端口是 **DNAT 到容器的 eth0 地址**，不是它的回环。
+   * 于是 `--ServerApp.ip=127.0.0.1` 这种写法在容器里怎么 curl 都通、宿主上 `127.0.0.1:7789` 永远 `000`。
+   * 本仓库的容器档**全部走回环**（status.ts 探的也是 `http://127.0.0.1:8888`），
+   * 所以那一整档全绿的时候功能其实是打不开的 ⇒ 只有「非回环地址上有没有人在听」这一判才拦得住。
+   * 两条各判一件事，缺一条都会把故障说错：
+   * ① 回环有人在听 ⇒ 「jupyter 起来了」（这条在缺陷当时是**绿的**，它没坏，它是证据）；
+   * ② DNAT 目标有人在听 ⇒ 「发布端口打得到」（这条当时是**红的**，它才是闸门）。
+   */
+  it('容器回环上有 jupyter 在听（证明服务起来了 —— 这一条不是那个缺陷，它是对照）', async () => {
+    const url = `http://127.0.0.1:${config.notebook.port}/tree`;
+    const res = await probeHttp(url);
+    expect('status' in res, `${probeLine(url, res)} ⇒ 容器里连回环都不应答：jupyter 压根没起来（缺 token / 镜像没带 Jupyter / 端口被占），与本条要对照的那个「绑定地址」缺陷无关`).toBe(true);
+  });
+
+  it('发布端口的 DNAT 目标（容器自己的非回环 IPv4）上也必须有人在听（只听容器 loopback ⇒ 宿主 7789 打不到）', async () => {
+    const addrs = nonLoopbackIpv4Addresses();
+    expect(
+      addrs.length,
+      '这个 netns 里没有任何非回环 IPv4 接口 ⇒ 本条没有判据对象。arena 容器按 compose 的网络配置应该有一条 eth0（172.18.0.x）；' +
+        '真一个都没有说明它跑在 host/无网络模式下，那「发布端口」这个前提本身就不成立了（先修这条判据的适用范围，别删断言）',
+    ).toBeGreaterThan(0);
+    // 回环那一侧同时探一次，只为把失败消息写成「一边通一边不通」——那才是这个缺陷的指纹。
+    // 它的正题判据在上面那条（对照）。
+    const loopback = `http://127.0.0.1:${config.notebook.port}/tree`;
+    const loopbackRes = await probeHttp(loopback);
+    for (const addr of addrs) {
+      const url = `http://${addr}:${config.notebook.port}/tree`;
+      const res = await probeHttp(url);
+      // 两种故障要说两种话（本文件的规矩：报错得说得出该去查什么）：
+      // 回环通而这里不通 = 绑定地址坏了；两边都不通 = jupyter 压根没起来，这条判据在这里还没有对象。
+      const verdict =
+        'status' in loopbackRes
+          ? '⇒ **容器里监听在 loopback ⇒ 发布端口打不到**：compose 把 127.0.0.1:7789:8888 DNAT 到容器的 ' +
+            `${addr}（不是它的 127.0.0.1），回环上的监听永远收不到这条转发。` +
+            '症状是宿主 curl 7789 得 000、页面第五项报「Jupyter 不可用」，而容器档一切正常（本仓库的容器判据全走回环，' +
+            '所以整片绿也发现不了）。改的是 docker/entrypoint.sh 的 --ServerApp.ip（要听 DNAT 目标那个地址），' +
+            '边界仍然是「宿主侧只绑回环 + token」那两道（compose-ports.test.ts / notebook-compose.test.ts ① 钉着）'
+          : '⇒ 但回环上也没人应答，那就不是绑定地址的问题，而是 **jupyter 根本没起来**（缺 token / ' +
+            '镜像还是没带 Jupyter 的旧版 / 端口被占）——先按上面那条对照断言说的三点排，这条 DNAT 判据要等回环通了才谈得上';
+      expect('status' in res, `${probeLine(url, res)}，而 ${probeLine(loopback, loopbackRes)}。${verdict}`).toBe(true);
+    }
+  });
 });
 
 // ──────────────────────────── 常驻：宿主档也要跑的那一组 ────────────────────────────
@@ -407,7 +503,9 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
         '/usr/local/bin/jupyter-notebook',
         '--allow-root',
         '--no-browser',
-        '--ServerApp.ip=127.0.0.1',
+        // ip 的值跟着 docker/entrypoint.sh 走（0.0.0.0）：这份 fixture 的名字承诺"就是 entrypoint 起的那一条"，
+        // 让它留着旧字面量只会教下一个人抄错 —— 而抄错的代价是发布端口打不到（DNAT 目标是容器 eth0，不是回环）。
+        '--ServerApp.ip=0.0.0.0',
         '--ServerApp.port=8888',
         '--ServerApp.port_retries=0',
         '--ServerApp.token=abc123',
