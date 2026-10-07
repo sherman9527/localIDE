@@ -201,6 +201,48 @@ textarea.answer,
   color: var(--text-muted);
 }
 
+/* 窄屏顶部导航（2026-10-08，Task 10 的 E2E 撞出来的，红的是分支自己的账不是那次的改动）。
+   上面那个 .topbar 是 brand → nav → spacer → head-meta **不换行**的一行 flex，
+   它的最小宽度由导航项的条数决定：Task 9（commit 6264fb8）加了第五项 Notebook 之后
+   `npm run e2e` 的「视口 320px」六条集体红在 `documentElement.scrollWidth 390 > clientWidth 320`。
+   实测（Edge，每个宽度一个新 context，摘元素前后各量一次）：
+     320px：brand right=56 · nav [72,345] w=273 · head-meta 被挤成 w=13 且 right=390
+     摘掉 Notebook 那一颗 ⇒ scrollWidth 回到 320 ⇒ 顶破整页的是第五项，不是页面内容。
+   两条约束决定了写法：
+   ① **不藏任何东西** —— 五个导航项与那句「本机 · 单人」都得还在（把内容藏掉换数字变绿，
+      就是本项目反复踩的那类静默降级；响应式那条闸门自己也判 OFFSCREEN，藏不住也没用）；
+   ② `order` 是必需的 —— DOM 顺序里 nav 排在 head-meta 前面，直接 `flex-wrap: wrap` 会贪心填成
+      brand / nav / head-meta **三行**；调成「brand+meta 一行、nav 独占一行」两行收工。
+   阈值取 430 而不是 320：390px 今天是"刚好没破"（再宽 1px 就跟着红），窄屏统一换行比留一条
+   靠运气达标的边界好。`height: auto` + `min-height` 是因为两行放不进原来那个固定 52px 的行高；
+   `--header-h` 的其它用法（:771-772 的 .q-side sticky）只在 ≥1100px 生效，不受这里影响。 */
+@media (max-width: 430px) {
+  .topbar {
+    height: auto;
+    min-height: var(--header-h);
+    flex-wrap: wrap;
+    padding: var(--space-2) var(--space-3);
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+  }
+
+  .topbar .head-meta {
+    order: 1;
+  }
+
+  .topbar .spacer {
+    order: 2;
+  }
+
+  /* 整行给导航，且让它自己也能换行：273px 的内容在 320 - 2×12 = 296 里放得下，
+     但字体渲染一宽就放不下 —— 让它换第二行，而不是把整页顶出横向滚动。 */
+  .topbar .nav {
+    order: 3;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+}
+
 main {
   flex: 1 1 auto;
   width: 100%;
