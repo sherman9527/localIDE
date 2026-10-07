@@ -156,6 +156,35 @@ function redactArgv(argv: string[]): string {
 const EVIDENCE_CAP = 400;
 
 /**
+ * node 那句 `Command failed:` 里能塞多少 stderr 就塞多少（实测过 Spark 的日志实践上没有上界），
+ * 所以崩溃消息里的 stderr 只留这么多字符。判据要的是"这一档跑不起来"这一事实，不是它的整本日志。
+ */
+const STDERR_TAIL = 800;
+
+/**
+ * `execFileSync('jupyter', ['nbconvert', …])` **非 0 退出**时该说的那句话（评审 I-1 的后半）。
+ * 加了 `--ExecutePreprocessor.allow_errors=True` 之后，这条路只剩「这一档根本跑不起来」那一类故障
+ * （kernel 起不来 / DeadKernelError / stdout 撑破 maxBuffer），它们与「某个 cell 抛了异常」是两件事：
+ * 后者现在是数据（`output_type=error` → `executedNotebookEvidence` 报「cell 号 + 异常名」），不再是异常。
+ * 这里不许把 node 原样的 `err.message` 抛出去：它整段拼进了 stderr（Spark 的 stderr 无上界），
+ * 一次失败就把测试报告写成日志转储 —— 那正是本文件把断言从整本 notebook 收进「三行」的同一个理由。
+ */
+function nbconvertCrashEvidence(err: unknown): string {
+  const e = err as { code?: number | string; stdout?: unknown; stderr?: unknown };
+  const stdout = typeof e.stdout === 'string' ? e.stdout : '';
+  const stderr = typeof e.stderr === 'string' ? e.stderr : '';
+  return (
+    `nbconvert 以 code=${e.code ?? '(没有 code)'} 非 0 退出 ⇒ 这**不是**「某个 cell 抛了异常」：` +
+    '那种情况 --ExecutePreprocessor.allow_errors=True 会让它退 0、错误落成 output_type=error，' +
+    '由「执行时抛异常的 cell」那条结构化断言报出 cell 号与异常名。非 0 退出说的是这一档跑不起来：' +
+    `${NOTEBOOK_KERNELS.pyspark} 没注册 / venv 解释器缺失（见「venv 的解释器真的在」那条）、` +
+    'DeadKernelError（Spark 崩在半路）、或 stdout 撑破了 maxBuffer。' +
+    `stderr ${stderr.length} 字节 / stdout ${stdout.length} 字节，只贴 stderr 末尾 ${STDERR_TAIL} 字符：\n` +
+    stderr.slice(-STDERR_TAIL)
+  );
+}
+
+/**
  * 从 `jupyter nbconvert --to notebook --execute --stdout` 的输出里只取**两样**：
  * cell 打到 stdout 的那些行，和出错 cell 的异常名。
  * 那份输出是「执行后的整本 notebook」（JSON，里面还有富输出／base64），`maxBuffer` 给到 32MB ——
@@ -349,24 +378,75 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
   it('smoke notebook 跑完并打出 venv ok（证明解释器落在 IDE venv，Spark 起得来）', () => {
     const notebook = join(config.notebook.seedDir, '00-smoke-pyspark.ipynb');
     expect(existsSync(notebook), `${notebook} 不在 ⇒ content/ 那份只读挂载没进来，本条没有对象`).toBe(true);
-    const raw = execFileSync(
-      'jupyter',
-      ['nbconvert', '--to', 'notebook', '--execute', '--stdout', notebook],
-      { encoding: 'utf8', timeout: 180_000, maxBuffer: 32 * 1024 * 1024 },
-    );
-    // 断言压在「notebook 导语承诺的那三行」上，不压在整本执行后 notebook 上（见 executedNotebookEvidence 那段）：
-    // 少任何一行照样红，而失败消息只带那几行，不带 32MB。
+    /**
+     * `--ExecutePreprocessor.allow_errors=True`（评审 I-1）：默认行为把「某个 cell 抛异常」与
+     * 「这一档跑不起来」混成**同一个非 0 退出** —— nbclient 一遇到 cell 报错就抛、nbconvert 退非 0、
+     * `execFileSync` 就地 throw，于是下面的 `executedNotebookEvidence()` 一行都没执行过。
+     * 上一轮自己的破坏性验证实测到的正是这个：那条红来自 throw（node 把整段 stderr 拼进 message），
+     * 不是来自那条「cell 号 + 异常名」的结构化路径 —— 设计里承诺的有界证据在它最该出现的那一次缺席。
+     * 加上这个开关之后：cell 的错误被**记进 notebook**（output_type=error）、nbconvert 退 0、
+     * 结构化路径真的跑起来，报出来的是「cell 3: AssertionError」而不是 nbclient 的整段 traceback。
+     *
+     * 为什么选开关而不是「catch 之后把 err.stdout 喂给提取器」（派单要二选一并说理由）：
+     * 报错即 abort 的那条路上，nbconvert 是把 traceback 打到 **stderr** 就退出的，`--stdout` 那份
+     * 执行后 notebook 根本没写出来 ⇒ `err.stdout` 是空的 ⇒ 提取器只能说"输出不是 notebook JSON"，
+     * 承诺的那句「cell N + 异常名」照样拿不到。所以"让结构化路径生效"必须靠让它跑完（这个开关）；
+     * catch 那一半只处理**另一类**故障（kernel 级/进程级），那里 stderr 才是主角，
+     * 于是由 `nbconvertCrashEvidence()` 把它按字节接住 —— 两条合起来才是"总是有界"。
+     */
+    let raw: string;
+    try {
+      raw = execFileSync(
+        'jupyter',
+        ['nbconvert', '--to', 'notebook', '--execute', '--stdout', '--ExecutePreprocessor.allow_errors=True', notebook],
+        { encoding: 'utf8', timeout: 180_000, maxBuffer: 32 * 1024 * 1024 },
+      );
+    } catch (err) {
+      throw new Error(nbconvertCrashEvidence(err));
+    }
+    // 断言压在「notebook 导语承诺的那三行」+ 那一行的**值**上，不压在整本执行后 notebook 上
+    // （见 executedNotebookEvidence 与 nbconvertCrashEvidence 两段注释）。现在的实际形状是：
+    // 少任何一行照样红，而失败消息只带那几行 stdout、出错 cell 的「cell 号 + 异常名」，
+    // 崩溃那一类再多带 stderr 末尾 STDERR_TAIL 个字符 —— 三条路都不会把 32MB 抄进报告。
     const { stdout, errors } = executedNotebookEvidence(raw);
-    expect(errors, `执行时抛异常的 cell（只有 cell 号与异常名，不带 traceback 正文）：${errors.join(' / ')}`).toEqual([]);
+    expect(
+      errors,
+      '执行时抛异常的 cell（只有 cell 号与异常名，不带 traceback 正文）。' +
+        '⚠ 这里的 cell 号是 **0 基的 cells 数组下标**（提取器按 forEach 的下标报的），' +
+        'notebook 界面右上角那个 In[n] 与导语里的"第 4 格"都从 1 数 —— 所以「cell 3」= 界面上的第 4 格 = ' +
+        `那句 venv assert 所在的格子。实测内容：${errors.join(' / ')}`,
+    ).toEqual([]);
     const shown = JSON.stringify(stdout);
     expect(stdout, `少「venv ok」⇒ 红线①那条 assert 没成立（解释器不在 IDE venv 里），实际 stdout 行：${shown}`).toContain('venv ok');
     // rows 15 = spark.range(6) 的 id **之和** 0+1+2+3+4+5（行数会是 6 —— 评审 I-1 把两边对齐成同一个算式）
     expect(stdout, `少「rows 15」⇒ Spark 那次聚合没真跑（15 是 range(6) 的 id 之和，不是行数 6），实际 stdout 行：${shown}`).toContain('rows 15');
     const pythonLine = stdout.filter((l) => l.startsWith('python '));
     expect(pythonLine, `「python <解释器>」应当恰好一条（cell 2 打的是 sys.executable），实际：${JSON.stringify(pythonLine)}`).toHaveLength(1);
+    /**
+     * 红线①的**第二处、且独立**的行为见证（评审 I-1）。此前"解释器落在 IDE venv"只有一处证据：
+     * notebook 里 cell 4 那句 in-notebook `assert sys.executable.startswith("/opt/arena-ide-env/")`，
+     * 而它的致命之处是"坏掉的方式包括这条闸门自己看不见它"（throw 绕过结构化路径 —— 上一轮实测就是）。
+     * 这里判的是那一行的**值**：cell 2 打的 `python <sys.executable>` 必须以 IDE venv 那一段开头。
+     * 期望值从 `config.ideEnvDir`（compose 的 ARENA_IDE_ENV_DIR）派生 + 布局取自 `venvPythonPath()`，
+     * 不在测试里再抄一遍 `/opt/arena-ide-env/` —— 那会变成第四处真相（见 notebook-image.test.ts 那段）。
+     */
+    const venvPrefix = `${config.ideEnvDir.replace(/\/+$/, '')}/`;
+    const pyLine = pythonLine[0] ?? '';
+    expect(
+      pyLine.startsWith(`python ${venvPrefix}`),
+      `cell 2 打的是「${pyLine}」，解释器不在 ${venvPrefix} 里 ⇒ **红线①**：notebook 里 !pip3 install 的包` +
+        `会进判题子进程看得见的那套 site-packages（期望的那个解释器是 ${venvPythonPath(config.ideEnvDir)}，` +
+        '它就是 kernel.json 的 argv[0] ⇒ 去查 kernelspec/entrypoint 的 PATH，别改这里的期望值）。' +
+        `这是同一件事的两处证据，第一处是 notebook 里 cell 4（0 基下标是 cell 3）那条 assert。` +
+        `两处各有一个来源：那条 assert 比的是 notebook 源文件里写死的 /opt/arena-ide-env/ 字面量，` +
+        `这条比的是本容器实际的 config.ideEnvDir ⇒ **只红一条**就说明这两个来源分叉了` +
+        `（compose 改了 ARENA_IDE_ENV_DIR 而 kernelspec 没跟着改，或反过来 —— notebook-image.test.ts 拦的就是这个），` +
+        `两条一起红才是"解释器真的落回系统 python"。此刻 errors 数组：${JSON.stringify(errors)}`,
+    ).toBe(true);
     // 旧写法是 `expect(out).not.toMatch(/Traceback/)`（扫整本 JSON）。这条把它收进"小集合"里：
     // stdout 不许出现 Traceback 字样，判据强度不丢，但失败消息只带那几行。
-    // 真出异常时走的是上面那条 errors（nbformat 把它落成 output_type=error），这条兜的是"异常被当成文本打出来"。
+    // 真出异常时走的是上面那条 errors（nbformat 把它落成 output_type=error，allow_errors=True 保证收得到），
+    // 这条兜的是"异常被当成文本打出来"。
     expect(stdout.filter((l) => l.includes('Traceback')), `stdout 里出现了 Traceback 字样：${shown}`).toEqual([]);
   }, 200_000);
 
@@ -553,12 +633,49 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
       `${NOTEBOOK_KERNELS.pyspark} 的 label 是空的 ⇒ display_name 没解出来（spec 那一层没取到，连 ?? id 的兜底都没生效）` +
         '⇒ 界面上那个 badge 是一片空白，读的人只知道"有一条 kernel"，不知道是哪套环境',
     ).not.toBe('');
+    /**
+     * 基准取**盘上那份 kernel.json**（评审 I-3），不再用「label ≠ id」那条启发式。
+     * 旧那条是"我们到底有没有读 `spec.display_name`"的**代理**，而代理会替错的东西作证、也会替对的东西撒谎：
+     * 有人把 `display_name` 改成与 id 同名（合法改动，界面显示的仍然是真名），那条就红，
+     * 而红出来的消息指责的是**解析器** —— 一次冤红 + 一句指错方向的报错，比不判还贵。
+     * 真值一直就在旁边：`KERNEL_FILE` 是本组第一条断言的对象（镜像级那份 kernelspec，Dockerfile COPY 进去的），
+     * Jupyter 在 `/api/kernelspecs` 的 `spec` 那一层回的就是它的键，所以 `display_name` 应当逐字相等。
+     *
+     * 顺带一条派单让记下来的好处：这条判的是「解析值 == 一份文件里的值」，
+     * 于是**同一个文件里将来谁加一句 `vi.stubGlobal('fetch')` 也替不了它** ——
+     * 旧的"只要不同于 id"任何一份 mock 都满足得了（包括一份与实现同源地写错的 mock，
+     * 那正是本轮 `kernels` / `kernelspecs` 那次全绿却对用户撒谎的形状），而"等于盘上这份"必须真打出去才拿得到。
+     *
+     * 诚实的边界（不是漏判，写出来免得下一个人以为这里还留着牙）：如果哪天 `display_name` 恰好等于 id，
+     * 这条就分不出「读到了 spec.display_name」与「`?? id` 兜底」——但那时两种解析的结果是同一个字符串，
+     * 界面上显示的也正是那个对的名字，**没有故障可判**。真要区分只能再问一个 spec 里没有的东西（比如 argv[0]），
+     * 那是另一条闸门的事（`notebook-image.test.ts` 已经在盘上那份里判 argv[0] 了）。
+     */
+    let displayNameOnDisk: string | null = null;
+    try {
+      const installedSpec = JSON.parse(readFileSync(KERNEL_FILE, 'utf8')) as { display_name?: unknown };
+      const raw = typeof installedSpec.display_name === 'string' ? installedSpec.display_name.trim() : '';
+      displayNameOnDisk = raw === '' ? null : raw;
+    } catch {
+      // 读不到不静默放过：下面那条「基准存在」的断言会把它说成一句话（本文件的规矩：不许有早退）。
+      displayNameOnDisk = null;
+    }
     expect(
-      label === NOTEBOOK_KERNELS.pyspark,
-      `${NOTEBOOK_KERNELS.pyspark} 的 label 与 id 一字不差（${label}）⇒ 走的是 \`?? id\` 那份兜底：` +
-        '键名对了但嵌套错了（display_name 在 spec 里面，不在 entry 顶层）。' +
-        '这条兜底会把"解析坏掉"伪装成"拿到了名字"，所以只判 label 非空不够，必须判它不是 id 的回声',
-    ).toBe(false);
+      displayNameOnDisk !== null,
+      `${KERNEL_FILE} 里读不出非空的 display_name ⇒ 这条闸门没有基准。它是容器档里唯一不经过 mock 的一条，` +
+        '而基准就是盘上那份 kernelspec（Dockerfile 的 COPY）⇒ 读不到说明镜像没按 Dockerfile 构建，' +
+        '该 ./start.sh --rebuild；**不是**这条断言写错了',
+    ).toBe(true);
+    expect(
+      label,
+      `${NOTEBOOK_KERNELS.pyspark} 解析出来的 label（${JSON.stringify(label)}）与容器里那份 kernel.json 的 ` +
+        `display_name（${JSON.stringify(displayNameOnDisk ?? '')}）不是同一个串⇒ ` +
+        '`spec` 那一层没取到，`?? id` 的兜底把"解析坏掉"伪装成"拿到了名字"（界面上那枚徽标会显示成 ' +
+        '`arena-pyspark` 这种机器名，读的人看不出差别）。改的是 server/src/notebooks/status.ts 里 ' +
+        'kernelspecs[<id>].spec.display_name 那一条解析，不是这条断言、不是盘上那份 kernel.json、' +
+        '也不是 status.test.ts 那份 fixture（它是抄的，判不住这个）',
+      // 上一条断言已经保证基准非 null；这个 `?? ''` 只是给类型看，不参与结论。
+    ).toBe(displayNameOnDisk ?? '');
   });
 
   /**
@@ -814,8 +931,11 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
       'venv ok',
     ]);
 
-    // 出错 cell：--execute 通常会直接抛，但"错误被 notebook 吃掉"那份 JSON 也算得上一份证据，
-    // 这时消息里要看得见是哪个 cell 的哪个异常，而不是靠 traceBack 全文。
+    // 出错 cell：容器档那条真跑现在带 `--ExecutePreprocessor.allow_errors=True`（评审 I-1），
+    // cell 的错误因此**总是**以这份 JSON 的形态到达提取器（以前 nbconvert 一遇到报错就 abort，
+    // traceback 走 stderr、stdout 空空 ⇒ 这一格在真跑里从来执行不到）。所以这假 JSON 就是那条
+    // 结构化路径的**形状判据**，在宿主上判得住，不必等一次真崩溃：消息里要看得见是哪个 cell 的
+    // 哪个异常名，而不是 traceback 全文。
     const bad = JSON.stringify({
       cells: [
         { cell_type: 'code', outputs: [{ output_type: 'error', ename: 'AssertionError', evalue: 'assert 落地在系统解释器', traceback: ['x'.repeat(5000)] }] },
@@ -855,6 +975,11 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
     });
     // 先占两个端口：一个当"活着的那个"，一个关留着当"没人听的那个"
     // （不写死 1 之类的端口号：那在别的机器上可能真有人听，也可能被防火墙拦成超时 —— 一条会周期性冤红的闸门）
+    // ⚠ 「bind(0) → close → 拿那个号当死端口」有一次**理论上的竞态**：close 与探测之间，同一 netns 里的
+    //   别的进程可能把刚释放的那个端口 bind 走 ⇒ 这一条会给 200/302 而不是 null 而冤红。
+    //   窗口是毫秒级、且要有进程正好那一下在 bind。真撞上了就是重跑一次的事 ——
+    //   **那不是产品 bug，别去查 jupyter**（本文件其它处的假 pid 都从 process.pid 派生是同一类防御，这里没有更稳的做法：
+    //   要"确定没人听"只能靠一个我们刚释放的号，或靠一个别人机器上可能真有人听的写死号，后者更糟）。
     const closedPort = await new Promise<number>((r) => {
       const tmp = createServer((_q, s) => s.end());
       tmp.listen(0, '127.0.0.1', () => {
