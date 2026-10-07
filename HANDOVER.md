@@ -1136,23 +1136,52 @@
   `reflog expire` + `gc --prune=now` 真正回收，等用户点头（不可反悔）；验收按上次那套：
   逐对象 `cat-file -e` 报缺失、`fsck` 无 dangling、扫**全部可达对象**命中 0。
 
+- [x] WI-89 Jupyter 运行时（子项目 A1）：**Task 1–11 全部关闭**，容器档 / E2E / 真浏览器都有落盘的实测（HEAD `c208524`）
+  ｜交付：kernelspec 注册在**镜像级** `docker/jupyter/kernels/arena-pyspark/kernel.json` →
+  `/usr/local/share/jupyter/kernels/…`，argv 指向 IDE 那个命名卷 venv 的 python ⇒ notebook 里 `!pip3 install X`
+  下一格就能 `import`，而判题看不见（= 红线一的第二个入口，两道保险见 `docs/JUDGING.md` 最后一段）；
+  `docker/entrypoint.sh` 常驻起 jupyter（**监听容器内 `0.0.0.0:8888`** + 显式 `--ServerApp.allow_remote_access=False`，
+  绑法与被它关掉的 Host 守卫见 memo 里程碑 BB），宿主侧 `127.0.0.1:7789:8888`；`server/src/notebooks/{seed,status}`
+  + `GET /api/notebook/status`（token **按 socket 对端释放**：回环或本进程默认网关，不是 `Host` 头；非本机对端
+  照样给链接、里面没有凭据）+ `POST /api/notebook/prepare-env`；第 5 个页面懒加载（首屏仍 1 JS + 1 CSS，
+  两把尺子：`check-bundle.mjs` 的 `notebook-page` 产物标记 + `web/test/notebook.test.tsx` 的源码形状）；
+  notebook 私有 warehouse/Derby 与判题侧分开。
+  ｜**两条只有真连一次才现形的缺陷**（每条都穿过全绿的档位活着到达交付档）：① "只听容器内 127.0.0.1" 与
+  "发布成宿主 7789"互相矛盾（发布端口 DNAT 到容器 eth0；实测 loopback 302 / eth0 000 / 宿主 000，而容器档全绿
+  因为它所有探活都走 loopback）；② `/api/kernelspecs` 读错键（`kernels` vs 真回话的 `kernelspecs`）而单测 fixture
+  是照实现的形状写的 ⇒ mock 与 bug 同形、三档一起绿，用户在页面上看到的横幅正在建议他 `--rebuild` 一个能用的镜像。
+  ｜验证（**容器**）`MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` → `CV_EXIT=0`、`✓ verify 全部通过`；
+  `Notebook 运行时（kernel 真跑）` 出现 **1** 次、区间非空（18 行）、区间内 `skip` **0** 次，
+  `kernel.test.ts (30 tests) 8754ms` → `Tests 30 passed (30)`；`[matrix] 代码题 158 道，本次可判 158 道，
+  跳过（栈不可用）0 道`（栈全 true）；`判题矩阵：513 passed / 7 skipped / 520 total ✓`（那 7 条是既有 env 门控：
+  `publish-identity` 1 + `env-write-atomicity` 6，不是新债）—— 日志 `/tmp/cv15.log`。
+  ｜验证（**宿主 E2E**）`npm run e2e` → **74 passed**（`/tmp/e2e18.log`），含新加进采样面的 480 / 600 / 1100
+  与那条顶栏几何判据。｜验证（**宿主快档**）`npm run verify:fast` EXIT=0（`fcd709b` 独立跑 `/tmp/vf16.log`，
+  每个 commit 的 pre-commit 各又跑一遍）。
+  ｜验证（**真浏览器**，宿主，两趟）：320/390/480/768/1440 五档 meta 与 brand 全部同行、`metaGapToRowRight` 与
+  `overflowX` 全 **0**、`order` 全 0/0/0，我们自己的页面 console **0 error / 0 warning**；交互式内核真跑：
+  `/tree` 不是登录页 → 双击 `00-smoke-pyspark.ipynb` → restart+Run All → prompts `["", "[1]:", "[2]:", "[3]:"]`、
+  输出 `python /opt/arena-ide-env/python/bin/python` / `rows 15` / `venv ok`，`GET /api/kernels` 两条 idle、
+  `ps` 是 `… -m ipykernel_launcher`；换状态（容器里 `pkill` 掉 jupyter）与 75s 停顿都做过（`task-10-browser-evidence.md`、
+  `task-10-closing2-evidence.md`）。
+  ｜破坏性（四条按计划 + 一条计划外，每条都亲眼看到红）：`kernel.json` 的 argv 改系统 python → 红在**结构化证据**
+  `cell 3: AssertionError`；`--ServerApp.local_hostnames=[]` → 红在"浏览器形状的 Host 放行"那一半而 rebinding→403
+  仍绿（两半各自独立）；同一轮"DNAT 目标上也必须有人在听"**照旧绿**（403 算有人在听 ⇒ 那个决定第一次被真实场景验到）；
+  fixture 的 `spec` 降一层 → `label === display_name` 红在名字不匹配；e2e 用 `page.route` 伪造 `running:true` →
+  `notebook-open` 的 `toHaveCount(0)` 红。还原 + 重建后复绿（30 passed，`git status` 空）。
+  ｜**同 HEAD 先跑的那一次是红的，照实记**：`/tmp/cv14.log` `CV_EXIT=1`，红在
+  `debug.test.ts > 后端接缝本身 > 写进一个刚退出的调试进程`（消息是那条用例自己的 fail-closed 守卫
+  `后端起不来，这条用例没有意义`），单文件重跑 38 passed（`/tmp/dbg_rerun.log`）⇒ 新数据进了 **WI-92**：
+  它在 `verify.sh:63` 而 notebook 那档在 `:75`，所以那一次**整轮没走到 kernel 真跑**（爆炸半径不是"烦人"）。
+  ｜本轮（Task 11）补的账：`memo.md` 里程碑 BA 那句绑法、计划与 spec 里同样的四处、`kernel.test.ts` 四条注释级
+  minor、`BUILDINFO.md` 那条指向未跟踪报告的死引用全部改完；README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md`
+  里 notebook 原本一个字都没有，现在有了；`.superpowers/` 补进 `.dockerignore`（此前 app 阶段 `COPY . .`
+  会把会话笔记烤进本地镜像）——**它改的是镜像构建，控制者要在这个 HEAD 之后再跑一次容器档收尾**。
+  ｜**仍未做/未测**：spec §11 的镜像增量与常驻内存两项**未测**（照写"未测"，没有数字就不编）；
+  Jupyter 无守护 → WI-93；notebook 内嵌（设计已批准）→ WI-94。
+
 ## IN PROGRESS
 
-- [ ] WI-89 Jupyter 运行时（子项目 A1）：**Task 1–9 完成，Task 10/11 未做，卡在 Docker 引擎**。
-  分支 `jupyter-a1`，HEAD `348f480`，**未 push**，工作树干净；宿主 `npm run verify:fast` EXIT=0。
-  交付内容：镜像里的 Jupyter + `arena-pyspark` kernel（argv 指向 IDE venv，所以 `!pip3` 下一格就能 import）、
-  entrypoint 常驻起在容器内 `127.0.0.1:8888` / 宿主 `127.0.0.1:7789`、token 走 `.env` 管线且**只按 socket
-  对端释放**（回环或本进程默认网关；`Host` 头那版被评审否了）、notebook 私有 warehouse/Derby 与判题侧隔离、
-  `shared` 契约 + `server/src/notebooks/{seed,status}` + 两个路由 + 第 5 个页面（懒加载，首屏仍 1 JS + 1 CSS）。
-  ｜**还没验的**（这三条一条都不许当成已过）：① 容器档 `./start.sh --verify` 与判题矩阵 `0 skipped`；
-  ② kernel 真跑 —— `nbconvert` 出 `venv ok` 与 `rows 15`、`/proc/<pid>/environ` 里 PATH 首项是 venv、
-  arena 容器里 `ARENA_JUPYTER_TOKEN` 这个 key 确实存在、容器 netns 里真读得到 `/proc/net/route`；
-  ③ 第五页的**真浏览器**验收（console error 与 warning 都要 0、切一次状态再看 DOM、故意停顿几十秒看进程还在）。
-  ｜**恢复点**：计划 `docs/superpowers/plans/2026-10-05-jupyter-notebook-runtime-a1.md`（Task 10 的指令已订正过，
-  `:1120` 那条假的"非回环不出现打开链接"已改掉）；ledger `.superpowers/sdd/2026-10-05-jupyter-notebook-runtime-a1/progress.md`
-  （gitignored）里有全部裁定与每条 "carried to Task 10"；明细在同目录 `task-9-report.md` / `task-11-docs-report.md`。
-  ｜**卡点判据**：`docker info` 现在挂到超时，后端日志 `connect tcp 192.168.65.7:2375: operation timed out`
-  （VM 半死，GUI 看不出来）⇒ 重启机器或 `wsl --shutdown` 后重开 Docker Desktop，等 `docker info` 秒回再跑 Task 10。
 - [ ] WI-56 公司扩充（长期项）：目标 **每家 25-30 题**（2026-09-22 用户拍板，取代 commit `2b71a0d`
   消息里那句"6 家各 ≥50"；2026-09-23 追到 30）。
   **当前实测（2026-09-25 批：Airbnb +1、DeepSeek +1，题库共 254）：六家全部达 30 ——
@@ -1245,10 +1274,39 @@
   三条路各给一个时间盒，按顺序试：**Almond → Toree（preview 那一档）→ 自己包一层 IMain kernel**。
   撞穿第一条就停下记账，不要在第二条上继续烧时间盒。注意与 WI-89 的两处耦合：kernel 的 `argv` 同样要落在
   IDE 那一侧的环境，且 Scala notebook 的 warehouse/Derby 也必须与判题侧分开（同 `arena-pyspark` 的做法）。
-- [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例在 pre-commit 里随机红（BA 里程碑记下的那条会冤红的闸门）：
-  "JavaScript 行断点（CDP）stepIn/stepOut" 报"起不来：没能开始调试"，单跑与整轮 `verify:fast` 都绿。
-  要修的是它的**启动竞态**（CDP 服务未就绪就发指令那一类），**不是** skip —— 冤红教人重跑，重跑久了闸门就没了。
-  判据建议：把"重试到 ready 为止 + 一个上限"做成可断言的行为，而不是加 sleep。
+- [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
+  两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
+  "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
+  失败消息是这条用例自己的 fail-closed 守卫 `后端起不来，这条用例没有意义`（`/tmp/cv14.log`，`CV_EXIT=1`；
+  单文件重跑 38 passed，`/tmp/dbg_rerun.log`；随后整轮 `/tmp/cv15.log` `CV_EXIT=0`）。
+  ｜**为什么它比烦人更糟**：`scripts/verify.sh` 是 `set -e` 顺序跑，那条阶段在 `:63` 而
+  「Notebook 运行时（kernel 真跑）」在 `:75` ⇒ 一次抖动红会**把整轮在 notebook 之前中止**，
+  于是"这一档唯一的容器证据"整片没有发生（`cv14` 实测就是这样，而它的 tail 看起来跟真的一样）。
+  ｜要修的是它的**启动竞态**（CDP 服务未就绪就发指令那一类），**不是** skip —— 冤红教人重跑，
+  重跑久了闸门就没了（仓库里"会偶发冤红的闸门比没有闸门更坏"记过一次）。
+  判据建议：把"重试到 ready 为止 + 一个上限"做成**可断言的行为**，而不是加 sleep。
+- [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
+  ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
+  `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；
+  镜像**变了**那一次才 `Container daily-arena Recreate` → 回 302。原因是 compose 对没变化的服务不重建容器，
+  而 jupyter 是 entrypoint 起的 ⇒ "镜像里有、进程没了"这一种没有任何东西会替你把容器换掉。
+  ｜现在的做法：`start.sh` 的横幅点名那条真能修好这个症状的命令 `docker compose up -d --force-recreate arena`
+  （实测恢复：`UP_EXIT=0`，第一次探 `health=000 notebook=000`、第二次 `health=200 notebook=302`），
+  并说清两件**不是**补救的事：`./start.sh`（镜像没变 ⇒ 什么都不做）与 `--rebuild`（怀疑镜像本身没带 Jupyter
+  才值得那 10–20 分钟的冷构建）。
+  ｜**加不加守护是一次决定，不是修复**：监督循环（restart 策略 / 看门狗）意味着任何一次 jupyter 崩溃都可能
+  连带重建容器，而重建会带走正在跑的 **IDE 调试会话与判题任务** ⇒ 需要用户点头。本轮**故意没做**。
+- [ ] WI-94 notebook **内嵌**（设计已批准，**未实施**）：把第五页从"跳出去开 7789"改成同源 `/jupyter/*`
+  ｜形状：7788 上做同源反代 `/jupyter/*` → 容器内 8888，jupyter 侧配 `--ServerApp.base_url=/jupyter/`，
+  token 由**服务端注入**（HTTP 请求走 header；**websocket 必须走 `?token=`** —— 浏览器给不了 ws 握手设请求头）。
+  ｜**不引新依赖**：`ws` 只是被 hoist 上来的传递包、**不是** `server` 声明的依赖 ⇒ 用 `http`/`net` +
+  `upgrade` 事件手写这一层（把传递包当直接依赖用 = 下次装包树一变就静默没掉）。
+  ｜**必须有的闸门（这条是硬前提，不是收尾打磨）**：被代理的那棵子树上要加 `Host` 白名单 +
+  `Sec-Fetch-Site ∈ {same-origin, none}`，**fail-closed** —— 因为一旦 7788 注入 token，
+  "谁能把报文发到 7788"就等价于"谁能在容器里执行代码"，而 7788 今天**没有任何 Host 白名单**。
+  ｜**等用户点头的开放事实**（独立成立，今天就可利用，与要不要内嵌无关）：正因为 7788 没有 Host 白名单，
+  对那张未鉴权的题库做 **DNS rebinding 现在就行得通**。要不要补这道守卫由用户定；本轮只在 WI-94 与
+  `memo.md` 里程碑 BB 里记账，**没有**动 7788 的鉴权或 Host 判据。
 
 - [ ] 【已决议：暂不做 · 2026-09-20 用户拍板】WI-38 JDK 21 与 Spark 并存的取舍（WI-26② 的评估结论）：镜像里 Spark 是 3.5.5，官方支持矩阵到 Java 17（21 要 Spark 4.0），而**同一个 JDK 既跑 javac/java 判算法题又跑 Spark**，整体升到 21 会把 pyspark / spark-scala 推到未支持路径。可行做法是并装 `openjdk-21-jdk-headless`（约 +400MB、stack 层要全量重建），只让 `java-junit` 用 21、Spark 继续用 17，并给 `RunnerConfig` 加 `jdk` 选项。
   当前损失面评估：record / sealed / switch 表达式在 17 就能编译，真正判不了的是**虚拟线程（21 正式）与 sequenced collections（21）**；而虚拟线程这类题本来就不适合"纯函数 + 用例"判分，所以先不付这个体积与重建成本。（"Spark 3.5 不支持 21"引自官方发布说明，本机未验证 —— 镜像里没有第二个 JDK）
