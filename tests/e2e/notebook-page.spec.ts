@@ -81,10 +81,21 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
   expect(pageText).toContain('ARENA_JUPYTER_TOKEN');
   expect(pageText, '这句是"按设计不跑"的诊断，不是故障 ⇒ 不许把它读成要你修的东西').toContain('不是需要你修的故障');
 
-  // 三句话在这一态也得常驻（用户最该看见它们的时刻正是状态最难看的时候）
+  // 三句边界话在这一态也得常驻（用户最该看见它们的时刻正是状态最难看的时候）。
+  // 但**逐字的文案契约只该有一份**：那份在单元层 —— `web/test/notebook.test.tsx` 里的
+  // `boundarySentences` × `boundaryCases`（在跑 / 没在跑 / 链接坏掉这三态各跑一遍）。
+  // 这里原来把最长那句整句抄了一遍，于是改个标点会红的是 E2E 而不是单测（评审 minor）——
+  // 那类红教人的是"两处都得改"，不是"这里真坏了"。
+  // ⇒ 最长那句换成 testid + 结构判据：`notebook-boundary` 那一块可见、里面恰好三个 <p>
+  //   （少一句就是这里红），且其中恰好一条提到 `127.0.0.1` —— 那是**契约事实**
+  //   （宿主侧两个发布端口只绑回环，`compose-ports.test.ts` 钉着），不是措辞。
+  //   剩下两句短语仍按文案判：它们短，且是这一页最容易被静默删掉的那两句，值得留字面。
   expect(pageText).toContain('这些包与 IDE 共用同一份环境');
   expect(pageText).toContain('这不是安全边界');
-  expect(pageText).toContain('只在浏览器本机打开：地址是 127.0.0.1，手机 / iPad 访问不了');
+  const boundary = page.getByTestId('notebook-boundary');
+  await expect(boundary).toBeVisible();
+  await expect(boundary.locator('p')).toHaveCount(3);
+  await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' }), '那一块里没有提到回环地址的那句 ⇒ 三种说法之一被删了').toHaveCount(1);
 
   // 示例清单与"在不在跑"无关：GET 顺手铺示例，所以 running:false 时也列得出那一份 smoke
   await expect(page.getByTestId('notebook-files')).toContainText('00-smoke-pyspark.ipynb');
