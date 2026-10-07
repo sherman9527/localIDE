@@ -28,21 +28,71 @@ function argsText(args: unknown[]): string {
   return args.map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 6, breakLength: 10_000 }))).join(' ');
 }
 
+/**
+ * `GET /api/kernelspecs` 的**真回话**（2026-10-08 从跑着的 arena 容器里 curl 出来的键结构，
+ * 逐字对照过，不是我按实现的样子编的）：
+ * `{"default":"python3","kernelspecs":{"python3":{"name":…,"spec":{"display_name":"Python 3 (ipykernel)",…},"resources":{…}},
+ * "arena-pyspark":{"name":…,"spec":{"display_name":"PySpark (arena)",…}}}}`
+ *
+ * ⚠ 顶层那个映射叫 **`kernelspecs`**，不叫 `kernels`。这份 fixture 以前按 `kernels` 写，
+ * 于是 mock 与实现**同一个错**：十一条 tests 全绿，而第五页在用户眼前说
+ * 「探到的 kernel 表里没有 arena-pyspark ⇒ 跑一次 `./start.sh --rebuild`」——
+ * 那个 kernel 其实注册着，并且刚在容器档里真跑通过 Spark（评审实测）。
+ * 按想象中的键名写的 fixture 修不了这个 bug，它只会替 bug 作证。
+ * 真正判住"解析的键必须与真回话同源"的是容器档那条 `kernel.test.ts`
+ * 「对着真 Jupyter 解出 arena-pyspark」—— 它不经过任何 mock。
+ *
+ * 三个容易写错的形状都留在这份 fixture 里：
+ * ① 标签嵌在 `kernelspecs[<id>].spec.display_name`，不在 entry 顶层；
+ * ② `default` 指着的 `python3` 本身也是一条 kernel（少收一条 = 界面列的与 Jupyter 自己列的不是一回事）；
+ * ③ entry 还带着 `name` / `resources` 两个兄弟键（解析按 entries 走，多余键不该改变结果）。
+ */
+const KERNELSPECS_BODY = {
+  default: 'python3',
+  kernelspecs: {
+    python3: {
+      name: 'python3',
+      spec: {
+        argv: ['python', '-m', 'ipykernel_launcher', '-f', '{connection_file}'],
+        env: {},
+        display_name: 'Python 3 (ipykernel)',
+        language: 'python',
+        interrupt_mode: 'signal',
+        metadata: { debugger: true },
+        kernel_protocol_version: '',
+      },
+      resources: {},
+    },
+    'arena-pyspark': {
+      name: 'arena-pyspark',
+      spec: {
+        argv: ['/opt/arena-ide-env/python/bin/python', '-m', 'ipykernel_launcher', '-f', '{connection_file}'],
+        env: { PYSPARK_SUBMIT_ARGS: '--conf spark.sql.warehouse.dir=/app/data/notebook-warehouse/wh pyspark-kernel' },
+        display_name: 'PySpark (arena)',
+        language: 'python',
+      },
+      resources: {},
+    },
+  },
+};
+
 const fake = () =>
   vi.fn(async (u: string | URL) =>
     String(u).includes('/api/kernelspecs')
-      ? { status: 200, json: async () => ({ default: 'python', kernels: { 'arena-pyspark': { name: 'arena-pyspark', spec: { display_name: 'PySpark (arena)' } } } }) }
+      ? { status: 200, json: async () => KERNELSPECS_BODY }
       : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) }) as unknown as typeof fetch;
 
 /**
  * 只有 `/api/status` 回那个状态码，kernelspecs 照常答 200。
  * 故意做成"半个坏"：两个端点各有各的守卫，若假 fetch 两边一律 403，删掉任意一支都会被另一支
  * 替它说出一句对的话 ⇒ 那条变异测不出来（评审要的就是"每一支都独立被判住"）。
+ * kernelspecs 那份 body 用**真形状的空表**（`kernelspecs: {}`，即"一个 kernel 都没注册"是 Jupyter
+ * 真会给的合法回话），不是旧那份 `{ kernels: {} }` —— 后者是同一个键名幻觉的第二次落笔。
  */
 const statusDeny = (status = 403) =>
   (vi.fn(async (u: string | URL) =>
     String(u).includes('/api/kernelspecs')
-      ? { status: 200, json: async () => ({ kernels: {} }) }
+      ? { status: 200, json: async () => ({ default: 'python3', kernelspecs: {} }) }
       : { status, json: async () => ({}) }
   ) as unknown as typeof fetch);
 
@@ -91,7 +141,13 @@ describe('notebookStatus', () => {
     // 于是"宿主端口换个号"会同时改掉 compose 与 config 而这条测试独自红 —— 那是冤红，
     // 冤红教给下一个人的是"改测试里的数字"，而不是"看谁真的漂移了"。
     expect(res.url).toBe(`${config.notebook.publicUrl}/tree?token=test-token`);
-    expect(res.kernels).toEqual([{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }]);
+    // 两条都要在，且标签来自 `spec.display_name`（不是 id、不是顶层）：
+    // 这一句以前只期望 arena-pyspark 一条，因为 fixture 里就只有那一条 —— 真回话两条都列，
+    // 少收 python3 的代价是"界面显示的 kernel 清单与 Jupyter 自己列的不是一回事"，没人会当 bug 报。
+    expect(res.kernels).toEqual([
+      { id: 'python3', label: 'Python 3 (ipykernel)', ready: true },
+      { id: 'arena-pyspark', label: 'PySpark (arena)', ready: true },
+    ]);
   });
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
@@ -271,7 +327,8 @@ describe('notebookStatus', () => {
       vi.resetModules();
     }
     expect(res.running, '链接拼不出来 ≠ Jupyter 没在跑 ⇒ 这里必须仍是 true').toBe(true);
-    expect(res.kernels).toHaveLength(1);
+    // 长度从真回话派生（两条 spec），断的是"链接坏了不许把 kernel 表一起吞掉"，不是那个数字本身
+    expect(res.kernels).toHaveLength(Object.keys(KERNELSPECS_BODY.kernelspecs).length);
     expect(res.url).toBeUndefined();
     expect(res.reason).toMatch(/ARENA_NOTEBOOK_PUBLIC_URL/);
   });

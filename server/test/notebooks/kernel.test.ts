@@ -2,11 +2,14 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { createServer, request as nodeHttpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
 import { ensureIdeEnv, venvPythonPath } from '../../src/ide/env.js';
 import { findLanguage } from '../../src/ide/languages.js';
+import { notebookStatus } from '../../src/notebooks/status.js';
 
 /**
  * Task 10：容器档「真跑」。
@@ -220,11 +223,17 @@ function nonLoopbackIpv4Addresses(): string[] {
 
 /**
  * 探一次 HTTP。**只区分两种结果**，因为这个缺陷的判据就是这一刀：
- * `{status}` ⇒ 有人在听（200/302/403 都算 —— 302 是"要 token"，403 可能是 jupyter 的 Host 守卫，
- * 两种都是"端口上有 jupyter 应答"，与"连不上"是完全不同的故障）；
+ * `{status}` ⇒ 有人在听（200/302/403 都算 —— 302 是"要 token"，403 是 jupyter 的 Host 守卫
+ * 把非回环的那个 Host 挡了，两种都是"端口上有 jupyter 应答"，与"连不上"是完全不同的故障）；
  * `{error}` ⇒ 没人听（ECONNREFUSED / 超时 / DNS 形状错误）。
  * 故意**不带 token**：带 token 就要把凭据拼进 URL、拼进错误消息，而这里判的是"有没有人在听"。
  * （`start.sh` 的 `report_notebook` 用的是同一个判据形状：只看有没有 HTTP 应答，不判语义。）
+ *
+ * ⚠ 「应答就算活着」这一条不是宽容，是**分工**：可达性归这两条，守卫归下面那条
+ * `probeWithHostHeader`。把 403 从"活着"里摘出去会撞出一个假红（容器自己的 eth0 地址不是回环，
+ * `--ServerApp.allow_remote_access=False` 之后那道守卫本来就该在那里回 403），
+ * 而修它的诱惑是"把守卫松掉让闸门变绿"—— 那是拿保护换一个数字。
+ * 「守卫放不放行」的判据是另一套状态码，写在 `HOST_ALLOWED_STATUSES` / `HOST_REFUSED_STATUS`。
  */
 async function probeHttp(url: string): Promise<{ status: number } | { error: string }> {
   try {
@@ -240,6 +249,40 @@ async function probeHttp(url: string): Promise<{ status: number } | { error: str
 /** 探测结果的一行可读证据（失败消息靠它把"两种故障"分开说）。 */
 const probeLine = (url: string, r: { status: number } | { error: string }): string =>
   `${url} ⇒ ${'status' in r ? `HTTP ${r.status}（有人在听）` : `没有 HTTP 应答（${r.error}）`}`;
+
+// ──────────────────── Host 守卫探针（DNS rebinding 那一半，见下面那条实测） ────────────────────
+
+/** 守卫**放行**的答案：200 直接给页面，302 跳登录（探针不带 token，必然跳）。 */
+const HOST_ALLOWED_STATUSES = [200, 302];
+/** 守卫**拒绝**的答案。只有这一个：401/404 都说明请求没走到守卫那一层，判不了这条。 */
+const HOST_REFUSED_STATUS = 403;
+
+/**
+ * 带着**指定的 Host 头**探一次 HTTP，拿状态码；连不上给 null。
+ *
+ * 为什么这里不能用现成的 `probeHttp`（fetch）：**fetch 会把你给的 Host 换掉**。
+ * 本机实测（Node 24，打在一个回显 `req.headers.host` 的临时服务器上）：
+ *   node:http + `headers:{host:'rebinding.example:7789'}` ⇒ 服务器收到 `echo-host=rebinding.example:7789`
+ *   fetch 同 URL 同 headers                                        ⇒ 服务器收到 `echo-host=127.0.0.1:7791`
+ * ⇒ 用 fetch 写这条闸门，它发的永远是"URL 那个权威"，也就是守卫**允许**的那一种 Host：
+ * 守卫整块关掉也照样绿，而且绿得跟真跑过一样。这条判据的全部价值就在"头是我发的"上。
+ * 这条 plumbing 本身由常驻那组的 echo 服务器判住（宿主就能红），不必等容器。
+ */
+function probeWithHostHeader(opts: { connectHost: string; port: number; path: string; hostHeader: string }): Promise<number | null> {
+  return new Promise((resolve) => {
+    const req = nodeHttpRequest(
+      { host: opts.connectHost, port: opts.port, path: opts.path, method: 'GET', headers: { host: opts.hostHeader }, timeout: PROBE_TIMEOUT_MS },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        res.resume(); // 把 body 排干，别把 socket 挂在连接池上
+        resolve(status);
+      },
+    );
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => (req.destroy(), resolve(null)));
+    req.end();
+  });
+}
 
 // ──────────────────────────── 容器档：真跑 ────────────────────────────
 
@@ -417,6 +460,21 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     const url = `http://127.0.0.1:${config.notebook.port}/tree`;
     const res = await probeHttp(url);
     expect('status' in res, `${probeLine(url, res)} ⇒ 容器里连回环都不应答：jupyter 压根没起来（缺 token / 镜像没带 Jupyter / 端口被占），与本条要对照的那个「绑定地址」缺陷无关`).toBe(true);
+    // 两条断言都会跑（不写 `if`：本文件的规矩是"永远会跑的断言里不许有早退"）；
+    // 第一条红就地停住，第二条的取值只在"有人应答"时才有意义。
+    const status = 'status' in res ? res.status : null;
+    // 走到这里这条请求的 Host 是 `127.0.0.1:8888` —— 正是守卫**必须放行**那一类
+    // （check_host() 先摘端口，再按 ipaddress 判 is_loopback）。于是同一个请求承担两件事：
+    // 可达性（上面那条）+「用户那条路没被 allow_remote_access=False 误伤」（这一条）。
+    // 红在这里 = 连回环 Host 都被拒 ⇒ 浏览器打开 127.0.0.1:7789 拿到的也是 403，那是把功能修没了。
+    expect(
+      HOST_ALLOWED_STATUSES,
+      `容器里带**回环 Host**（默认就是 127.0.0.1:${config.notebook.port}）的请求拿到 ${status}，` +
+        `期望 ${HOST_ALLOWED_STATUSES.join('/')} 之一` +
+        '⇒ --ServerApp.allow_remote_access=False 把本机那条路也挡了。红在这里该查的是' +
+        ' local_hostnames / 启动行，**不是**把 allow_remote_access 松回 True（那是关掉下面那条守卫闸门）：' +
+        'jupyter 的判据是"摘掉端口 → IP 字面量走 is_loopback（127.0.0.1、::1 都算）→ 非 IP 才查 local_hostnames（默认 localhost）"',
+    ).toContain(status);
   });
 
   it('发布端口的 DNAT 目标（容器自己的非回环 IPv4）上也必须有人在听（只听容器 loopback ⇒ 宿主 7789 打不到）', async () => {
@@ -444,7 +502,123 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
             '边界仍然是「宿主侧只绑回环 + token」那两道（compose-ports.test.ts / notebook-compose.test.ts ① 钉着）'
           : '⇒ 但回环上也没人应答，那就不是绑定地址的问题，而是 **jupyter 根本没起来**（缺 token / ' +
             '镜像还是没带 Jupyter 的旧版 / 端口被占）——先按上面那条对照断言说的三点排，这条 DNAT 判据要等回环通了才谈得上';
+      // 判的是「有没有人应答」，不是「应答得客气」：allow_remote_access=False 之后这里的实际答案
+      // 就是 403（Host 是 eth0 那个非回环地址 ⇒ 守卫该拒），而 403 恰恰证明
+      // 「包转到了、有 jupyter 在按 Host 做决定」。把 403 当坏 = 逼着人去把守卫松开，方向反了；
+      // 「守卫该不该拒」由下面那条 probeWithHostHeader 的闸门专门判，两边各管各的。
       expect('status' in res, `${probeLine(url, res)}，而 ${probeLine(loopback, loopbackRes)}。${verdict}`).toBe(true);
+    }
+  });
+
+  /**
+   * 这条是「第五页那句 kernel 没注册」的**唯一真相来源**。
+   *
+   * 上面所有档的 fixture 都是人手写的 JSON，而它们曾经与实现**同源地写错**：
+   * `status.ts` 读 `body.kernels`，真回话里那个映射叫 `kernelspecs`（顶层是
+   * `{default, kernelspecs}`，标签嵌在 `[<id>].spec.display_name`）。mock 与 bug 同形时单测全绿，
+   * 于是三档验证没有一个拦得住，用户在真浏览器里看到的是
+   * 「探到的 kernel 表里没有 arena-pyspark ⇒ 跑一次 ./start.sh --rebuild」——
+   * 而那个 kernel 注册着、并且刚被容器档真跑通过 Spark。那句提示会让人去拆掉一个能用的镜像。
+   * ⇒ 这里**不经过任何 mock**：直接调生产那份 `notebookStatus()`，打的是这个容器里真跑着的 Jupyter。
+   *
+   * token 的给法与本文件其它处一致：**从 process.env 读，绝不进任何字符串**。
+   * 失败消息只带 `kernels` 的 id/label 与 `reason`，绝不带 `res.url` —— 本机对端那份 url 里躺着 token。
+   */
+  it('对着真 Jupyter 解 kernelspecs：arena-pyspark 必须在表里，标签来自 spec.display_name（解析的键与真回话同源）', async () => {
+    const res = await notebookStatus({
+      peerAddress: '127.0.0.1',
+      tokenOverride: process.env[TOKEN_KEY] ?? '',
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    expect(
+      res.running,
+      `running:false ⇒ 容器里这一次真探活就没成（reason：${res.reason ?? '(空 reason，那是契约违规)'}` +
+        '）。这一条还没走到解析那一步：先排 jupyter 起没起、token 对不对得上，再来谈键名',
+    ).toBe(true);
+    // 只压 id/label：把 res.kernels 整份打印是安全的，把 res 整份打印会连带打印 url（里面是 token）。
+    const received = res.kernels.map((k) => `${k.id}=${k.label}`);
+    const hit = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+    expect(
+      hit,
+      `kernels 里没有 ${NOTEBOOK_KERNELS.pyspark}（真 Jupyter 这次被解出来 ${received.length} 条：${JSON.stringify(received)}）` +
+        '⇒ **解析的键与 Jupyter 实际回话不一致 ⇒ 界面会说 kernel 没注册，而它其实在**（容器档刚用它跑通 Spark），' +
+        '而那句谎给的操作是 ./start.sh --rebuild —— 让人拆掉一个能用的镜像。' +
+        '实测真相：/api/kernelspecs 的顶层是 {default, kernelspecs}，**没有 kernels 这个键**；' +
+        '标签在 kernelspecs[<id>].spec.display_name。改的是 server/src/notebooks/status.ts 的解析，' +
+        '不是这条断言，也不是 status.test.ts 那份 fixture（它现在按真回话写）',
+    ).toBeTruthy();
+    const label = (hit?.label ?? '').trim();
+    expect(
+      label,
+      `${NOTEBOOK_KERNELS.pyspark} 的 label 是空的 ⇒ display_name 没解出来（spec 那一层没取到，连 ?? id 的兜底都没生效）` +
+        '⇒ 界面上那个 badge 是一片空白，读的人只知道"有一条 kernel"，不知道是哪套环境',
+    ).not.toBe('');
+    expect(
+      label === NOTEBOOK_KERNELS.pyspark,
+      `${NOTEBOOK_KERNELS.pyspark} 的 label 与 id 一字不差（${label}）⇒ 走的是 \`?? id\` 那份兜底：` +
+        '键名对了但嵌套错了（display_name 在 spec 里面，不在 entry 顶层）。' +
+        '这条兜底会把"解析坏掉"伪装成"拿到了名字"，所以只判 label 非空不够，必须判它不是 id 的回声',
+    ).toBe(false);
+  });
+
+  /**
+   * Host 头守卫（防 DNS rebinding）**是开着的**。
+   *
+   * 事实与推理分开写：
+   * - 事实（实测 jupyter_server 2.21.1 / serverapp.py 的 `@default("allow_remote_access")`）：
+   *   `return not addr.is_loopback` ⇒ **绑到非回环 ip 时它自己把默认值算成 True**，
+   *   而 `base/handlers.py` 的 `check_host()` 第一件事就是
+   *   `if self.settings.get("allow_remote_access", False): return True` —— 守卫整块关掉。
+   *   entrypoint 上一轮把 ip 改到 0.0.0.0（发布端口 DNAT 到 eth0，那是修"打不开"），
+   *   于是这一步是**跟着发生的**，不是有人决定的。
+   * - 为什么"宿主侧只绑 127.0.0.1:7789"（compose-ports.test.ts 钉着）不等于这里安全：
+   *   那条限的是**谁能路由到这里**，而 rebinding 攻击里"到这里"的是受害者自己的浏览器 ——
+   *   恶意页面先把域名解析到自己服务器、读完之后再改成 127.0.0.1，同源检查拦不住改解析，
+   *   唯一还认得"这个 Host 不是本机"的就是这一道。而 token 登录之后 jupyter 靠 cookie 认后续请求，
+   *   cookie 会跟着那些请求发到 127.0.0.1 —— 于是"不用 token 也能干活"这条路是通的。
+   *
+   * 三种答案要三种话，别写混（本文件的规矩）：
+   * ① 连不上（null）= 前置条件不成立，守卫的事还没到能判的时候；
+   * ② 非回环 Host 没拿到 403 = 守卫不在位（这一条红的那个缺陷就是它要判的）；
+   * ③ 回环 Host 拿到 403 = 收紧收过了，用户那条路被误伤（上面那条对照断言判这一半）。
+   */
+  it('Host 守卫在位：rebinding 形状的 Host 被拒（403），而浏览器形状的 Host 照旧放行', async () => {
+    const port = config.notebook.port;
+    const evilHeader = 'rebinding.example:7789';
+    const evil = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: '/tree', hostHeader: evilHeader });
+    expect(
+      evil,
+      `带 Host: ${evilHeader} 的请求连不上（null）⇒ 这一条没有判据对象：jupyter 没在这个端口上答话。` +
+        '守卫的事要在它答话之后才谈得上 —— 先按上面「容器回环上有 jupyter 在听」那条排' +
+        '（**这不是"守卫通过"，是没测**）',
+    ).not.toBeNull();
+    expect(
+      evil,
+      `Host: ${evilHeader} 得到 ${evil}，期望 ${HOST_REFUSED_STATUS}` +
+        '⇒ **ServerApp.allow_remote_access 不是 False**：ip 绑到 0.0.0.0 之后 jupyter 把那个默认值算成 True，' +
+        '于是 check_host() 第一行就 return True，Host 头守卫整块关闭。' +
+        `这一条测的是**守卫**，不是可达性（可达性归上面那两条，403 在那里仍算"有人在听"）：` +
+        '宿主侧只绑 127.0.0.1:7789 限的是"谁能路由过来"，而 DNS rebinding 里发请求的是受害者自己的浏览器，' +
+        'token 登录之后 jupyter 靠 cookie 认后续请求，只剩这一道还认得出"这个 Host 不是本机"。' +
+        '修法：docker/entrypoint.sh 的启动行加 --ServerApp.allow_remote_access=False（别松 ip，那是发布端口打不到的那个修复）',
+    ).toBe(HOST_REFUSED_STATUS);
+
+    // 收紧之后用户那条路必须还活着。Host 用**宿主发布端口那份写法**（:7789）：
+    // docker-proxy 转的是 TCP 字节，Host 头原样进来，所以容器里看到的与浏览器发出的就是同一个串。
+    for (const header of ['127.0.0.1:7789', 'localhost:7789', '[::1]:7789']) {
+      const ok = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: '/tree', hostHeader: header });
+      expect(
+        ok,
+        `带 Host: ${header} 的请求连不上（null）⇒ 没有判据对象，同上面那条：先排 jupyter 在不在听`,
+      ).not.toBeNull();
+      expect(
+        HOST_ALLOWED_STATUSES,
+        `Host: ${header} 得到 ${ok}（期望 ${HOST_ALLOWED_STATUSES.join('/')} 之一）` +
+          `⇒ allow_remote_access=False 把**本机形状**的 Host 也拒了 = 用户打不开第五页那条链接。` +
+          'jupyter 的判据是先摘端口再分类：IP 字面量走 ipaddress 的 is_loopback（127.0.0.1 与 ::1 都算，' +
+          '[::1] 那种带方括号的写法它自己会摘掉方括号），非 IP 的名字才查 local_hostnames（默认只有 localhost）。' +
+          '红在这里时该改的是 local_hostnames/启动行，**不是**把 allow_remote_access 松回 True —— 那等于关掉这条闸门',
+      ).toContain(ok);
     }
   });
 });
@@ -658,6 +832,61 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
     const only = broken.errors[0] ?? '';
     expect(only, 'error 要说清是解析不了').toContain('不是 notebook JSON');
     expect(only.length, `失败消息的长度被上限判住（实际 ${only.length}）`).toBeLessThan(1000);
+  });
+
+  /**
+   * 守卫探针这层 plumbing 判在宿主上（"这条闸门自己看起来跑了其实没测"是最贵的那种坏）。
+   * 起一把把 `req.headers.host` 收进清单的临时服务器，判三件事：
+   * ① 自定义 Host **真的发得出去** —— 换成 `fetch` 这一条就红：undici 按 URL 的 authority 重写 Host
+   *    （本机实测 echo 服务器收到的是 `127.0.0.1:7791`，不是我们要发的那个串）。
+   *    那条容器闸门的全部价值在"头是我发的"上：用 fetch 写它，守卫关掉与否它发的都是**合法** Host，
+   *    于是它会一直绿着替一个关掉的守卫作证 —— 与本轮 `kernels` / `kernelspecs` 那次同一种坏法。
+   *    ⇒ 这里既判 node:http 发得出去，也**反向**判 fetch 发不出去（哪天 Node 改了行为，这条会翻脸，
+   *    那时该重读这段注释而不是顺手把断言删了）。
+   * ② 状态码拿得到（302 是我们让它回的）；
+   * ③ 端口上没人听 ⇒ `null`（"没判据对象"与"守卫放行了"必须是两句话 —— 见容器那组的①②③三种答案）。
+   */
+  it('Host 探针自己：node:http 真发得出去而 fetch 发不出去，没人听要给 null', async () => {
+    const seen: string[] = [];
+    const srv = createServer((req, res) => {
+      seen.push(req.headers.host ?? '(没有 Host 头)');
+      res.writeHead(302, { location: '/login' });
+      res.end();
+    });
+    // 先占两个端口：一个当"活着的那个"，一个关留着当"没人听的那个"
+    // （不写死 1 之类的端口号：那在别的机器上可能真有人听，也可能被防火墙拦成超时 —— 一条会周期性冤红的闸门）
+    const closedPort = await new Promise<number>((r) => {
+      const tmp = createServer((_q, s) => s.end());
+      tmp.listen(0, '127.0.0.1', () => {
+        const p = (tmp.address() as AddressInfo).port;
+        tmp.close(() => r(p));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as AddressInfo).port;
+    try {
+      const got = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: '/tree', hostHeader: 'rebinding.example:7789' });
+      expect(got, `探针从自己起的服务器拿回 ${got}（期望 302）⇒ 连本地服务器都打不通，那条容器闸门就没有判据对象了`).toBe(302);
+      expect(seen, '服务器收到的 Host 与递进去的不一致 ⇒ 探针根本没在控制 Host 头').toEqual(['rebinding.example:7789']);
+
+      // ① 的反向对照：同一个 URL、同一个 headers，走 fetch 就丢了
+      const viaFetch = await fetch(`http://127.0.0.1:${port}/tree`, { headers: { host: 'rebinding.example:7789' }, redirect: 'manual' });
+      expect(viaFetch.status, 'fetch 这条路连自己起的服务器都打不通 ⇒ 下面那两条对照没有对象').toBe(302);
+      expect(
+        seen[1],
+        `fetch 竟然也把自定义 Host 发出去了（收到的是 ${seen[1]}）⇒ 上面"必须用 node:http"的理由已经不成立：` +
+          '那就把 probeWithHostHeader 换成 fetch 并删掉这段注释与这条对照，别留一句谎在文件里',
+      ).not.toBe('rebinding.example:7789');
+      expect(seen[1], `fetch 发的 Host 应当被 URL 的 authority 顶掉（实测收到 ${seen[1]}）`).toBe(`127.0.0.1:${port}`);
+
+      // ③ 没人听 ⇒ null（端口是刚才关掉的那个，不会再有人 bind）
+      expect(
+        await probeWithHostHeader({ connectHost: '127.0.0.1', port: closedPort, path: '/tree', hostHeader: '127.0.0.1' }),
+        '端口上没人应答却给了一个状态码 ⇒ 容器那条"连不上 = 没有判据对象"的分支会被读成"守卫放行了"',
+      ).toBeNull();
+    } finally {
+      srv.close();
+    }
   });
 
   /**

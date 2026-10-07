@@ -51,11 +51,27 @@ const stubGrade: GradePort = {
   },
 };
 
-/** 假 Jupyter：两个端点都照常答 200，用来把"running:true"这几条形状在宿主上跑出来。 */
+/**
+ * 假 Jupyter：两个端点都照常答 200，用来把"running:true"这几条形状在宿主上跑出来。
+ * ⚠ `/api/kernelspecs` 那份 body 用的是**真回话的形状**（顶层 `kernelspecs`，标签在
+ * `[<id>].spec.display_name`），不是 `{ kernels: {...} }`。这里曾经与 `status.ts` 的
+ * 同一个错键名同源，于是宿主档一片绿而第五页在用户眼前说"kernel 没注册"
+ * （2026-10-08 实测；真形状与逐字段对照写在 `server/test/notebooks/status.test.ts` 的
+ * `KERNELSPECS_BODY`，判住"键名与真回话同源"的是容器档那条不打 mock 的闸门）。
+ */
 function jupyterUp(): void {
   const fake = async (u: string | URL): Promise<unknown> =>
     String(u).includes('/api/kernelspecs')
-      ? { status: 200, json: async () => ({ kernels: { 'arena-pyspark': { spec: { display_name: 'PySpark (arena)' } } } }) }
+      ? {
+          status: 200,
+          json: async () => ({
+            default: 'python3',
+            kernelspecs: {
+              python3: { name: 'python3', spec: { display_name: 'Python 3 (ipykernel)', language: 'python' }, resources: {} },
+              'arena-pyspark': { name: 'arena-pyspark', spec: { display_name: 'PySpark (arena)', language: 'python' }, resources: {} },
+            },
+          }),
+        }
       : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) };
   vi.stubGlobal('fetch', vi.fn(fake) as unknown as typeof fetch);
 }

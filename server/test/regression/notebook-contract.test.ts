@@ -62,15 +62,33 @@ const entrypointText = () => readFileSync(join(config.repoRoot, ENTRYPOINT_REL),
  */
 const CONTAINER_LOOPBACK = /^(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|::1|\[::1\]|localhost|ip6-localhost)$/i;
 
-/** entrypoint 的**代码视图**里所有 --ServerApp.ip= 的取值（丢掉整行注释，同 notebook-env-isolation 的 ①）。 */
-function serverAppIpValues(text: string): string[] {
-  const code = text
+/**
+ * entrypoint 的**代码视图**：丢掉整行注释（同 notebook-env-isolation 的 ①）。
+ * 单独抽出来是因为现在有**两条**判据都要读启动行（ip 与 allow_remote_access）：各写一份 filter
+ * 的那天下掉一份，就会有一条判据开始在注释里读配置 —— "注释里写一句就骗绿"是这个文件已经付过学费的形状。
+ */
+function codeView(text: string): string {
+  return text
     .split(/\r?\n/)
     .filter((l) => !/^\s*#/.test(l))
     .join('\n');
-  return [...code.matchAll(/--ServerApp\.ip=(\S+)/g)]
+}
+
+/** 从代码视图里解出 `--ServerApp.<flag>=` 的取值；引号先剥掉，否则 `"127.0.0.1"` / `"False"` 会躲过判据。 */
+function flagValues(text: string, flag: string): string[] {
+  return [...codeView(text).matchAll(new RegExp(`--ServerApp\\.${flag}=(\\S+)`, 'g'))]
     .map((m) => (m[1] ?? '').replaceAll(/["']/g, ''))
     .filter((v) => v !== '');
+}
+
+/** entrypoint 的**代码视图**里所有 --ServerApp.ip= 的取值（丢掉整行注释，同 notebook-env-isolation 的 ①）。 */
+function serverAppIpValues(text: string): string[] {
+  return flagValues(text, 'ip');
+}
+
+/** 同上，取 --ServerApp.allow_remote_access= 的取值。 */
+function allowRemoteAccessValues(text: string): string[] {
+  return flagValues(text, 'allow_remote_access');
 }
 
 describe('notebook 契约与配置', () => {
@@ -218,6 +236,61 @@ describe('notebook 契约与配置', () => {
     expect(serverAppIpValues(launch.replace('%s', '0.0.0.0')), '真正的启动行必须解得出值').toEqual(['0.0.0.0']);
     // 引号包裹的写法也要能识别成回环（值里的引号先剥掉，否则 "127.0.0.1" 会躲过判据）
     expect(serverAppIpValues(launch.replace('%s', '"127.0.0.1"')), '带引号的回环写法躲过了判据').toEqual(['127.0.0.1']);
+  });
+
+  /**
+   * Host 头守卫（防 DNS rebinding）的**静态前身** —— 与上面那条 ip 判据同一个归属划分：
+   * 行为终判在 `server/test/notebooks/kernel.test.ts`「Host 守卫在位」（要 Docker、要真 Jupyter），
+   * 本条只保证"删掉这一项"或"把它改成 True"在**宿主档 verify:fast** 里就红，不必等一整轮容器验证。
+   *
+   * 为什么这一条值得单独钉，而不是给上面那条凑数（实测 jupyter_server 2.21.1 的源码，不是推理）：
+   * `serverapp.py` 的 `@default("allow_remote_access")` 写的是 `return not addr.is_loopback` ——
+   * **ip 一绑到非回环，那个默认值就是 True**，而 `base/handlers.py` 的 `check_host()` 第一行
+   * `if self.settings.get("allow_remote_access", False): return True` ⇒ 守卫整块关闭
+   * （改之前实测：`Host: rebinding.example:7789` 得到 302，照收）。
+   * 上一轮为了让发布端口打得通，ip **必须**绑 0.0.0.0 ⇒ "改 ip"与"关守卫"是同一次动作的两面，
+   * 只钉 ip 那一面不够，这里要显式的 False。
+   *
+   * 方向也一并钉住：谁若为了"让 eth0 那条可达性闸门从 403 变回 302"把它松回 True，那是拿保护换一个数字
+   * —— 那条闸门判的是"有没有真实 HTTP 应答"，403 恰恰证明包转到了、有 jupyter 在按 Host 做决定。
+   */
+  it('entrypoint 必须显式 --ServerApp.allow_remote_access=False（绑非回环时 jupyter 默认把 Host 守卫关掉）', () => {
+    const values = allowRemoteAccessValues(entrypointText());
+    expect(
+      values.length,
+      `${ENTRYPOINT_REL} 的启动行里没有 --ServerApp.allow_remote_access= 这一项 ⇒ jupyter 按 ip=0.0.0.0 把默认值算成 True，` +
+        '于是 check_host() 第一行就放行，防 DNS rebinding 的 Host 守卫整块关闭。' +
+        '症状不是"别人能连进来"（宿主侧只绑 127.0.0.1:7789，compose-ports.test.ts 钉着），' +
+        '而是"受害者自己的浏览器替攻击者打隧道"：token 登录之后靠 cookie 认后续请求，只剩这一道还认得出 Host 不是本机。' +
+        '行为终判在 server/test/notebooks/kernel.test.ts 的「Host 守卫在位」',
+    ).toBeGreaterThan(0);
+    const notFalse = values.filter((v) => !/^false$/i.test(v));
+    expect(
+      notFalse,
+      `--ServerApp.allow_remote_access 里有不是 False 的值：${JSON.stringify(notFalse)}（实际值 ${JSON.stringify(values)}）` +
+        '⇒ 守卫又被关回去了（True / 1 都是关）。这一项与 --ServerApp.ip=0.0.0.0 是一对：' +
+        '绑非回环是"发布端口打得通"的修复（kernel.test.ts 那条 DNAT 闸门判它），显式 False 是"守卫别随之关闭"',
+    ).toEqual([]);
+  });
+
+  /**
+   * 上面那条的**判据本身**（常驻反例，喂字符串不喂仓库文件）：与 ip 那组同一个规矩 ——
+   * 注释不算配置、值解得出、非 False 必须翻脸。少了这一组，把 codeView 的 filter 去掉、
+   * 或把 `/^false$/i` 松成"只要出现过 False 就算"，都不会有任何东西红。
+   */
+  it('allow_remote_access 判据自己的反例：注释不算配置、True/1 不放行、False 认得大小写与引号', () => {
+    const launch = '  jupyter notebook --allow-root --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=%s \\\n';
+    expect(allowRemoteAccessValues('  jupyter notebook --ServerApp.ip=0.0.0.0 --ServerApp.port=8888 \\\n'), '没有这一项时不该解出值（那条"删掉这一项"的红另有其句）').toEqual([]);
+    expect(allowRemoteAccessValues('#   jupyter notebook --ServerApp.allow_remote_access=False\n'), '注释被当成了启动行 ⇒ 在注释里写一句就能骗绿').toEqual([]);
+    const notFalse = (text: string) => allowRemoteAccessValues(text).filter((v) => !/^false$/i.test(v));
+    for (const bad of ['True', 'true', '1', '"True"']) {
+      expect(notFalse(launch.replace('%s', bad)), `${bad} 是"守卫关掉"那一类，必须留在待判红的清单里`).toEqual([bad.replaceAll(/["']/g, '')]);
+    }
+    for (const ok of ['False', 'false', '"False"', "'False'"]) {
+      expect(notFalse(launch.replace('%s', ok)), `${ok} 是放行值，不该出现在"守卫没开"的清单里`).toEqual([]);
+    }
+    // 只出现过一次"False"字样的行不算放行值（判的是这一项的**值**，不是文件里有没有这个词）
+    expect(allowRemoteAccessValues(launch.replace('%s', 'False')).length, '正式启动行该解出恰好一个值').toBe(1);
   });
 
   /**

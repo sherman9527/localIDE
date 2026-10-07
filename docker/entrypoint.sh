@@ -92,7 +92,7 @@ start_jupyter() {
   # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
   PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
   jupyter notebook --allow-root --no-browser \
-    --ServerApp.ip=0.0.0.0 --ServerApp.port=8888 --ServerApp.port_retries=0 \
+    --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888 --ServerApp.port_retries=0 \
     --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
     --ServerApp.root_dir="${nb_root}/notebooks" \
     >"${nb_root}/notebook-server.log" 2>&1 &
@@ -111,11 +111,24 @@ start_jupyter() {
   # 残余风险照实写：bind 到 0.0.0.0 之后，**compose 网桥上的同伴服务**（dev / tools / e2e，
   # 以及任何挂进这张网络的容器）能路由到 8888 —— 但它们必须拿到 token 才能做任何事，
   # 而同伴跑的是同一个镜像、同一个 .env、同一个信任级；这道口子换来的是"用户真能点开链接"。
-  # 附带一条 jupyter 自己的行为（实测 jupyter_server 2.21.1）：ip 不是回环时它把
-  # ServerApp.allow_remote_access 的默认值算成 True，于是 Host 头守卫（防 DNS rebinding）随之关闭。
-  # 我们那条真实路径的 Host 本来就是 127.0.0.1:7789，不依赖这个默认值，所以这里不另加参数、
-  # 只在文档与报告里把这条说清楚（要收紧就显式 --ServerApp.allow_remote_access=False，
-  # 那条会让 eth0 上的探测得到 403 —— 仍算"有人在听"，kernel.test.ts 那条判据就是这么写的）。
+  # 附带一条 jupyter 自己的行为（实测 jupyter_server 2.21.1 的源码，不是推理）：
+  # serverapp.py 的 `@default("allow_remote_access")` 写的是 `return not addr.is_loopback` ——
+  # **ip 一绑到非回环，它自己就把这个默认值算成 True**，而 base/handlers.py 的 check_host()
+  # 第一行就是 `if settings["allow_remote_access"]: return True` ⇒ 那道防 DNS rebinding 的
+  # Host 头守卫整块关闭（实测改之前：`Host: rebinding.example:7789` 得到 302，也就是照收）。
+  # 于是 --ServerApp.ip=0.0.0.0 与"守卫关掉"是同一次改动的两面，只钉 ip 那一面不够，
+  # 这里必须**显式写 False** 才把守卫留得住。
+  # "宿主侧只绑 127.0.0.1:7789"（compose-ports.test.ts 钉着）替不了它：那条限的是**谁能路由到这里**，
+  # 而 rebinding 攻击里"到这里"的是受害者自己的浏览器 —— 恶意页面先把域名解析到自己服务器、
+  # 读完之后再改成 127.0.0.1，同源检查拦不住改解析；token 登录之后 jupyter 靠 cookie 认后续请求，
+  # cookie 会跟着这些请求发到 127.0.0.1，所以"不用 token 也能干活"这条路是通的，
+  # 唯一还认得出"这个 Host 不是本机"的就是这一道。
+  # 代价（照实说，也照实测）：容器**自己的 eth0 地址**上的请求现在拿 403（那个 IP 不是回环）。
+  # 那不影响功能：宿主浏览器的请求进来之后 Host 是 127.0.0.1:7789 或 localhost:7789，
+  # check_host() 先摘端口再按 ipaddress 判 is_loopback ⇒ 用户那条路照旧 302/200；
+  # 而可达性那条闸门（kernel.test.ts「DNAT 目标上也必须有人在听」）判的是"有没有真实 HTTP 应答"，
+  # 403 恰恰证明包转到了、有 jupyter 在按 Host 做决定 —— 不许为了让那条闸门显示 302 把它松回去。
+  # 闸门：kernel.test.ts「Host 守卫在位」（行为终判）+ notebook-contract.test.ts（静态前身，宿主档就红）。
 
   # port_retries=0：8888 被占时 jupyter 默认会**换个端口**继续起（8889），而宿主映射钉的是
   # 7789:8888 —— 静默换端口等于那条映射变成死的，日志却照样"已拉起"。宁可让它起不来并报错。

@@ -219,8 +219,18 @@ export async function notebookStatus(input: {
     if (ks.status !== 200) {
       return { ...empty, reason: httpReason(ks.status) };
     }
-    const body = (await ks.json()) as { kernels?: Record<string, { spec?: { display_name?: string } }> };
-    kernels = Object.entries(body.kernels ?? {}).map(([id, v]) => ({ id, label: v.spec?.display_name ?? id, ready: true }));
+    // ⚠ 键名以**真回话**为准：`GET /api/kernelspecs` 的顶层是 `{default, kernelspecs}`，
+    // **没有 `kernels` 这个键**（2026-10-08 从跑着的容器里 curl 过，标签嵌在
+    // `kernelspecs[<id>].spec.display_name` 那一层）。这里曾经读 `body.kernels`，于是
+    // `kernels` 永远是空表，而 `/api/status` 是 200 —— 第五页于是在用户眼前说
+    // 「探到的 kernel 表里没有 arena-pyspark ⇒ 跑一次 ./start.sh --rebuild」，
+    // 而那个 kernel 注册着、并且刚在容器档里通过它跑完一份 Spark notebook。
+    // 那句谎给的操作是拆掉一个能用的镜像，比"少显示一个 badge"贵得多。
+    // 三份单测 fixture 当年与这个 bug 同源地写着 `kernels`，所以 mock 全绿救不了它 ——
+    // 判住这件事的是 `server/test/notebooks/kernel.test.ts` 那条**不经过 mock** 的容器档闸门
+    // （直接调这个函数打真 Jupyter）。改这一行之前先去读那条。
+    const body = (await ks.json()) as { kernelspecs?: Record<string, { spec?: { display_name?: string } }> };
+    kernels = Object.entries(body.kernelspecs ?? {}).map(([id, v]) => ({ id, label: v.spec?.display_name ?? id, ready: true }));
   } catch (err) {
     // 三条 reason 对应三件不同的事，不许合成一句"连不上"：
     // 超时 = 有人在听但不答（多半是 jupyter 卡住）；未在监听 = 进程根本没起；HTTP 状态 = token 不对。
