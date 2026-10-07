@@ -31,18 +31,27 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 | npm 依赖 | `package-lock.json`（仓库跟踪） | — |
 | apt 镜像站 | `ARG MIRROR_APT`（唯一"不改被跟踪文件就换不了"的那层；shell env > `.env` > 这里的默认值，闸门 `dockerfile-pins.test.ts` 钉三处默认值一致） | 默认 `http://mirrors.aliyun.com` |
 
-**换这个镜像站时的两条事实**（都是实测，不是规矩）：
+**换这个镜像站时的四条事实**（都是实测，不是规矩）：
 
-1. 值要写 `http://`，不是 `https://`。钉住的 `ubuntu:22.04` 基座里**没有 CA 证书包**
+1. 仓库发出去的默认值是 `http://mirrors.aliyun.com`，写在三处并被 `dockerfile-pins.test.ts` 钉成一致
+   （`docker/mirrors.sh` 的兜底、`docker/Dockerfile` 的 `ARG MIRROR_APT=`、`compose.yml` 的 `build.args`）。
+   **脚本不会替你选源**：`start.sh` / `start.ps1` 里曾经有一个 `ensure_build_mirror`，第一次构建时往 `.env`
+   写一台机器上恰好可用的那一个（2026-10-08 撤掉，评审 I-4）—— 那等于让每份 clone 静默继承某台机器的落点，
+   而 apt 的点版本（JDK 17.0.x / MySQL 8.0.x 只按**主版本**断言钉，见下）随落点漂移，
+   与这份文件开头的复现性承诺相反；那条漂移闸门只钉上面三处，看不见脚本里多出来的第四处。
+2. 换源是**每机的选择**，记在被 gitignore 的 `.env` 里：写一行 `MIRROR_APT=http://…` 即可，
+   `compose.yml` 的 `${MIRROR_APT:-…}` 插值自己会读它（不需要 shell 前缀）。临时换源用 shell 前缀，
+   它优先级高于 `.env`。本机这一行是 `MIRROR_APT=http://mirrors.ustc.edu.cn`
+   （aliyun 对 jammy 整片 pocket 回 403 —— 网络侧条件，不是仓库坏了），它留着，只是不再有脚本替你写它。
+3. 值要写 `http://`，不是 `https://`。钉住的 `ubuntu:22.04` 基座里**没有 CA 证书包**
    （`ca-certificates` 正是这一层 apt 才装上的），走 https 时 `apt-get update` 会**退出 0 而一个列表都没拿到**，
    紧跟着整层报 `E: Unable to locate package tzdata/locales/...` —— `docker/mirrors.sh:6-9` 记的就是第一次这样炸的现场。
-2. 改这个值 = **冷构建**。它在 stack 阶段顶部被写成 `ENV`（`docker/Dockerfile:20-21`），
+4. **改这个值 = 冷构建**。它在 stack 阶段顶部被写成 `ENV`（`docker/Dockerfile:20-21`），
    其后每一层的缓存键都含它，所以换一次源就要重跑 apt、pip、maven、Redis 源码编译与 notebook 安装（本机 9–10 分钟）。
-
-本机（aliyun 对 jammy 整片 pocket 回 403，是网络侧条件不是仓库坏了）把可用的那一个记在**gitignored 的 `.env`** 里
-（`MIRROR_APT=http://mirrors.ustc.edu.cn`），所以裸 `./start.sh` 与带前缀的那条走的是同一个值 ——
-旋钮记在人脑里等于没记，这是上一轮 `./start.sh` 单独不可用的原因。那一行由 `start.sh` 的
-`ensure_build_mirror` 在第一次构建前写进去（已存在就不抢），要临时换源仍然可以用 shell 前缀，它优先级更高。
+   同一条机理还有一笔已经付过的账：**把这对 `ARG`/`ENV` 落进 Dockerfile 的那次提交本身**就作废了 stack 层缓存
+   —— 缓存键含 Dockerfile 的内容，所以加那两行之后的第一次构建必然是冷的，与传不传 build-arg 无关
+   （`mirror-arg-report.md` §8.4 记的就是这一条，此前只活在会话报告里、没进这份文档）。
+   凡是动 `Dockerfile` 顶部那几行 `ARG`/`ENV` 的人，都要预期这一次冷构建。
 
 ## 钉不住什么，以及为什么不硬钉
 

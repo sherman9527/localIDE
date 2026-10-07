@@ -138,18 +138,12 @@ function Write-EnvToken([string]$token) { Write-EnvKey 'ARENA_LLM_BRIDGE_TOKEN' 
 function Read-EnvJupyterToken { return Read-EnvKey 'ARENA_JUPYTER_TOKEN' }
 function Write-EnvJupyterToken([string]$token) { Write-EnvKey 'ARENA_JUPYTER_TOKEN' $token }
 
-# apt 镜像站的**本机默认值**，落在 .env 里（compose 的插值自己会读 .env，不需要 shell 前缀）。
-# 与 start.sh 的 ensure_build_mirror 是**同一套判据的两个实现**：那段注释（aliyun 对 jammy 整片
-# pocket 回 403 ⇒ 裸 ./start.sh 死在 stack 阶段、只有带前缀那条能过 = 给下一个 session 挖的坑；
-# 只在"这一行还不存在"时写，人手改过/删过都是表态；shell 前缀优先级高于 .env；改这个值会让
-# stack 层及其后每一层的缓存键变 ⇒ 冷构建，见 docker/BUILDINFO.md；.env 里另有两条 token，不许 cat）
-# 全文写在 start.sh 那边，这里不抄第二份 —— 但**行为与那句话必须一致**，漂移过一次就是"其中一个实现说假话"。
-$MirrorAptLocalDefault = 'http://mirrors.ustc.edu.cn'
-function Ensure-BuildMirror {
-  if (Read-EnvKey 'MIRROR_APT') { return }
-  Write-EnvKey 'MIRROR_APT' $MirrorAptLocalDefault
-  Write-Host '[arena] 已把构建用的 apt 源记进 .env 的 MIRROR_APT（这台机器上 aliyun 对 jammy 整片 pocket 回 403，裸 .\start.ps1 要靠这一行才建得起来）。换源改那一行即可，shell 前缀优先级更高；改它会作废 stack 层及其后每一层的缓存 ⇒ 下一次是冷构建，见 docker/BUILDINFO.md' -ForegroundColor Cyan
-}
+# apt 镜像站**没有本机的自动默认值**（2026-10-08 撤掉 Ensure-BuildMirror，评审 I-4）：
+# 判据与 start.sh 里那段注释**必须一致**（那边写了全文：自动写源=每份 clone 静默拿到 ustc，
+# apt 小版本随落点漂移，与 BUILDINFO 的复现性承诺相反，而 dockerfile-pins 那条闸门只钉三处默认值、
+# 看不见脚本里这第四处）。想换源：往 gitignored 的 .env 里自己写一行 MIRROR_APT=…，
+# 或者用 shell 前缀（优先级更高）—— 两条都不动被跟踪的文件。改这个值 = 冷构建，见 docker/BUILDINFO.md。
+# ⚠ .env 里另有两条 token：不许打印，取值只走 Read-EnvKey / Write-EnvKey。
 
 function Write-TextFile([string]$path, [string]$text) {
   [System.IO.File]::WriteAllText((Join-Path $PSScriptRoot $path), $text + "`n", (New-Object System.Text.UTF8Encoding($false)))
@@ -324,6 +318,9 @@ function Report-Health {
 #   镜像没变时把容器里的 jupyter 杀掉再跑 .\start.ps1 ⇒ compose 报 0 行 Recreate、7789 一直 000，
 #   所以旧文案那句"必要时 .\start.ps1 -Rebuild"对"进程掉了"是 10-20 分钟的空等（那是 --no-cache 冷构建，
 #   修的是"镜像里没带 Jupyter"）。补救是换新容器：docker compose up -d --force-recreate arena。
+#   ⚠ 那条命令有个前提（与 start.sh 的注释 ④ 同一条，评审 I-4 顺带点出的"死胡同建议"）：它按**现有
+#   镜像**换容器，所以镜像若早于"容器内监听从 127.0.0.1 改到 0.0.0.0"那一次修复，force-recreate 完
+#   还是 000 —— 那一种先跑 .\start.ps1（先构建再 up -d），然后才轮到 --force-recreate。
 #   只报命令、不代你执行：重建容器会带走正在跑的 IDE 调试会话与判题任务，这个副作用该由用户决定。
 #   同样不做的事：不给 jupyter 加看门狗/守护循环（改进程生命周期 ⇒ 单独工作项、单独评审）。
 # -Dev 分支不走这里：dev 服务故意不发布 notebook 端口，打印出来就是个打不开的地址（说假话）。
@@ -343,7 +340,7 @@ function Report-Notebook {
     if ($r) { $code = [int]$r.StatusCode }
   }
   if ($code -eq 0) {
-    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
+    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 .\start.ps1（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
     return
   }
   Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan
@@ -362,7 +359,6 @@ if ($Verify) {
   # **先起新代码，再验**（与 start.sh --verify 同一判据）：`docker compose exec` 进的是当前跑着的
   # 容器，而它用的是被创建时那个镜像 —— 只 build 不 up -d 等于验旧代码。
   Start-Bridge
-  Ensure-BuildMirror
   Invoke-Step '镜像构建' { docker compose build --pull=false }
   Invoke-Step '启动容器' { docker compose up -d arena }
   Wait-Healthy 180
@@ -393,7 +389,6 @@ if ($E2E) {
 }
 
 Start-Bridge
-Ensure-BuildMirror
 if ($Rebuild) { Invoke-Step '镜像重建' { docker compose build --pull=false --no-cache } }
 else { Invoke-Step '镜像构建' { docker compose build --pull=false } }
 

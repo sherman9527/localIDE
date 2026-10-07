@@ -146,25 +146,16 @@ write_env_token() { write_env_key ARENA_LLM_BRIDGE_TOKEN "$1"; }
 read_env_jupyter_token() { read_env_key ARENA_JUPYTER_TOKEN; }
 write_env_jupyter_token() { write_env_key ARENA_JUPYTER_TOKEN "$1"; }
 
-# apt 镜像站的**本机默认值**，落在 .env 里（compose 的插值自己会读 .env，不需要 shell 前缀）。
-# 为什么要这一份：compose.yml 写的是 `${MIRROR_APT:-http://mirrors.aliyun.com}`，而这台机器上
-# aliyun 对 jammy 的**整片 pocket 回 403**（外部条件，不是仓库坏了）⇒ 裸 `./start.sh` 会重跑 apt
-# 然后死在 stack 阶段，只有 `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh …` 能构建。
-# "只有带前缀那条路能过"就是给下一个 session 挖的坑：构建旋钮记在人脑里等于没记。
-# 只在**这一行还不存在**时写：人手改过/删过都是表态 —— 删掉它想回默认值的人，别跟他抢那一行
-# （回的代价就是下一次裸构建撞 403，那是他自己的选择，这段解释够他读了）。
-# 临时换源不用改文件：compose 插值里 shell 变量优先于 .env，`MIRROR_APT=… ./start.sh` 照样一句话生效。
-# ⚠ 改这个值的代价要说清：它是 stack 阶段那份 ENV 的一部分（Dockerfile 顶部），
-#   而后每一层的缓存键都含它 ⇒ 下一次构建是**冷构建**。见 docker/BUILDINFO.md。
+# apt 镜像站**没有本机的自动默认值**（2026-10-08 撤掉了 `ensure_build_mirror`，评审 I-4）：
+# 上一轮把"给这台机器记一份 .env"做成了"每份 clone 第一次构建都自动写 ustc"，那是越界 ——
+# 落点决定 apt 的小版本（JDK 17.0.x / MySQL 8.0.x 只按主版本断言钉），于是"别人 clone 出来的镜像
+# 里装的是什么"取决于他落在哪个镜像站，与 docker/BUILDINFO.md 的复现性承诺相反；
+# 而 `dockerfile-pins.test.ts` 那条漂移闸门只钉 mirrors.sh / Dockerfile / compose 三处默认值，
+# 看不见 start.sh 里这第四处。要换源：自己往 gitignored 的 `.env` 里写一行 `MIRROR_APT=…`，
+# 或者用 shell 前缀（`MIRROR_APT=… ./start.sh`，优先级更高）。两条都不动被跟踪的文件。
+# ⚠ 改这个值的代价：它是 stack 阶段那份 ENV 的一部分（Dockerfile 顶部），其后每一层的缓存键都含它
+#   ⇒ 下一次构建是**冷构建**。详见 docker/BUILDINFO.md。
 # ⚠ .env 里另有两条 token：这一份文件不许 cat、不许进日志，取值只走 read_env_key/write_env_key。
-MIRROR_APT_LOCAL_DEFAULT="http://mirrors.ustc.edu.cn"
-ensure_build_mirror() {
-  [ -n "$(read_env_key MIRROR_APT)" ] && return 0
-  write_env_key MIRROR_APT "$MIRROR_APT_LOCAL_DEFAULT" || return 1
-  say "已把构建用的 apt 源记进 .env 的 MIRROR_APT（这台机器上 aliyun 对 jammy 整片 pocket 回 403，" \
-      "裸 ./start.sh 要靠这一行才建得起来）。换源改那一行即可，shell 前缀优先级更高；" \
-      "改它会作废 stack 层及其后每一层的缓存 ⇒ 下一次是冷构建，见 docker/BUILDINFO.md"
-}
 
 # 端口上真正应答的那个进程才是事实。pid 文件会骗人：Windows 的 Git Bash 里
 # `kill -0 <错位的 pid>` 哪怕对应的是别的进程也返回真 —— 于是"孤儿桥 + 新 token"这种状态下
@@ -343,6 +334,10 @@ report_health() {
 #   旧文案那句"必要时 ./start.sh --rebuild"对这个症状是 10-20 分钟的空等（--rebuild 是 --no-cache 冷构建，
 #   修的是"镜像里没带 Jupyter"，不是"镜像里有、进程没了"）。真正的补救是换一个**新容器**：
 #   `docker compose up -d --force-recreate arena`。
+#   ⚠ 那条命令本身还有一个前提（评审 I-4 顺带点出的"死胡同建议"）：它按**现有镜像**换容器，
+#   所以镜像若早于「容器内监听从 127.0.0.1 改到 0.0.0.0」那一次修复，force-recreate 完还是 000 ——
+#   那一种的顺序是 `./start.sh`（先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），
+#   然后才轮到 --force-recreate。文案里这一句必须写出来，否则照建议走完仍然是打不开的链接。
 #   这里只报命令、不代你执行：重建容器会带走正在跑的 IDE 调试会话与判题任务，
 #   这种副作用该由用户决定什么时候承担（同样理由见本文件不自动 restart 的每一处）。
 #   另一件事明确**不在这里做**：给 jupyter 加看门狗/守护循环 —— 那改的是进程生命周期，
@@ -359,7 +354,7 @@ report_notebook() {
   fi
   code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/login" 2>/dev/null || true)"
   if [ -z "$code" ] || [ "$code" = "000" ]; then
-    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（按 ./start.sh 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，start.sh 不代你做。只有怀疑镜像本身没带 Jupyter 时才值得 ./start.sh --rebuild（10-20 分钟的冷构建）。先跑 ./start.sh --logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
+    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（按 ./start.sh 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，start.sh 不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 ./start.sh（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 ./start.sh --rebuild（10-20 分钟的冷构建）。先跑 ./start.sh --logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
     return 0
   fi
   say "Notebook：http://127.0.0.1:7789/tree（7789 已应答 HTTP ${code}；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）—— 只打印一次，且不含 token"
@@ -370,7 +365,6 @@ report_notebook() {
 # 吞掉构建失败则连"跑的是旧代码"都看不出来 —— 这两个坑本项目都踩过。
 start_app() {
   start_bridge || return 1
-  ensure_build_mirror || return 1
   say "构建镜像（命中缓存则很快）…"
   docker compose build --pull=false || { fail "构建失败：没有起新代码，先修构建再跑"; return 1; }
   docker compose up -d arena || return 1
@@ -383,7 +377,6 @@ start_app() {
 case "${1:-up}" in
   --rebuild)
     start_bridge || exit 1
-    ensure_build_mirror || exit 1
     say "重新构建镜像（首次约 10-20 分钟，含 Spark/MySQL/JDK）"
     docker compose build --pull=false --no-cache || exit 1
     docker compose up -d arena || exit 1
@@ -397,7 +390,6 @@ case "${1:-up}" in
     ;;
   --dev)
     start_bridge || exit 1
-    ensure_build_mirror || exit 1
     docker compose build --pull=false || exit 1
     docker compose --profile dev up -d dev || exit 1
     say "开发模式：前端 http://localhost:5173 ，后端 ${APP_URL}"
