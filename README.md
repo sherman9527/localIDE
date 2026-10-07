@@ -118,8 +118,12 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 
 顶栏第五项 **Notebook**（`#/notebook`，懒加载 —— 首屏仍然是 1 JS + 1 CSS）。这一页**不是**嵌进来的 Jupyter，
 它只做三件事：说清服务在不在、给 kernel 徽标、给一个能点开的地址
-（`http://127.0.0.1:7789/tree?token=…` —— token 只在你本机点开的那次通信里附上去，判据是 **socket 对端地址**，
-不是浏览器自报的 `Host` 头；非本机对端照样给链接，只是里面没有凭据）。真界面是容器里那个 Jupyter，
+（`http://127.0.0.1:7789/tree?token=…` —— token 只在你本机点开的那次通信里附上去，判据是**合取**：
+**socket 对端地址**（内核给的）与 **`Host` 头是本机字面量**（`localhost` / `127.x` / `::1`）两条都要成立，
+因为单看对端拦不住 DNS rebinding（那种攻击里对端真的是 `127.0.0.1`），单看头拦不住局域网里伪造头的人；
+判不上的那些连接照样给链接，只是里面没有凭据）。同一个 `Host` 判据还管着**整个 API**（外来 Host ⇒ 403，
+因为这个服务没有鉴权、一直靠"只绑宿主回环"活着），但它**不替代**绑回环：Host 谁都写得出来。
+真界面是容器里那个 Jupyter，
 由 `docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起。
 
 - **kernel 就是网页 IDE 那份环境**：`PySpark (arena)` 的 argv 指向 `/opt/arena-ide-env/python/bin/python`，

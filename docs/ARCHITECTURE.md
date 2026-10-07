@@ -286,11 +286,25 @@ A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-de
 
 四条边界，每条都有闸门，不是约定：
 
-- **token 按 socket 对端释放，不按 Host 头**。对端 = 回环（`::1` / `127.0.0.0/8`，双栈先剥 `::ffff:`）
+- **token 按"对端是本机 **且** Host 头是本机字面量"释放（合取）**。第一半：对端 = 回环（`::1` / `127.0.0.0/8`，双栈先剥 `::ffff:`）
   或 = 本进程的默认网关（读 `/proc/net/route`，不是猜网段 +1）。为什么必须有网关那一支：compose 部署里
   宿主浏览器的流量经 docker-proxy/NAT 进来，容器看到的对端**永远是网桥网关而不是回环** —— 只认回环不报错，
   它让这个功能在唯一启用它的部署里静默失效（点开撞 Jupyter 登录页而界面全绿）。网关那一支的安全性是
   **派生的**：派生自"每条发布端口都只绑宿主 `127.0.0.1`"（闸门 `compose-ports.test.ts`）。
+  第二半（终审 C-1 补的）：`Host` 头的 hostname 必须是 `localhost` 或一个回环地址字面量
+  （判据 `server/src/net/localOrigin.ts`）。只有第一半时 DNS rebinding 是通的 —— 受害者浏览器把攻击域名
+  改成 `127.0.0.1`，对端**就是**回环，而响应与攻击页同源，页面上的 JS 直接读走 `url` 里那个 token。
+  两半各拦一种坏法，所以两个方向的用例都必须红：伪造 `Host: 127.0.0.1:7788` 的局域网对端（拦在第一半）、
+  真回环对端 + 外来 Host（拦在第二半）。这一条与"上一轮说 Host 头不参与判定"不冲突 —— 那句反对的是
+  **Host 单独说话**，合取严格强于任何一半。
+  **同一个 `Host` 判据还做成了整个 origin 的白名单**（`app.ts` 里第一个 `onRequest` hook，外来 Host ⇒ 403，
+  与 jupyter 那一侧同码）：只把它用在 token 路径上，等于承认 rebinding 照样读得到 `/api/bank`（含被隐藏的题）、
+  `/api/attempts` 与 `/api/progress` —— 那半边暴露面**先于 notebook 这个功能就存在**，因为这个 API 一直没有
+  鉴权，靠的是"只绑宿主回环"。这一层不替代 token 那一半（合取仍要在 `notebookStatus()` 内部判：外层挡在前面，
+  走到路由的请求 Host 必然已过检，路由档造不出"对端本机 + Host 外来"的组合）。**它也不替代绑回环**：
+  Host 是客户端写的，局域网里直连 `192.168.x.x:7788` 并把 Host 改成 `localhost` 就能过这一层 ——
+  那条路是靠 `compose-ports.test.ts` 关的。闸门：`server/test/api/notebook-api.test.ts`（外层，含
+  `/api/bank` 与 `/api/health` 的反向对照）+ `server/test/notebooks/status.test.ts`（内层合取表）。
 - **绑法与它带出的那道守卫**。容器内监听 `0.0.0.0:8888`：发布的端口是 DNAT 到**容器的 eth0**、不是转到它的
   回环，所以"只听容器内 127.0.0.1"与"宿主经 7789 打开"互相矛盾（实测 loopback 302 / eth0 000 / 宿主 000，
   而容器档全绿 —— 它每次探活都走 loopback）。改绑之后必须一起钉 `--ServerApp.allow_remote_access=False`：

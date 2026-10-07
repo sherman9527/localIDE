@@ -145,7 +145,9 @@ const refuses = (message: string) =>
 
 // 每条用例都显式给 tokenOverride：宿主上 config.notebook.token 是空的（compose 才设它），
 // 不显式覆盖的话第 1 条会在"没配 token 就 running:false"那条早退分支上红 —— 那是环境差，不是实现错。
-const TOK = { tokenOverride: 'test-token' };
+// hostHeader 同批发下去是 **C-1** 的结果：token 释放现在读的是**合取**（对端本机 **且** Host 是本机字面量），
+// 这一份是"两半都对"的基准形状，各条用例只在要判某一半时单独改掉那一半。
+const TOK = { tokenOverride: 'test-token', hostHeader: '127.0.0.1:7788' };
 
 /**
  * 在"ARENA_JUPYTER_TOKEN 这个**键**存在与否"受控的情况下跑一条断言。
@@ -243,22 +245,61 @@ describe('notebookStatus', () => {
   });
 
   /**
-   * Host 头彻底退出判定（评审 M-1 的原话）。这里钉两层：
-   * ① 类型层面塞不进去（`@ts-expect-error` 若哪天不再报错，说明有人把 hostHeader 加回了入参
-   *    ⇒ 两个机制并存，迟早只改一个）；
-   * ② 行为层面伪造得再像也换不到 token，而真本机换什么都不换。
+   * **C-1（终审）把上一轮的这条断言反过来了**，这里把新旧两句话都留在原地，免得下一位再吵一遍：
+   * 上一轮反对的是「**Host 单独说话**」—— `Host: 127.0.0.1:7788` 任何人都写得出来，照着它发凭据
+   * 等于把 token 发给局域网里任意一个请求。那一条裁决今天**仍然成立**，被推翻的只有
+   * 「Host 完全不参与判定」这半句。
+   *
+   * 现在的判据是**合取**：`isLocalPeer(对端)` **且** Host 头的 hostname 是本机字面量。
+   * 合取严格强于任何一半，所以两个方向都要有独立的红：
+   * ① 只有 Host 对（局域网里伪造头的那个）⇒ 不给 —— 上面 `192.168.1.20` 那条与下面表里那一行判它；
+   * ② 只有对端对（**DNS rebinding**：受害者浏览器把攻击域名的 A 记录改成 `127.0.0.1`，
+   *    socket 对端**就是**回环，而响应与攻击页同源 ⇒ 页面上的 JS 读得到 `url` 里那个 token，
+   *    拿到的是"能在容器里以 root 执行任意代码"的长期凭据：写在 `.env`、重启不换）⇒ 也不给。
+   * 只留 ① 的那一半判据时 ② 是绿的，这就是这一轮补的东西。
+   *
+   * `Host: localhost:7789` 这一行是**故意钉住的决定**：`localhost` 是名字不是地址，
+   * 但 rebinding 要的是"域名解析到我控制的 IP"，把 localhost 解析走等于让攻击者域名 = localhost，
+   * 那种 DNS 任何正经解析器都不接受；而 `http://localhost:7788` 是用户真会敲的第二个写法
+   * （`start.ps1` 的健康检查就用它）。放行它、并在这里钉住，比"松一半让某个写法进来"更好。
    */
-  it('Host 头不再是 notebookStatus 的入参：想按头说话也说不成', async () => {
-    const spoofed = await notebookStatus({
-      peerAddress: '203.0.113.9',
-      fetchImpl: fake(),
-      ...TOK,
-      // @ts-expect-error 这个键已经不在契约里；它不该编译，更不该改变结论
-      hostHeader: '127.0.0.1:7788',
-    });
-    expect(spoofed.url).not.toContain('token=');
-    const local = await notebookStatus({ peerAddress: '::1', fetchImpl: fake(), ...TOK });
-    expect(local.url).toContain('token=test-token');
+  it('token 释放是合取：对端本机 **且** Host 是本机字面量（C-1：DNS rebinding 拿不到 token）', async () => {
+    const gw = { gatewayAddresses: ['172.18.0.1'] };
+    const cases: Array<{ peer: string; host: string | undefined; want: boolean; why: string }> = [
+      { peer: '127.0.0.1', host: '127.0.0.1:7788', want: true, why: '宿主直跑：两半都对' },
+      { peer: '127.0.0.1', host: 'localhost:7789', want: true, why: 'localhost 写法（上面那段决定）' },
+      { peer: '::1', host: '[::1]:7788', want: true, why: 'IPv6 回环的带括号写法' },
+      { peer: '172.18.0.1', host: '127.0.0.1:7788', want: true, why: '容器部署里用户真实的那条路：对端=网桥网关、Host=宿主回环' },
+      { peer: '127.0.0.1', host: 'evil.example.com:7788', want: false, why: 'DNS rebinding：对端确实是回环' },
+      { peer: '172.18.0.1', host: 'rebinding.example:7788', want: false, why: '同一半在容器部署里也否决' },
+      { peer: '192.168.1.20', host: '127.0.0.1:7788', want: false, why: '伪造头（上一轮 M-1 的形状，必须继续红）' },
+      { peer: '::1:7788', host: '127.0.0.1:7788', want: false, why: '非回环字面量当对端（旧 IPv6 正则的假阳性）' },
+      { peer: '127.0.0.1', host: '127.0.0.1.evil.example', want: false, why: '以本机字面量开头的域名不是本机地址' },
+      { peer: '127.0.0.1', host: '127.0.0.1:7788:99', want: false, why: '多一个冒号的 Host 是坏值 ⇒ fail closed' },
+      { peer: '127.0.0.1', host: '', want: false, why: '没有 Host 头 ⇒ fail closed' },
+      { peer: '127.0.0.1', host: undefined, want: false, why: 'Host 头缺席（HTTP/1.0 或被人摘掉）⇒ fail closed' },
+    ];
+    for (const c of cases) {
+      // ⚠ `...TOK` 必须在**前面**：它带着基准那份 `hostHeader`，放后面会把用例自己那个 Host 顶掉
+      // （第一版就是这么错的 —— 于是"外来 Host"那一行拿着本机 Host 跑，红在测试自己写的断言上）。
+      const res = await notebookStatus({ ...TOK, ...gw, peerAddress: c.peer, hostHeader: c.host, fetchImpl: fake() });
+      if (c.want) {
+        expect(res.url, `${c.why}：两半都成立却不给 token ⇒ 用户得手贴（静默降级那一侧）`).toContain('token=test-token');
+      } else {
+        expect(res.url, `${c.why}：这一半不成立却给了 token ⇒ 泄漏`).not.toContain('token=');
+        expect(JSON.stringify(res), `${c.why}：token 出现在任何字段里都算泄漏`).not.toContain('test-token');
+      }
+    }
+  });
+
+  /**
+   * 缺的那一半不许靠"调用方忘了传"蒙过去：`hostHeader` 是**必填**入参（类型层面就要求每个调用点
+   * 表态），而 `undefined` 走的是 fail-closed 那一支。这条判的是接线的形状，不是文案。
+   */
+  it('路由忘传 Host 头时不给 token（新增入参不许有"忘了也照样绿"的形状）', async () => {
+    const noHost = await notebookStatus({ ...TOK, peerAddress: '127.0.0.1', hostHeader: undefined, fetchImpl: fake() });
+    expect(noHost.running).toBe(true);
+    expect(noHost.url, '没给 Host 头 ⇒ 合取判不上 ⇒ 宁可不给（用户至多手贴一次 token）').not.toContain('token=');
   });
 
   it('超时与"没起"给的 reason 必须不同（同一个 reason 会让人去查错的地方）', async () => {
@@ -273,7 +314,7 @@ describe('notebookStatus', () => {
   });
 
   it('没配 token 时如实报，不假装能用', async () => {
-    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' });
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '' });
     expect(res.running).toBe(false);
     expect(res.reason).toMatch(/ARENA_JUPYTER_TOKEN/);
   });
@@ -322,8 +363,8 @@ describe('notebookStatus', () => {
    */
   it('每一条 running:false 都带一句非空的 reason（不变式，逐条覆盖失败形状）', async () => {
     const probes: Array<[string, () => Promise<NotebookStatusResponse>]> = [
-      ['没给 token', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' })],
-      ['token 键存在但为空', () => withTokenKey('', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }))],
+      ['没给 token', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '' })],
+      ['token 键存在但为空', () => withTokenKey('', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '' }))],
       ['连不上（ECONNREFUSED）', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED 127.0.0.1:8888'), ...TOK })],
       ['探活超时', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('The operation was aborted due to timeout'), ...TOK })],
       ['/api/status 403', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(403), ...TOK })],
@@ -379,9 +420,11 @@ describe('notebookStatus', () => {
       ].join('\n');
     try {
       // 三条分支各走一遍：成功（url 里就躺着 token）、非本机且非网关（url 给但不带 token）、失败（reason 可能拼进 url）
-      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY });
-      await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), tokenOverride: CANARY });
-      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY });
+      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
+      await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
+      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
+      // C-1 的第四趟：本机对端 + 外来 Host（url 里躺着 token 的那一态被否掉的那一态）也要过一遍收集器
+      await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: 'evil.example.com:7788' });
       const seen = collect();
       expect(seen, `有日志调用把 token 打印出来了 ⇒ 它会留在 data/logs 里，删不掉历史：\n${seen}`).not.toContain(CANARY);
       // 判据自己也要被判（否则"什么都没收集到"也看起来像成功）：
@@ -403,10 +446,10 @@ describe('notebookStatus', () => {
    */
   it('token 缺席分两种成因：刻意不给（dev/e2e）不许读起来像故障，从没生成才给修复指令', async () => {
     const noKey = await withTokenKey(undefined, () =>
-      notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }),
+      notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake() }),
     );
     const emptyKey = await withTokenKey('', () =>
-      notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: '' }),
+      notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake() }),
     );
     expect(noKey.running).toBe(false);
     expect(emptyKey.running).toBe(false);

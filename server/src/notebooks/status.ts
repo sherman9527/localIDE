@@ -1,14 +1,25 @@
 import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
+import { isLoopbackAddressLiteral, isLoopbackHostHeader } from '../net/localOrigin.js';
 import type { NotebookKernel, NotebookStatusResponse } from '@arena/shared';
 
 /**
- * 「这个请求是不是从本机发出来的」—— 它决定要不要在链接里附 token，所以判据只能是
- * **内核给的 socket 对端地址**，不是客户端自报的 Host 头（评审 M-1：任何人都能把
- * `Host:` 写成 `127.0.0.1:7788`，照着它发凭据等于把 token 发给局域网里任意一个请求）。
+ * 「这个请求能不能拿到 token」—— 终审 C-1 之后它是**合取**，两半都要点头：
  *
- * 但"本机"在两种部署里长成两个不同的样子，这条必须写在代码里，否则换判据的动作会把功能
- * 在**唯一会启用它的部署**里静默关掉：
+ * 1. `isLocalPeer(对端地址)`：判据是**内核给的 socket 对端地址**，不是客户端自报的头（评审 M-1：
+ *    任何人都能把 `Host:` 写成 `127.0.0.1:7788`，照着它发凭据等于把 token 发给局域网里任意一个请求）。
+ * 2. `isLoopbackHostHeader(Host 头)`（`server/src/net/localOrigin.ts`）：**只有**第一半不够 ——
+ *    DNS rebinding 里受害者浏览器把攻击者的域名改成 `127.0.0.1`，socket 对端**就是**回环，
+ *    而响应与攻击页同源 ⇒ 页面上的 JS 读得到 `url` 里那个 token（一个能在容器里以 root 执行任意代码
+ *    的服务的**长期**凭据：躺在 `.env`、重启不换）。这时还认得出"这个 Host 不是本机"的只剩头本身。
+ *
+ * **这不与上一轮那条裁决冲突**（会读成冲突，是因为那句话写成了"Host 头不参与判定"）：
+ * 那一句反对的是 **Host 单独说话**，而合取严格强于任何一半 —— 伪造头的用例（LAN 对端 +
+ * `Host: 127.0.0.1:7788`）与 `::1:7788` 那个非回环字面量今天**都还得红**，
+ * `server/test/notebooks/status.test.ts` 的合取表把两个方向各钉了一次。
+ *
+ * 第一半为什么必须带"默认网关"那一支 —— 它决定这个功能在**唯一会启用它的部署**里生不生效，
+ * 所以这条必须写在代码里，否则换判据的动作会把功能静默关掉：
  * - 宿主直跑（`npm run dev`）：浏览器 → `127.0.0.1:7788` ⇒ 对端就是 `127.0.0.1` / `::1`。
  * - compose（`./start.sh`，也是唯一拿到 `ARENA_JUPYTER_TOKEN` 的实例）：浏览器 → 宿主的
  *   `127.0.0.1:7788` → docker-proxy / NAT 在**宿主那侧**拨容器的 eth0 ⇒ 容器里看到的对端是
@@ -27,22 +38,10 @@ import type { NotebookKernel, NotebookStatusResponse } from '@arena/shared';
  * `^(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d+)?$` 会把 `::1:7788` 这个**非回环字面量**认成本机 ——
  * 冒号在 IPv6 里是地址的一部分，不是"地址:端口"的分隔符。socket 地址本来就不带端口，
  * 所以这里按地址族逐条判，不做任何"尾巴上可能带端口"的宽容匹配。
+ * 同一串 `::1:7788` 在 Host 那一半也判"不是本机"（`hostHeaderHostname` 见到第二个冒号给 null）——
+ * 同一个字面量不许在两处各解释一遍。
  */
 const TOKEN_KEY = 'ARENA_JUPYTER_TOKEN';
-
-/** `255.255.0.0` 这类点分十进制 → 无符号整数；不是四段合法字节就 null（宁可不给 token，也不给错人）。 */
-function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return null;
-  let n = 0;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    const octet = Number(part);
-    if (octet > 255) return null;
-    n = n * 256 + octet;
-  }
-  return n;
-}
 
 /** `/proc/net/route` 里的网关是小端十六进制（`010012AC` = 172.18.0.1）。 */
 function hexLittleEndianToIpv4(hex: string): string | null {
@@ -94,19 +93,18 @@ export function localGatewayAddresses(): string[] {
  * 对端地址是不是"这台机器自己"。`gateways` 做成参数是为了让判据可注入、可测
  * （默认那条走 `localGatewayAddresses()`，测试不必依赖跑它的那台机器有什么网络）。
  * 输入只有 `socket.remoteAddress`：它是内核给的**地址字面量**，不是名字 —— 所以这里不接受
- * `'localhost'` 这类主机名（评审 Fix-1 Minor：旧 LOOPBACK 正则里那个 `|localhost` 分支是从
+ * `'localhost'` 这类主机名（评审 Fix-1 的 Minor：旧 LOOPBACK 正则里那个 `|localhost` 分支是从
  * Host 头时代抄过来的死代码，今天永远匹配不上，留着它只是给"哪天有人往对端地址里塞自报字符串"
  * 预留一条通向凭据的路）。要认的就按地址族认，认不上就不给。
+ * 回环那一半的判据住在 `net/localOrigin.ts:isLoopbackAddressLiteral`（Host 那一半与它必须同源），
+ * 这里只加"网桥网关"那一支。
  */
 export function isLocalPeer(rawAddress: string | undefined, gateways: string[] = localGatewayAddresses()): boolean {
   const addr = (rawAddress ?? '').trim().toLowerCase();
   if (!addr) return false;
-  // 双栈监听时 Node 把 IPv4 对端写成 `::ffff:127.0.0.1`
+  if (isLoopbackAddressLiteral(addr)) return true;
+  // 双栈监听时 Node 把 IPv4 对端写成 `::ffff:127.0.0.1`，网桥网关也是这个形状
   const ip = addr.startsWith('::ffff:') ? addr.slice('::ffff:'.length) : addr;
-  if (ip === '::1') return true;
-  const n = ipv4ToInt(ip);
-  // 127.0.0.0/8 整段都是回环（`127.1`、`127.0.0.2` 都到本机），但四段必须齐全
-  if (n !== null && (n >>> 24) === 127) return true;
   /**
    * 网桥那一半（容器部署里"本机"唯一的形状）。**它的安全性是派生的，不是自证的**：
    * 成立的前提是 compose 里每一个发布端口都只绑在宿主的 `127.0.0.1` 上
@@ -190,8 +188,14 @@ function httpReason(status: number): string {
  * （IDE 同样把 ensureIdeEnv 挂在显式动作上，不挂在语言列表上）。
  */
 export async function notebookStatus(input: {
-  /** 真实对端地址（Fastify 的 `request.raw.socket.remoteAddress`）—— token 释放判据的唯一输入 */
+  /** 真实对端地址（Fastify 的 `request.raw.socket.remoteAddress`）—— 合取的第一半的唯一输入 */
   peerAddress: string;
+  /**
+   * 请求的 Host 头 —— 合取的第二半（终审 C-1）。**必填**是刻意的：新增入参若有默认值，
+   * "调用方忘了传"就会变成"忘了也照样给 token"。传 `undefined` 走 fail-closed（不给）。
+   * 它从不单独放行任何东西：只在本机字面量上点头，其余一律否决（见 `net/localOrigin.ts`）。
+   */
+  hostHeader: string | undefined;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   tokenOverride?: string;
@@ -224,7 +228,7 @@ export async function notebookStatus(input: {
     // `kernelspecs[<id>].spec.display_name` 那一层）。这里曾经读 `body.kernels`，于是
     // `kernels` 永远是空表，而 `/api/status` 是 200 —— 第五页于是在用户眼前说
     // 「探到的 kernel 表里没有 arena-pyspark ⇒ 跑一次 ./start.sh --rebuild」，
-    // 而那个 kernel 注册着、并且刚在容器档里通过它跑完一份 Spark notebook。
+    // 而那个 kernel 其实注册着、并且刚在容器档里通过它跑完一份 Spark notebook。
     // 那句谎给的操作是拆掉一个能用的镜像，比"少显示一个 badge"贵得多。
     // 三份单测 fixture 当年与这个 bug 同源地写着 `kernels`，所以 mock 全绿救不了它 ——
     // 判住这件事的是 `server/test/notebooks/kernel.test.ts` 那条**不经过 mock** 的容器档闸门
@@ -246,8 +250,13 @@ export async function notebookStatus(input: {
   let url: string;
   try {
     const u = new URL(`${config.notebook.publicUrl}/tree`);
-    // 判的是对端地址，不是 Host 头（评审 M-1）；非本机连接**照样给链接**，只是里面没有凭据。
-    if (isLocalPeer(input.peerAddress, input.gatewayAddresses)) u.searchParams.set('token', token);
+    // **合取**（终审 C-1）：对端是本机 **且** Host 头是本机字面量，两半都要点头。
+    // 只有对端说话 ⇒ DNS rebinding 拿得到 token（对端确实是回环）；只有头说话 ⇒ 局域网里
+    // 伪造 `Host: 127.0.0.1:7788` 的那个拿得到（评审 M-1 的原始形状）。
+    // 非本机连接**照样给链接**，只是里面没有凭据 —— 不给链接才是静默降级。
+    if (isLocalPeer(input.peerAddress, input.gatewayAddresses) && isLoopbackHostHeader(input.hostHeader)) {
+      u.searchParams.set('token', token);
+    }
     url = u.toString();
   } catch {
     return {

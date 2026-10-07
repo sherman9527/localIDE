@@ -15,8 +15,15 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  * 而是四件只有"挂上 HTTP 之后"才成立的事：
  * ① 路由真的存在（WI-87 的学费：一次编辑把 `app.post(...)` 并进注释，整条路由被吞掉，
  *    而"切片里 indexOf 路径字符串"的断言照样绿 ⇒ 判据必须是**行首**，不是包含）；
- * ② token 的释放判据是**内核给的 socket 对端地址**，不是客户端自报的 Host 头（评审 M-1）——
- *    含容器那一半：对端是这张网桥的**网关**时也算本机（评审 I-3a，靠 `gatewayAddresses` 那个 seam）；
+ * ② token 的释放判据是**合取**（终审 C-1）：内核给的 socket 对端地址 **且** Host 头是本机字面量。
+ *    上一轮那句"不是客户端自报的 Host 头"反对的是 **Host 单独说话**（谁都写得得出
+ *    `Host: 127.0.0.1:7788`），它今天仍然成立；补上第二半是因为 DNS rebinding 里对端**确实是**回环。
+ *    含容器那一半：对端是这张网桥的**网关**时也算本机（评审 I-3a，靠 `gatewayAddresses` 那个 seam）。
+ *    C-1 的第二半落在**两层**上，本文件判外层、`status.test.ts` 那张合取表判内层：
+ *      外层 = `app.ts` 第一个 onRequest hook：Host 不是本机字面量 ⇒ **整个 origin** 403
+ *             （顺带收掉先于本分支存在的那一半暴露面：这个 API 无鉴权，外来 Host 原本能读 `/api/bank`）；
+ *      内层 = `notebookStatus()` 里那个合取（走不到路由的形状只能在这里判，因为外层已经把
+ *             "对端本机 + Host 外来"这种组合挡在路由之前了）。摘掉任意一层都至少有一条红。
  * ③ `notebookStatus` 的第三种响应形状（Jupyter 在跑但 publicUrl 配坏 ⇒ running:true + reason + 没有 url）
  *    必须被路由**原样透传**，不许在路由里被抹平成"要么给链接、要么没在跑"两态（评审第二条裁定）；
  * ④ 挂在同一个 GET 上的 `seedNotebooks()` 失败时不许把整个接口拖成 500（评审 I-1）：
@@ -274,17 +281,72 @@ describe('GET /api/notebook/status', () => {
     expect(JSON.stringify(body), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
   });
 
-  it('真回环对端 + 一句别的 Host 头 ⇒ 照样给 token（头只剩展示价值，不参与判定）', async () => {
+  /**
+   * **C-1（终审）：这一条是上一轮那条断言的反面。** 上一轮钉的是「真回环对端 + 一句别的 Host 头
+   * ⇒ 照样给 token（头只剩展示价值，不参与判定）」，而那句在 DNS rebinding 面前是错的：
+   * 受害者浏览器把攻击者的域名解析到 `127.0.0.1`，socket 对端**就是**回环，而响应与攻击页同源
+   * ⇒ 它的 JS 直接读走 `url` 里那个 token —— 一个能执行任意代码（容器里还是 root）的服务的
+   * **长期凭据**（写在 `.env` 里、重启不换）。
+   *
+   * 现在**两层**都拦（两层各判一件事，都要有独立的红，别把上面那条 M-1 用例读成"已经够了"）：
+   * ① 路由层之外：整个 origin 的 Host 白名单（`app.ts` 的第一个 onRequest hook）把这种请求判 403 ——
+   *    它顺带收掉的是**先于本分支存在**的那一半：这个 API 没有鉴权，外来 Host 原本能读 `/api/bank`；
+   * ② token 那一半：`notebookStatus()` 内部的对端 ∧ Host 合取。**它在 HTTP 之外判**
+   *    （`server/test/notebooks/status.test.ts` 那张合取表直接调函数）—— 因为这一层被 ① 挡在前面之后，
+   *    走到路由的请求 Host 必然已经过检，路由档**造不出**"对端本机 + Host 外来"的形状。
+   *    ⇒ 摘掉 ① 会让下面那条「/api/bank 外来 Host」红；摘掉 ② 会让 status.test.ts 那张表红。
+   *    两条都摘才算"C-1 做完了"，一条都不算。
+   */
+  it('C-1 真回环对端 + 外来 Host（DNS rebinding 的形状）⇒ 整个 origin 拒绝，且响应里没有 token', async () => {
     jupyterUp();
-    const { app, cfg } = await injectApp({ token: CANARY });
+    const { app } = await injectApp({ token: CANARY });
     const res = await app.inject({
       method: 'GET',
       url: '/api/notebook/status',
       remoteAddress: '127.0.0.1',
       headers: { host: 'evil.example.com:7788' },
     });
-    const body = res.json() as NotebookStatusResponse;
-    expect(body.url).toBe(`${cfg.notebook.publicUrl}/tree?token=${CANARY}`);
+    expect(res.statusCode, 'rebinding 形状的 Host 不该走到任何路由（403 是"守卫在位"的样子，与 jupyter 那一侧同码）').toBe(403);
+    expect(res.headers['content-type'] ?? '', '403 也要回 JSON：SPA 拿的是 fetch，回 HTML 会掉进"读不到状态"那一态').toMatch(/application\/json/);
+    expect(JSON.stringify(res.json()), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
+  });
+
+  /**
+   * ①那一层的**范围**判据：不是"notebook 这一个路由"，而是整个 origin。
+   * 挑 `/api/bank` 是因为它是这条防线**本来就漏着**的那一半（无鉴权、含被隐藏的题），
+   * 而它先于本分支存在 ⇒ 只补 token 路径的话，rebinding 照样读得到题库。
+   */
+  it('C-1 的 Host 白名单覆盖整个 origin：外来 Host 读不到 /api/bank（那条先于本分支的暴露面）', async () => {
+    const { app } = await injectApp({ token: CANARY });
+    const foreign = await app.inject({ method: 'GET', url: '/api/bank', remoteAddress: '127.0.0.1', headers: { host: 'rebinding.example' } });
+    expect(foreign.statusCode, '只把 Host 判据用在 token 上 ⇒ 无鉴权的题库仍被 rebinding 页面同源读走').toBe(403);
+    // 反向对照：本机写法必须照常能读，否则这条闸门等于把功能关掉（start.sh / Dockerfile 健康检查走的都是 127.0.0.1）
+    for (const host of ['127.0.0.1:7788', 'localhost:7788', '[::1]:7788']) {
+      const ok = await app.inject({ method: 'GET', url: '/api/bank', headers: { host } });
+      expect(ok.statusCode, `Host: ${host} 是本机形状却被 Host 白名单挡住 ⇒ 正常访问一起坏了（这是功能，不是安全预算）`).toBe(200);
+    }
+    // 健康检查那条探针（Dockerfile 的 HEALTHCHECK 用 127.0.0.1:7788，start.ps1 用 localhost:7788）
+    const health = await app.inject({ method: 'GET', url: '/api/health', headers: { host: '127.0.0.1:7788' } });
+    expect(health.statusCode, '/api/health 被 Host 白名单挡住 ⇒ 容器会被判成 unhealthy 并反复重启').toBe(200);
+  });
+
+  /** 合取的另一半：两半都对才给。这一条同时是"别把守卫写成永远拒绝"的反向对照。 */
+  it('对端回环 + 本机形状的 Host ⇒ 给 token（合取的两半都成立）', async () => {
+    jupyterUp();
+    for (const host of ['127.0.0.1:7788', 'localhost:7788', '127.0.0.1', 'localhost:7789', '[::1]:7788']) {
+      const { app, cfg } = await injectApp({ token: CANARY });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/notebook/status',
+        remoteAddress: '127.0.0.1',
+        headers: { host },
+      });
+      expect(res.statusCode, `Host: ${host} 是本机形状，不该被 origin 那一层挡住`).toBe(200);
+      const body = res.json() as NotebookStatusResponse;
+      expect(body.url, `Host: ${host} 是本机形状 + 回环对端 ⇒ 不给 token 就得让用户手贴（静默降级那一侧）`).toBe(
+        `${cfg.notebook.publicUrl}/tree?token=${CANARY}`,
+      );
+    }
   });
 
   /**
@@ -309,12 +371,40 @@ describe('GET /api/notebook/status', () => {
   it('对端是 docker 网桥网关 ⇒ 路由真的把它当本机（评审 I-3a：容器部署里这才是"本机"）', async () => {
     jupyterUp();
     const { app, cfg } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
-    const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '172.18.0.1' });
+    // Host 用**容器部署里浏览器实际发的那一个**（用户打开的是宿主的 127.0.0.1:7788，docker-proxy
+    // 原样转发字节）：C-1 之后合取的两半必须在这一条里都真的成立，否则它测的是"只有对端说话"。
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/notebook/status',
+      remoteAddress: '172.18.0.1',
+      headers: { host: '127.0.0.1:7788' },
+    });
     expect(res.statusCode).toBe(200);
     expect(
       (res.json() as NotebookStatusResponse).url,
       '路由没把网关判据接到 notebookStatus ⇒ 容器里的页面永远只能手贴 token',
     ).toBe(`${cfg.notebook.publicUrl}/tree?token=${CANARY}`);
+  });
+
+  /**
+   * C-1 的容器那一半：对端是网关（=本机）但 Host 是外来名字 ⇒ 拿不到 token。
+   * 今天它红在**origin 那一层**（403，请求根本走不到路由），与上面那条 rebinding 用例同形；
+   * 而"走不到路由"恰恰是这一层要的效果 —— 容器部署里对端永远是网桥网关，
+   * 少了这一层，网关 + 外来 Host 就是**容器里最容易达成**的那条攻击路径。
+   * 内层合取在容器形状上的判据在 `status.test.ts` 那张表里（`peer: '172.18.0.1' + host: 'rebinding.example'`），
+   * 那条不受这一层遮挡，因为它不打 HTTP。
+   */
+  it('对端是网关 + 外来 Host ⇒ 不给 token（容器部署里这一条由 origin 白名单先拦住）', async () => {
+    jupyterUp();
+    const { app } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/notebook/status',
+      remoteAddress: '172.18.0.1',
+      headers: { host: 'rebinding.example:7788' },
+    });
+    expect(res.statusCode, '对端是网关 + Host 是外来名字 ⇒ 容器里最容易达成的那条路，必须断在任何路由之前').toBe(403);
+    expect(JSON.stringify(res.json()), 'token 出现在任何字段里都算泄漏').not.toContain(CANARY);
   });
 
   /** 反向：这一条判据不是"172.18 整段都算本机"。同网段的另一个地址（隔壁容器）拿不到凭据。 */

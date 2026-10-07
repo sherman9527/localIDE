@@ -40,6 +40,7 @@ import {
   type TodayResponse,
 } from '@arena/shared';
 import type { BankPort, Clock, GradePort, JudgePort, ProgressStore } from '../ports.js';
+import { isLoopbackHostHeader } from '../net/localOrigin.js';
 import { IDE_LANGUAGES, IDE_LIMITS, ideAvailability, runIdeCode } from '../ide/runner.js';
 import { REPL_IDLE_MS, REPL_MAX_SESSIONS, feedRepl, replSessions, startRepl, stopRepl } from '../ide/repl.js';
 import { DEBUG_IDLE_MS, DEBUG_MAX_SESSIONS, debugSessions, startDebug, stepDebug, stopDebug } from '../ide/debug.js';
@@ -108,7 +109,7 @@ export interface AppDeps {
    * 不传 = 生产路径 = `notebooks/status.ts` 自己读 `/proc/net/route`（内核说了算，不是猜的）。
    * 为什么只能从这里注入：那一半判据的输入是**容器自己的网络命名空间**，宿主上的单测永远读不到它，
    * 于是"网关那条分支真被走过吗"在 api 层本来是无判据的。这个口子只在 buildApp 时开，
-   * 不是请求参数 ⇒ 客户端碰不到它，也换不到 token（判据依旧是 socket 对端）。
+   * 不是请求参数 ⇒ 客户端碰不到它，也换不到 token（判据依旧是**对端 + Host 的合取**，见 C-1 那段）。
    */
   notebookGatewayAddresses?: string[];
 }
@@ -170,6 +171,43 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const clock: Clock = deps.clock ?? { now: () => new Date() };
   const app = Fastify({ logger: deps.logger ?? false });
   const api = API_PREFIX;
+
+  /**
+   * **C-1（终审）第二半：整个 7788 origin 的 Host 白名单。**
+   *
+   * 判据与 token 那一半**同源**（`server/src/net/localOrigin.ts`），而且它不是"给 token 那一处补的"：
+   * 这个 API **没有任何鉴权**（README/ARCHITECTURE 都写了：题库含被隐藏的题、进度、提交内容全靠
+   * "只绑宿主回环"这一条撑着）。只把 Host 判据用在 token 上，等于承认 rebinding 能读走 `/api/bank`
+   * 与 `/api/attempts`，只是读不走那个凭据 —— 而那一半的暴露面是**先于本分支存在**的。
+   * 这一层把它一起收掉：Host 不是本机字面量的请求，**任何路由**都拿不到（含静态资源与 404 兜底）。
+   *
+   * 为什么放在第一个 hook（而不是和 traceId 那条并列在后面）：`@fastify/cors` 是在函数末尾
+   * `app.register(cors, …)` 才挂的，Fastify 对同一封装层的 onRequest 按**注册顺序**执行 —— 先挂的这一层
+   * 一定先跑，于是跨源预检（`OPTIONS` + `Origin: http://evil.example`）也是先被 Host 判掉，
+   * 而不是先由 cors 回一个 204 再放行后面的真实请求。
+   *
+   * 为什么回 403 而不是 400/421：**与 jupyter 那一侧同码**。`docker/entrypoint.sh` 里
+   * `--ServerApp.allow_remote_access=False` 让 jupyter 的 `check_host()` 对外来 Host 回 403，
+   * 而 `server/test/notebooks/kernel.test.ts` 把 403 写成了"守卫在位"的唯一判据
+   * （`HOST_REFUSED_STATUS`，理由：401/404 说明请求没走到守卫那一层，判不了这条）。
+   * 两边同码，将来才可能用同一条探针判两边。
+   *
+   * ⚠ 这一层**不替代** token 路径上的合取，两层各判一件事：这层拦的是"外来 Host 读到任何东西"，
+   * 那层拦的是"对端是本机但 Host 不是本机时不许发凭据"。删掉这一层，token 那一半必须还红
+   * （`server/test/notebooks/status.test.ts` 的合取表不打 HTTP，走的正是那条）；
+   * 删掉那一半，`notebook-api.test.ts` 的"路由把 Host 头接进 notebookStatus"那两条必须红。
+   */
+  app.addHook('onRequest', async (request, reply) => {
+    if (isLoopbackHostHeader(request.headers.host)) return;
+    await reply.code(403).send({
+      error: 'bad_host',
+      message:
+        `Host 头不是本机字面量（收到的那个值不打印在这里 —— 它是外部输入，会进日志）。` +
+        '这个服务没有鉴权，靠的历来是"只绑宿主回环"（闸门 compose-ports.test.ts）；' +
+        'DNS rebinding 会让那条边界只对 socket 对端成立、对页面同源不成立，所以 Host 也要是本机的形状。' +
+        '要用别的地址访问（手机 / 局域网里的另一台），得先给这个服务加一套真正的鉴权，不是把这个检查关掉。',
+    } satisfies ApiError);
+  });
 
   /**
    * 每个请求一个 traceId：请求头带 x-trace-id 就沿用（前端重试用），否则生成。
@@ -567,13 +605,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   // MARK: /api/notebook/status（第五页的唯一事实来源：服务在不在、kernel 就绪没有）
-  // 对端地址取的是 `request.raw.socket.remoteAddress` —— **不是** Host 头（评审 M-1）：
-  // 头是客户端写的，`Host: 127.0.0.1:7788` 就能换到一条带 token 的链接；socket 地址由三次握手决定。
+  // token 的释放判据是**合取**（终审 C-1）：`request.raw.socket.remoteAddress`（内核给的，客户端改不动）
+  // **且** `request.headers.host` 是本机字面量。两个输入各拦一种坏法：
+  // 只看对端 ⇒ DNS rebinding（受害者浏览器把攻击域名改成 127.0.0.1，对端**就是**回环，而响应与攻击页
+  // 同源，页面上的 JS 读得到 url 里那个 token）；只看头 ⇒ 局域网里任何人写 `Host: 127.0.0.1:7788` 就能换到
+  // 凭据（评审 M-1 的原始形状）。合取严格强于任何一半，两个方向的用例都钉在
+  // `server/test/notebooks/status.test.ts` 与 `server/test/api/notebook-api.test.ts`。
   // 这里不读 `request.ip`：那是 Fastify 在 `trustProxy` 打开后会改口的封装，而本服务没设过 trustProxy，
   // 用 raw socket 是"只有一个输入"的写法 —— 将来真上反向代理，也得在这儿显式决定信谁的转发头。
   app.get(`${api}/notebook/status`, async (request): Promise<NotebookStatusResponse> => {
     const base = await notebookStatus({
       peerAddress: request.raw.socket.remoteAddress ?? '',
+      // 头缺席（HTTP/1.0 或被人摘掉）传 undefined ⇒ `isLoopbackHostHeader` fail-closed ⇒ 不给 token
+      hostHeader: asString(request.headers.host),
       // 不传 = 走 `localGatewayAddresses()`（生产路径）。见 AppDeps.notebookGatewayAddresses 的注释。
       gatewayAddresses: deps.notebookGatewayAddresses,
     });

@@ -621,6 +621,11 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
   it('对着真 Jupyter 解 kernelspecs：arena-pyspark 必须在表里，标签来自 spec.display_name（解析的键与真回话同源）', async () => {
     const res = await notebookStatus({
       peerAddress: '127.0.0.1',
+      // C-1 之后 token 的释放是**合取**，这一条要的正是"跑到解析那一步"，所以 Host 必须给成
+      // 用户真实会发的那一个（宿主打开的是 127.0.0.1:7788，docker-proxy 原样转发字节）。
+      // 它的另一个作用是把这条闸门与 C-1 解耦：Host 判据坏掉时这里红在"running:false / 没 url"，
+      // 而不是让人以为解析出了问题。
+      hostHeader: '127.0.0.1:7788',
       tokenOverride: process.env[TOKEN_KEY] ?? '',
       timeoutMs: PROBE_TIMEOUT_MS,
     });

@@ -42,7 +42,7 @@ export interface NotebookFile {
  */
 export interface NotebookStatusResponse {
   running: boolean;
-  /** url 是本机地址；带不带 token 判的是 socket 对端地址：回环或本进程默认网关 ⇒ 带（compose 里宿主浏览器经网桥 NAT 进来，对端是网关而非回环），其余对端拿到的不含；网关那一半的安全性是派生的，前提是发布端口全绑 127.0.0.1（闸门 compose-ports.test.ts） */
+  /** url 是本机地址；带不带 token 判的是**合取**（终审 C-1）：socket 对端 = 回环或本进程默认网关（compose 里宿主浏览器经网桥 NAT 进来，对端是网关而非回环）**且** Host 头是本机字面量（`localhost` / `127.x` / `[::1]`）⇒ 带；两半任缺其一（含 Host 头缺席）都不带，链接照给。为什么必须有第二半：DNS rebinding 里对端确实是回环。判据本体在 `server/src/net/localOrigin.ts`；网关那一半的安全性仍是派生的，前提是发布端口全绑 127.0.0.1（闸门 compose-ports.test.ts） */
   url?: string;
   /** running:false 时必填 */
   reason?: string;
