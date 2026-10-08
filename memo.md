@@ -3433,8 +3433,11 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 都还写着"7788 没有任何 Host 白名单 / DNS rebinding 现在就行得通"，而 C-1 之后那是假的（下一轮照着它会把已经
 存在的守卫再加一遍）。逐条改法见 commit `2fea5f3`。
 
-**验证表**：`npm run e2e` ⇒ exit 0，74 passed（3.2m）；`npm run verify:fast` ⇒ exit 0（三次：`/tmp/vf24.log`、
-`/tmp/vf25.log`、commit `79d3a1e` 前置）；`bash -n scripts/verify.sh` ⇒ 0 且文件里 0 个 CR 字节（本轮只删注释行）。
+**验证表**：`npm run e2e` ⇒ exit 0，74 passed（3.2m）；`npm run verify:fast` ⇒ exit 0（四次：`/tmp/vf24.log`（P1 那个 commit 前）、
+`/tmp/vf25.log`（P2/P3 那两个 commit 前）、`/tmp/vf26.log`（WI-96 那个 commit 前）、
+`/tmp/vf27.log`（**这条更正自己**这次提交前 —— 上一版这里写的是一个仓库里不存在的 commit 号
+`79d3a1e`，那是我这一轮亲手写进去的、比 N1–N8 更糟的一种不诚实：一个"看起来像引用"的编造）；
+`bash -n scripts/verify.sh` ⇒ 0 且文件里 0 个 CR 字节（本轮只删注释行）。
 
 **已知问题 / 留给 A2**：新增 **WI-96**（`needsVenv` 按 `id === NOTEBOOK_KERNELS.pyspark` 判 ⇒ A2 的
 `arena-scala` 会静默 `ready: true`，与 I-1 刚关掉的洞结构同一形状；修法是把"要哪份环境"做成 `NOTEBOOK_KERNELS`
