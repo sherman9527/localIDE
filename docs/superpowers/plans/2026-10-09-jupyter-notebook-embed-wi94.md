@@ -921,8 +921,11 @@ export function attachNotebookUpgrade(
       () => { /* 没有 'upgrade' 的回话走下面那个 'response' */ },
     );
     upstreamReq.on('upgrade', (ures, usocket, uhead) => {
+      // 101 这一条**不能**照搬 HOP_BY_HOP 那一套：`Upgrade: websocket` 与 `Connection: Upgrade`
+      // 正是"这是一个 101"的组成部分（RFC 6455 的握手回话必须带它们；Firefox 缺 Connection 会判失败）。
+      // 逐跳头"不许转发"讲的是**已建立的普通请求**之间，握手例外。
       const lines = Object.entries(ures.headers)
-        .filter(([k, v]) => v !== undefined && !HOP_BY_HOP.has(k.toLowerCase()) && k !== ':status')
+        .filter(([k, v]) => v !== undefined && k !== ':status' && (!HOP_BY_HOP.has(k.toLowerCase()) || k === 'upgrade' || k === 'connection'))
         .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
       socket.write(`HTTP/1.1 101 Switching Protocols\r\n${lines.join('\r\n')}\r\n\r\n`);
       if (head && head.length) usocket.write(head);
