@@ -87,8 +87,10 @@ export function guardNotebookProxy(input: {
       };
     }
     if (!ALLOWED_SEC_FETCH_SITE.has(site)) {
-      // 这里**不打印读到的值**（brief 那版拼了 `${site}`，与本文件顶上那段纪律矛盾：
-      // 头值是客户端给的，curl 能写任意串，而这句话会进日志 —— 照 `api/app.ts` 那条钩子的先例闭嘴）。
+      // 这里**不打印读到的值**（brief 那版拼了 `${site}`，与本文件顶上那段纪律矛盾）：
+      // 这句话会随响应体回到发起方手里，而"拒绝访问"正是会被记进日志的那一类调用
+      // （`api/app.ts` 那条 origin 钩子立了同一个先例 —— 它明写"收到的那个值不打印在这里"）。
+      // 头值是客户端给的：浏览器只发那几个枚举，curl 能发任意串。
       return {
         ok: false,
         status: 403,
