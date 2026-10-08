@@ -119,7 +119,14 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
     const stranded = testFiles()
       .map((f) => ({ file: f, vars: gateVars(f) }))
       .filter((x) => x.vars.length > 0 && !declaresManualGate(x.file))
-      .filter((x) => !all.some((s) => claimed(x.file, s.patterns) && s.vars.some((v) => x.vars.includes(v))));
+      // ⚠ **`every` 只能取在 `x.vars` 上**（这条是被撞出来的，不是审美选择）：
+      // 判据要说的等式是「认领它的那条阶段，把这一文件门控要的变量**全都**设了」⇒ 量词落在文件那几个门上。
+      // 写成 `s.vars.every(...)`（"阶段设的每个变量都在文件的门里"）看着是同义的，其实是**空判**：
+      // `s.vars` 为空时 `[].every()` 恒真，而「单元测试」那条阶段就是 0 个变量、又按目录认领了
+      // `server/test/notebooks/` ⇒ kernel.test.ts 永远不算搁浅。实测（本轮终审的破坏性验证）：
+      // 把 `ARENA_NOTEBOOK_SERVICE=1` 从 kernel 那条阶段里摘掉，`s.vars.every` 那一版仍 3 passed，
+      // 而下面这一版当场红。`some` 的老问题是同一条的反面（只设一个变量就算数），两版都不是"全设了"。
+      .filter((x) => !all.some((s) => claimed(x.file, s.patterns) && x.vars.every((v) => s.vars.includes(v))));
     expect(
       stranded,
       `这些测试用 skipIf 门控，但没有任何"设了对应变量"的阶段认领它们：${stranded

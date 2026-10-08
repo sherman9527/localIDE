@@ -51,6 +51,12 @@ if [ "$NB_SERVICE" = "1" ]; then
   # `--exclude` 的值**不要**写成 `"${ARR[@]}"`：verify-coverage.test.ts 收集认领路径时丢掉以 `-` 开头的
   # token（所以那个 flag 本身不会被当成路径），但以引号开头的 `"${ARR[@]}"` 会被记成一条**假路径**。
   # 这里展开后是裸路径，最坏只是多一条永远匹配不上文件的模式，不会误认领。
+  # ⚠ 已知弱点（**登记给 A2，本轮不修**）：`--exclude` 的**值**本身会被 verify-coverage.test.ts 的
+  # 认领路径收集当成一条"这条阶段跑了 kernel.test.ts"的模式（它只丢以 `-` 开头的 token，不丢 `--exclude`
+  # 后面那个路径）⇒ 被排除的文件看起来仍被这一阶段认领。今天它不构成误判（kernel.test.ts 那条
+  # `env 门控`判据现在要求"设了全部变量的阶段"，专门阶段满足、这一条不满足），但"A 阶段说排除、
+  # 守卫却按认领算"这个方向是错的：将来若有人靠 `--exclude` 把某个门控文件挪出目录扫描，
+  # verify-coverage 会以为它还在跑。修法是解析时把 `--exclude` 的值记成**排除**而不是认领。
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 else
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
