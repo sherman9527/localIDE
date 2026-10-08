@@ -331,6 +331,12 @@ report_health() {
 #   镜像变了的时候 ./start.sh 会重建容器、jupyter 跟着回来；镜像**没**变的时候
 #   先在容器里把 jupyter 杀掉、再跑 ./start.sh ⇒ `docker compose` 报 **0 行 Recreate**，
 #   而宿主 `curl http://127.0.0.1:7789/jupyter/tree` 一直是 000 —— 也就是说**掉进去的 jupyter 靠 ./start.sh 起不回来**，
+#     （上面那句里的路径是**现在**该打的那一条；**2026-10-08 那次实测 typed 的是根路径 `/tree`** ——
+#     取证：`git show 5f07b24:start.sh` 的 ④ 那一行写的是 `curl http://127.0.0.1:7789/tree`，
+#     base_url=/jupyter/ 是 2026-10-09（WI-94 Task 1）才落的，所以别把这两个写法当成同一次测量。
+#     000 与路径无关，它说的是"7789 上没人监听"：2026-10-09 实测服务在跑时 `/tree` → 404、
+#     `/jupyter/tree` → 302，而打一个没人听的端口（7791）两种写法都是 000 ⇒ 照抄的人看到 404
+#     要想的是"前缀打错了"，看到 000 才是这一条说的"进程掉了"。）
 #   旧文案那句"必要时 ./start.sh --rebuild"对这个症状是 10-20 分钟的空等（--rebuild 是 --no-cache 冷构建，
 #   修的是"镜像里没带 Jupyter"，不是"镜像里有、进程没了"）。真正的补救是换一个**新容器**：
 #   `docker compose up -d --force-recreate arena`。
