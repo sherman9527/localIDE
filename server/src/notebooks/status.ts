@@ -147,8 +147,12 @@ async function jupyterApi(subPath: string, token: string, doFetch: typeof fetch,
  * 静默漂成"按设计不给（不用修）" —— 正是评审 T34 那条双重误导的复活，而且复活在修好了它的那次改动里。
  * 默认值取 `config.notebook.tokenKeyPresent`（读的那一刻记下的），入参只是给测试的注入点
  * （与 `tokenOverride` 同一形状：生产路径不传，走的就是 config 那份记录）。
+ *
+ * **WI-94：反代守卫（`notebooks/proxyGuard.ts`）复用这同一段话** —— '从没生成' 与 '按设计不给'
+ * 修的是相反的东西，写两遍迟早只有一遍更新。导出是为了让"复用"这件事可判
+ * （判据：`server/test/notebooks/proxyGuard.test.ts` 里那句「503 那句话用的就是 status.ts 那一份」）。
  */
-function missingTokenReason(tokenKeyPresent: boolean): string {
+export function missingTokenReason(tokenKeyPresent: boolean): string {
   return tokenKeyPresent
     ? `${TOKEN_KEY} 是空的 ⇒ token 从没生成过：跑一次 ./start.sh（首启会生成并写进 .env），容器拿到它才会有 notebook`
     : `这个实例没有被给予 ${TOKEN_KEY}（compose 只给 arena / tools 透传，dev 与 e2e 故意不给 —— 那是 WI-40 的隔离规则）` +
