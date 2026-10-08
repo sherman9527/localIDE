@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import { isLoopbackAddressLiteral, isLoopbackHostHeader } from '../net/localOrigin.js';
-import type { NotebookKernel, NotebookStatusResponse } from '@arena/shared';
+import { venvPythonPath } from '../ide/env.js';
+import { NOTEBOOK_KERNELS, type NotebookKernel, type NotebookStatusResponse } from '@arena/shared';
 
 /**
  * 「这个请求能不能拿到 token」—— 终审 C-1 之后它是**合取**，两半都要点头：
@@ -246,7 +247,43 @@ export async function notebookStatus(input: {
     // 判住这件事的是 `server/test/notebooks/kernel.test.ts` 那条**不经过 mock** 的容器档闸门
     // （直接调这个函数打真 Jupyter）。改这一行之前先去读那条。
     const body = (await ks.json()) as { kernelspecs?: Record<string, { spec?: { display_name?: string } }> };
-    kernels = Object.entries(body.kernelspecs ?? {}).map(([id, v]) => ({ id, label: v.spec?.display_name ?? id, ready: true }));
+    /**
+     * **终审 I-1：`ready` 过去在这里恒为 true**，于是一整条规格要求的状态在生产里不可达 ——
+     * `web/src/pages/Notebook.tsx` 的 `blocked`（`kernels.filter(k => !k.ready)`）永远是空表
+     * ⇒「准备环境」按钮永远不渲染 ⇒ `POST /api/notebook/prepare-env` 永远没有调用方
+     * ⇒ `NotebookKernel.reason` 永远没有值（契约与规格都要的那一态：spec `:159`、`:174-175`）。
+     *
+     * 后果不是"少一个按钮"：`arena-pyspark` 的 argv 指的是**懒创建**的 IDE venv
+     * （`docker/jupyter/kernels/arena-pyspark/kernel.json` 里那条解释器路径 —— 镜像从来不含它，
+     * `ARENA_IDE_ENV_DIR` 那个命名卷在首次显式创建之前是空的）。于是**全新卷**上这一页写着
+     * 「运行中」+ 绿徽标、README 说"选它然后 Run All"，用户按下去起不来；而这时如果用页面上
+     * 另一条 kernel（镜像自带的系统解释器）兜底，`!pip3 install` 就装进**判题那套**环境 ——
+     * 红线①正好在被 entrypoint 那段警告为它而写的状态下踩掉。
+     *
+     * 判的是**解释器在不在**（一次本地 stat），不是"本进程有没有跑过 ensureIdeEnv"那种内存状态：
+     * 那个状态跨不过重启，而这一页是要被轮询的。路径一律从 `venvPythonPath(config.ideEnvDir)` 派生 ——
+     * **不写死 `/opt/arena-ide-env`**，也**不加"Windows 上就跳过"的平台分支**：
+     * 台账 `Ruling(T2-C 修正)` 记着那条分支的后果（宿主档恒为真 = 这条判据在唯一每天跑它的那一档
+     * 永不生效）。宿主直跑时 `config.ideEnvDir` 是 `data/ide-env`，解释器同样还没建 ⇒
+     * 这一态在宿主也真实存在，不是为容器编出来的。
+     *
+     * ⚠ 这里**只 stat、绝不创建**：分钟级的 venv 不许挂在会被轮询的只读路径上
+     * （与本文件顶部那段、以及 prepare-env 那条路由的注释同一条纪律）。
+     */
+    const venvInterpreter = venvPythonPath(config.ideEnvDir);
+    const venvReady = existsSync(venvInterpreter);
+    kernels = Object.entries(body.kernelspecs ?? {}).map(([id, v]) => {
+      const needsVenv = id === NOTEBOOK_KERNELS.pyspark;
+      const kernel: NotebookKernel = { id, label: v.spec?.display_name ?? id, ready: !needsVenv || venvReady };
+      if (needsVenv && !venvReady) {
+        kernel.reason =
+          `环境还没建：这条 kernel 的解释器指向 IDE 那份 venv（${venvInterpreter}），而它还不存在 —— ` +
+          'venv 是**懒创建**的，镜像里从来不含它，所以"服务在跑"与"能跑代码"是两件事。' +
+          '现在选它只会得到"起不来"。按「准备环境」建一次（第一次几十秒到两分钟，建在命名卷上、跨重启保留）。' +
+          '在那之前**别拿另一条 kernel 兜底**：那是镜像自带的系统解释器，`!pip3 install` 装进去的包会落到判题那套环境里（红线①）。';
+      }
+      return kernel;
+    });
   } catch (err) {
     // 三条 reason 对应三件不同的事，不许合成一句"连不上"：
     // 超时 = 有人在听但不答（多半是 jupyter 卡住）；未在监听 = 进程根本没起；HTTP 状态 = token 不对。

@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
 import { NOTEBOOK_KERNELS, type NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
+import { venvPythonPath } from '../../src/ide/env.js';
 import { notebookStatus, parseProcNetRoute } from '../../src/notebooks/status.js';
 
 /**
@@ -176,10 +177,20 @@ describe('notebookStatus', () => {
     // 两条都要在，且标签来自 `spec.display_name`（不是 id、不是顶层）：
     // 这一句以前只期望 arena-pyspark 一条，因为 fixture 里就只有那一条 —— 真回话两条都列，
     // 少收 python3 的代价是"界面显示的 kernel 清单与 Jupyter 自己列的不是一回事"，没人会当 bug 报。
-    expect(res.kernels).toEqual([
-      { id: 'python3', label: 'Python 3 (ipykernel)', ready: true },
-      { id: 'arena-pyspark', label: 'PySpark (arena)', ready: true },
+    //
+    // ⚠ **终审 I-1 之后 `ready` 不再能从这一条里写死**：arena-pyspark 的 ready 判的是盘上那份
+    // 懒创建的 venv 解释器在不在，于是它随"这台机器今天建没建过 IDE 环境"变化 ——
+    // 照原样写 `ready: true` 会变成一条抽签断言（新克隆的机器上红、跑过 IDE 的机器上绿，
+    // 两边都不说明任何东西）。"清单与标签"在这里判，"ready 的两态"由下面那组
+    // 「venv 在不在」用**受控的临时目录**判（那组才是非空转的那一层）。
+    expect(res.kernels.map((k) => `${k.id}=${k.label}`)).toEqual([
+      'python3=Python 3 (ipykernel)',
+      `${NOTEBOOK_KERNELS.pyspark}=PySpark (arena)`,
     ]);
+    const py = res.kernels.find((k) => k.id === 'python3');
+    expect(py?.ready, 'python3 用的是镜像自带的解释器，不依赖那份懒创建的 venv ⇒ 它恒就绪').toBe(true);
+    const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+    expect(spark?.ready).toBe(existsSync(venvPythonPath(config.ideEnvDir)));
   });
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
@@ -548,6 +559,128 @@ describe('notebookStatus', () => {
     });
     expect(timedOut.reason).toMatch(/超时/);
     expect(timedOut.reason).not.toContain('ECONNREFUSED');
+  });
+});
+
+/**
+ * **终审 I-1：`ready:false` 那一态必须在真 `notebookStatus()` 上判得住。**
+ *
+ * 为什么这一组存在（而不是"上面那条断言里带个 ready 就够了"）：`ready` 过去在 `status.ts` 里
+ * **恒为 true**，于是前端那个 `blocked` 集合永远是空表、「准备环境」按钮永远不渲染、
+ * `POST /api/notebook/prepare-env` 永远没有调用方、`NotebookKernel.reason` 永远没有值 ——
+ * 规格要的那一态（spec `:159`、`:174-175`）在生产里**不可达**，而上面所有用例都不看盘：
+ * 它们跑的是"这台机器今天有没有建过 IDE 环境"，写死 true 也照样绿。
+ * ⇒ 判据必须**自己造那个环境**：把 `ARENA_IDE_ENV_DIR` 指到一个临时目录，
+ * 一次不放解释器（要 `ready:false` + 一句能行动的原因）、一次放上（要 `ready:true`）。
+ * 两态各判一次，缝就不可能再是空的（本仓库的规矩：结构断言要配上"它真的会因为缺功能而红"的判据）。
+ *
+ * 每一趟都 `vi.resetModules()` 重导一份 `status.js`：`config.ideEnvDir` 是 import 时定型的
+ * （而且 `consumeIdeEnvDir()` 读完就把键摘了），拿静态那份 import 改 env 是**改了也不生效**的写法。
+ * 与 `kernel.test.ts` 处理 `gatewayOnce` 缓存用的是同一个缝，不为测试放宽生产代码的可见性。
+ */
+describe('venv 在不在决定 arena-pyspark 的 ready（I-1：用受控临时目录判，不赌机器状态）', () => {
+  const KEY = 'ARENA_IDE_ENV_DIR';
+
+  /**
+   * 把 IDE 环境目录指到 `root`，用**新的那份模块实例**跑一次真 notebookStatus（假 Jupyter 只负责
+   * 把 arena-pyspark 列进来 —— 被测的是这函数对盘的判断，不是网络解析，解析由上面那组判）。
+   */
+  async function statusWithIdeEnv(root: string, kernelspecsId: string): Promise<NotebookStatusResponse> {
+    const saved = process.env[KEY];
+    process.env[KEY] = root;
+    try {
+      vi.resetModules();
+      const { notebookStatus: fresh } = await import('../../src/notebooks/status.js');
+      return await fresh({
+        peerAddress: '127.0.0.1',
+        ...TOK,
+        fetchImpl: (vi.fn(async (u: string | URL) =>
+          String(u).includes('/api/kernelspecs')
+            ? { status: 200, json: async () => ({ default: kernelspecsId, kernelspecs: { [kernelspecsId]: { name: kernelspecsId, spec: { display_name: 'PySpark (arena)' }, resources: {} } } }) }
+            : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) }) as unknown as typeof fetch),
+      });
+    } finally {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+    }
+  }
+
+  /** 临时目录放在仓库的 data/test-tmp/ 下（与 notebook-api.test.ts 同一套隔离纪律，跑完就收）。 */
+  function freshIdeEnvRoot(): string {
+    // mkdtemp 不会替你把父目录建出来：`data/test-tmp/` 在新克隆与容器里都不存在，
+    // 少这一句的症状是"这条用例在干净的机器上 ENOENT"（本地跑一百次都不会发现）。
+    const parent = join(process.cwd(), 'data', 'test-tmp');
+    mkdirSync(parent, { recursive: true });
+    return mkdtempSync(join(parent, 'status-venv-'));
+  }
+
+  it('解释器不在 ⇒ ready:false，原因里点名那份 venv 与那个按钮（只 stat，绝不在 GET 里建环境）', async () => {
+    const root = freshIdeEnvRoot();
+    try {
+      const res = await statusWithIdeEnv(root, NOTEBOOK_KERNELS.pyspark);
+      const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+      expect(res.running, 'Jupyter 确实在答 ⇒ 这一条判的是环境就绪，不是服务在不在').toBe(true);
+      expect(spark, `表里应该有 ${NOTEBOOK_KERNELS.pyspark}`).toBeTruthy();
+      expect(spark!.ready, 'venv 解释器不在还报 ready:true ⇒ 这就是 I-1 那个不可达态的成因').toBe(false);
+      const reason = spark!.reason ?? '';
+      // 三样都得在这一句里读到，缺一个用户就得到"不可用"三个字而不是下一步：
+      // ① 是哪个环境（路径从 config 派生的那一份，不是写死的 /opt/arena-ide-env）；
+      expect(reason, '原因里要点名那份 venv 的解释器路径 ⇒ 读者能自己核对，而不是信一个布尔').toContain(venvPythonPath(root));
+      // ② 这个按钮做什么、要多久（第一次几十秒到两分钟，不写时长会让人以为卡死）；
+      expect(reason).toMatch(/准备环境/);
+      expect(reason).toMatch(/几十秒|分钟/);
+      // ③ 为什么不能拿另一条 kernel 兜底（红线①就踩在这一步上：!pip3 落进系统解释器）。
+      expect(reason, '没提"别用系统解释器兜底" ⇒ 用户下一步就是 !pip3 install，而那是判题那套环境').toMatch(/红线|判题/);
+      // 反向对照：这条用例本身要能红 —— 把 ready 写回 true 的人必须被这一条抓到（上面那句判的就是它）。
+      expect(reason).not.toBe('');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('解释器在 ⇒ ready:true（别把这一态写成"永远没就绪"，那是另一种静默降级）', async () => {
+    const root = freshIdeEnvRoot();
+    try {
+      // 只造那一**个**文件：路径必须由生产用的同一个 `venvPythonPath()` 派生，
+      // 于是"实现里写死了 /opt/arena-ide-env"或"少了 python/ 那一层"都会在这一条上红。
+      const interpreter = venvPythonPath(join(root));
+      mkdirSync(dirname(interpreter), { recursive: true });
+      writeFileSync(interpreter, '#!/bin/sh\nexit 0\n', 'utf8');
+      expect(existsSync(interpreter), '夹具本身没建成 ⇒ 这一条会假绿，先把夹具修好').toBe(true);
+      const res = await statusWithIdeEnv(root, NOTEBOOK_KERNELS.pyspark);
+      const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+      expect(spark?.ready, '解释器明明在却报没就绪 ⇒ 用户会被一个绿页面反过来挡住，按钮永远亮着').toBe(true);
+      expect(spark?.reason, '就绪了还挂着原因 ⇒ 前端会把这条列进 blocked，按钮又出不来了').toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * 另一半：**不是 arena-pyspark 的那些 kernel 不许被这份 venv 的状态拖累**。
+   * 判的形状：同一次跑里 python3 恒就绪（它用的是镜像自带的解释器）。
+   * 少了这一条，"把 ready 全判成 venv 在不在"这种写法能过上面两条。
+   */
+  it('venv 缺席只影响 arena-pyspark，不牵连别的 kernel', async () => {
+    const root = freshIdeEnvRoot();
+    try {
+      const saved = process.env[KEY];
+      process.env[KEY] = root;
+      try {
+        vi.resetModules();
+        const { notebookStatus: fresh } = await import('../../src/notebooks/status.js');
+        const res = await fresh({ peerAddress: '127.0.0.1', ...TOK, fetchImpl: fake() });
+        const py = res.kernels.find((k) => k.id === 'python3');
+        expect(py?.ready, 'python3 不依赖那份懒创建的 venv ⇒ 一起判成没就绪就是把页面做成"什么都不能用"').toBe(true);
+        const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+        expect(spark?.ready).toBe(false);
+      } finally {
+        if (saved === undefined) delete process.env[KEY];
+        else process.env[KEY] = saved;
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
