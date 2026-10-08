@@ -792,8 +792,14 @@ Run: `cd server && npx vitest run test/regression/verify-coverage.test.ts` → �
 const APP_PORT = config.port; // 7788：容器内自己的 API
 ```
 
-要判的五条：
-1. `GET /jupyter/tree`（对端 127.0.0.1，Host `127.0.0.1:7788`，`Sec-Fetch-Site: same-origin`）⇒ **200**，body 里含 `<html`，且 `!body.includes(config.notebook.token)`（凭据没落到页面上 —— 这条是注入式而非透传的证据）。
+要判的这几条（①②⑤ 三条的形状是 Task 3 实施时按实测改过的，原稿那版会常驻红，理由写在每条后面；
+落地时还多了两条原稿没列的：一条在 HTTP 层判住守卫"对端那一半"的"对端外来 + Host 本机"组合，
+一条**不注入** `gatewayAddresses`、用真 `/proc/net/route` 的网关当对端 ⇒ 200，那是上一档遗留的 I-3 那笔账）：
+1. `GET /jupyter/tree`（对端 127.0.0.1，Host `127.0.0.1:7788`，`Sec-Fetch-Site: same-origin`）⇒ **200**，body 里含 `<html`。
+   ⚠ 原稿这里写的是"且 body 不含 token（注入式而非透传的证据）"—— **判据前提被实测推翻**：
+   Notebook 7 自己就把 token 写进树页的内嵌 PageConfig，直连上游、不经反代也一样有。
+   改成判**差分**：经隧道那份"含不含凭据"必须与直连那份**一致**，加上**我们自己写的响应头**里没有凭据。
+   （另见"完成判据 #3"那条收窄，以及"不许 `not.toContain(token)`"这条实现纪律。）
 2. 同一条**不带** `Sec-Fetch-Site`（curl 形状）⇒ 200（缺席=非浏览器，放行；红在这里说明把'none'那一支写错了）。
 3. `Sec-Fetch-Site: cross-site` ⇒ 403 + `notebook_cross_site`。
 4. Host 写 `rebinding.example:7788` ⇒ **403**，而且是**我们**那层的 403（`error` 字段是 `bad_host` —— origin 钩子先拦；这条判"整个 origin 的钩子确实盖住了 `/jupyter/*` 这棵树"）。
@@ -1359,7 +1365,14 @@ Expected: `BUILD_EXIT=0`。**不许**用 `docker cp` 代替重建（那只活在
 
 1. 三个退出码 `CV_EXIT=0` / `FAST_EXIT=0` / `E2E_EXIT=0`，且容器档 notebook 阶段确实跑了、区域里 `skip` 为 0、判题矩阵 `跳过 0`。
 2. 真浏览器里：console error 与 warning 都为 0；iframe 里那份 notebook **真的执行了一行代码并出了结果**；切走再切回没有残留面板；停顿 60 秒服务还在。
-3. 页面上任何链接、任何响应体、任何日志里都**不含 token**；守卫的三个否决各有自己的状态码与 `error` 码，且都做过破坏性验证。
+3. **凭据只住在一个地方**（Task 3 落地后按实测收窄，原稿那句"页面上任何链接、任何响应体都不含 token"是**假的**）：
+   ① **由我们生成**的东西 —— 自己拼的链接、响应头、错误消息、日志 —— 不含凭据；
+   ② 上游 HTML 里那份 PageConfig token 是 jupyter 自己的既有形状（直连 7789 也一样有），由一条**差分断言**
+   钉住"经隧道与直连含不含凭据必须一致"；把它列成"反代泄漏"是把既有事实记在新代码账上（裁定见台账 Ruling(4)，
+   减暴露的后续动作登记为 WI-98）。
+   ③ 附带一条实现纪律：**不许写 `expect(body).not.toContain(config.notebook.token)`** ——
+   vitest 在失败时会把"期望不包含的那一串"印进报告，一次失败就把长期凭据写进测试输出（Task 3 实测撞到过一次）。
+   统一走只返回布尔的 helper（`embed.test.ts` 的 `holdsToken()`），失败消息里只出现 `true`/`false`。
 4. `/jupyter` 这个字面量只在 `shared/src/notebook.ts` 出现一次，其余全为派生或由闸门按派生值查文本。
 5. `package.json`（server/web/shared 三处）一个字节都没变。
 6. `memo.md` 里程碑 + `HANDOVER.md` 已移动 WI-94；每条新闸门的破坏性验证结果写在代码注释里而不是"应该会被抓到"。
