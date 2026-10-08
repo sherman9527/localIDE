@@ -58,7 +58,11 @@ if [ "$NB_SERVICE" = "1" ]; then
   # `env 门控`判据现在要求"设了全部变量的阶段"，专门阶段满足、这一条不满足），但"A 阶段说排除、
   # 守卫却按认领算"这个方向是错的：将来若有人靠 `--exclude` 把某个门控文件挪出目录扫描，
   # verify-coverage 会以为它还在跑。修法是解析时把 `--exclude` 的值记成**排除**而不是认领。
-  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+  # WI-94 Task 3：`embed.test.ts`（反代打在真 Jupyter 上）走的是**同一条被登记的路**——它同样用
+  # `describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)` 门控，所以这里排除它、由下面那条专门阶段认领。
+  # 排除的理由与 kernel.test.ts 不同但更硬：那一档真跑 Spark（贵），这一档每条都打真 7788 + 真 jupyter，
+  # 在"单元测试"阶段扫目录时会**与专门阶段各跑一遍**，其中第 5 条会往 data/notebooks 建一份再删一份笔记。
+  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts --exclude server/test/notebooks/embed.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 else
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 fi
@@ -79,7 +83,9 @@ run "网页 IDE（执行内核与解耦边界）" npx vitest run server/test/ide
 # 两个变量在阶段命令里都显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
 # '设了那个变量'的阶段认领"读的是**阶段命令行**，容器环境里已有的那份它看不见（照它的报错接线）。
 if [ "$NB_SERVICE" = "1" ]; then
-  run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/kernel.test.ts
+  # WI-94 Task 3：`embed.test.ts`（反代 + 真 Jupyter）由这一条认领 —— 两个变量都得设上，
+  # 否则 verify-coverage 那条"env 门控的闸门必须被'设了那个变量'的阶段认领"会红（实测过它先红后绿）。
+  run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/kernel.test.ts server/test/notebooks/embed.test.ts
 else
   printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\033[0m\n'
 fi

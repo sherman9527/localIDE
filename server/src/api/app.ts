@@ -50,6 +50,7 @@ import { resetIdeEnv } from '../ide/reset.js';
 import { ensureIdeEnv } from '../ide/env.js';
 import { findLanguage } from '../ide/languages.js';
 import { notebookStatus } from '../notebooks/status.js';
+import { registerNotebookProxy, type NotebookUpstream } from '../notebooks/proxy.js';
 import { seedNotebooks } from '../notebooks/seed.js';
 import type {
   DebugAction,
@@ -112,6 +113,12 @@ export interface AppDeps {
    * 不是请求参数 ⇒ 客户端碰不到它，也换不到 token（判据依旧是**对端 + Host 的合取**，见 C-1 那段）。
    */
   notebookGatewayAddresses?: string[];
+  /**
+   * WI-94：`/jupyter/*` 反代的**上游**。生产路径永远是"同一个容器里的 jupyter"
+   * （`127.0.0.1:config.notebook.port`），这个口子只为测试开（宿主档要在临时端口上跑一个假上游）。
+   * 它不是请求参数 ⇒ 客户端碰不到它，也指不了别处（把上游做成可配 = 给一个没鉴权的服务加一条 SSRF）。
+   */
+  notebookUpstream?: NotebookUpstream;
 }
 
 interface ApiError {
@@ -947,6 +954,15 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await bank.unhide(id);
     const payload: HideResponse = { id, hidden: false };
     return payload;
+  });
+
+  // MARK: WI-94 同源反代（`/jupyter/*` → 容器里的 Jupyter）
+  // 放在静态资源**之前**：路由匹配本来就比 `@fastify/static` 的根 `/*` 更具体（find-my-way 按静态段优先，
+  // 这条实测过），顺序不是功能前提；放在这里是为了让"把上面那行注释删了以后仍看不出什么"的读者少一个理由。
+  // 放行判据只有一处（`proxy.ts` 里那一次 `guardNotebookProxy`），这一层不再判任何东西。
+  registerNotebookProxy(app, {
+    ...(deps.notebookUpstream === undefined ? {} : { upstream: deps.notebookUpstream }),
+    ...(deps.notebookGatewayAddresses === undefined ? {} : { gatewayAddresses: deps.notebookGatewayAddresses }),
   });
 
   // MARK: 静态资源与 SPA 回退
