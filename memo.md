@@ -3394,8 +3394,12 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
   + token 由服务端注入（HTTP header；websocket 必须走 `?token=`，浏览器给不了 ws 的请求头），**不引新依赖**
   —— `ws` 只是被 hoist 上来的传递包、不是 `server` 声明的依赖 ⇒ 用 `http`/`net` + `upgrade` 事件手写。
   硬前提：被代理的那棵子树上必须有 `Host` 白名单 + `Sec-Fetch-Site ∈ {same-origin, none}`，**fail-closed** ——
-  注入 token 之后"谁能打开 7788"就等价于"谁能在容器里执行代码"。**另有一条今天就已成立的开放事实**（等用户
-  点头，不是 WI-94 的前置）：7788 没有任何 Host 白名单 ⇒ 对那张未鉴权的题库做 DNS rebinding 现在就行得通。
+  注入 token 之后"谁能打开 7788"就等价于"谁能在容器里执行代码"。
+  ⚠ **2026-10-08 收尾轮更正（终审 N1）**：这里原先写"7788 没有任何 Host 白名单 ⇒ 对那张未鉴权的题库做
+  DNS rebinding 现在就行得通"，两条都已过期 —— `server/src/api/app.ts` 那条 origin 级 `onRequest` 钩子
+  把 Host 非本机字面量的请求**整个 origin** 判 403（含 `/api/bank`、静态资源、SPA 兜底；宿主实测四个路径全 403）。
+  它还漏的三件事仍成立，也正是 WI-94 那条前提没被顺手做掉的理由：判的是头的形状而不是鉴权（不替代绑回环）、
+  socket 对端那一半只护 token 释放、看不见 `Sec-Fetch-Site` 也管不到 `/jupyter/*` 的 websocket。
 - **CDP 那条抖动**（WI-92）：见上面"一次红的整轮"。要修的是它的会话启动竞态，不是给它加 skip。
 - **未测的两项**：镜像增量、常驻内存（要 `docker images` / `docker stats` 前后对照，收尾轮不动栈）⇒
   spec §11 里写"未测"，没有数字就不写数字。

@@ -1308,10 +1308,21 @@
   `upgrade` 事件手写这一层（把传递包当直接依赖用 = 下次装包树一变就静默没掉）。
   ｜**必须有的闸门（这条是硬前提，不是收尾打磨）**：被代理的那棵子树上要加 `Host` 白名单 +
   `Sec-Fetch-Site ∈ {same-origin, none}`，**fail-closed** —— 因为一旦 7788 注入 token，
-  "谁能把报文发到 7788"就等价于"谁能在容器里执行代码"，而 7788 今天**没有任何 Host 白名单**。
-  ｜**等用户点头的开放事实**（独立成立，今天就可利用，与要不要内嵌无关）：正因为 7788 没有 Host 白名单，
-  对那张未鉴权的题库做 **DNS rebinding 现在就行得通**。要不要补这道守卫由用户定；本轮只在 WI-94 与
-  `memo.md` 里程碑 BB 里记账，**没有**动 7788 的鉴权或 Host 判据。
+  "谁能把报文发到 7788"就等价于"谁能在容器里执行代码"。
+  ｜**2026-10-08 收尾轮更正（终审 N1）**：这一段原先写的是"7788 今天**没有任何 Host 白名单**"与
+  "对那张未鉴权的题库做 **DNS rebinding 现在就行得通**" —— 两条在 C-1 之后**都不成立**，
+  别照着它们去补一道已经存在的守卫。今天成立的是：`server/src/api/app.ts` 那条 origin 级 `onRequest`
+  钩子（`isLoopbackHostHeader`，fail-closed）把 Host 不是本机字面量的请求**整个 origin 判 403**，
+  含无鉴权的 `/api/bank`、静态资源与 SPA 兜底（实测宿主 `curl -H 'Host: evil.example'` 对
+  `/`、`/assets/`、`/no-such-page`、`/api/health` 全部 403）；判据在 `server/test/api/notebook-api.test.ts`。
+  ｜**这道守卫仍然不够 WI-94 用**，缺的是三件事，所以那条"硬前提"没被顺手做掉：
+  ① 它判的是**头的形状**，不是鉴权、也不替代"只绑宿主回环"（闸门 `compose-ports.test.ts`）——
+  Host 谁都写得出来：本机上的任何进程、将来任何反代转发时填的 `127.0.0.1` 都过得了这一层；
+  ② **socket 对端**那一半只在释放 token 的那条路由上判（合取，终审 C-1），别的路由没有对端判据；
+  ③ 它看不见 `Sec-Fetch-Site`，也管不到 `/jupyter/*` 那棵树上的 websocket 握手 —— 注入 token 之后
+  "能把报文发到 7788"依然等价于"能在容器里执行代码"，那一层必须自己 fail-closed。
+  （原先那句"要不要补这道守卫由用户定"也随之作废：守卫已经在 `7c5f9dc` 之后加上了，
+  要不要**再加** `Sec-Fetch-Site` 那一层才是等用户点头的东西。）
 
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），

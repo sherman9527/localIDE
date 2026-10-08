@@ -52,7 +52,6 @@ if [ "${ARENA_NOTEBOOK_SERVICE:-0}" = "1" ]; then NB_SERVICE=1; else NB_SERVICE=
 if [ "$NB_SERVICE" = "1" ]; then
   # `--exclude` 的值**不要**写成 `"${ARR[@]}"`：verify-coverage.test.ts 收集认领路径时丢掉以 `-` 开头的
   # token（所以那个 flag 本身不会被当成路径），但以引号开头的 `"${ARR[@]}"` 会被记成一条**假路径**。
-  # 这里展开后是裸路径，最坏只是多一条永远匹配不上文件的模式，不会误认领。
   # ⚠ 已知弱点（**登记给 A2，本轮不修**）：`--exclude` 的**值**本身会被 verify-coverage.test.ts 的
   # 认领路径收集当成一条"这条阶段跑了 kernel.test.ts"的模式（它只丢以 `-` 开头的 token，不丢 `--exclude`
   # 后面那个路径）⇒ 被排除的文件看起来仍被这一阶段认领。今天它不构成误判（kernel.test.ts 那条

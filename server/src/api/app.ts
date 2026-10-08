@@ -193,9 +193,17 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
    * 两边同码，将来才可能用同一条探针判两边。
    *
    * ⚠ 这一层**不替代** token 路径上的合取，两层各判一件事：这层拦的是"外来 Host 读到任何东西"，
-   * 那层拦的是"对端是本机但 Host 不是本机时不许发凭据"。删掉这一层，token 那一半必须还红
-   * （`server/test/notebooks/status.test.ts` 的合取表不打 HTTP，走的正是那条）；
-   * 删掉那一半，`notebook-api.test.ts` 的"路由把 Host 头接进 notebookStatus"那两条必须红。
+   * 那层拦的是"对端是本机但 Host 不是本机时不许发凭据"。两侧的**实测**配对（2026-10-08 收尾轮做的
+   * 破坏性验证，原先这里写的是"删掉哪一侧都会红哪两条"，那句是**没测过的推测**、测出来是错的）：
+   * - 摘掉**这一层**（钩子无条件 return）⇒ 红在 `server/test/api/notebook-api.test.ts` 的四条用例：
+   *   「C-1 真回环对端 + 外来 Host…整个 origin 拒绝」「C-1 的 Host 白名单覆盖整个 origin…读不到 /api/bank」
+   *   「C-1 的 Host 白名单也管非 API 那半棵树…」「对端是网关 + 外来 Host ⇒ 不给 token」，
+   *   报的都是 `expected 200 to be 403`（实测 2026-10-08，4 failed | 43 passed）。
+   *   **不是** token 泄漏：内层那半还在，走到路由的请求依然拿不到凭据（那几条里的 token 判据都还是绿的）。
+   * - 摘掉**内层那一半**（`status.ts` 的 `hostHeader` 判据）⇒ 只红在
+   *   `server/test/notebooks/status.test.ts` 那条「token 释放是合取：对端本机 **且** Host 是本机字面量」
+   *   （合取表直接调函数、不打 HTTP，所以它不受这一层遮挡）。`notebook-api.test.ts` 的路由档**造不出**
+   *   "对端本机 + Host 外来"那一态 —— 外层先 403，请求根本走不到路由去读内层。那不是漏接线，是这一层的效果。
    */
   app.addHook('onRequest', async (request, reply) => {
     if (isLoopbackHostHeader(request.headers.host)) return;

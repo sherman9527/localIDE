@@ -49,7 +49,8 @@ const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8');
 
 describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
   it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
-    // 旧判据只吃三处（arena/dev/e2e，compose.yml 里那三行 ARENA_IDE_ENV_DIR：今天 :44/:134/:173）
+    // 旧判据只吃三处（arena / dev / e2e 三个服务块里各自的 `ARENA_IDE_ENV_DIR:` 那一行 ——
+    // 按服务名定位，不写行号：行号会漂，上一轮这里就漂成了 `:44/:134/:173` 那种"今天对、下轮错"的引用）
     // 里的**第一处**，
     // dev/e2e 漂移无人看管；且 \S+ 会把 YAML 引号一并捕获，`ARENA_IDE_ENV_DIR: "/opt/arena-ide-env"`
     // 这种语义等价的写法会冤红。现在：只认以 `/` 开头的值（引号可选），三处必须全部命中且相等。

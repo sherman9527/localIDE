@@ -128,7 +128,9 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 
 - **kernel 就是网页 IDE 那份环境**：`PySpark (arena)` 的 argv 指向 `/opt/arena-ide-env/python/bin/python`，
   所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。**这条同时是判题那条红线的第二个入口**
-  —— 包只进 IDE 那套 site-packages，判题器看不到（两道保险见 `docs/JUDGING.md` 最后一段）。
+  —— 默认装进的是 IDE 那套 site-packages，判题器读不到；**但那是默认，不是这一页能给的保证**：
+  entrypoint 那道 PATH 前置只管裸命令，写成 `!/usr/local/bin/pip3 install X` 装进去的就是判题那个解释器，
+  闸门与页面都拦不住这种写法（红线①的可复现性靠**镜像 + 闸门**，见 `docs/JUDGING.md` 红线①最后两段）。
 - **示例**在 `content/notebooks/*.ipynb`（进 git、可 diff）。启动时"缺失才复制"进 `data/notebooks/`，
   **绝不覆盖你改过的那份**；铺不进去（只读挂载 / 磁盘满）会单独说成一句话，不伪装成"没有示例"。
 - **Spark 的表与判题分开**：notebook 用自己的 warehouse 与 Derby（`data/notebook-warehouse/`），

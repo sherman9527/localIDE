@@ -268,8 +268,11 @@ export async function notebookStatus(input: {
      *
      * "那要是我们自己的 kernel 没注册了呢"——不靠"全列"发现：`Notebook.tsx` 的
      * `missingSpec`（表里没有 `NOTEBOOK_KERNELS.pyspark` ⇒ `notebook-spec-missing` 那条横幅，
-     * 文案是"多半是镜像没按 Dockerfile 重建 ⇒ ./start.sh --rebuild"）正是为那一件事准备的，
-     * 而且过滤之后它更准：以前 python3 在场会让这张表非空、看着像"有 kernel 可用"。
+     * 文案是"多半是镜像没按 Dockerfile 重建 ⇒ ./start.sh --rebuild"）正是为那一件事准备的。
+     * ⚠ 过滤让它变准的是**徽标那一排**，不是 `missingSpec`（收尾轮 N7 更正过这句）：
+     * `missingSpec` 只 key 在"`arena-pyspark` 在不在表里"这一件事上，过滤掉别的条目不改它的真假；
+     * 真正被过滤修好的是——以前镜像自带的 python3 挂着绿徽标，那张表看着像"有 kernel 可用"，
+     * 而它正是红线①要拦在判题环境外面的那个解释器。
      */
     const listed = Object.entries(body.kernelspecs ?? {}).filter(([id]) => ARENA_KERNEL_IDS.includes(id));
     /**
@@ -317,7 +320,8 @@ export async function notebookStatus(input: {
   }
 
   // 链接是在**已经探到 Jupyter 在跑**之后拼的，所以这一步坏掉不许把结果说成"未在监听"，
-  // 更不许让 promise reject —— Task 8 会把这个函数直接挂在 GET 路由上，reject 出去就是 500，
+  // 更不许让 promise reject —— 这个函数就挂在 `GET /api/notebook/status` 上（`server/src/api/app.ts`
+  // 的 `// MARK: /api/notebook/status` 那一节，Task 8 早就落了），reject 出去就是 500，
   // 而 500 没有 reason 可读（前端那句"kernel 就绪"会整块消失，读者看不到任何原因，正是本仓库最恨的静默）。
   // 坏值来自 env（ARENA_NOTEBOOK_PUBLIC_URL），这里不写第二份默认值：那会造出端口的第五处真相，
   // 而"给不出链接 + 说清是哪一行坏了"比"给一个可能是错的链接"更可行动。

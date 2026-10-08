@@ -16,7 +16,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * ④ 评审第二条裁定的**第三种形状**：`running:true` + `reason` + **没有 url**
  *    （publicUrl 被 env 配坏）。它既不是"点开它"也不是"没在运行"，必须单独一态：
  *    说成前者是谎（链接不存在），说成后者也是谎（服务确实在跑）。
- * 三句话（共用环境 / 答案可读不是安全边界 / 只在本机打得开）在任何一态都常驻。
+ * 那几句边界话（共用环境 / 绝对路径拦不住 / CPU / 答案可读不是安全边界 / 只在本机打得开，
+ * 逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
  */
 
 const status = vi.fn();
@@ -232,7 +233,8 @@ describe('Notebook 第五页', () => {
   });
 
   /**
-   * 三句话一条都不能省（Step 4），而且**换一态再看**：
+   * 每一句一条都不能省（Step 4；`db08cf8` 之后清单从 3 句长到 7 句，用例名里的"三句"就是这么留下的假话），
+   * 而且**换一态再看**：
    * 只在"在跑"那态显示，等于在用户最该看见的时候（他要开始装包 / 开 notebook 了）把它收走。
    * 评审 Fix-1 的 Minor：一态一个 `it` —— 一个循环里三态共用一条用例名，红的时候只知道
    * "有一句不在"，得再翻代码才知道是哪一态掉的。
@@ -297,7 +299,7 @@ describe('Notebook 第五页', () => {
     expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
   });
 
-  it('状态读不到（服务没起 / 500）时不白屏，且仍说得出那三句', async () => {
+  it('状态读不到（服务没起 / 500）时不白屏，且仍说得出那句"不是安全边界"', async () => {
     status.mockRejectedValue(new Error('连不上本地服务'));
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-error')).toBeTruthy());
