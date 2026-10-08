@@ -338,6 +338,16 @@ describe('/jupyter 同源反代：请求方向', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin' },
       body: payload,
+      // ⚠ 这条**必须带超时**（实测出来的，不是审美）：把 `scope.removeContentTypeParser(...)` 那一行删掉
+      // 之后，Fastify 的默认 JSON 解析器会把 body 变成对象 ⇒ 隧道那条 `upstreamReq.end()` 发的是
+      // "content-length 说了 21 个字节、一个字节都没送"的请求 ⇒ 假上游等不到 `end`、这一档**挂死**
+      // （90 秒没有结论，连 vitest 的 5s 单测超时都救不回来：卡的是没结束的 socket，worker 退不掉）。
+      // 挂死的门禁比红更坏 —— 它看起来像"还在跑"。有了这条超时，那个变异变成一条确定的红。
+      // 补强之后**复测过**（收尾档 2026-10-09，同样加外层 `timeout 180` 判退出码）：
+      //   删掉那一行 ⇒ `1 failed | 14 passed`、vitest exit **1**（不是 124）、整档 10.2s 有结论，
+      //   红的就是这一条，报错原文 `TimeoutError: The operation was aborted due to timeout`（8075ms 处断）。
+      //   ⇒ 这一处补强**足够**把 ④-b 从挂死变成红；失败消息里没有 token 值（CANARY 不会进报告）。
+      signal: AbortSignal.timeout(8000),
     });
     expect(res.status).toBe(200);
     const got = seen.at(-1)!;
