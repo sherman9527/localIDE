@@ -25,6 +25,10 @@ import { config } from '../../src/config.js';
  *    那个文件自己有一条常驻解释断言会在容器档跑时撞红，但它要等一次 `./start.sh --verify` 才看得见；
  *    compose 档是每天跑的那一侧，所以这里也钉一份。多给 dev / tools / e2e 第二条，
  *    等于让那一组在没有 jupyter、没有 token、IDE 环境不在卷上的实例里承诺自己会跑（理由见 ⑦ 本体）。
+ * ⑧（终审 I-3）arena **不许**设 `ARENA_DATA_DIR`：`docker/jupyter/kernels/arena-pyspark/kernel.json:13`
+ *    那份 warehouse/Derby 是构建期 COPY 的**绝对字面量**，而 entrypoint 与 config 都从这个变量派生 ——
+ *    三处只在"arena 没设它"时才重合。`notebook-contract.test.ts` 比的是**叶子名**，
+ *    对"根目录换了"天生瞎，所以这条等式过去只有注释撑着（坏法与实证写在 ⑧ 本体）。
  */
 
 /**
@@ -237,6 +241,56 @@ describe('notebook 的端口与 token 接线', () => {
             '容器档那一组却会在这里 promise 自己会跑，并先在 bind mount 上试建 venv',
         ).toBe(false);
       }
+    }
+  });
+
+  /**
+   * ⑧（终审 I-3）：**arena 这一侧不许设 `ARENA_DATA_DIR`**。
+   *
+   * 这不是一条风格要求，是一条**承重等式**：`docker/jupyter/kernels/arena-pyspark/kernel.json:13`
+   * 里的 `PYSPARK_SUBMIT_ARGS` 把 warehouse 与 Derby 写成**绝对字面量**
+   * `/app/data/notebook-warehouse/{wh,derby}` —— kernelspec 是构建期 COPY 进镜像的静态文件，
+   * 运行时没人能改它（那一段自己写了这一点）。而另外两处是从 env 派生的：
+   * `docker/entrypoint.sh:81-82`（`${ARENA_DATA_DIR:-/app/data}`）与
+   * `server/src/config.ts:93` 那条链（`dataDir = process.env.ARENA_DATA_DIR ?? join(repoRoot,'data')`
+   * ⇒ `config.notebook.warehouseDir`）。**今天**三处重合，只因为 compose 没给 arena 设那个变量。
+   *
+   * 哪天有人给它设上（比如想换个盘、或把 notebook 数据挪出 bind mount），坏法是：
+   * entrypoint 在 `<新目录>` 下建好目录、`/api/notebook/status` 列的也是那边的示例，
+   * 而 spark 把表写进 `/app/data/notebook-warehouse` —— 界面"铺了示例但没有表"，
+   * 且不报错（Spark 会自己建它指着的目录，所以连"目录不存在"都不会成为线索）。
+   *
+   * 为什么必须在这里钉、而不是靠 kernel.json 那段注释：`notebook-contract.test.ts` 比较的是
+   * **叶子名**（`notebooks` / `notebook-warehouse` 这两个名字在三处一致），它对"根目录换了"天生瞎；
+   * 而这段等式的另一头（compose）没有任何一条闸门看过。改 compose 的人看不见 kernel.json 的注释。
+   * 反向也判一眼（别把这条做成"读不到就行"的空判）： arena 块必须真的被解析出来了（上面那条
+   * 「compose 被真的解析出了服务」已经判过 blocks 非空，这里再判 arena 这一条存在）。
+   */
+  it('arena 不设 ARENA_DATA_DIR（kernel.json:13 那份绝对字面量与它派生的两处只在今天重合）', () => {
+    expect(blocks.has('arena'), 'arena 这个服务没被解析出来 ⇒ 这一条会在空气上判').toBe(true);
+    expect(
+      configLine(arena, 'ARENA_DATA_DIR'),
+      'compose 给 arena 设了 ARENA_DATA_DIR ⇒ 三处立刻分叉：kernel.json:13 的 PYSPARK_SUBMIT_ARGS 还是'
+        + ' /app/data/notebook-warehouse（构建期 COPY 的静态文件，运行时改不了），而 entrypoint.sh:81-82 与'
+        + ' config.notebook.warehouseDir 都跟着这个变量走 ⇒ 症状是"示例铺了、表却不在那边"，而且不报错。'
+        + ' 真要换数据目录，得先把 kernel.json 那一行变成运行时生成的 kernelspec（不是改 compose）',
+    ).toBeUndefined();
+    // 同一条等式的另一半：**容器里**仓库根确实是 /app，所以 kernel.json:13 那份绝对字面量今天确实
+    // 等于 config.notebook.warehouseDir。这一档只能在容器里判（宿主档 repoRoot 是检出路径，
+    // 那个字面量在宿主上压根不存在）—— 本文件在**两侧都跑**（verify.sh 的「单元测试」阶段扫
+    // server/test/regression），所以判据按档位分岔，而不是照抄容器假设写死一条：
+    // 写死 `/app` 会在宿主撞红，写死「不是 /app」会在容器撞红（上一版就是这个方向反了）。
+    if (process.env.ARENA_IN_CONTAINER === '1') {
+      expect(
+        config.notebook.warehouseDir,
+        '容器里仓库根不再是 /app ⇒ kernel.json:13 那份构建期 COPY 的绝对字面量连今天都不对，'
+          + ' 只能把 kernelspec 改成运行时生成（见上一条的说明）',
+      ).toBe('/app/data/notebook-warehouse');
+    } else {
+      expect(
+        config.repoRoot,
+        '宿主档的仓库根竟然就是 /app ⇒ 这一档已经是容器了，上面那条容器判据不该被跳过（检查 ARENA_IN_CONTAINER）',
+      ).not.toBe('/app');
     }
   });
 
