@@ -5,6 +5,12 @@ import { venvPythonPath } from '../ide/env.js';
 import { NOTEBOOK_KERNELS, type NotebookKernel, type NotebookStatusResponse } from '@arena/shared';
 
 /**
+ * 页面上允许出现的 kernel（终审 I-4）。从 `NOTEBOOK_KERNELS` 派生 ⇒ A2 加 `arena-scala`
+ * 只需要在那一处加一条，这里自动跟着长（"第四处字面量"是本仓库反复付学费的形状）。
+ */
+const ARENA_KERNEL_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS);
+
+/**
  * 「这个请求能不能拿到 token」—— 终审 C-1 之后它是**合取**，两半都要点头：
  *
  * 1. `isLocalPeer(对端地址)`：判据是**内核给的 socket 对端地址**，不是客户端自报的头（评审 M-1：
@@ -248,6 +254,23 @@ export async function notebookStatus(input: {
     // （直接调这个函数打真 Jupyter）。改这一行之前先去读那条。
     const body = (await ks.json()) as { kernelspecs?: Record<string, { spec?: { display_name?: string } }> };
     /**
+     * **终审 I-4：这一份表要过 arena 自己的 allow-list，不许"照 Jupyter 列的都给"。**
+     *
+     * 为什么"全列"是被否掉的那个方案（它看起来更"诚实"：界面显示的与服务器列的一致）：
+     * `/api/kernelspecs` 里排在前面的是**镜像自带的 `Python 3 (ipykernel)`** —— 那正是
+     * 红线①要拦在判题环境外面的那个系统解释器（`docker/Dockerfile` 装的 pyspark/pandas 那一套）。
+     * 把它列出来，它带的就是**绿徽标**（ready 与"能不能跑"是两件事，用户读到的是"能跑"），
+     * 于是这一页变成"邀请用户去用那个不该用的环境"：在**全新卷**上（I-1 那一态）尤其成立 ——
+     * arena-pyspark 起不来，用户退而选第二个，`!pip3 install` 直接落进判题那套。
+     * 这一页是**入口**不是 Jupyter 本身，它没有义务替 Jupyter 转发一份它自己的全局清单。
+     *
+     * "那要是我们自己的 kernel 没注册了呢"——不靠"全列"发现：`Notebook.tsx` 的
+     * `missingSpec`（表里没有 `NOTEBOOK_KERNELS.pyspark` ⇒ `notebook-spec-missing` 那条横幅，
+     * 文案是"多半是镜像没按 Dockerfile 重建 ⇒ ./start.sh --rebuild"）正是为那一件事准备的，
+     * 而且过滤之后它更准：以前 python3 在场会让这张表非空、看着像"有 kernel 可用"。
+     */
+    const listed = Object.entries(body.kernelspecs ?? {}).filter(([id]) => ARENA_KERNEL_IDS.includes(id));
+    /**
      * **终审 I-1：`ready` 过去在这里恒为 true**，于是一整条规格要求的状态在生产里不可达 ——
      * `web/src/pages/Notebook.tsx` 的 `blocked`（`kernels.filter(k => !k.ready)`）永远是空表
      * ⇒「准备环境」按钮永远不渲染 ⇒ `POST /api/notebook/prepare-env` 永远没有调用方
@@ -272,7 +295,7 @@ export async function notebookStatus(input: {
      */
     const venvInterpreter = venvPythonPath(config.ideEnvDir);
     const venvReady = existsSync(venvInterpreter);
-    kernels = Object.entries(body.kernelspecs ?? {}).map(([id, v]) => {
+    kernels = listed.map(([id, v]) => {
       const needsVenv = id === NOTEBOOK_KERNELS.pyspark;
       const kernel: NotebookKernel = { id, label: v.spec?.display_name ?? id, ready: !needsVenv || venvReady };
       if (needsVenv && !venvReady) {

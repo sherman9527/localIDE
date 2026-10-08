@@ -63,7 +63,10 @@ function argsText(args: unknown[]): string {
  *
  * 三个容易写错的形状都留在这份 fixture 里：
  * ① 标签嵌在 `kernelspecs[<id>].spec.display_name`，不在 entry 顶层；
- * ② `default` 指着的 `python3` 本身也是一条 kernel（少收一条 = 界面列的与 Jupyter 自己列的不是一回事）；
+ * ② `default` 指着的 `python3` 本身也是一条 kernel —— **但它不该出现在响应里**（终审 I-4：
+ *    这一页只列 arena 自己注册的那几条，python3 是镜像自带的系统解释器 = 红线①要挡住的那个）。
+ *    这份 fixture 留着它，正是为了让"过滤"这件事有东西可滤：删掉这条 filter，python3 就会
+ *    带着绿徽标出现在 `res.kernels` 里，而下面那条用例当场红。
  * ③ entry 还带着 `name` / `resources` 两个兄弟键（解析按 entries 走，多余键不该改变结果）。
  */
 const SHIPPED_KERNEL_FILE = join(config.repoRoot, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.pyspark, 'kernel.json');
@@ -174,23 +177,51 @@ describe('notebookStatus', () => {
     // 于是"宿主端口换个号"会同时改掉 compose 与 config 而这条测试独自红 —— 那是冤红，
     // 冤红教给下一个人的是"改测试里的数字"，而不是"看谁真的漂移了"。
     expect(res.url).toBe(`${config.notebook.publicUrl}/tree?token=test-token`);
-    // 两条都要在，且标签来自 `spec.display_name`（不是 id、不是顶层）：
-    // 这一句以前只期望 arena-pyspark 一条，因为 fixture 里就只有那一条 —— 真回话两条都列，
-    // 少收 python3 的代价是"界面显示的 kernel 清单与 Jupyter 自己列的不是一回事"，没人会当 bug 报。
-    //
+    // 标签来自 `spec.display_name`（不是 id、不是顶层）。清单**只有 arena 自己那一条** ——
+    // fixture 里的 python3 由 I-4 的 allow-list 滤掉，它下面单独有一条用例判（含反向对照）。
     // ⚠ **终审 I-1 之后 `ready` 不再能从这一条里写死**：arena-pyspark 的 ready 判的是盘上那份
     // 懒创建的 venv 解释器在不在，于是它随"这台机器今天建没建过 IDE 环境"变化 ——
     // 照原样写 `ready: true` 会变成一条抽签断言（新克隆的机器上红、跑过 IDE 的机器上绿，
     // 两边都不说明任何东西）。"清单与标签"在这里判，"ready 的两态"由下面那组
     // 「venv 在不在」用**受控的临时目录**判（那组才是非空转的那一层）。
-    expect(res.kernels.map((k) => `${k.id}=${k.label}`)).toEqual([
-      'python3=Python 3 (ipykernel)',
-      `${NOTEBOOK_KERNELS.pyspark}=PySpark (arena)`,
-    ]);
-    const py = res.kernels.find((k) => k.id === 'python3');
-    expect(py?.ready, 'python3 用的是镜像自带的解释器，不依赖那份懒创建的 venv ⇒ 它恒就绪').toBe(true);
+    expect(res.kernels.map((k) => `${k.id}=${k.label}`)).toEqual([`${NOTEBOOK_KERNELS.pyspark}=PySpark (arena)`]);
     const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
     expect(spark?.ready).toBe(existsSync(venvPythonPath(config.ideEnvDir)));
+  });
+
+  /**
+   * **终审 I-4：Jupyter 自己列的"别家的 kernel"不许到得了界面。**
+   * fixture 里的 `python3`（Jupyter 的 `default` 还指着它）就是镜像自带的那个系统解释器 ——
+   * 也就是红线①一直不让判题碰的那一套。列出来它就带一个绿徽标，而这一页在全新卷上
+   * （I-1 那一态）恰好会把用户推到"那我选第二个"上去，`!pip3 install` 于是落进判题环境。
+   * 判的是行为（响应里没有它），不是源码里有没有那道 filter —— filter 被删掉这条就红。
+   */
+  it('外来 kernel（python3 = 镜像自带的系统解释器）不进响应：这一页只列 arena 自己注册的那几条（I-4）', async () => {
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
+    expect(res.running).toBe(true);
+    expect(
+      res.kernels.map((k) => k.id),
+      'python3 出现在这一页 = 给用户一个带着绿徽标的"用系统解释器"入口（红线①）',
+    ).not.toContain('python3');
+    expect(res.kernels.map((k) => k.id)).toEqual([NOTEBOOK_KERNELS.pyspark]);
+    // 反向对照（别把 filter 写成"什么都不放过"）：我们自己的那条必须在，而且带标签。
+    // 少了这两句，"返回空表"那种坏法也算通过 —— 而那恰好会让 missingSpec 横幅误报成
+    // 「kernel 没注册 ⇒ ./start.sh --rebuild」，也就是让人去拆一个能用的镜像（status.ts 里记着那次谎）。
+    expect(res.kernels).toHaveLength(1);
+    expect(res.kernels[0]!.label, '标签不许在过滤时丢掉（徽标显示的是它，不是 id）').toBe('PySpark (arena)');
+  });
+
+  /**
+   * allow-list 的**来源**也要判住（I-4 的另一半）：它必须从 `NOTEBOOK_KERNELS` 派生，
+   * 不是第四处手写字符串 —— A2 加 `arena-scala` 时只改那一处就该自动生效
+   * （"两处各写一遍"是本仓库反复付过学费的形状，WI-86 的桥 token 就是同一次学费）。
+   */
+  it('allow-list 从 NOTEBOOK_KERNELS 派生（不是第四处字面量）', () => {
+    const src = readFileSync(join(config.repoRoot, 'server', 'src', 'notebooks', 'status.ts'), 'utf8');
+    expect(src, 'filter 的输入必须是 Object.values(NOTEBOOK_KERNELS)，否则加一条 kernel 要改两处')
+      .toMatch(/const ARENA_KERNEL_IDS[^=]*=\s*Object\.values\(NOTEBOOK_KERNELS\)/);
+    expect(src, 'status.ts 里不该再写死 kernel 的名字（它只有 NOTEBOOK_KERNELS 这一个来源）')
+      .not.toMatch(/=\s*'arena-pyspark'/);
   });
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
@@ -409,8 +440,11 @@ describe('notebookStatus', () => {
       vi.resetModules();
     }
     expect(res.running, '链接拼不出来 ≠ Jupyter 没在跑 ⇒ 这里必须仍是 true').toBe(true);
-    // 长度从真回话派生（两条 spec），断的是"链接坏了不许把 kernel 表一起吞掉"，不是那个数字本身
-    expect(res.kernels).toHaveLength(Object.keys(KERNELSPECS_BODY.kernelspecs).length);
+    // 「链接坏了不许把 kernel 表一起吞掉」判的是这一态里 kernels 还活着、还是我们那一条。
+    // ⚠ 期望值过去是从 `KERNELSPECS_BODY.kernelspecs` 的**键数**派生的（="Jupyter 列了几条"），
+    // 而 I-4 之后响应里只剩 allow-list 那几条 ⇒ 继续从那边派生等于让断言跟着被测物一起漂移，
+    // 正好把这条用例想判的东西抹掉。改成直接点名"还剩哪几条"。
+    expect(res.kernels.map((k) => k.id)).toEqual([NOTEBOOK_KERNELS.pyspark]);
     expect(res.url).toBeUndefined();
     expect(res.reason).toMatch(/ARENA_NOTEBOOK_PUBLIC_URL/);
   });
@@ -657,27 +691,21 @@ describe('venv 在不在决定 arena-pyspark 的 ready（I-1：用受控临时�
   });
 
   /**
-   * 另一半：**不是 arena-pyspark 的那些 kernel 不许被这份 venv 的状态拖累**。
-   * 判的形状：同一次跑里 python3 恒就绪（它用的是镜像自带的解释器）。
-   * 少了这一条，"把 ready 全判成 venv 在不在"这种写法能过上面两条。
+   * 另一半：**venv 缺席只该牵连那一条 kernel**。I-4 之后 allow-list 里今天只有
+   * `NOTEBOOK_KERNELS.pyspark` 一个成员，所以这一条判的是**前端实际拿到的那个集合**
+   * （`Notebook.tsx` 的 `blocked = kernels.filter(k => !k.ready)` —— 按钮就是它撑起来的）：
+   * 它必须恰好是那一条，既不能空（按钮就出不来 = I-1 那个不可达态），也不能是"整表都没就绪"
+   * （那等于把这一页做成"什么都不能用"，而缺的只是一份 venv）。
+   * 顺带钉住"ready 是按 id 判的、不是按整表判的"：A2 加 `arena-scala` 之后这一条会自动变严，
+   * 不必再回来改判据的形状。
    */
-  it('venv 缺席只影响 arena-pyspark，不牵连别的 kernel', async () => {
+  it('venv 缺席时 blocked 恰好是那一条（不空、也不是整表）', async () => {
     const root = freshIdeEnvRoot();
     try {
-      const saved = process.env[KEY];
-      process.env[KEY] = root;
-      try {
-        vi.resetModules();
-        const { notebookStatus: fresh } = await import('../../src/notebooks/status.js');
-        const res = await fresh({ peerAddress: '127.0.0.1', ...TOK, fetchImpl: fake() });
-        const py = res.kernels.find((k) => k.id === 'python3');
-        expect(py?.ready, 'python3 不依赖那份懒创建的 venv ⇒ 一起判成没就绪就是把页面做成"什么都不能用"').toBe(true);
-        const spark = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
-        expect(spark?.ready).toBe(false);
-      } finally {
-        if (saved === undefined) delete process.env[KEY];
-        else process.env[KEY] = saved;
-      }
+      const res = await statusWithIdeEnv(root, NOTEBOOK_KERNELS.pyspark);
+      const blocked = res.kernels.filter((k) => !k.ready).map((k) => k.id);
+      expect(blocked, 'blocked 集合是「准备环境」按钮的唯一判据 ⇒ 空集就是 I-1 那个不可达态').toEqual([NOTEBOOK_KERNELS.pyspark]);
+      expect(res.kernels.every((k) => k.id === NOTEBOOK_KERNELS.pyspark || k.ready), '把不属于 venv 的 kernel 也判成没就绪 = 整页不可用').toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -39,6 +39,10 @@ afterEach(() => {
 const up = {
   running: true,
   url: 'http://127.0.0.1:7789/tree?token=x',
+  // ⚠ 清单里**只有 arena 自己注册的那几条**（终审 I-4）：后端会把 Jupyter 列出的
+  // `Python 3 (ipykernel)` 滤掉，所以"服务端回了 python3"这种形状在这一档里是不存在的。
+  // 下面那几条 `ready:false` 的夹具因此也都写成 arena-pyspark —— 夹具写成不可能的形状，
+  // 判出来的"前端接得住这一态"就只对不可能的输入成立（本项目要的反面正是这种绿）。
   kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
   notebooks: [{ file: '00-smoke-pyspark.ipynb', seeded: true }],
 };
@@ -93,7 +97,8 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: 'http://127.0.0.1:7789/tree',
-      kernels: [{ id: 'python3', label: 'Python 3', ready: false, reason: '解释器不存在' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
     });
     render(<Notebook />);
@@ -133,7 +138,8 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: 'http://127.0.0.1:7789/tree',
-      kernels: [{ id: 'python3', label: 'Python 3', ready: false, reason: '解释器不存在' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: true });
@@ -149,7 +155,8 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: 'http://127.0.0.1:7789/tree',
-      kernels: [{ id: 'python3', label: 'Python 3', ready: false, reason: '解释器不存在' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: false, reason: 'venv 创建超时' });
@@ -168,7 +175,8 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: 'http://127.0.0.1:7789/tree',
-      kernels: [{ id: 'python3', label: 'Python 3', ready: false, reason: '解释器不存在' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: true });

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import type { NotebookPrepareResponse, NotebookStatusResponse } from '@arena/shared';
+import { NOTEBOOK_KERNELS, type NotebookPrepareResponse, type NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
 import type { GradePort, JudgePort } from '../../src/ports.js';
 import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures.js';
@@ -433,6 +433,23 @@ describe('GET /api/notebook/status', () => {
     expect(body.url).toBeUndefined();
     expect(body.reason).toMatch(/ARENA_NOTEBOOK_PUBLIC_URL/);
     expect(body.kernels.map((k) => k.id)).toContain('arena-pyspark');
+  });
+
+  /**
+   * **终审 I-4 的 HTTP 那一半：Jupyter 自己列的 `Python 3 (ipykernel)` 不许到得了响应。**
+   * 上面的 `jupyterUp()` 真的把两条都列出来了（那是真 Jupyter 的回话形状，见 `default: 'python3'`），
+   * 所以这一条判的是"这一页只转发 arena 自己注册的那几条"。
+   * 为什么单测层判过之后还要在路由层再判一次：这一页的用户可见契约就是这份 JSON，
+   * 而 `python3` 带的是绿徽标 —— 它是"用镜像自带的系统解释器"的入口，也就是红线①那个环境。
+   */
+  it('外来 kernel（python3）被挡在响应之外：这一页只列 arena 自己注册的那几条（I-4，路由档）', async () => {
+    jupyterUp();
+    const { app } = await injectApp({ token: CANARY });
+    const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '127.0.0.1', headers: { host: '127.0.0.1:7788' } });
+    expect(res.statusCode).toBe(200);
+    const ids = ((res.json() as NotebookStatusResponse).kernels ?? []).map((k) => k.id);
+    expect(ids, '假 Jupyter 明明列了两条 ⇒ 这一条判的确实是过滤，不是解析').toEqual([NOTEBOOK_KERNELS.pyspark]);
+    expect(JSON.stringify(res.json()), 'Python 3 (ipykernel) 这个标签一旦出去，界面上就是一个可用的绿色 kernel').not.toMatch(/ipykernel/i);
   });
 });
 
