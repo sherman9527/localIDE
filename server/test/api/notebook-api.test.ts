@@ -330,6 +330,45 @@ describe('GET /api/notebook/status', () => {
     expect(health.statusCode, '/api/health 被 Host 白名单挡住 ⇒ 容器会被判成 unhealthy 并反复重启').toBe(200);
   });
 
+  /**
+   * 「整个 origin」这句话里**没被钉过的那半棵树**（收尾轮 P3②）：仓库里每一条 403 断言打的都是 `/api/*`，
+   * 而非 API 路径恰好有两处会把外来 Host 的请求**喂成 200**：`@fastify/static`（静态资源）与
+   * 末尾那个 not-found 兜底（SPA 的 `index.html`）。所以这里各钉一个形状：
+   * 未知路径（走兜底那条）与真静态资源（走 static 那条）。
+   * 宿主实测（`curl -H 'Host: evil.example' http://127.0.0.1:7788/…`）：
+   * `/` `/assets/` `/index.html` `/no-such-page` `/api/health` 全是 **403** —— 钩子在 root 封装层，
+   * 而 `@fastify/static` 由 fastify-plugin 注册（不新建封装层），所以它跑在钩子之后。
+   * 断的是 **403 而不是 404、也不是 HTML 外壳**：404 说明请求走到了路由，200 说明它走到了文件。
+   */
+  it('C-1 的 Host 白名单也管非 API 那半棵树：未知路径与静态资源都是 403，不是 404 / index.html', async () => {
+    const { app } = await injectApp({ token: CANARY });
+    const unknown = await app.inject({ method: 'GET', url: '/no-such-page', remoteAddress: '127.0.0.1', headers: { host: 'evil.example' } });
+    expect(unknown.statusCode, '外来 Host 打到非 API 路径拿到了 200/404 ⇒ "整个 origin"其实只盖住了 /api/*').toBe(403);
+    expect(unknown.headers['content-type'] ?? '', '403 也要回 JSON：回 HTML 就是把 SPA 兜底当成了这条判据的出口').toMatch(/application\/json/);
+    const asset = await app.inject({ method: 'GET', url: '/index.html', remoteAddress: '127.0.0.1', headers: { host: 'evil.example' } });
+    expect(asset.statusCode, '外来 Host 读得到 SPA 外壳 ⇒ 页面与它的 fetch 一起同源了，那条"整个 origin"是假的').toBe(403);
+    expect(asset.body, '响应体是 index.html 的 HTML ⇒ 静态资源那棵树在钩子外面').not.toContain('<div id="root">');
+    // 反向对照：本机形状必须照常拿得到那份 HTML，否则这条安全判据等于把前端关掉
+    const local = await app.inject({ method: 'GET', url: '/index.html', headers: { host: '127.0.0.1:7788' } });
+    expect(local.statusCode, 'Host: 127.0.0.1:7788 读不到 index.html ⇒ 前端被这条判据一起挡住了（那是功能故障）').toBe(200);
+  });
+
+  /**
+   * 上面那条依赖一个**住在依赖里的**事实：`@fastify/static` 是 `fastify-plugin` 包装的（不封装 ⇒
+   * root 层那个 onRequest 钩子对它可见）。它哪天改成自己封一层，上面那条会以"静态资源回 200"的形式红，
+   * 而原因在 `node_modules` 里、读代码的人看不见 —— 所以这里直接钉住那个标记本身。
+   * 判据不是去 grep 依赖的源码，而是 fastify-plugin 留在被包装函数上的 Symbol（`skip-override`
+   * 为 true = 不新建封装层）—— 实测 `Symbol.for('skip-override') === true`、
+   * `Symbol.for('fastify.display-name') === '@fastify/static'`。
+   */
+  it('origin 级钩子能盖住静态资源：@fastify/static 仍由 fastify-plugin 注册（skip-override 为真）', async () => {
+    const staticPlugin = (await import('@fastify/static')).default as unknown as Record<symbol, unknown>;
+    expect(
+      staticPlugin[Symbol.for('skip-override')],
+      '@fastify/static 不再带 skip-override ⇒ 它自己封了一层封装，root 层的 Host 钩子就管不到静态资源了（上面那条非 API 用例会先红，这里是它的因）',
+    ).toBe(true);
+  });
+
   /** 合取的另一半：两半都对才给。这一条同时是"别把守卫写成永远拒绝"的反向对照。 */
   it('对端回环 + 本机形状的 Host ⇒ 给 token（合取的两半都成立）', async () => {
     jupyterUp();
