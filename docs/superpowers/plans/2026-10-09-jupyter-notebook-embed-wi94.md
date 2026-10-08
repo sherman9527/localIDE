@@ -620,10 +620,14 @@ export function proxiedPath(rawUrl: string, token: string, viaQuery: boolean): s
  * 上游看到的那份头。三件重写各有必要，都不是"整理一下"：
  * - `host`：jupyter 的 `check_host()` 在 `allow_remote_access=False` 下只放"回环形状"，
  *   而浏览器给 7788 的那个 Host（`127.0.0.1:7788`）到上游看就成了"别的服务"。
- * - `origin`：`jupyter_server` 的 `check_origin()` 拿 Origin 与 **Host** 比 —— 不重写的话
- *   `Origin: http://127.0.0.1:7788` vs `Host: 127.0.0.1:8888` ⇒ 文档能开但每个 API/ws 都是 403
- *   "Blocking Cross Origin"。**这条是设计决定，不是省事**：改 `allowed_origins` 要在镜像里加配置，
- *   而"允许 7788"这件事的真相本来就在代理手里。
+ * - `origin`：**保留这一条重写，但它的必要性已在真容器里读过源码（2026-10-09，jupyter_server 2.21.1），
+ *   结论与直觉相反** —— `auth/login.py:243-257` 的 `get_user_token` 认 URL 参数与 `Authorization` 头两种，
+ *   命中就把这一次请求标成 token 认证；`auth/identity.py:533-542`（`should_check_origin`）与
+ *   `base/handlers.py:530-542`（`check_xsrf_cookie`）都对 token 认证的请求**直接放行**，
+ *   于是 `check_origin()` 的"Origin 的 netloc 必须等于 Host"（`base/handlers.py:437-465`）根本不会被问到。
+ *   ⇒ 内嵌这条路**不需要**给镜像加 `c.ServerApp.allowed_origins`，也不需要把 `_xsrf` 供成对。
+ *   ⇒ 那也就不该把这条重写当"必须"来写注释：它是**纵深防御**（万一哪天 token 不再每次注入，
+ *   症状会是一整片 403 "Blocking Cross Origin"，而不是一个能读的错误），不是当前功能的前提。
  * - `authorization`：凭据只在这一行出现，且**只在服务端**（页面上任何链接都不含 token）。
  */
 export function buildUpstreamHeaders(client: IncomingHttpHeaders, upstreamAuthority: string, token: string): Record<string, string | string[]> {
@@ -793,7 +797,8 @@ const APP_PORT = config.port; // 7788：容器内自己的 API
 2. 同一条**不带** `Sec-Fetch-Site`（curl 形状）⇒ 200（缺席=非浏览器，放行；红在这里说明把'none'那一支写错了）。
 3. `Sec-Fetch-Site: cross-site` ⇒ 403 + `notebook_cross_site`。
 4. Host 写 `rebinding.example:7788` ⇒ **403**，而且是**我们**那层的 403（`error` 字段是 `bad_host` —— origin 钩子先拦；这条判"整个 origin 的钩子确实盖住了 `/jupyter/*` 这棵树"）。
-5. 一次**真**写操作穿过隧道：`POST /jupyter/api/contents/smoke-<ts>.ipynb`（`{"type":"notebook","content":{…}}`，带 jupyter 要求的 `_xsrf`）⇒ 2xx，然后 `GET /jupyter/api/contents/smoke-<ts>.ipynb` ⇒ 200，最后 `DELETE` ⇒ 204。**这一条不许省**：它同时判掉三件推理不出来的事 —— body 不解析是否真的没坏、`_xsrf` 双跳是否还成立、`check_origin` 重写对不对。若这一条红在 403 "Blocking Cross Origin" 或 `_xsrf` mismatch，那是**设计被实测推翻**，停下来报告，不要在本任务里顺手改判据。
+5. 一次**真**写操作穿过隧道：`POST /jupyter/api/contents/smoke-<ts>.ipynb`（body 是 `{"type":"notebook","content":{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}}`）⇒ 2xx，然后 `GET` 同一份 ⇒ 200，最后 `DELETE` ⇒ 2xx。**这一条不许省**：它判的是"body 逐字节搬运真的没坏"（上游 `base/handlers.py:698-710` 的 `get_json_body` 要 `json.loads` 得动）。顺带钉住两件事**不需要**做：不需要 `_xsrf`、不需要给镜像加 `allowed_origins` —— 注入 token 之后这被算成 token 认证请求（三处源码位置记在 Step 2 的注释里，2026-10-09 在真容器里读的是 jupyter_server 2.21.1）。
+   **所以这条测试里不许出现 `_xsrf`**：一次带着 `_xsrf` 的 201 同时被"代理剥了它"与"jupyter 本来就跳过检查"两种解释满足 ⇒ 什么都不判（本项目付过"mock 与 bug 同形"的学费，同一个形状）。红在这里该查的是 body 有没有被 Fastify 的解析器改过字节。
 6. 从**非回环**的容器地址打自己的 7788（`http://${eth0}:7788/jupyter/tree`，Host 就是那个 eth0 地址）⇒ 403（`isLoopbackHostHeader` 那一半）；并把"回环上同一个请求是 200"作为对照一起断（`kernel.test.ts` 里"两条各判一件事，缺一条会把故障说错"的写法）。
 
 Run: `./start.sh --verify > /tmp/wi94-t3-verify.log 2>&1; echo "CV_EXIT=$?"` → 全绿；`grep -c "skip" ` 在那一段区域内为 0。
@@ -976,7 +981,7 @@ function rejectUpgrade(socket: Duplex, status: number, body: { error: string; me
  */
 ```
 
-要做的：① `POST /jupyter/api/sessions`（JSON body `{"path":"smoke-session.ipynb","type":"notebook","kernel":{"name":"python3"}}`，带 Step 5 从 cookie/`/api/session` 拿到的 `_xsrf`）→ 断言 2xx 且 `json.model.kernel.execution_state` 最终为 `idle`/`starting`；
+要做的：① `POST /jupyter/api/sessions`（JSON body `{"path":"smoke-session.ipynb","type":"notebook","kernel":{"name":"python3"}}`，**不带 `_xsrf`** —— 理由与实测的源码位置都记在 Task 3 Step 2 的注释里：注入 token 之后这是 token 认证请求，xsrf 与 origin 两道检查都被跳过）→ 断言 2xx 且 `json.model.kernel.execution_state` 最终为 `idle`/`starting`；
 ② 对该 session 的内核 `GET /jupyter/api/kernels/<id>/channels` 做**手工 ws 握手 + 手工帧编解码**（约 45 行：`maskKey = crypto.randomBytes(16)`、`Sec-WebSocket-Key: base64(…)`、客户端帧必须 `FIN|text + mask + 4 字节 mask key`，解析服务端那帧只需去掉 opcode 0x1 的长度与前 2/4/10 字节头）—— 发
 `{"header":{"msg_id":"m1","msg_type":"execute_request","version":"5.3","username":"","session":"s1"},"parent_header":{},"metadata":{},"content":{"code":"print(6*7)","silent":false},"buffers":[]}`，
 读若干帧直到 `content.text` 里出现 `42` 或收到 `execute_reply`；
