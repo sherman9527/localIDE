@@ -1,5 +1,5 @@
-import { request as httpRequest, type IncomingHttpHeaders } from 'node:http';
-import { Readable } from 'node:stream';
+import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server as HttpServer } from 'node:http';
+import { Readable, type Duplex } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { JUPYTER_BASE_URL, NOTEBOOK_PREFIX } from '@arena/shared';
 import { config } from '../config.js';
@@ -115,6 +115,140 @@ function verdictFor(request: FastifyRequest, gatewayAddresses?: string[]): Proxy
   });
 }
 
+/**
+ * 101 的回话头部。**不许**照搬 HTTP 通道那套 `responseHeaders()`，两处形状都不同：
+ * - `Upgrade` 与 `Connection` **必须转发**（RFC 6455 的握手回话要带它们；Firefox 缺 `Connection` 直接判握手失败）。
+ *   "逐跳头不许转发"讲的是**已建立的普通请求**之间，握手是例外 —— 把它"顺手修正"回一般规则，
+ *   本仓库只有宿主档那条按字节读的判据抓得住（浏览器侧的故障要换个浏览器才看得见，E2E 用的是 Edge）。
+ * - 数组值要写成**多行**（`set-cookie` 折成一行的话浏览器只收到一条畸形 cookie —— Task 3 评审 I-B 的 ws 那一半）。
+ * - 不写 CSP/XFO：那两个头管的是"这个**文档**能不能被嵌"，握手回话不是文档。
+ */
+function upgradeResponseLines(headers: IncomingHttpHeaders): string[] {
+  const lines: string[] = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || name === ':status') continue;
+    const lower = name.toLowerCase();
+    if (HOP_BY_HOP.has(lower) && lower !== 'upgrade' && lower !== 'connection') continue;
+    for (const one of Array.isArray(value) ? value : [value]) lines.push(`${name}: ${one}`);
+  }
+  return lines;
+}
+
+/** 握手被否决时的回话：JSON + 明确的状态码。静默断连是这一层最难查的故障（"页面转圈、控制台什么都不说"）。 */
+function rejectUpgrade(socket: Duplex, status: number, body: { error: string; message: string }): void {
+  const payload = JSON.stringify(body);
+  socket.write(
+    `HTTP/1.1 ${status} ${status === 403 ? 'Forbidden' : status === 503 ? 'Service Unavailable' : 'Not Found'}\r\n` +
+      `content-type: application/json; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(payload)}\r\nconnection: close\r\n\r\n${payload}`,
+  );
+  socket.destroy();
+}
+
+/** Node 22.21+/24 上有这个可写属性（宿主 24.10.0 与容器 24.10.0 实测都是 `function`）；更旧的没有。 */
+type NarrowableServer = HttpServer & { shouldUpgradeCallback?: (req: IncomingMessage) => boolean };
+
+/**
+ * 只认领 `/jupyter/` 那棵子树的 upgrade，返回"这台 Node 支持收窄吗"。
+ * 为什么必须显式收窄（读的是容器里 Node 24 的 `_http_server.js` 源码，不是推测）：
+ * `parserOnIncoming` 里 `req.upgrade = … || !!server.shouldUpgradeCallback(req)`，而默认那一份是
+ * `() => this.listenerCount('upgrade') > 0` ⇒ **我们一开始听 `upgrade`，整台服务器的 upgrade 都不再走路由**；
+ * 而派发之前 Node 已经把这条 socket 的 parser 拆了（`onParserExecuteCommon`），所以"不归我们就不管"
+ * 在监听者里是**做不到的** —— 剩下的只有两种：客户端挂死，或者我们显式回话。收窄之后
+ * `GET /api/health` 那种"带 Upgrade 头的握手"仍旧由原来的路由回答，隧道一行都不碰（宿主档钉着这条）。
+ * ⚠ 这里是**整体替换**而不是"与默认那份合取"：默认那份回答的是"有没有人听 upgrade"，
+ * 而那件事从我们接线起恒为真 —— 合取它等于没收窄。代价是：若将来别的插件也想听 upgrade，
+ * 它必须在**我们之后**设这个属性（或由它自己判前缀），否则两边会互相覆盖 —— 那条写进注释里，
+ * 因为"两个通道各吃一次对方的地盘"正是本仓库反复付学费的形状。
+ */
+function claimJupyterUpgrades(server: NarrowableServer): boolean {
+  if (typeof server.shouldUpgradeCallback !== 'function') return false;
+  server.shouldUpgradeCallback = (req: IncomingMessage) => (req.url ?? '').startsWith(JUPYTER_BASE_URL);
+  return true;
+}
+
+/**
+ * 第二条通道：内核 ↔ 页面的 websocket（`/jupyter/api/kernels/<id>/channels`）。
+ * `jupyter_server` 在这一条上跑的是**执行** —— 这一条不通，内嵌就是个只能看不能跑的截图。
+ * 它有两个 HTTP 隧道没有的性质，每一个都决定了这里的一行：
+ * ① 浏览器给原生 WebSocket **加不了请求头** ⇒ 凭据只能走 `?token=`（`proxiedPath(…, true)`），
+ *    而客户端自己塞的那一份**必须摘掉**（两份同时在场时 jupyter 读哪个是未定义行为）—— 复用 HTTP 那
+ *    一份 `proxiedPath`，就是为了"摘"这件事只有的一处实现；
+ * ② 它**不走路由**，所以 Fastify 的 `onRequest` 钩子与上面那个 HTTP handler 都碰不到它 ⇒
+ *    **守卫必须在这里再调一次同一个 `guardNotebookProxy`**，否则"能打开页面"就变成了"能绕过页面执行代码"。
+ *    这一次调用与 HTTP 那一次不是重复：判据仍然只有一套（`proxyGuard.ts`），
+ *    `proxy.test.ts` 那条结构判据数的就是"每条通道各一次、全文件仅此两次"。
+ * `head`（握手之后已经到了一截的字节）在隧道建好之后写进**对侧的 socket**，不写进 `upstreamReq`：
+ * 那个请求没有 content-length，往它身上写字节会变成 chunked，把握手打成乱码。
+ */
+export function attachNotebookUpgrade(
+  server: NarrowableServer,
+  deps: { upstream: NotebookUpstream; authority: string; gatewayAddresses?: string[] },
+): void {
+  const narrowing = claimJupyterUpgrades(server);
+  server.on('upgrade', (req, socket, head) => {
+    // 每条 socket 的 'error' 都必须就地接住：这一层的对端随时可能被浏览器/上游半路砍断，
+    // 而逃出去的 'error' 事件会**把整个进程带走**（本项目有过同类事故：一条 void 掉的 async 拒绝
+    // 让 Node 按 unhandled rejection 结束了服务；这里死掉的会是 arena 本身）。
+    socket.on('error', () => socket.destroy());
+    const url = req.url ?? '';
+    if (!url.startsWith(JUPYTER_BASE_URL)) {
+      // 收窄成功时这一支到不了（Node 不会把别人的 upgrade 交给我们）；到得了的唯一原因是这台 Node
+      // 没有那个开关 ⇒ 我们的监听者已经吃下了整台服务器的 upgrade ⇒ 静默 = 客户端挂死，所以显式回一句再断。
+      if (narrowing) return;
+      rejectUpgrade(socket, 404, {
+        error: 'notebook_upgrade_not_ours',
+        message: '同源反代只隧道 /jupyter/ 那一棵子树的 websocket；这一条不是它的。' +
+          '（这台 Node 太旧，没有 `http.Server` 的 `shouldUpgradeCallback`，我们没法只认领自己那棵子树，' +
+          '只能对不归自己的握手明确说"不是我的"而不是让你挂在那里等。）',
+      });
+      return;
+    }
+    // 守卫必须在**注入凭据之前** —— 与 HTTP 那一条同一个理由，越权的那一半就发生在这两行之间。
+    // ⚠ 事件给的 `socket` 在类型上是 `Duplex`（没有 `remoteAddress`），对端地址从 `req.socket` 取 ——
+    //   与 HTTP 那一条 `request.raw.socket.remoteAddress` 是同一个对象，两条通道的输入因此同源。
+    const verdict = guardNotebookProxy({
+      peerAddress: req.socket.remoteAddress ?? '',
+      hostHeader: asHeader(req.headers.host),
+      secFetchSite: asHeader(req.headers['sec-fetch-site']),
+      ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }),
+    });
+    if (!verdict.ok) return rejectUpgrade(socket, verdict.status, { error: verdict.error, message: verdict.message });
+    const token = config.notebook.token;
+    const upstreamReq = httpRequest({
+      host: deps.upstream.host,
+      port: deps.upstream.port,
+      method: 'GET',
+      path: proxiedPath(url, token, true), // 握手只能走查询串（上面①）
+      headers: {
+        ...buildUpstreamHeaders(req.headers, deps.authority, token),
+        // `buildUpstreamHeaders` 按一般规则把这两个逐跳头剥掉了（HTTP 通道那样才对）；
+        // 握手这一支必须自己带上，否则打出去的是"一个带 WebSocket 头的普通 GET"，jupyter 回 400。
+        upgrade: asHeader(req.headers.upgrade) ?? 'websocket',
+        connection: 'Upgrade',
+      },
+    });
+    upstreamReq.on('upgrade', (ures, usocket, uhead) => {
+      usocket.on('error', () => socket.destroy()); // 同上：这一侧逃出去的 'error' 也会带走进程
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\n${upgradeResponseLines(ures.headers).join('\r\n')}\r\n\r\n`);
+      if (head && head.length) usocket.write(head);
+      if (uhead && uhead.length) socket.write(uhead);
+      usocket.pipe(socket);
+      socket.pipe(usocket);
+      socket.on('close', () => usocket.destroy());
+      usocket.on('close', () => socket.destroy());
+    });
+    upstreamReq.on('response', (res) => {
+      // 上游不肯升级（403/404/503）：把状态码原样回给客户端再断 —— 静默断连最难查
+      socket.write(`HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? 'Bad Gateway'}\r\nconnection: close\r\n\r\n`);
+      res.resume();
+      socket.destroy();
+    });
+    upstreamReq.on('error', () => socket.destroy());
+    socket.on('close', () => upstreamReq.destroy()); // 浏览器切页/关 iframe ⇒ 上游那个握手续着也没用
+    upstreamReq.end();
+  });
+}
+
 export function registerNotebookProxy(app: FastifyInstance, deps: { upstream?: NotebookUpstream; gatewayAddresses?: string[] } = {}): void {
   const upstream: NotebookUpstream = deps.upstream ?? { host: '127.0.0.1', port: config.notebook.port };
   const authority = `${upstream.host}:${upstream.port}`;
@@ -142,7 +276,7 @@ export function registerNotebookProxy(app: FastifyInstance, deps: { upstream?: N
         const verdict = verdictFor(request, deps.gatewayAddresses);
         if (!verdict.ok) return refuse(reply, verdict);
         const token = config.notebook.token;
-        reply.hijack(); // 从这里往后的字节归我们，Fastify 不再碰这条响应（onResponse 也不会跑，见测试档那段）
+        reply.hijack(); // 从这里往后的字节归我们，Fastify 不再写这条响应（`onSend` 不跑；⚠ `onResponse` **仍然会跑**，见测试档那段）
         const upstreamReq = httpRequest(
           {
             host: upstream.host,
@@ -182,4 +316,9 @@ export function registerNotebookProxy(app: FastifyInstance, deps: { upstream?: N
     },
     { prefix: NOTEBOOK_PREFIX },
   );
+
+  // 第二条通道（Task 4）：`/jupyter/api/kernels/<id>/channels` 那条 websocket。
+  // 它**不在上面那棵树里**（`scope.route` 只管路由表），只能挂在 `app.server` 的 `upgrade` 事件上 ——
+  // 于是守卫、凭据注入、逐跳头例外都要在那里重来一遍（判据本体仍然只有 `proxyGuard.ts` 那一份）。
+  attachNotebookUpgrade(app.server as unknown as NarrowableServer, { upstream, authority, ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }) });
 }
