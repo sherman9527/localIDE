@@ -1056,6 +1056,10 @@
   ｜**`v0.1.0` 的处理**：它是**附注标签**，而附注标签对象自己存着 tagger 姓名与邮箱 ——
   所以它既是旧历史的锚点，也是脱敏目标之一（不是"顺手删"，是它本身带着身份）。
   已删旧的重打在干净初始提交上，tagger 用 noreply；消息也从"100 道"改成实际的 254 道 / 7 judgeKind。
+  ｜**更正（2026-10-08 复核）**：上面那句"重打在干净初始提交上"不准 —— 现在这个附注标签指向 `206ae2c`，
+  它是根提交 `15fd5ab` 之后的**第三条**（`git rev-list --count 15fd5ab..v0.1.0` = 2），不是根本身。
+  其余各点（附注标签自带 tagger 身份、tagger 用 noreply、消息改成实际题量）复核为真；
+  `git show v0.1.0 --format='%T %s'` 可自查。
   ｜**全对象复扫**：`git rev-list --objects --all --tags` 喂 `cat-file --batch`，
   737 个对象（commit + tree + blob + tag 元数据全在内）按个人邮箱 / 账户名 / 盘符路径三种判据扫
   ⇒ **命中 0**；现存身份只有 `sherman9527 <…@users.noreply.github.com>` 一种。
