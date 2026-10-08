@@ -101,9 +101,10 @@ describe('反代守卫：三个输入的合取', () => {
 
   /**
    * brief 那 11 行之外补的两条，各钉一个"调用方会踩的形状"：
-   * ① 对端地址缺席 —— websocket 那一侧 `socket.remoteAddress` 真可能是 undefined，
-   *   守卫的入参是 `string`（Task 3/4 共用同一个签名），所以 Task 4 要把它映射成 `''`；
-   *   这一条钉的就是"空串必须走 fail-closed"，否则那个映射是个洞，而表里 11 行一行都不会红。
+   * ① 对端地址缺席 —— `@types/node/net.d.ts:330` 把 socket 那一侧定成
+   *   `readonly remoteAddress: string | undefined`，而守卫的入参是 `string`（brief 定的签名，本档没改），
+   *   所以 Task 4 的调用点**必然**要把 undefined 映射成什么；这一条钉的就是"映射成 `''` 走 fail-closed"，
+   *   否则那个映射是个洞 —— 而表里那 11 行一行都不会红（它们拿的都是能解析的地址）。
    */
   it('对端地址缺席（ws upgrade 拿不到 remoteAddress 时映射成的空串）⇒ 否决', () => {
     const v = refused(guardNotebookProxy({ ...LOCAL, peerAddress: '', token: TOK, gatewayAddresses: [] }));
