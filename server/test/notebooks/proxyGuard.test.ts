@@ -28,10 +28,13 @@ import { guardNotebookProxy, type ProxyVerdict } from '../../src/notebooks/proxy
  * 外部输入会进日志，而这一层读到的每一个字段都是客户端给的（`api/app.ts` 那条 origin 钩子立了
  * 同一个先例："收到的那个值不打印在这里"）。
  *
- * ## 破坏性验证（2026-10-09 实测，四次都跑了；命令 `npx vitest run server/test/notebooks/proxyGuard.test.ts`）
+ * ## 破坏性验证（2026-10-09 实测，brief 那四次 + 本档补的 ⑤，五次都跑了；
+ * ## 命令 `npx vitest run server/test/notebooks/proxyGuard.test.ts`）
  *
- * 基准：`23 passed`、exit 0。每次变异后立刻还原，`git status` 与 `git diff` 已核。
- * 括号里是 **brief 预测 vs 实测** —— 三处不一致，都记在这儿，因为下一档会照这些句子决定判据放哪：
+ * 基准：`23 passed`、exit 0。每次变异后立刻还原，`git status` 与 `git diff` 已核
+ * （①–④ 在那一笔提交 `c38a1c7` 之前跑；⑤ 是提交后补的，还原判据换成"`git diff` 空 = 与提交逐字节一致"）。
+ * 表里是 **brief 预测 vs 实测** —— 四处预测与实际不同（①②③⑤），都记在这儿，
+ * 因为下一档会照这些句子决定判据放哪：
  *
  * | 变异 | brief 预测 | 实测 |
  * | --- | --- | --- |
@@ -39,6 +42,9 @@ import { guardNotebookProxy, type ProxyVerdict } from '../../src/notebooks/proxy
  * | ② 集合加 `'cross-site'` | cross-site 与 same-site 两行红 | **2 failed \|\| 21 passed，exit 1** —— 只有 cross-site 那行红；`same-site` 那行**没红**（往集合里加的是 `cross-site`，`same-site` 本来就不在集合里，照旧被拒 ⇒ 这一行判不住这个变异，它判的是另一件事）。第二条红的是「多值那条…顺序是判据」（它下半句用 `cross-site` 取反消息身份） |
  * | ③ 删掉"先判多值"那两行 | 多值那行必须红 | **1 failed \|\| 22 passed，exit 1** —— 红的是**消息身份那一条**，`'Sec-Fetch-Site 有两个值'` 那行**没红**：整串 `'same-origin, cross-site'` 落在集合分支上，error 与 status 与预检分支**逐字节相同**，光看那两个字段这条顺序是不可测的。⇒ 这一档补了 `toContain('不止一个值')` 那条，顺序才有了可见证据 |
  * | ③b 顺手写成 `site.split(',')[0]`（brief 点名最危险的那种"更宽容"） | —— | **3 failed \|\| 20 passed，exit 1** —— 多值那行 + 消息身份那一条 + "不回显 Sec-Fetch-Site 值"那一条一起红（三条都拿到 `{"ok":true}`）。这是四次里红得最多的一次：那个写法确实把守卫关掉了一半，而且关得掉在三层判据上 |
+ * | ⑤（额外一次，判 brief 那个回显缺陷）把消息换回 brief 那版 `（${site}）` | brief 没提 | **1 failed \|\| 22 passed，exit 1** —— 红的**只有**"不回显读到的值"这一条，而且它的失败消息里就把 canary 印了出来（`说这个请求不是从本页面发起的（canary-header-value-not-printed-7c3d）`）。⇒ 这句是实测不是推测：**brief 给的那 11 行加它自己的"三种否决都不回显"那条判不住这个回显**（那三条 patch 走的是 host / peer / token 分支，回显住在第四支），照原样落地就是全绿带着一处泄漏 |
+ *
+ * ④ 就是"还原并确认全绿"：`23 passed`、exit 0，`git diff` 空（工作树与那一笔提交逐字节一致）。
  *
  * ③ 那一条是本文件与 brief 的**实质分歧**：brief 说"删掉预检 ⇒ 那一行必须红"，实测不红。
  * 所以这张表对"顺序"的判据住在消息里，不在 error/status 里 —— 读代码的人若把消息当成可有可无的文案，
