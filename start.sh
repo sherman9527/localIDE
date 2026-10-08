@@ -353,7 +353,9 @@ report_notebook() {
     return 0
   fi
   # 路径带 `/jupyter/` 前缀（WI-94 Task 1）：jupyter 自己挂在 base_url=/jupyter/ 下，
-  # 探 `/login` 从此永远 000 —— 横幅会说"未就绪"而功能其实是好的（假阴性）。
+  # 根路径上的 /login 从此给的是 **404**（实测，2026-10-09：`curl …8888/login` → 404、`…/jupyter/login` → 200；
+  # 000 只在"没人监听"时才出现）。所以旧写法不会说"未就绪"，而是走下面那条成功分支、
+  # 打印"7789 已应答 HTTP 404"再附一个本就打不开的链接 —— 探活就此形同虚设（假阳性，比假阴性更难发现）。
   # 前缀的真相在 shared/src/notebook.ts，shell 带不回常量 ⇒ 这里写字面量，
   # 由闸门 server/test/regression/notebook-contract.test.ts 按派生值查这两个脚本的文本。
   # start.ps1 是同一套判据的另一个实现，改一边必须改另一边。

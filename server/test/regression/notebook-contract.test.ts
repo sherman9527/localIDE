@@ -409,12 +409,26 @@ describe('notebook 契约与配置', () => {
    *    expected '\ufeff# 游戏启动脚本（Windows PowerShell 对等实…' to contain '7789/jupyter/login'`
    * 顺带一条实测副产品：那条消息里 ps1 正文以 `\ufeff` 开头 ⇒ 本文件的读取看见的是带 BOM 的字节，
    * BOM 判据（`scripts-syntax.test.ts`）与本条互不掩盖。
+   *
+   * 反方向也真做过一次（2026-10-09：**只**把 `start.sh` 的探测退回 `/login`、`start.ps1` 保持带前缀
+   * ⇒ 仍然**只有本条红**（`Tests 1 failed | 13 passed`），红的是**第一句**）：
+   *   `start.sh 的 report_notebook 还在探 /login ⇒ …永远拿到 **404**（实测：/login → 404，000 只在没人监听时
+   *    时才出现）…: expected '#!/usr/bin/env bash\n# 游戏启动脚本（需求 场景 2…' to contain '7789/jupyter/login'`
+   * ⇒ 两句断言各自都能独立翻脸，"两个实现"不是靠一句 `&&` 糊在一起的。
+   *
+   * ⚠ 这一条的**症状描述**在实施中被实测订正过一次，写在这里免得下一个人按旧说法排查：
+   * 计划/brief 原稿写的是"base_url 一改它就永远 **000**，横幅说未就绪（假阴性）"。从跑着的容器里实测：
+   * `…/login` → **404**、`…/jupyter/login` → 200、`…/tree` → 404、`…/jupyter/tree` → 302
+   * （宿主 7789 那侧一模一样）。`000` 只在"没人监听"时才出现 ⇒ 旧写法实际走的是**成功分支**：
+   * 横幅打印"已应答 HTTP 404"再附一条打不开的链接，那是**假阳性**（探活形同虚设），比假阴性更难发现。
+   * 判据本身（"文本里必须出现派生出来的那条路径"）不受这个订正影响 —— 变的只是它解释故障的那句话。
    */
   it('start.sh 与 start.ps1 里那条探测也带前缀（同一套判据的两个实现）', () => {
     const probe = `7789${JUPYTER_BASE_URL}login`;      // 期望值派生，不写死 '/jupyter/login'
     const sh = readFileSync(join(config.repoRoot, 'start.sh'), 'utf8');
     const ps = readFileSync(join(config.repoRoot, 'start.ps1'), 'utf8');
-    expect(sh, 'start.sh 的 report_notebook 还在探 /login ⇒ base_url一改它就永远 000，横幅会说"未就绪"而功能其实是好的（假阴性）').toContain(probe);
+    expect(sh, 'start.sh 的 report_notebook 还在探 /login ⇒ base_url 一改它就永远拿到 **404**（实测：/login → 404，' +
+      '000 只在没人监听时才出现），于是横幅照走成功分支、打印"已应答 HTTP 404"再附一条打不开的链接 ⇒ 探活形同虚设（假阳性）').toContain(probe);
     expect(ps, 'start.ps1 与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西').toContain(probe);
   });
 });
