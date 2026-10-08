@@ -185,7 +185,11 @@ function nbconvertCrashEvidence(err: unknown): string {
     '那种情况 --ExecutePreprocessor.allow_errors=True 会让它退 0、错误落成 output_type=error，' +
     '由「执行时抛异常的 cell」那条结构化断言报出 cell 号与异常名。非 0 退出说的是这一档跑不起来：' +
     `${NOTEBOOK_KERNELS.pyspark} 没注册 / venv 解释器缺失（见「venv 的解释器真的在」那条）、` +
-    'DeadKernelError（Spark 崩在半路）、或 stdout 撑破了 maxBuffer。' +
+    'DeadKernelError（Spark 崩在半路）、stdout 撑破了 maxBuffer，' +
+    // 枚举里必须有**这一条自己**：execFileSync 的 `timeout: 180_000` 到点会直接杀掉 nbconvert，
+    // code 一样非 0 —— 而它过去不在列出的原因里，于是最常见的坏法（Spark 冷启动撑到预算尽头）
+    // 被印成"四条此刻并不成立的原因"，把人往 kernel 注册那三条上赶（函数上方那段警告说的是同一件事）。
+    '或这条用例自己的 180s 预算到点（先想这一条，再去看上面那三条）。' +
     `stderr ${stderr.length} 字节 / stdout ${stdout.length} 字节，只贴 stderr 末尾 ${STDERR_TAIL} 字符：\n` +
     stderr.slice(-STDERR_TAIL)
   );

@@ -3290,6 +3290,10 @@ Host 做决定），但 403 **不**算"这次请求被接受" —— 不许为�
   交付档里挡住了东西；横幅本身只留"说清症状 + 说清哪条命令真能修好"。
 - **证据不落盘等于没跑**：Step 6 那趟真浏览器（kill → 刷新状态、浏览器里 Run All、75 秒停顿）全跑过，
   但只活在会话里，于是被评审判成"没跑"；写进 `task-10-browser-evidence.md` 之后那次评审才闭合。
+  **但那份笔记现在也不是权威载体**（`.superpowers/` 既不进 git 也不进镜像）⇒ 三个实测值已抄进
+  `HANDOVER.md` 的 WI-89 块：`index-CsYirOYE.css`（服务出去的那份样式哈希）、prompts `["", "[1]:", "[2]:", "[3]:"]`
+  + 输出 `python /opt/arena-ide-env/python/bin/python` / `rows 15` / `venv ok`、console **0 error / 0 warning**。
+  闭合评审要读的是 HANDOVER 里那三行，不是会话文件。
   同族的一条本轮补掉：`.superpowers/` 没被 `.dockerignore` 排掉，而 `docker/Dockerfile` 的 app 阶段是
   `COPY . .` ⇒ 会话笔记被烤进本地镜像、每写一次 ledger 就脏一次构建上下文（那一行现在有了）。
 
@@ -3344,7 +3348,7 @@ Jupyter 自己那页有 4 error / 9 warning，逐条读过：全部来自它自�
 | 判题矩阵 | 同一轮 | `[matrix] 代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道`，栈全 true（java-junit / react-vitest / mysql / redis / pyspark / spark-scala / llm-rubric）；`判题矩阵：513 passed / 7 skipped / 520 total ✓` —— 那 7 条是既有的 env 门控（`publish-identity` 1 + `env-write-atomicity` 6），不是本轮新债 |
 | 宿主 E2E | `npm run e2e` | **74 passed**（`/tmp/e2e18.log`），含新加进采样面的 480 / 600 / 1100 与那条顶栏几何判据 |
 | 宿主快档 | `npm run verify:fast` | 每个 commit 由 pre-commit 各跑一遍；`fcd709b` 独立跑 `EXIT=0`（`/tmp/vf16.log`）；**本轮文档收尾之后** `EXIT=0`（`/tmp/vf18.log` 改动树 + `/tmp/vf19.log` 收尾） |
-| 真浏览器 | Playwright（宿主），两趟 | 320/390/480/768/1440 五档 meta 与 brand 全部同行、`metaGapToRowRight` 与 `overflowX` 全 **0**、`order` 全 0/0/0、console **0/0**；交互式内核见上一节（`task-10-closing2-evidence.md`） |
+| 真浏览器 | Playwright（宿主），两趟 | 320/390/480/768/1440 五档 meta 与 brand 全部同行、`metaGapToRowRight` 与 `overflowX` 全 **0**、`order` 全 0/0/0、console **0 error / 0 warning**；交互式内核见上一节。实测值以 `HANDOVER.md` 的 WI-89 块为准（`task-10-closing2-evidence.md` 只是当时的会话笔记，不进 git，**不是权威载体**） |
 
 **一次红的整轮照实记**：同一个 HEAD 上先跑的那次（`/tmp/cv14.log`）`CV_EXIT=1`，红在
 `server/test/ide/debug.test.ts > 后端接缝本身 > 写进一个刚退出的调试进程`，失败消息是那条用例自己的

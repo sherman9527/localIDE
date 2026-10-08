@@ -117,7 +117,7 @@ arena 服务加 `127.0.0.1:7789:8888` 与 `ARENA_JUPYTER_TOKEN`（透传 `${VAR:
   //   释放判据也**不是**"本机同源"（同源要由 Origin/Host 推，而 Host 是客户端自报的）：判的是内核给的 socket 对端地址
   //   （request.raw.socket.remoteAddress）= 回环，或等于本进程的默认网关（compose 里宿主浏览器经网桥 NAT 进来，对端就是网关而非回环）
   "reason"?: "…",                   // running:false 时必填，说清是"没起"还是"端口不通"
-  "kernels": [ { "id": "arena-pyspark", "label": "PySpark 3.5.5", "ready": true },
+  "kernels": [ { "id": "arena-pyspark", "label": "PySpark (arena)", "ready": true },
                { "id": "arena-scala", "label": "Scala (Spark)", "ready": false,
                  "reason": "kernel 未注册" } ],
   "notebooks": [ { "file": "pyspark-csv-ingest.ipynb", "seeded": true } ] }

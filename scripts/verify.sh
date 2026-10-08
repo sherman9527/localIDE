@@ -46,7 +46,9 @@ if [ "${ARENA_NOTEBOOK_SERVICE:-0}" = "1" ]; then NB_SERVICE=1; else NB_SERVICE=
 # 又点名 `kernel.test.ts` ⇒ 同一个真 Spark 会话被起**两次**（一次 40–90s）。更糟的是它坏的时候先红在
 # 「单元测试」这个标签下、整轮就地终止，人本该读的那句「Notebook 运行时（kernel 真跑）」根本不会出现。
 # 修法只在**这一侧**（另一侧都错：删掉专门阶段会撞 verify-coverage 那条认领判据；
-# 把目录从 :35 的清单里去掉会静默搬走 18 条宿主档常驻断言）。宿主走 else，行为与今天逐字节一致。
+# 把目录从「单元测试（shared + exec + regression + notebooks + server 根级）」那条阶段的清单里去掉
+# 会静默搬走 18 条宿主档常驻断言（阶段名是真相，行号会漂 —— 这句原先写的是 `:35`，那条早就挪窝了）。
+# 宿主走 else，行为与今天逐字节一致。
 if [ "$NB_SERVICE" = "1" ]; then
   # `--exclude` 的值**不要**写成 `"${ARR[@]}"`：verify-coverage.test.ts 收集认领路径时丢掉以 `-` 开头的
   # token（所以那个 flag 本身不会被当成路径），但以引号开头的 `"${ARR[@]}"` 会被记成一条**假路径**。

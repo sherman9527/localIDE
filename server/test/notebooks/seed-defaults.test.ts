@@ -11,7 +11,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * 自己写的错误文案：示例铺在一个目录、Jupyter 打开的是另一个，页面里就是空的，一声不响。
  * （宿主默认 env 下 `config.notebook.workDir` 恰好**等于**那个写死值，所以"不传参调一次、
  * 断言参数相等"还不够 —— 必须把 `ARENA_DATA_DIR` 注入成仓库之外的目录，两者才会分叉。
- * 这与 `notebook-contract.test.ts:79` 是同一个道理：派生关系只能在 env 被换掉之后判。）
+ * 这与 `notebook-contract.test.ts` 那条「workDir / warehouseDir 跟着注入的 ARENA_DATA_DIR 走」是
+ * 同一个道理：派生关系只能在 env 被换掉之后判。）
  *
  * 为什么用 mock 而不是真跑：默认值就是**真人那份 `data/`**，宿主测试里照它跑一次就会
  * 在人家目录下建目录、写文件（本仓库的隔离纪律，见 WI-40）。这里 `node:fs/promises` 的

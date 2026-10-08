@@ -42,13 +42,15 @@ const kernel = JSON.parse(readFileSync(SPEC_FILE, 'utf8')) as {
   argv: string[];
   display_name: string;
   env?: Record<string, string>;
+  metadata?: Record<string, string>;
 };
 const compose = readFileSync(join(root, 'compose.yml'), 'utf8');
 const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8');
 
 describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
   it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
-    // 旧判据只吃三处（arena/dev/e2e，compose.yml:38/88/117）里的**第一处** ARENA_IDE_ENV_DIR，
+    // 旧判据只吃三处（arena/dev/e2e，compose.yml 里那三行 ARENA_IDE_ENV_DIR：今天 :44/:134/:173）
+    // 里的**第一处**，
     // dev/e2e 漂移无人看管；且 \S+ 会把 YAML 引号一并捕获，`ARENA_IDE_ENV_DIR: "/opt/arena-ide-env"`
     // 这种语义等价的写法会冤红。现在：只认以 `/` 开头的值（引号可选），三处必须全部命中且相等。
     const matches = [...compose.matchAll(/^\s*ARENA_IDE_ENV_DIR:\s*"?(\/[^\s"]*)"?\s*$/gm)];
@@ -67,6 +69,14 @@ describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
     // kernel.json 里 PYSPARK_DRIVER_PYTHON 与 argv[0] 是同一条路径的第四份抄写，文件内相等断言把它钉死。
     expect(kernel.env?.PYSPARK_DRIVER_PYTHON, 'PYSPARK_DRIVER_PYTHON 必须与 argv[0] 完全一致').toBe(kernel.argv[0]);
     expect(kernel.argv).toEqual(expect.arrayContaining(['-m', 'ipykernel_launcher', '{connection_file}']));
+    // 本文件头部 ② 那句「布局漂移由 kernel.json 的 metadata.arena_sync_note 指回 env.ts」过去只是
+    // **注释里的声称**：没有任何判据看过这份 note 在不在。有人删掉 metadata 里那一项，那句声称照样
+    // "成立"，而下一个改 `venvPythonPath` 的人就丢了这条唯一指向 kernel.json 的回程线索（第四处真相
+    // 就是这么养出来的）。现在它有一条 expect。
+    expect(
+      kernel.metadata?.arena_sync_note ?? '',
+      'kernel.json 的 metadata.arena_sync_note 必须在场并点名 server/src/ide/env.ts —— notebook-image.test.ts 头部 ② 的声称靠这一行撑着',
+    ).toMatch(/env\.ts/);
   });
 
   it('display_name 不写死 Spark 版本（版本号只在 Dockerfile 的 ARG 里）', () => {

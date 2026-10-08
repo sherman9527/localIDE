@@ -177,8 +177,10 @@ function errorChain(err: unknown): { text: string; detail: string } {
 
 /** 超时/中止的样子：AbortSignal.timeout 给的是 DOMException(TimeoutError)，文案里有 timeout。 */
 function isTimeoutish(text: string): boolean {
-  // `abort` 这一支今天唯一能触发它的是我们自己那个 deadline；Task 8 会把路由层的请求取消
-  // （AbortController）接进来，那时"用户取消了"会被说成"探活超时"—— 到那一步要一起改这里。
+  // `abort` 这一支今天唯一能触发它的是我们自己那个 deadline（AbortSignal.timeout）。
+  // 路由层的请求取消（AbortController）**已被明确排除在 A1 之外** —— 这里不留"Task 8 会接进来"的
+  // 前向引用（那份接线从来没被批准，注释替实现许愿是本仓库记过的另一类债）。
+  // 真接的那天再看这里：那时"用户取消了"会走进这一支、被说成"探活超时"。
   return /timeout|timed out|abort/.test(text);
 }
 

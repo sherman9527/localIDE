@@ -1164,6 +1164,11 @@
   输出 `python /opt/arena-ide-env/python/bin/python` / `rows 15` / `venv ok`，`GET /api/kernels` 两条 idle、
   `ps` 是 `… -m ipykernel_launcher`；换状态（容器里 `pkill` 掉 jupyter）与 75s 停顿都做过（`task-10-browser-evidence.md`、
   `task-10-closing2-evidence.md`）。
+  ｜**那两份会话笔记不是权威载体**（`.superpowers/` 已进 `.dockerignore`、也不进 git，换台机器就没有了）：
+  实测值抄在这里，闭合评审只认这三行 —— ① **服务出去的产物哈希** `index-CsYirOYE.css`（浏览器看到的样式就是这份，
+  上一轮缓存里那个 `index-DmnCSBgE.css` 是旧的那版）；② **交互式内核真跑** prompts `["", "[1]:", "[2]:", "[3]:"]`，
+  输出三行 `python /opt/arena-ide-env/python/bin/python` / `rows 15` / `venv ok`；③ **console 0 error / 0 warning**
+  （warning 也算：WI-81 那条重复 key 的教训）。
   ｜破坏性（四条按计划 + 一条计划外，每条都亲眼看到红）：`kernel.json` 的 argv 改系统 python → 红在**结构化证据**
   `cell 3: AssertionError`；`--ServerApp.local_hostnames=[]` → 红在"浏览器形状的 Host 放行"那一半而 rebinding→403
   仍绿（两半各自独立）；同一轮"DNAT 目标上也必须有人在听"**照旧绿**（403 算有人在听 ⇒ 那个决定第一次被真实场景验到）；
