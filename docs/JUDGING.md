@@ -168,3 +168,16 @@ entrypoint 给 jupyter 那个进程前置 `PATH=/opt/arena-ide-env/python/bin:$P
 `server/test/notebooks/kernel.test.ts`（容器档：`nbconvert` 真跑 `00-smoke-pyspark.ipynb` 打出 `venv ok`，
 外加读那个活进程 `/proc/<pid>/environ` 的 PATH 首项 —— nbconvert 是测试进程自己起的子进程，继承的是测试的
 env，它证明不了服务进程那一侧）。
+
+**但那是默认，不是这一页能给的保证**（终审 I-5；`web/src/pages/Notebook.tsx` 的措辞已按此改过）：
+上面那道 PATH 前置只管**裸命令** —— `!pip3 install X` 命中谁由 `PATH` 决定，写成绝对路径就绕过去了：
+`!/usr/local/bin/pip3 install X` 装进的就是判题那个解释器，"重建镜像即可复现判题"当场作废。
+闸门拦不住这种写法（它判的是**服务自己那条 PATH 的前置**，不是 cell 里写的第二个词），界面也拦不住 ——
+红线①的可复现性靠**镜像 + 闸门**，不靠页面文案，页面现在说的就是这句话。
+
+**第二类影响不落在红线①上、落在超时上**：notebook 的 kernel 自带
+`--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的
+`PYSPARK_SUBMIT_ARGS`），那是判题池**之外**的第二个 Spark JVM。`docs/ARCHITECTURE.md:249` 那套
+"判题优先于 IDE 且不抢占"排的是 `exec/spark-pool.ts` 里的 worker，notebook 这个 JVM 不在队列里 ——
+笔记本里跑重活会与被判题的 Spark 题抢宿主 CPU，把它推向超时。这条记为 **WI-95**（目前没有闸门，
+页面文案已说实话）。

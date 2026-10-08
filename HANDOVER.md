@@ -1308,6 +1308,18 @@
   对那张未鉴权的题库做 **DNS rebinding 现在就行得通**。要不要补这道守卫由用户定；本轮只在 WI-94 与
   `memo.md` 里程碑 BB 里记账，**没有**动 7788 的鉴权或 Host 判据。
 
+- [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
+  `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
+  于是它是 `exec/spark-pool.ts` 那套队列**之外**的第二个 JVM —— `docs/ARCHITECTURE.md:249` 写的
+  "判题优先于 IDE 且不抢占"管不到它，笔记本里跑重活会把被判题的 Spark 题推向超时。
+  ｜本轮只做了两件事：把 `web/src/pages/Notebook.tsx` 那段"不会让判题少跑一秒"（一个默认被写成了一道保证）
+  改成说实话 + `docs/JUDGING.md` 红线①一节同步（含 `!/usr/local/bin/pip3 install X` 这条绕过：拦不住的是闸门与界面，
+  可复现性靠镜像）。**没有**动 `local[2]`、**没有**给 notebook 侧做任何排队或 cpu 配额。
+  ｜要收的话有三档，按代价排：① 把 `--master local[1]` 或降 `driver-memory`（改一行 kernelspec，代价是笔记本侧变慢）；
+  ② compose 给 arena 服务加 `cpus:` 配额（容器级，但会同时限住判题本身 —— 要先确认判题池在这台容器里的 CPU 预算）；
+  ③ 让 notebook 的 Spark 会话也过 `spark-pool` 的队列（改动最大，且 notebook 是长会话、与"一题一 worker"的模型不合）。
+  闸门形状：现在**没有**任何一条能判住"notebook 起第二个 JVM 时判题题的超时余量"，这条要配什么判据由 A2 一起定。
+
 - [ ] 【已决议：暂不做 · 2026-09-20 用户拍板】WI-38 JDK 21 与 Spark 并存的取舍（WI-26② 的评估结论）：镜像里 Spark 是 3.5.5，官方支持矩阵到 Java 17（21 要 Spark 4.0），而**同一个 JDK 既跑 javac/java 判算法题又跑 Spark**，整体升到 21 会把 pyspark / spark-scala 推到未支持路径。可行做法是并装 `openjdk-21-jdk-headless`（约 +400MB、stack 层要全量重建），只让 `java-junit` 用 21、Spark 继续用 17，并给 `RunnerConfig` 加 `jdk` 选项。
   当前损失面评估：record / sealed / switch 表达式在 17 就能编译，真正判不了的是**虚拟线程（21 正式）与 sequenced collections（21）**；而虚拟线程这类题本来就不适合"纯函数 + 用例"判分，所以先不付这个体积与重建成本。（"Spark 3.5 不支持 21"引自官方发布说明，本机未验证 —— 镜像里没有第二个 JDK）
 

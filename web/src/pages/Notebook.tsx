@@ -242,8 +242,19 @@ export default function Notebook() {
         </div>
         <div className="col small">
           <p>
-            这些包与 IDE 共用同一份环境，<strong>判题器看不到</strong>。notebook 里 <span className="mono">!pip3 install</span>{' '}
-            装的东西不会让判题多用一分，也不会让判题少跑一秒。
+            notebook 的 kernel 与 IDE 共用同一份环境，判题用的是另一套解释器 —— <strong>这是默认，不是这道页面上的强制</strong>。
+          </p>
+          <p>
+            <span className="mono">!pip3 install</span> 命中哪个 pip 由 <span className="mono">PATH</span> 决定：
+            服务那边把 IDE 那份 venv 前置在 PATH 上，所以默认装进的是 notebook 自己的环境。但绝对路径拦不住 ——{' '}
+            <span className="mono">!/usr/local/bin/pip3 install X</span> 装进的就是判题那套解释器，
+            改的是你之后每道题的判题结果（红线①的承诺由闸门守着，不由这一页守着）。
+          </p>
+          <p>
+            这一页也管不住 <strong>CPU</strong>：kernel 自带{' '}
+            <span className="mono">--master local[2] --driver-memory 512m</span>，
+            那是判题池之外的第二个 Spark JVM —— 「判题优先、IDE 排队、不抢占」那套安排看不见它，
+            笔记本里跑重活时，被判题的那道 Spark 题可能被推向超时。
           </p>
           <p>
             notebook 里能读到题库的参考答案 —— <strong>这不是安全边界</strong>。工作目录只是让默认视图干净，
