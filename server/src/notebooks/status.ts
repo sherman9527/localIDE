@@ -132,11 +132,16 @@ async function jupyterApi(path: string, token: string, doFetch: typeof fetch, ti
  * compose 给 arena / tools 的是 `${ARENA_JUPYTER_TOKEN:-}` 插值 ⇒ 值没生成时拿到的是**空串**，
  * 而 dev / e2e 那一行压根不存在（`notebook-compose.test.ts` 的 ⑤⑥ 钉的就是这两半）。
  * 所以"键在、值为空"= 接上了但从没生成（有得修），"键都没有"= 这个实例按设计不参与 notebook。
- * `config` 把两者都读成空串（`?? ''`），所以这一处只能直接看 process.env 的键 ——
- * 读的是**形状**不是值，token 的值仍然只从 config 走。
+ *
+ * **终审 I-2 之后这个布尔是"记下来的"，不是"现场问的"**：`config.ts` 把这个键读完就从
+ * `process.env` 摘掉了（判题子进程走 `{ ...process.env }` 继承，凭据不许躺在那条路上），
+ * 所以这里再写 `TOKEN_KEY in process.env` 会**永远**得到 false ⇒ 容器里那句"从没生成（有得修）"
+ * 静默漂成"按设计不给（不用修）" —— 正是评审 T34 那条双重误导的复活，而且复活在修好了它的那次改动里。
+ * 默认值取 `config.notebook.tokenKeyPresent`（读的那一刻记下的），入参只是给测试的注入点
+ * （与 `tokenOverride` 同一形状：生产路径不传，走的就是 config 那份记录）。
  */
-function missingTokenReason(): string {
-  return TOKEN_KEY in process.env
+function missingTokenReason(tokenKeyPresent: boolean): string {
+  return tokenKeyPresent
     ? `${TOKEN_KEY} 是空的 ⇒ token 从没生成过：跑一次 ./start.sh（首启会生成并写进 .env），容器拿到它才会有 notebook`
     : `这个实例没有被给予 ${TOKEN_KEY}（compose 只给 arena / tools 透传，dev 与 e2e 故意不给 —— 那是 WI-40 的隔离规则）` +
       `⇒ 按设计这里不跑 Jupyter，不是需要你修的故障；notebook 在正常启动的那个实例里（${config.notebook.publicUrl}）`;
@@ -196,6 +201,13 @@ export async function notebookStatus(input: {
    * 它从不单独放行任何东西：只在本机字面量上点头，其余一律否决（见 `net/localOrigin.ts`）。
    */
   hostHeader: string | undefined;
+  /**
+   * 「这个实例的环境里有没有 token 那个**键**」—— 只影响 `running:false` 时**说哪一句**
+   * （从没生成 vs 按设计不给，两者修的是相反的东西）。缺省取 `config.notebook.tokenKeyPresent`，
+   * 那是 I-2 里"摘掉之前记下的"那一份；入参存在的唯一理由是测试要能把两句话各判一次
+   * （现场改 `process.env` 已经判不到任何事了：那个键在 config 加载时就没了）。
+   */
+  tokenKeyPresent?: boolean;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   tokenOverride?: string;
@@ -207,7 +219,7 @@ export async function notebookStatus(input: {
   const token = input.tokenOverride ?? config.notebook.token;
   const empty: NotebookStatusResponse = { running: false, kernels: [], notebooks: [] };
 
-  if (!token) return { ...empty, reason: missingTokenReason() };
+  if (!token) return { ...empty, reason: missingTokenReason(input.tokenKeyPresent ?? config.notebook.tokenKeyPresent) };
 
   let kernels: NotebookKernel[] = [];
   try {

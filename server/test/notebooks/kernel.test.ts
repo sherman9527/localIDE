@@ -499,17 +499,38 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
    * 评审 T10-3 ①：Task 7 那句「这个实例没被给予 token，是按设计」的分支全靠
    * **键在不在**（`status.ts` 的 `missingTokenReason()`），而此前它只有 compose 插值那行的推断撑着。
    * 这里把它变成闸门：arena 容器里这个键必须存在（值可以是空的 —— 「接上了但从没生成」也是它该说的另一句话）。
+   *
+   * ⚠ **终审 I-2 之后读的是 `config.notebook.tokenKeyPresent`，不是 `process.env`，判的东西也跟着挪了一层**
+   * （改的是判据的**含义**，不是它的松紧）：config 现在把这个键**读完就摘**，而本文件第 9 行就 import 了 config
+   * ⇒ 到这一条跑的时候 `TOKEN_KEY in process.env` 已经是 false —— 不是"compose 没给"，是"这个进程已经把它消费掉了"。
+   * 继续判 process.env 会得到一条**永远红**的闸门（红在修好了它的那次改动上）；而把断言松成"没给也算过"
+   * 又把它变成装饰。所以判**记下来的那份形状**：「compose 传进来的那份 env 里，在 config 消费它之前，
+   * 到底有没有这个键」。
+   * ⇒ 它现在说的是「**compose 有没有把这一行透传进来**」（容器档走 `docker compose exec`，那是按 compose 的
+   * env 新起的进程，不是那个长驻的 server），**不再是**"跑着的 server 现在还能看见它"——后者今天恒为假，
+   * 而且**应该**恒为假（那正是 I-2 的目的，下面第三句断言判的就是它）。
    */
   it('容器里 ARENA_JUPYTER_TOKEN 这个键存在（只判形状，绝不回显值）', () => {
     // 值可能是真的凭据：断言一律走布尔，消息里不插值 —— vitest 失败时打印的是 true/false，不是它。
-    expect(TOKEN_KEY in process.env, `${TOKEN_KEY} 这个键不在容器进程环境里 ⇒ compose 那一行透传被删了；` +
-      '而 status.ts 的 missingTokenReason() 会因此从「token 从没生成（有得修）」漂成「这个实例按设计不参与 notebook」' +
-      '（dev / e2e 那一支）——症状是要人去修没坏的东西，或不去修坏了的东西').toBe(true);
-    const value = process.env[TOKEN_KEY] ?? '';
+    expect(
+      config.notebook.tokenKeyPresent,
+      `${TOKEN_KEY} 这个键不在"容器刚拿到那份 env"里 ⇒ compose 那一行透传被删了；` +
+        '而 status.ts 的 missingTokenReason() 会因此从「token 从没生成（有得修）」漂成「这个实例按设计不参与 notebook」' +
+        '（dev / e2e 那一支）——症状是要人去修没坏的东西，或不去修坏了的东西',
+    ).toBe(true);
+    const value = config.notebook.token;
     expect(
       value === '' || !/\s/.test(value),
       `${TOKEN_KEY} 里含空白/换行 ⇒ entrypoint 的 --ServerApp.token="..." 与拼进 URL query 的那一份会各自被截断（值本身不打出来）`,
     ).toBe(true);
+    // 消费这个动作本身也在这一条里判：键**不该**还躺在 process.env 里（I-2 的目的：判题子进程经由
+    // `{...process.env}` 继承不到它）。它与上面那条一起成立才有意义 —— 只有"记下来了"而没有"摘掉"，
+    // 红线一仍然作废；只有"摘掉"而没有"记下来"，missingTokenReason() 会永远说"按设计不给"。
+    expect(
+      TOKEN_KEY in process.env,
+      `${TOKEN_KEY} 还躺在本进程的 process.env 里 ⇒ config 的 consume-once 没生效，` +
+        '每一个判题子进程都会继承这个凭据（红线一）。闸门：server/test/regression/ide-env-isolation.test.ts 的 D 组',
+    ).toBe(false);
   });
 
   /**
@@ -615,7 +636,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
    * 而那个 kernel 注册着、并且刚被容器档真跑通过 Spark。那句提示会让人去拆掉一个能用的镜像。
    * ⇒ 这里**不经过任何 mock**：直接调生产那份 `notebookStatus()`，打的是这个容器里真跑着的 Jupyter。
    *
-   * token 的给法与本文件其它处一致：**从 process.env 读，绝不进任何字符串**。
+   * token 的给法与本文件其它处一致：**走 config，绝不进任何字符串**。
+   * ⚠ 这里不能写成 `process.env[TOKEN_KEY]`：I-2 之后 config 在**本进程 import 的那一刻**就把这个键
+   * 摘掉了（判题子进程不许继承凭据），照 process.env 读拿到的是空串 ⇒ 这条闸门会红在
+   * 「running:false / 没 url」上，而毛病是接线、不是 Jupyter。
    * 失败消息只带 `kernels` 的 id/label 与 `reason`，绝不带 `res.url` —— 本机对端那份 url 里躺着 token。
    */
   it('对着真 Jupyter 解 kernelspecs：arena-pyspark 必须在表里，标签来自 spec.display_name（解析的键与真回话同源）', async () => {
@@ -626,7 +650,7 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
       // 它的另一个作用是把这条闸门与 C-1 解耦：Host 判据坏掉时这里红在"running:false / 没 url"，
       // 而不是让人以为解析出了问题。
       hostHeader: '127.0.0.1:7788',
-      tokenOverride: process.env[TOKEN_KEY] ?? '',
+      tokenOverride: config.notebook.token,
       timeoutMs: PROBE_TIMEOUT_MS,
     });
     expect(

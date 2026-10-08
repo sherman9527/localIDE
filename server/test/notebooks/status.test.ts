@@ -150,24 +150,20 @@ const refuses = (message: string) =>
 const TOK = { tokenOverride: 'test-token', hostHeader: '127.0.0.1:7788' };
 
 /**
- * 在"ARENA_JUPYTER_TOKEN 这个**键**存在与否"受控的情况下跑一条断言。
- * 为什么要控制键而不是值：compose 给 arena/tools 的是 `${ARENA_JUPYTER_TOKEN:-}` 插值，
+ * 造「token 那个**键**在不在」的入参。
+ * 为什么判的是键而不是值：compose 给 arena/tools 的是 `${ARENA_JUPYTER_TOKEN:-}` 插值，
  * 于是那两个容器里"键在、值为空"= token 从没生成；dev/e2e 连键都没有（notebook-compose ⑥ 钉的形状）
- * = 这个实例按设计不参与 notebook。config 把两者都读成空串，所以只能就地管这个键。
- * 存亡都要还原 —— 别的用例（和别的测试文件）看到的是进来的那份环境。
+ * = 这个实例按设计不参与 notebook。两句话的修法相反，所以两条文案要各判一次。
+ *
+ * ⚠ **终审 I-2 改了这里的实现，没改它判的事**：这一版以前是真的去改 `process.env`，而那个动作今天
+ * 已经判不到任何东西了 —— `config.ts` 把这个键**读完就从 process.env 摘掉**（凭据不许经由
+ * `{ ...process.env }` 被每一个判题子进程继承），所以"键在不在"在生产里是**读的那一刻记下的一个布尔**
+ * （`config.notebook.tokenKeyPresent`）。现场写 process.env 既不生效、也测不出"不生效"这件事本身。
+ * ⇒ 这里注入那个布尔。剩下的两层各由别处判：「摘之前记下形状」这个动作 =
+ * `server/test/regression/ide-env-isolation.test.ts` 的 D 组；「容器里 compose 到底给没给这个键」=
+ * `server/test/notebooks/kernel.test.ts`（读的也是记下来的那份，理由写在那里）。
  */
-async function withTokenKey(value: string | undefined, run: () => Promise<NotebookStatusResponse>): Promise<NotebookStatusResponse> {
-  const key = 'ARENA_JUPYTER_TOKEN';
-  const saved = process.env[key];
-  if (value === undefined) delete process.env[key];
-  else process.env[key] = value;
-  try {
-    return await run();
-  } finally {
-    if (saved === undefined) delete process.env[key];
-    else process.env[key] = saved;
-  }
-}
+const tokenKeyShape = (present: boolean) => ({ tokenKeyPresent: present });
 
 describe('notebookStatus', () => {
   it('服务在跑：running + 带 token 的本机地址 + kernel 就绪', async () => {
@@ -364,7 +360,7 @@ describe('notebookStatus', () => {
   it('每一条 running:false 都带一句非空的 reason（不变式，逐条覆盖失败形状）', async () => {
     const probes: Array<[string, () => Promise<NotebookStatusResponse>]> = [
       ['没给 token', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '' })],
-      ['token 键存在但为空', () => withTokenKey('', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '' }))],
+      ['token 键存在但为空', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK, tokenOverride: '', ...tokenKeyShape(true) })],
       ['连不上（ECONNREFUSED）', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED 127.0.0.1:8888'), ...TOK })],
       ['探活超时', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('The operation was aborted due to timeout'), ...TOK })],
       ['/api/status 403', () => notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: statusDeny(403), ...TOK })],
@@ -445,12 +441,8 @@ describe('notebookStatus', () => {
    * 且只有后者带修复指令。
    */
   it('token 缺席分两种成因：刻意不给（dev/e2e）不许读起来像故障，从没生成才给修复指令', async () => {
-    const noKey = await withTokenKey(undefined, () =>
-      notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake() }),
-    );
-    const emptyKey = await withTokenKey('', () =>
-      notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake() }),
-    );
+    const noKey = await notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake(), ...tokenKeyShape(false) });
+    const emptyKey = await notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake(), ...tokenKeyShape(true) });
     expect(noKey.running).toBe(false);
     expect(emptyKey.running).toBe(false);
     expect(noKey.reason).not.toBe(emptyKey.reason);
@@ -464,6 +456,24 @@ describe('notebookStatus', () => {
     expect(noKey.reason, '刻意不给的那条给出了修复指令 ⇒ 它读起来就是故障，正是 T34 那句双重误导').not.toMatch(/start\.sh|\.env|生成/);
     // 且要正面说出"设计如此"，光靠"没有修复指令"推不出结论
     expect(noKey.reason).toMatch(/按设计|不是故障/);
+  });
+
+  /**
+   * 上面那条走的是**注入点**，所以它判不出"生产路径读的是哪一份记录"。这一条不注入，
+   * 期望值从 `config.notebook.tokenKeyPresent` 派生（评审 M9 的纪律：别写死只在一档成立的答案）——
+   * 于是宿主（没这个键 ⇒ false）与容器交付档（compose 给了 ⇒ true）跑的是同一条断言、各判各的那一支。
+   * 它判住的是：I-2 把键摘掉之后，`missingTokenReason()` 没有退化成"永远说按设计不给"。
+   */
+  it('不注入 tokenKeyPresent 时取的是 config 里记下的那一份（摘掉键之后文案不许一起漂掉）', async () => {
+    const res = await notebookStatus({ ...TOK, tokenOverride: '', peerAddress: '127.0.0.1', fetchImpl: fake() });
+    expect(res.running).toBe(false);
+    if (config.notebook.tokenKeyPresent) {
+      expect(res.reason, '这个进程的环境里有过那个键（compose 给了）⇒ 该说"从没生成"，说"按设计不给"就是让人不去修坏了的东西')
+        .toMatch(/从没生成/);
+    } else {
+      expect(res.reason, '这个进程从没拿到那个键 ⇒ 该说"按设计不给"，喊"缺 ARENA_JUPYTER_TOKEN"就是 T34 那句双重误导')
+        .toMatch(/按设计|不是故障/);
+    }
   });
 
   /**

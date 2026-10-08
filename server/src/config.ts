@@ -47,6 +47,38 @@ export function consumeIdeEnvDir(): string {
   return raw && raw.trim() ? raw.trim() : join(dataDir, 'ide-env');
 }
 
+/**
+ * Jupyter 的 token。**与上面 `ARENA_IDE_ENV_DIR` 同一套处理，且理由更强**（终审 I-2）：
+ * compose 把它透传给 arena（`${ARENA_JUPYTER_TOKEN:-}`），而判题子进程的环境是
+ * `{ ...process.env, ...opts.env }`（`judge/process.ts`）⇒ 只要它留在 process.env 里，
+ * **每一道提交的代码都能读到一个能在容器里以 root 执行任意代码的服务的长期凭据**。
+ * 能力上今天大致中性（被判的代码本来就在那张 netns 里裸跑 root，而桥 token 躺在那儿更久），
+ * 但"判题层根本不需要知道"这条原则不该为它破例 —— 破一次例，下一个凭据就顺着同一条路进来。
+ *
+ * 记下来的 `tokenKeyPresent` 不是多余的字段：`missingTokenReason()` 判的是**键在不在**而不是值空不空
+ * （"接上了但从没生成"与"按设计不给"修的是相反的东西，评审 T34 那句双重误导就是把它俩说成一句话造成的），
+ * 而摘掉之后 process.env 里就再也没了这个键 —— 所以"Presence"这件事必须在读的那一刻记下来。
+ * 容器档那条闸门（`server/test/notebooks/kernel.test.ts` 的 token 键用例）读的也是这个记录。
+ * 闸门：`server/test/regression/ide-env-isolation.test.ts`（B 摘干净 + B2 摘这个动作有效 + 新的 D 那组）。
+ */
+const JUPYTER_TOKEN_KEY = 'ARENA_JUPYTER_TOKEN';
+
+export interface ConsumedJupyterToken {
+  token: string;
+  tokenKeyPresent: boolean;
+}
+
+/** 导出只为让闸门能验"读完就摘 + 摘之前记下形状"这个动作，不是给业务代码调用的第二入口。 */
+export function consumeJupyterToken(): ConsumedJupyterToken {
+  const raw = process.env[JUPYTER_TOKEN_KEY];
+  // **键在不在**要在删之前记下：`?? ''` 那种写法会把"没给"与"给了空串"读成同一件事
+  const tokenKeyPresent = raw !== undefined;
+  delete process.env[JUPYTER_TOKEN_KEY];
+  return { token: raw ?? '', tokenKeyPresent };
+}
+
+const jupyterToken = consumeJupyterToken();
+
 /** 全部路径默认落在仓库目录内（rule.md C1）。 */
 export const config = {
   repoRoot,
@@ -88,7 +120,17 @@ export const config = {
     port: Number(process.env.ARENA_JUPYTER_PORT ?? 8888),
     // 宿主机上的地址：compose 把 8888 发布到 127.0.0.1:7789，前端拿它拼链接
     publicUrl: process.env.ARENA_NOTEBOOK_PUBLIC_URL ?? 'http://127.0.0.1:7789',
-    token: process.env.ARENA_JUPYTER_TOKEN ?? '',
+    // ⚠ 这里是**唯一**允许读这份凭据的地方，而且读的是 `consumeJupyterToken()` 的返回值、
+    // **不是 `process.env`**：那一行会先把键从 process.env 摘掉（见上面 I-2 那段），
+    // 照着 `process.env.ARENA_JUPYTER_TOKEN` 写会永远读到空串 —— 症状不是报错，是
+    // `notebookStatus()` 在每一步早退成 `running:false`（这一版就踩过：容器档 8 条路由用例一起红，
+    // 而红的是"Jupyter 没在跑"，离毛病隔着一层）。
+    token: jupyterToken.token,
+    /**
+     * "这个实例的环境里**有没有**这个键"—— 与"值空不空"是两件事，而且**只能在这个键还在的时候**记下来
+     * （摘掉之后就再也问不出来了）。`missingTokenReason()` 判的是它，判据不能反过来读 process.env。
+     */
+    tokenKeyPresent: jupyterToken.tokenKeyPresent,
     workDir: join(dataDir, 'notebooks'),
     warehouseDir: join(dataDir, 'notebook-warehouse'),
     seedDir: join(repoRoot, 'content', 'notebooks'),
