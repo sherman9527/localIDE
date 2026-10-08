@@ -93,16 +93,24 @@ function allowRemoteAccessValues(text: string): string[] {
 }
 
 /**
- * 假 Jupyter 上游，给下面那条「给页面的链接带前缀」用 —— 形状照
+ * 假 Jupyter 上游，给下面那条「给页面的链接与探活都带前缀」用 —— 形状照
  * `server/test/api/notebook-api.test.ts` 的 `jupyterUp()`，区别是这里**返回** `typeof fetch`
  * 注进 `notebookStatus({ fetchImpl })`，不 stubGlobal（本文件别的用例还在读真文件，别搅动全局）。
  * ⚠ 顶层键必须是 `kernelspecs`、标签在 `[<id>].spec.display_name`，**不是** `kernels`：
  * 那份 fixture 当年与实现同源地写错过，于是宿主档一片绿而第五页在用户眼前说"kernel 没注册"
  * （2026-10-08 实测；判住键名的是容器档那条不打 mock 的闸门）。
+ *
+ * `seenUrls`（评审 I-3 补的）：分流用的是 `.includes('/api/kernelspecs')` —— **带不带 `/jupyter`
+ * 都命中**，所以这份 fixture 在 URL 那一维上是空转的：摘掉 `status.ts` 里 `jupyterApi()` 的
+ * 前缀，两次探活会打到根路径（实测那里给 404），而假上游照样回 200。要么把分流改成精确匹配
+ * （那会让"前缀只在一处加"这个副产品变成脆弱点），要么**把被请求的 URL 记下来单独判**。
+ * 选后者：这一维本来就该由一条判据说话，不该靠 fixture 的巧合。
  */
-function fakeUp() {
-  return vi.fn(async (u: string | URL) =>
-    String(u).includes('/api/kernelspecs')
+function fakeUp(seenUrls: string[] = []) {
+  return vi.fn(async (u: string | URL) => {
+    const url = String(u);
+    seenUrls.push(url);
+    return url.includes('/api/kernelspecs')
       ? {
           status: 200,
           json: async () => ({
@@ -116,8 +124,44 @@ function fakeUp() {
             },
           }),
         }
-      : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) },
-  ) as unknown as typeof fetch;
+      : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) };
+  }) as unknown as typeof fetch;
+}
+
+/**
+ * `publicUrl` 自带的 base path，**去掉尾斜杠**后的样子：默认 env（`http://127.0.0.1:7789`）是空串，
+ * 同源反代挂在子路径上的部署（`…/arena`）是 `/arena`。
+ * 为什么判 pathname 必须把它算进期望值（评审 I-1 实测）：`new URL('http://127.0.0.1:7789').pathname`
+ * 给的是 `'/'` 而不是空串，所以既不能直接拼、也不能拿字面量 `${NOTEBOOK_TREE_PATH}` 比 ——
+ * 后者在 `ARENA_NOTEBOOK_PUBLIC_URL` 带 base path 时**冤红**（实际链接是 `/arena/jupyter/tree`，
+ * 前缀好好在那儿），而冤红教给下一个人的是"改测试里的数字"。
+ */
+function publicUrlBasePath(publicUrl: string): string {
+  return new URL(publicUrl).pathname.replace(/\/$/, '');
+}
+
+/** 链接的 pathname；`url` 缺席时把"为什么没给"当成值报出来（红得有信息，而不是让 `new URL('')` 抛 TypeError）。 */
+function linkPathname(res: { url?: string; reason?: string }): string {
+  if (!res.url) return `（没有 url${res.reason ? `：${res.reason}` : ''}）`;
+  return new URL(res.url).pathname;
+}
+
+/** 注入 env 重新 import `notebookStatus`（`loadConfigWith` 的同一条路子，只是这一次要的是 status 那一层）。 */
+async function loadStatusWith(env: Record<string, string | undefined>) {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of ['ARENA_DATA_DIR', 'ARENA_DB_FILE', 'ARENA_JUPYTER_TOKEN', 'ARENA_NOTEBOOK_PUBLIC_URL']) {
+    saved[key] = process.env[key];
+    if (env[key] === undefined) delete process.env[key];
+    else process.env[key] = env[key];
+  }
+  vi.resetModules();
+  try {
+    return (await import('../../src/notebooks/status.js')).notebookStatus as typeof notebookStatus;
+  } finally {
+    Object.assign(process.env, saved);
+    // 再清一次模块图：否则后面某条用例动态 import 到的还是"带着 base path 的那份 config"
+    vi.resetModules();
+  }
 }
 
 describe('notebook 契约与配置', () => {
@@ -362,56 +406,110 @@ describe('notebook 契约与配置', () => {
    * 不是"启动行里出现过 base_url"—— 后者在有人把值改成 `/nb/` 时照样绿，而那时页面上的
    * 反代前缀与 jupyter 的 base_url 分家，症状是"iframe 里全 404"，一片绿。
    *
-   * 破坏性验证（2026-10-09 实测，两条各改坏一次，都是**只有本条红**：`Tests 1 failed | 13 passed`）：
+   * 破坏性验证（2026-10-09 三种形状各改坏一次 `docker/entrypoint.sh` 的启动行，跑完即还原；
+   * 三次都是**只有本条红**：`Tests 1 failed | 15 passed (16)`，退出码 1）：
    * ① 删掉这一项（Task 1 落地之前的状态）⇒ 红在第一句 `toHaveLength(1)`：
-   *    `expected [] to have a length of 1 but got +0`；
+   *    `base_url 必须恰好一处，实际解出 0 处：[]（0 处 ⇒ …）: expected [] to have a length of 1 but got +0`；
    * ② 把值改成 `--ServerApp.base_url=/nb/` ⇒ 红在第二句，两个值都在消息里：
    *    `entrypoint 里的 base_url 是 "/nb/" 而前缀的真相是 "/jupyter/"（shared/src/notebook.ts）…：
-   *     expected '/nb/' to be '/jupyter/'`。
-   * 没测过的形状照实说：**两处** `--ServerApp.base_url=`（比如有人补一条而没删旧的）没有单独变异验过，
-   * 但它会撞在 ① 同一条 `toHaveLength(1)` 上（`flagValues` 解出 2 个值）。
+   *     expected '/nb/' to be '/jupyter/' // Object.is equality`。
+   *
+   * ③ 把这一项**复制成两行**（补新的没删旧的）—— 上一版在这里只写了推论（"没测过的形状…
+   * 会撞在同一条 `toHaveLength(1)` 上"），本轮按评审 M-2 实测掉了它：`DV_DUP_EXIT=1`、仍然只有本条红，
+   * 红在第一句，消息把条数与两个值一起报出来：
+   *   `base_url 必须恰好一处，实际解出 2 处：["/jupyter/","/jupyter/"]（0 处 ⇒ …；多于 1 处 ⇒ …）:
+   *    expected [ '/jupyter/', '/jupyter/' ] to have a length of 1 but got 2`
+   *   ⇒ 上一版的消息在这种形状下说的是"启动行里**没有** --ServerApp.base_url"，而真实故障是有两处 ——
+   *   那句会把第一次来的人支去**加一条**而不是删一条。现在两种形状（0 处 / 多于 1 处）各有一句解释。
    */
   it('entrypoint 的 --ServerApp.base_url 必须就是 shared 的 JUPYTER_BASE_URL（不多不少、恰好一处）', () => {
     const values = flagValues(entrypointText(), 'base_url');
-    expect(values, '启动行里没有 --ServerApp.base_url ⇒ jupyter 挂在根路径上，同源反代 `/jupyter/*` 会把它的 /static、/api、/login 全撞进 7788 自己的树里').toHaveLength(1);
+    expect(
+      values,
+      `base_url 必须恰好一处，实际解出 ${values.length} 处：${JSON.stringify(values)}` +
+        '（0 处 ⇒ jupyter 挂在根路径上，同源反代 `/jupyter/*` 会把它的 /static、/api、/login 全撞进 7788 自己的树里；' +
+        '多于 1 处 ⇒ 后一条覆盖前一条，两处会分家，而分家之后的症状是 iframe 里每个资源都 404）',
+    ).toHaveLength(1);
     expect(values[0], `entrypoint 里的 base_url 是 "${values[0]}" 而前缀的真相是 "${JUPYTER_BASE_URL}"（shared/src/notebook.ts）⇒ 两边分家时症状是 iframe 里每个资源都 404，而三档验证谁都不会红`).toBe(JUPYTER_BASE_URL);
   });
 
   /**
-   * 钉的是**链接的形状从常量派生**。期望值带 `?token=x` 不是凑数：这一条喂的是"本机两半都点头"
-   * 那一形状（对端回环 ∧ Host 是本机字面量），`status.ts` 在这种情况下必须附 token ——
-   * 实测（2026-10-09，Step 3）：不带这一截的话这一条在功能做好之后**仍然恒红**，
-   * 红在 `'…/jupyter/tree?token=x'` ≠ `'…/jupyter/tree'`，于是它判的不再是前缀而是 token 释放。
-   * 同 `server/test/notebooks/status.test.ts:179`：那条从一开始就把 token 写进期望值。
-   * 前缀本身另用 pathname 单独钉一次，这样"token 那一半将来变了"不会掩盖"前缀漂移"。
+   * 钉的是**链接的前缀**与**两次探活的 URL 前缀**，两维各一条断言。
    *
-   * 破坏性验证（2026-10-09 实测：把 `status.ts` 拼链接那处换回字面量 `/tree` ⇒ **只有本条红**，
-   * `Tests 1 failed | 13 passed`）：
-   *   `链接没带前缀 ⇒ 用户点开的还是 7789 的根路径，而 jupyter 已经不在那儿了:
-   *    expected 'http://127.0.0.1:7789/tree?token=x' to be 'http://127.0.0.1:7789/jupyter/tree?to…'`
-   * 诚实的边界：那次变异红在**第一句**就停了，第二句 pathname 判据没被执行过 —— 它是给
-   * "整串相等被 token 那一半的变化掩盖住"那种将来态准备的，今天只有 ① 的等价路径被真判过。
+   * 为什么链接那一条只看 pathname（评审 I-1，本轮订正；那两条证据是评审 2026-10-09 实测的）：
+   * 上一版在这里写的是"整串相等（含 `?token=x`）"，然后**另加**一句 pathname 判据，注释声称它提供
+   * 独立保护 —— 两句都不成立：① 默认 env 下第一句一旦成立第二句必然成立，而第一句一失败 vitest
+   * 就在第一个 `expect` 抛出、第二句根本不被执行（上一轮报告自己就记了这条实测）；
+   * ② `ARENA_NOTEBOOK_PUBLIC_URL` 带 base path 时第一句仍然成立而第二句**冤红**
+   * （评审实测 `expected '/arena/jupyter/tree' to be '/jupyter/tree'`，指责的却是一个不存在的硬编码）。
+   * 现在把这一条的对象收窄成**前缀本身**（pathname），token 那一维不在这里判 —— 它由
+   * `server/test/notebooks/status.test.ts` 的合取表钉（那条从一开始就是整串相等、含 token）。
+   *
+   * 破坏性验证（2026-10-09 三次各改坏一次，跑本文件，退出码单独 echo；基线 `Tests 16 passed (16)`）：
+   * ① `status.ts` 拼链接那处退回字面量 `/tree` ⇒ `DV_I1_EXIT=1`、`Tests 2 failed | 14 passed (16)`：
+   *    本条的第一句 + 下面那条 base path 用例各翻一次脸（同一个故障在两维上）——
+   *    `链接的 pathname 是 "/tree" 而派生值是 "/jupyter/tree" …: expected '/tree' to be '/jupyter/tree'`
+   *    `带 base path 的部署下，前缀必须接在 "http://127.0.0.1:7789/arena" 之后: expected '/arena/tree' to be '/arena/jupyter/tree'`
+   *    ⇒ 这一句红得不冤枉：那两条判的确实都是"前缀在不在链接里"；
+   * ② 摘掉 `jupyterApi()` 里的 `${JUPYTER_BASE_URL}` ⇒ `DV_I3_EXIT=1`、**只有本条红**
+   *    （`Tests 1 failed | 15 passed (16)`），红在第二句，received 是
+   *    `["http://127.0.0.1:8888api/status","http://127.0.0.1:8888api/kernelspecs"]`（端口后面直接粘上
+   *    `api/…`，前缀没了）⇒ **这就是评审 I-3 要的那次"宿主档必须红"**：评审对改之前的同一个变异
+   *    实测过"宿主档 14 条契约判据与整条 `verify:fast` 都照绿"（`.includes('/api/kernelspecs')`
+   *    分流不看前缀），会红的只有容器档那条不打 mock 的闸门；
+   * ③ `ARENA_NOTEBOOK_PUBLIC_URL='http://127.0.0.1:7789/arena'` 整文件跑 ⇒ `ENV_PUB_URL_EXIT=1`、
+   *    `Tests 1 failed | 15 passed (16)`，红的**只有**第 1 条用例那句"默认 publicUrl 就是这个"的取值判据
+   *    （`expected 'http://127.0.0.1:7789/arena' to be 'http://127.0.0.1:7789'` —— env 敏感的本来之判，
+   *    不在本轮六条里，评审也没把它列成 finding）；单独点本条 ⇒ `ENV_PUB_GATE2_EXIT=0`、
+   *    `Tests 1 passed | 15 skipped (16)` ⇒ I-1 的那个冤红不复存在。
    */
   it('给页面的链接与探活都带前缀：config.notebook.publicUrl + JUPYTER_BASE_URL 派生，不许写死 /tree', async () => {
-    const res = await notebookStatus({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(), gatewayAddresses: [] });
-    expect(res.url, '链接没带前缀 ⇒ 用户点开的还是 7789 的根路径，而 jupyter 已经不在那儿了').toBe(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=x`);
-    expect(new URL(res.url ?? '').pathname, 'pathname 不是派生出来的那个前缀 ⇒ 拼链接那一处还写死着 /tree（与 token 那一半无关，单独钉）').toBe(NOTEBOOK_TREE_PATH);
+    const seenUrls: string[] = [];
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(seenUrls), gatewayAddresses: [] });
+    const actualPath = linkPathname(res);
+    const expectPath = `${publicUrlBasePath(config.notebook.publicUrl)}${NOTEBOOK_TREE_PATH}`;
+    expect(actualPath, `链接的 pathname 是 "${actualPath}" 而派生值是 "${expectPath}" ⇒ 拼链接那一处没跟着前缀的真相走（与 token 无关）`).toBe(expectPath);
+    expect(
+      seenUrls,
+      '两次探活打的是 ' + JSON.stringify(seenUrls) + ` ⇒ \`jupyterApi\` 里没拼 JUPYTER_BASE_URL（status.ts 那句"前缀在这里加、只在这里加"是假的）。` +
+        '这一维假 fixture 判不到：它按 .includes("/api/kernelspecs") 分流，带不带前缀都命中、都回 200，' +
+        '于是摘掉前缀之后第五页会对着一台活着的 Jupyter 说"返回 404"（实测根路径给 404），而这一档全绿 —— 本条就是补在那里的',
+    ).toEqual([
+      `http://127.0.0.1:${config.notebook.port}${JUPYTER_BASE_URL}api/status`,
+      `http://127.0.0.1:${config.notebook.port}${JUPYTER_BASE_URL}api/kernelspecs`,
+    ]);
+  });
+
+  /**
+   * 评审 I-1 的那个冤红形状，钉成常驻判据：`ARENA_NOTEBOOK_PUBLIC_URL` 带 base path
+   * （同源反代挂在子路径上，正是 WI-94 后面几档要支持的部署形状）时，前缀必须**挂在 base path 之后**
+   * 而不是把它挤掉，也不许有条判据因为它而翻脸。期望值是**字面量**，不由被测实现派生。
+   */
+  it('ARENA_NOTEBOOK_PUBLIC_URL 带 base path 时前缀仍然接在它后面（I-1 的冤红形状不留原位）', async () => {
+    const BASE = 'http://127.0.0.1:7789/arena';
+    const statusWithBase = await loadStatusWith({ ARENA_NOTEBOOK_PUBLIC_URL: BASE });
+    const res = await statusWithBase({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(), gatewayAddresses: [] });
+    // 空转防护：注入没生效时下面这条会退化成上一条的复读
+    expect(res.url, `注入的 publicUrl 没进链接 ⇒ env 那一层没生效（本条就在空转）：${JSON.stringify(res)}`).toContain(BASE);
+    expect(linkPathname(res), `带 base path 的部署下，前缀必须接在 "${BASE}" 之后`).toBe('/arena/jupyter/tree');
   });
 
   /**
    * 「两个实现」这句话的判据本体（`start.sh` 与 `start.ps1` 是同一套判据的两个实现，改了其一必须改其二）。
    * 期望值 `7789${JUPYTER_BASE_URL}login` 是从 shared 那份真相派生的，不是写死的 `'/jupyter/login'`。
    *
-   * 破坏性验证（2026-10-09 实测：只把 `start.ps1` 的探测退回 `/login`、`start.sh` 保持带前缀
-   * ⇒ **只有本条红**，`Tests 1 failed | 13 passed`，且红的是**第二句**（先 `toContain` sh 通过、再 ps 翻脸），
-   * 说明它判的确实是"两边同步"而不是"sh 那边有没有"）：
+   * 破坏性验证（上一轮实测过一次；本轮因为文件里多了用例，2026-10-09 又各重跑一次，
+   * 记的是**本轮**的数字：**只**把 `start.ps1` 的探测退回 `/login`、`start.sh` 保持带前缀
+   * ⇒ `DV_PS_PROBE_EXIT=1`、**只有本条红**（`Tests 1 failed | 15 passed (16)`），且红的是**第二句**
+   * （先 `toContain` sh 通过、再 ps 翻脸），说明它判的确实是"两边同步"而不是"sh 那边有没有"）。
+   * 失败消息逐字：
    *   `start.ps1 与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西:
    *    expected '\ufeff# 游戏启动脚本（Windows PowerShell 对等实…' to contain '7789/jupyter/login'`
    * 顺带一条实测副产品：那条消息里 ps1 正文以 `\ufeff` 开头 ⇒ 本文件的读取看见的是带 BOM 的字节，
    * BOM 判据（`scripts-syntax.test.ts`）与本条互不掩盖。
    *
-   * 反方向也真做过一次（2026-10-09：**只**把 `start.sh` 的探测退回 `/login`、`start.ps1` 保持带前缀
-   * ⇒ 仍然**只有本条红**（`Tests 1 failed | 13 passed`），红的是**第一句**）：
+   * 反方向本轮也重跑了一次（**只**把 `start.sh` 的探测退回 `/login`、`start.ps1` 保持带前缀
+   * ⇒ `DV_SH_PROBE_EXIT=1`、仍然**只有本条红**（`Tests 1 failed | 15 passed (16)`），红的是**第一句**）：
    *   `start.sh 的 report_notebook 还在探 /login ⇒ …永远拿到 **404**（实测：/login → 404，000 只在没人监听时
    *    时才出现）…: expected '#!/usr/bin/env bash\n# 游戏启动脚本（需求 场景 2…' to contain '7789/jupyter/login'`
    * ⇒ 两句断言各自都能独立翻脸，"两个实现"不是靠一句 `&&` 糊在一起的。
@@ -430,5 +528,46 @@ describe('notebook 契约与配置', () => {
     expect(sh, 'start.sh 的 report_notebook 还在探 /login ⇒ base_url 一改它就永远拿到 **404**（实测：/login → 404，' +
       '000 只在没人监听时才出现），于是横幅照走成功分支、打印"已应答 HTTP 404"再附一条打不开的链接 ⇒ 探活形同虚设（假阳性）').toContain(probe);
     expect(ps, 'start.ps1 与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西').toContain(probe);
+  });
+
+  /**
+   * 评审 I-2：横幅里那条**用户真正会点开的链接**（`say` / `Write-Host` 那一行）以前一句判据都没有 ——
+   * 评审实测过"把 `start.sh` 的横幅退回 `/tree` ⇒ 整条 `npm run verify:fast` `EXIT=0`"。
+   * 上面那条只查探测（`…/jupyter/login`），两条是不同的行：探测坏了是"探活形同虚设"，
+   * 横幅坏了是"每一个跑 ./start.sh 的人第一次看到的都是点不开的链接"，症状与 Task 1 想防的完全同形。
+   *
+   * ⚠ **必须走 `codeView()`**：`start.sh` 注释 ④ 里**现在就含** `7789/jupyter/tree`
+   * （本轮 Minor-1 又往那一段加了年代标记，串还在），直接 `toContain(sh)` 会被注释喂绿 ——
+   * 与本文件「注释不算配置」那条纪律同源（见 `codeView` 的注释：各写一份 filter 的那天下掉一份，
+   * 就会有一条判据开始在注释里读配置）。上面那两条**探测**判据今天没被注释喂到（数过，见 ③ 后面那段普查），
+   * 但那是运气不是设计 ⇒ 新加的这两句一律走剥离后的视图。
+   *
+   * 破坏性验证（2026-10-09 三次，跑完即还原；全文件基线 `Tests 16 passed (16)`）：
+   * ① **只**把 `start.sh` 的 `report_notebook` 末尾那句横幅退回 `7789/tree` ⇒ `DV_I2_SH_EXIT=1`、
+   *    **只有本条红**（`Tests 1 failed | 15 passed (16)`），红在**第一句**：
+   *    `start.sh 的横幅还在给 /tree ⇒ …: expected 'set -uo pipefail\ncd "$(dirname "$0")…' to contain '7789/jupyter/tree'`
+   *    —— received 以 `set -uo pipefail` 开头而不是 `#!/usr/bin/env bash` ⇒ 视图确实是剥离过注释的；
+   *    而这一次变异里 `start.sh` 的**注释仍然带着正确的** `7789/jupyter/tree`，它没能把这一句喂绿；
+   * ② **只**把 `start.ps1` 的 `Report-Notebook` 末尾那句 `Write-Host` 退回 `7789/tree` ⇒ `DV_I2_PS_EXIT=1`、
+   *    只有本条红（`Tests 1 failed | 15 passed (16)`），红在**第二句**
+   *    （`start.ps1 的横幅与 start.sh 不同步…: expected 'param(\n  [switch]$Rebuild,\n  [switc…' to contain …`）
+   *    ⇒ 两句各自都能独立翻脸，"两个实现"不是靠一句 `&&` 糊起来的；
+   * ③ 反向对照：**只**把 `start.sh` 注释 ④ 里那条给人照抄的 curl 的路径改成 `7789/tree`、`say` 那行不动
+   *    ⇒ `DV_I2_COMMENT_EXIT=0`、`Tests 16 passed (16)` ⇒ 注释里的对错不参与判据
+   *    （否则每次写排障注释都像是在改闸门，而 ① 已经证明反方向不成立：注释里的正确值喂不绿它）。
+   * 另一次普查（同一轮，按行分类数出来的）：`7789/jupyter/login` 在两个脚本的非注释行各 1 处、注释 0 处；
+   * `7789/jupyter/tree` 在 `start.sh` 是**非注释行 1 处 + 注释行 1 处**、`start.ps1` 非注释行 1 处、注释 0 处
+   * ⇒ 探测那两句今天没被注释喂到，但横幅这一句**只要不走 codeView 就必然被 `start.sh` 的注释 ④ 喂绿**。
+   */
+  it('start.sh 与 start.ps1 的横幅里那条链接也带前缀（用户点开的那一条，判据走注释剥离后的视图）', () => {
+    const link = `7789${NOTEBOOK_TREE_PATH}`;          // 期望值派生，不写死 '/jupyter/tree'
+    const shView = codeView(readFileSync(join(config.repoRoot, 'start.sh'), 'utf8'));
+    const psView = codeView(readFileSync(join(config.repoRoot, 'start.ps1'), 'utf8'));
+    // 空转防护：codeView 把整行注释丢掉之后，两个视图里确实还剩东西（filter 坏了这里先红，
+    // 而不是让下面两句"在注释里读到配置"然后绿得毫无意义）
+    expect(shView.length, 'start.sh 的代码视图是空的 ⇒ codeView 的 filter 坏了').toBeGreaterThan(100);
+    expect(psView.length, 'start.ps1 的代码视图是空的 ⇒ codeView 的 filter 坏了').toBeGreaterThan(100);
+    expect(shView, 'start.sh 的横幅还在给 /tree ⇒ base_url 之后那条链接必 404，而这是跑 ./start.sh 的人看到的第一句话').toContain(link);
+    expect(psView, 'start.ps1 的横幅与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西').toContain(link);
   });
 });
