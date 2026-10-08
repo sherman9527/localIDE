@@ -80,3 +80,31 @@ export interface NotebookPrepareResponse {
  * 测试断言全指向这里。写死字符串会漂移，而漂移的表现不是报错，是"下拉框里那个 kernel 永远 ready:false"。
  */
 export const NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' } as const;
+
+/**
+ * WI-94：同源反代的前缀**唯一真相**（`/jupyter`）。
+ * 它是"三处各写一遍"的高危形状：`docker/entrypoint.sh` 的 `--ServerApp.base_url`、
+ * 服务端反代的挂载点、`start.sh` / `start.ps1` 的探测路径、`status.ts` 给页面的链接、
+ * 前端 iframe 的 src —— 任一处对不上，症状都不是报错而是"iframe 里全 404"或"横幅永远说未就绪"，
+ * 而三档验证全是绿的（本项目在桥 token 与 kernel id 上各付过一次学费，见 WI-86 与
+ * `notebook-contract.test.ts` 的「kernel id 只有一份真相」）。
+ * shell 侧带不回这个常量 ⇒ 那边用字面量，由闸门按派生的期望值去查它的文本。
+ */
+export const NOTEBOOK_PREFIX = '/jupyter' as const;
+
+/**
+ * jupyter 侧的 base_url：`NOTEBOOK_PREFIX` + **尾斜杠**。
+ * 尾斜杠不是风格：jupyter 拼资源用的是 `${base_url}static/…`，少一个斜杠它就成了 `/jupyterstatic/…`。
+ */
+export const JUPYTER_BASE_URL = `${NOTEBOOK_PREFIX}/` as const;
+
+/** 文件列表页（7789 那把"逃生链接"与第五页 iframe 的默认落点）。 */
+export const NOTEBOOK_TREE_PATH = `${NOTEBOOK_PREFIX}/tree` as const;
+
+/**
+ * 一份笔记在同源那棵树上的路径。**逐段 encode**：文件名里能出现空格、中文、`#`、`?`，
+ * 整串 encode 会把 `/` 也吃掉（变成 %2F ⇒ jupyter 当成一段路径，找不到文件）。
+ */
+export function notebookDocPath(file: string): string {
+  return `${NOTEBOOK_PREFIX}/notebooks/${file.split('/').map(encodeURIComponent).join('/')}`;
+}

@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { createServer, request as nodeHttpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { NOTEBOOK_KERNELS } from '@arena/shared';
+import { JUPYTER_BASE_URL, NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
 import { ensureIdeEnv, venvPythonPath } from '../../src/ide/env.js';
 import { findLanguage } from '../../src/ide/languages.js';
@@ -576,7 +576,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
    * ② DNAT 目标有人在听 ⇒ 「发布端口打得到」（这条当时是**红的**，它才是闸门）。
    */
   it('容器回环上有 jupyter 在听（证明服务起来了 —— 这一条不是那个缺陷，它是对照）', async () => {
-    const url = `http://127.0.0.1:${config.notebook.port}/tree`;
+    // 路径从 JUPYTER_BASE_URL 派生（WI-94 Task 1）：entrypoint 的 base_url=/jupyter/ 一改，
+    // 根路径上的 /tree 就不存在了 —— 下面那两条 HOST_* 判据会把"404"读成别的东西（见文件里
+    // HOST_REFUSED_STATUS 那句"401/404 说明请求没走到守卫那一层"）。
+    const url = `http://127.0.0.1:${config.notebook.port}${JUPYTER_BASE_URL}tree`;
     const res = await probeHttp(url);
     expect('status' in res, `${probeLine(url, res)} ⇒ 容器里连回环都不应答：jupyter 压根没起来（缺 token / 镜像没带 Jupyter / 端口被占），与本条要对照的那个「绑定地址」缺陷无关`).toBe(true);
     // 两条断言都会跑（不写 `if`：本文件的规矩是"永远会跑的断言里不许有早退"）；
@@ -605,10 +608,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     ).toBeGreaterThan(0);
     // 回环那一侧同时探一次，只为把失败消息写成「一边通一边不通」——那才是这个缺陷的指纹。
     // 它的正题判据在上面那条（对照）。
-    const loopback = `http://127.0.0.1:${config.notebook.port}/tree`;
+    const loopback = `http://127.0.0.1:${config.notebook.port}${JUPYTER_BASE_URL}tree`;
     const loopbackRes = await probeHttp(loopback);
     for (const addr of addrs) {
-      const url = `http://${addr}:${config.notebook.port}/tree`;
+      const url = `http://${addr}:${config.notebook.port}${JUPYTER_BASE_URL}tree`;
       const res = await probeHttp(url);
       // 两种故障要说两种话（本文件的规矩：报错得说得出该去查什么）：
       // 回环通而这里不通 = 绑定地址坏了；两边都不通 = jupyter 压根没起来，这条判据在这里还没有对象。
@@ -753,7 +756,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
   it('Host 守卫在位：rebinding 形状的 Host 被拒（403），而浏览器形状的 Host 照旧放行', async () => {
     const port = config.notebook.port;
     const evilHeader = 'rebinding.example:7789';
-    const evil = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: '/tree', hostHeader: evilHeader });
+    // ⚠ 路径必须是**带前缀**的那个（WI-94 Task 1）。这一条判的是 `HOST_REFUSED_STATUS = 403`，
+    // 而 base_url 一改之后根路径上的 `/tree` 变成 404 —— 本文件自己写着"401/404 说明请求没走到
+    // 守卫那一层，判不了这条"，于是**功能没坏而闸门红了**，红的话还指着一个不存在的守卫问题。
+    const evil = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: `${JUPYTER_BASE_URL}tree`, hostHeader: evilHeader });
     expect(
       evil,
       `带 Host: ${evilHeader} 的请求连不上（null）⇒ 这一条没有判据对象：jupyter 没在这个端口上答话。` +
@@ -774,7 +780,7 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     // 收紧之后用户那条路必须还活着。Host 用**宿主发布端口那份写法**（:7789）：
     // docker-proxy 转的是 TCP 字节，Host 头原样进来，所以容器里看到的与浏览器发出的就是同一个串。
     for (const header of ['127.0.0.1:7789', 'localhost:7789', '[::1]:7789']) {
-      const ok = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: '/tree', hostHeader: header });
+      const ok = await probeWithHostHeader({ connectHost: '127.0.0.1', port, path: `${JUPYTER_BASE_URL}tree`, hostHeader: header });
       expect(
         ok,
         `带 Host: ${header} 的请求连不上（null）⇒ 没有判据对象，同上面那条：先排 jupyter 在不在听`,

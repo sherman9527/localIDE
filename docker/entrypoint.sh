@@ -90,11 +90,20 @@ start_jupyter() {
   # venv 前置到 PATH：notebook 里 `!pip3 install X` 走 shell，命中哪个 pip 由 PATH 决定。
   # 不加这一句包会写进系统 site-packages —— 而判题用的正是那个解释器（红线一延伸，判据见
   # server/test/regression/notebook-env-isolation.test.ts）。必须写在命令之前。
+  # base_url 为什么挂在 jupyter 自己身上，而不是让 7788 那侧的反代去剥前缀（WI-94 Task 1）：
+  # jupyter 回话里的资源与跳转是**绝对路径**（`/static/…`、`/api/…`、`/login?next=…`）。代理剥前缀的话，
+  # 它发回来的这些链接仍然没有前缀 ⇒ 浏览器把它们打到 7788 自己的树上，与 SPA 的 `/` 和 `/api/*` 直接撞名。
+  # 让它自己带前缀，才是"页面里每一个链接生来就在 `/jupyter/` 下面"的写法。
+  # ⚠ 这一改是连带的：`start.sh` / `start.ps1` 的探测与横幅、`kernel.test.ts` 的 `/tree` 探针、
+  # `status.ts` 的探活与拼链接都跟着它走。前缀的真相只有一份，住在 `shared/src/notebook.ts`
+  # （`NOTEBOOK_PREFIX` / `JUPYTER_BASE_URL`）；钉住这一点的闸门是
+  # `server/test/regression/notebook-contract.test.ts` 的那三条（值必须等于那个常量，不是"出现过"）。
   PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
   jupyter notebook --allow-root --no-browser \
     --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888 --ServerApp.port_retries=0 \
     --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
     --ServerApp.root_dir="${nb_root}/notebooks" \
+    --ServerApp.base_url=/jupyter/ \
     >"${nb_root}/notebook-server.log" 2>&1 &
 
   # 为什么 ip 是 0.0.0.0 而不是 127.0.0.1（Task 10 实测到的缺陷，不是推理）：

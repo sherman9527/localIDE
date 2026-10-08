@@ -2,8 +2,9 @@ import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { NOTEBOOK_KERNELS } from '@arena/shared';
+import { NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, JUPYTER_BASE_URL } from '@arena/shared';
 import { config } from '../../src/config.js';
+import { notebookStatus } from '../../src/notebooks/status.js';
 
 /**
  * Task 5 的契约闸门：类型住在 `shared`（服务端与页面共用一份真相，同 `shared/src/ide.ts` 的先例），
@@ -89,6 +90,34 @@ function serverAppIpValues(text: string): string[] {
 /** 同上，取 --ServerApp.allow_remote_access= 的取值。 */
 function allowRemoteAccessValues(text: string): string[] {
   return flagValues(text, 'allow_remote_access');
+}
+
+/**
+ * 假 Jupyter 上游，给下面那条「给页面的链接带前缀」用 —— 形状照
+ * `server/test/api/notebook-api.test.ts` 的 `jupyterUp()`，区别是这里**返回** `typeof fetch`
+ * 注进 `notebookStatus({ fetchImpl })`，不 stubGlobal（本文件别的用例还在读真文件，别搅动全局）。
+ * ⚠ 顶层键必须是 `kernelspecs`、标签在 `[<id>].spec.display_name`，**不是** `kernels`：
+ * 那份 fixture 当年与实现同源地写错过，于是宿主档一片绿而第五页在用户眼前说"kernel 没注册"
+ * （2026-10-08 实测；判住键名的是容器档那条不打 mock 的闸门）。
+ */
+function fakeUp() {
+  return vi.fn(async (u: string | URL) =>
+    String(u).includes('/api/kernelspecs')
+      ? {
+          status: 200,
+          json: async () => ({
+            default: NOTEBOOK_KERNELS.pyspark,
+            kernelspecs: {
+              [NOTEBOOK_KERNELS.pyspark]: {
+                name: NOTEBOOK_KERNELS.pyspark,
+                spec: { display_name: 'PySpark (arena)' },
+                resources: {},
+              },
+            },
+          }),
+        }
+      : { status: 200, json: async () => ({ version: '7.2.0', ready: true }) },
+  ) as unknown as typeof fetch;
 }
 
 describe('notebook 契约与配置', () => {
@@ -326,5 +355,66 @@ describe('notebook 契约与配置', () => {
     expect(isInside(join('/data', 'sandbox', 'notebook-warehouse'), join('/data', 'sandbox'))).toBe(true);
     // ③ 同一目录不是"在里面"（相等时 relative 得空串，别把它读成"互相包含"）
     expect(isInside(judge, judge)).toBe(false);
+  });
+
+  /**
+   * WI-94 的前提：Jupyter 自己就挂在 `/jupyter/` 下。判的是**取值等于 shared 里那份真相**，
+   * 不是"启动行里出现过 base_url"—— 后者在有人把值改成 `/nb/` 时照样绿，而那时页面上的
+   * 反代前缀与 jupyter 的 base_url 分家，症状是"iframe 里全 404"，一片绿。
+   *
+   * 破坏性验证（2026-10-09 实测，两条各改坏一次，都是**只有本条红**：`Tests 1 failed | 13 passed`）：
+   * ① 删掉这一项（Task 1 落地之前的状态）⇒ 红在第一句 `toHaveLength(1)`：
+   *    `expected [] to have a length of 1 but got +0`；
+   * ② 把值改成 `--ServerApp.base_url=/nb/` ⇒ 红在第二句，两个值都在消息里：
+   *    `entrypoint 里的 base_url 是 "/nb/" 而前缀的真相是 "/jupyter/"（shared/src/notebook.ts）…：
+   *     expected '/nb/' to be '/jupyter/'`。
+   * 没测过的形状照实说：**两处** `--ServerApp.base_url=`（比如有人补一条而没删旧的）没有单独变异验过，
+   * 但它会撞在 ① 同一条 `toHaveLength(1)` 上（`flagValues` 解出 2 个值）。
+   */
+  it('entrypoint 的 --ServerApp.base_url 必须就是 shared 的 JUPYTER_BASE_URL（不多不少、恰好一处）', () => {
+    const values = flagValues(entrypointText(), 'base_url');
+    expect(values, '启动行里没有 --ServerApp.base_url ⇒ jupyter 挂在根路径上，同源反代 `/jupyter/*` 会把它的 /static、/api、/login 全撞进 7788 自己的树里').toHaveLength(1);
+    expect(values[0], `entrypoint 里的 base_url 是 "${values[0]}" 而前缀的真相是 "${JUPYTER_BASE_URL}"（shared/src/notebook.ts）⇒ 两边分家时症状是 iframe 里每个资源都 404，而三档验证谁都不会红`).toBe(JUPYTER_BASE_URL);
+  });
+
+  /**
+   * 钉的是**链接的形状从常量派生**。期望值带 `?token=x` 不是凑数：这一条喂的是"本机两半都点头"
+   * 那一形状（对端回环 ∧ Host 是本机字面量），`status.ts` 在这种情况下必须附 token ——
+   * 实测（2026-10-09，Step 3）：不带这一截的话这一条在功能做好之后**仍然恒红**，
+   * 红在 `'…/jupyter/tree?token=x'` ≠ `'…/jupyter/tree'`，于是它判的不再是前缀而是 token 释放。
+   * 同 `server/test/notebooks/status.test.ts:179`：那条从一开始就把 token 写进期望值。
+   * 前缀本身另用 pathname 单独钉一次，这样"token 那一半将来变了"不会掩盖"前缀漂移"。
+   *
+   * 破坏性验证（2026-10-09 实测：把 `status.ts` 拼链接那处换回字面量 `/tree` ⇒ **只有本条红**，
+   * `Tests 1 failed | 13 passed`）：
+   *   `链接没带前缀 ⇒ 用户点开的还是 7789 的根路径，而 jupyter 已经不在那儿了:
+   *    expected 'http://127.0.0.1:7789/tree?token=x' to be 'http://127.0.0.1:7789/jupyter/tree?to…'`
+   * 诚实的边界：那次变异红在**第一句**就停了，第二句 pathname 判据没被执行过 —— 它是给
+   * "整串相等被 token 那一半的变化掩盖住"那种将来态准备的，今天只有 ① 的等价路径被真判过。
+   */
+  it('给页面的链接与探活都带前缀：config.notebook.publicUrl + JUPYTER_BASE_URL 派生，不许写死 /tree', async () => {
+    const res = await notebookStatus({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(), gatewayAddresses: [] });
+    expect(res.url, '链接没带前缀 ⇒ 用户点开的还是 7789 的根路径，而 jupyter 已经不在那儿了').toBe(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=x`);
+    expect(new URL(res.url ?? '').pathname, 'pathname 不是派生出来的那个前缀 ⇒ 拼链接那一处还写死着 /tree（与 token 那一半无关，单独钉）').toBe(NOTEBOOK_TREE_PATH);
+  });
+
+  /**
+   * 「两个实现」这句话的判据本体（`start.sh` 与 `start.ps1` 是同一套判据的两个实现，改了其一必须改其二）。
+   * 期望值 `7789${JUPYTER_BASE_URL}login` 是从 shared 那份真相派生的，不是写死的 `'/jupyter/login'`。
+   *
+   * 破坏性验证（2026-10-09 实测：只把 `start.ps1` 的探测退回 `/login`、`start.sh` 保持带前缀
+   * ⇒ **只有本条红**，`Tests 1 failed | 13 passed`，且红的是**第二句**（先 `toContain` sh 通过、再 ps 翻脸），
+   * 说明它判的确实是"两边同步"而不是"sh 那边有没有"）：
+   *   `start.ps1 与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西:
+   *    expected '\ufeff# 游戏启动脚本（Windows PowerShell 对等实…' to contain '7789/jupyter/login'`
+   * 顺带一条实测副产品：那条消息里 ps1 正文以 `\ufeff` 开头 ⇒ 本文件的读取看见的是带 BOM 的字节，
+   * BOM 判据（`scripts-syntax.test.ts`）与本条互不掩盖。
+   */
+  it('start.sh 与 start.ps1 里那条探测也带前缀（同一套判据的两个实现）', () => {
+    const probe = `7789${JUPYTER_BASE_URL}login`;      // 期望值派生，不写死 '/jupyter/login'
+    const sh = readFileSync(join(config.repoRoot, 'start.sh'), 'utf8');
+    const ps = readFileSync(join(config.repoRoot, 'start.ps1'), 'utf8');
+    expect(sh, 'start.sh 的 report_notebook 还在探 /login ⇒ base_url一改它就永远 000，横幅会说"未就绪"而功能其实是好的（假阴性）').toContain(probe);
+    expect(ps, 'start.ps1 与 start.sh 不同步 ⇒ 两个人照着不同的一句话修不同的东西').toContain(probe);
   });
 });

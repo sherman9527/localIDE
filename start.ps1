@@ -333,7 +333,11 @@ function Report-Notebook {
   }
   $code = 0
   try {
-    $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:7789/login' -TimeoutSec 2 -UseBasicParsing
+    # 路径带 `/jupyter/` 前缀（WI-94 Task 1）：jupyter 自己挂在 base_url=/jupyter/ 下，
+    # 探 `/login` 从此永远 000 —— 横幅会说"未就绪"而功能其实是好的（假阴性）。
+    # 与 start.sh 的 report_notebook 是同一套判据的两个实现，改一边必须改另一边；
+    # 前缀的真相在 shared/src/notebook.ts，闸门是 server/test/regression/notebook-contract.test.ts。
+    $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:7789/jupyter/login' -TimeoutSec 2 -UseBasicParsing
     $code = [int]$resp.StatusCode
   } catch {
     # 非 2xx 也算"有进程应答"（与 start.sh 那边 curl 只看 http_code 同判据）；完全没有连接才是没起来。
@@ -344,7 +348,7 @@ function Report-Notebook {
     Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 .\start.ps1（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
     return
   }
-  Write-Host "[arena] Notebook -> http://127.0.0.1:7789/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan
+  Write-Host "[arena] Notebook -> http://127.0.0.1:7789/jupyter/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan
 }
 
 if ($Down) {

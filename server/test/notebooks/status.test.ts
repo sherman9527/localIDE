@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
-import { NOTEBOOK_KERNELS, type NotebookStatusResponse } from '@arena/shared';
+import { NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, type NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
 import { venvPythonPath } from '../../src/ide/env.js';
 import { notebookStatus, parseProcNetRoute } from '../../src/notebooks/status.js';
@@ -176,7 +176,7 @@ describe('notebookStatus', () => {
     // 期望值从 config 派生（评审 M9）：原来这里写死 `http://127.0.0.1:7789`，
     // 于是"宿主端口换个号"会同时改掉 compose 与 config 而这条测试独自红 —— 那是冤红，
     // 冤红教给下一个人的是"改测试里的数字"，而不是"看谁真的漂移了"。
-    expect(res.url).toBe(`${config.notebook.publicUrl}/tree?token=test-token`);
+    expect(res.url).toBe(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=test-token`);
     // 标签来自 `spec.display_name`（不是 id、不是顶层）。清单**只有 arena 自己那一条** ——
     // fixture 里的 python3 由 I-4 的 allow-list 滤掉，它下面单独有一条用例判（含反向对照）。
     // ⚠ **终审 I-1 之后 `ready` 不再能从这一条里写死**：arena-pyspark 的 ready 判的是盘上那份
@@ -420,7 +420,8 @@ describe('notebookStatus', () => {
   });
 
   /**
-   * 评审 M5：`new URL(config.notebook.publicUrl + '/tree')` 原先在 try **外面**。
+   * 评审 M5：`new URL(config.notebook.publicUrl + NOTEBOOK_TREE_PATH)`（WI-94 Task 1 之前那半是
+   * 字面量 `'/tree'`）原先在 try **外面**。
    * publicUrl 是 env 可覆盖的（ARENA_NOTEBOOK_PUBLIC_URL），一个坏值会让整个函数 reject，
    * 而 Task 8 把它挂在 GET 路由上 ⇒ 前端拿到 500，500 里没有 reason 可读，
    * 那句"kernel 就绪"整块消失 —— 症状与"Jupyter 真坏了"一模一样。
@@ -470,7 +471,7 @@ describe('notebookStatus', () => {
       expect(seen, `有日志调用把 token 打印出来了 ⇒ 它会留在 data/logs 里，删不掉历史：\n${seen}`).not.toContain(CANARY);
       // 判据自己也要被判（否则"什么都没收集到"也看起来像成功）：
       // 故意泄漏一次，收集器必须当场看得见那个 canary。
-      logSpy.logInfo('notebook', 'selfcheck', { url: `http://127.0.0.1:7789/tree?token=${CANARY}` });
+      logSpy.logInfo('notebook', 'selfcheck', { url: `${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=${CANARY}` });
       expect(collect(), '收集器看不见 logInfo 的字段 ⇒ 上面那条断言是在空转').toContain(CANARY);
     } finally {
       for (const s of consoleSpies) s.mockRestore();

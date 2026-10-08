@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { NOTEBOOK_KERNELS, type NotebookPrepareResponse, type NotebookStatusResponse } from '@arena/shared';
+import { NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, type NotebookPrepareResponse, type NotebookStatusResponse } from '@arena/shared';
 import { config } from '../../src/config.js';
 import type { GradePort, JudgePort } from '../../src/ports.js';
 import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures.js';
@@ -277,7 +277,7 @@ describe('GET /api/notebook/status', () => {
     expect(res.statusCode).toBe(200);
     const body = res.json() as NotebookStatusResponse;
     expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是 token 释放，不是探活').toBe(true);
-    expect(body.url, '链接照给（它本来就只在本机能打开），但里面不许有凭据').toBe(`${cfg.notebook.publicUrl}/tree`);
+    expect(body.url, '链接照给（它本来就只在本机能打开），但里面不许有凭据').toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
     expect(JSON.stringify(body), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
   });
 
@@ -383,7 +383,7 @@ describe('GET /api/notebook/status', () => {
       expect(res.statusCode, `Host: ${host} 是本机形状，不该被 origin 那一层挡住`).toBe(200);
       const body = res.json() as NotebookStatusResponse;
       expect(body.url, `Host: ${host} 是本机形状 + 回环对端 ⇒ 不给 token 就得让用户手贴（静默降级那一侧）`).toBe(
-        `${cfg.notebook.publicUrl}/tree?token=${CANARY}`,
+        `${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=${CANARY}`,
       );
     }
   });
@@ -422,7 +422,7 @@ describe('GET /api/notebook/status', () => {
     expect(
       (res.json() as NotebookStatusResponse).url,
       '路由没把网关判据接到 notebookStatus ⇒ 容器里的页面永远只能手贴 token',
-    ).toBe(`${cfg.notebook.publicUrl}/tree?token=${CANARY}`);
+    ).toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=${CANARY}`);
   });
 
   /**
@@ -453,7 +453,7 @@ describe('GET /api/notebook/status', () => {
     const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '172.18.0.7' });
     const body = res.json() as NotebookStatusResponse;
     expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是释放判据，不是探活').toBe(true);
-    expect(body.url).toBe(`${cfg.notebook.publicUrl}/tree`);
+    expect(body.url).toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
     expect(JSON.stringify(body), 'token 出现在任何字段里都算泄漏').not.toContain(CANARY);
   });
 

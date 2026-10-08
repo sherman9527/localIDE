@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import { isLoopbackAddressLiteral, isLoopbackHostHeader } from '../net/localOrigin.js';
 import { venvPythonPath } from '../ide/env.js';
-import { NOTEBOOK_KERNELS, type NotebookKernel, type NotebookStatusResponse } from '@arena/shared';
+import { JUPYTER_BASE_URL, NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, type NotebookKernel, type NotebookStatusResponse } from '@arena/shared';
 
 /**
  * 页面上允许出现的 kernel（终审 I-4）。从 `NOTEBOOK_KERNELS` 派生 ⇒ A2 加 `arena-scala`
@@ -123,8 +123,9 @@ export function isLocalPeer(rawAddress: string | undefined, gateways: string[] =
   return gateways.some((gw) => gw.toLowerCase() === ip);
 }
 
-async function jupyterApi(path: string, token: string, doFetch: typeof fetch, timeoutMs: number): Promise<Response> {
-  return doFetch(`http://127.0.0.1:${config.notebook.port}${path}`, {
+async function jupyterApi(subPath: string, token: string, doFetch: typeof fetch, timeoutMs: number): Promise<Response> {
+  // subPath 是**相对 base_url** 的（`api/status`），前缀在这里加、只在这里加。
+  return doFetch(`http://127.0.0.1:${config.notebook.port}${JUPYTER_BASE_URL}${subPath}`, {
     headers: token ? { Authorization: `token ${token}` } : {},
     signal: AbortSignal.timeout(timeoutMs),
   });
@@ -232,14 +233,14 @@ export async function notebookStatus(input: {
 
   let kernels: NotebookKernel[] = [];
   try {
-    const status = await jupyterApi('/api/status', token, doFetch, timeoutMs);
+    const status = await jupyterApi('api/status', token, doFetch, timeoutMs);
     // 判状态码而不是 `Response.ok`：注入的假 fetch（测试里 `fake()` 的形状）只带 status / json 两个字段，
     // 判 `.ok` 会把"探到了、200"读成失败 —— 而假阴性最难查（症状是 running:false 加一句
     // "Jupyter 返回 200"，没人会去怀疑探活本身是好的）。
     if (status.status !== 200) {
       return { ...empty, reason: httpReason(status.status) };
     }
-    const ks = await jupyterApi('/api/kernelspecs', token, doFetch, timeoutMs);
+    const ks = await jupyterApi('api/kernelspecs', token, doFetch, timeoutMs);
     // 这一句是评审 I-3 补的：kernelspecs 的回话同样是外部输入，判据必须和 /api/status 那条一样。
     if (ks.status !== 200) {
       return { ...empty, reason: httpReason(ks.status) };
@@ -327,7 +328,7 @@ export async function notebookStatus(input: {
   // 而"给不出链接 + 说清是哪一行坏了"比"给一个可能是错的链接"更可行动。
   let url: string;
   try {
-    const u = new URL(`${config.notebook.publicUrl}/tree`);
+    const u = new URL(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
     // **合取**（终审 C-1）：对端是本机 **且** Host 头是本机字面量，两半都要点头。
     // 只有对端说话 ⇒ DNS rebinding 拿得到 token（对端确实是回环）；只有头说话 ⇒ 局域网里
     // 伪造 `Host: 127.0.0.1:7788` 的那个拿得到（评审 M-1 的原始形状）。

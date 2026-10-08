@@ -31,6 +31,15 @@ vi.mock('../src/api', () => ({
 }));
 
 import Notebook from '../src/pages/Notebook';
+import { NOTEBOOK_TREE_PATH } from '@arena/shared';
+
+/**
+ * 夹具里那份"后端给的链接"（WI-94 Task 1 之后它带 `/jupyter` 前缀）。
+ * 路径从 `@arena/shared` 派生而不是在本文件再长一遍字面量：这一页**只渲染 `res.url`**、
+ * 从不自己拼路径（`notebook-open` 那条断言钉的就是这件事），所以夹具里的串应当与后端
+ * 真的会给的那个形状同源 —— 抄一份写死的字面量，判的就只是"我抄得对不对"。
+ */
+const TREE = `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}`;
 
 afterEach(() => {
   cleanup();
@@ -39,7 +48,7 @@ afterEach(() => {
 
 const up = {
   running: true,
-  url: 'http://127.0.0.1:7789/tree?token=x',
+  url: `${TREE}?token=x`,
   // ⚠ 清单里**只有 arena 自己注册的那几条**（终审 I-4）：后端会把 Jupyter 列出的
   // `Python 3 (ipykernel)` 滤掉，所以"服务端回了 python3"这种形状在这一档里是不存在的。
   // 下面那几条 `ready:false` 的夹具因此也都写成 arena-pyspark —— 夹具写成不可能的形状，
@@ -55,7 +64,7 @@ describe('Notebook 第五页', () => {
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
     // 链接就是那个 url 本身，不由前端二次拼（端口写死在页面里 = 第二处真相）
-    expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe('http://127.0.0.1:7789/tree?token=x');
+    expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe(`${TREE}?token=x`);
     expect(screen.getByTestId('notebook-page').textContent).toContain('PySpark (arena)');
     expect(screen.getByTestId('notebook-page').textContent).toContain('00-smoke-pyspark.ipynb');
     // 反向也要判：全都就绪时不许挂一个"准备环境"按钮（给了就是让人白点）
@@ -68,7 +77,7 @@ describe('Notebook 第五页', () => {
    * 界面不许把这口气咽掉：不说的话，读者只会以为"这个服务坏了"，而事实是他不是本机。
    */
   it('链接里没有 token ⇒ 当场说破"要贴一次 token"，并说明这不是故障', async () => {
-    status.mockResolvedValue({ ...up, url: 'http://127.0.0.1:7789/tree' });
+    status.mockResolvedValue({ ...up, url: TREE });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     const hint = screen.getByTestId('notebook-tokenless');
@@ -97,7 +106,7 @@ describe('Notebook 第五页', () => {
   it('kernel 没就绪（venv 还没建）：给「准备环境」按钮，而不是让人对着报错猜', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree',
+      url: TREE,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -138,7 +147,7 @@ describe('Notebook 第五页', () => {
   it('点「准备环境」= 一次显式 POST + 一次状态重读', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree',
+      url: TREE,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -155,7 +164,7 @@ describe('Notebook 第五页', () => {
   it('准备环境失败时把原因摊开说，不许"点了没反应"', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree',
+      url: TREE,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -175,7 +184,7 @@ describe('Notebook 第五页', () => {
   it('手动刷新状态时收掉上一轮「准备环境」那句话', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree',
+      url: TREE,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -202,7 +211,7 @@ describe('Notebook 第五页', () => {
   it('示例铺不进去：单独说一句原因，且不许说成"没有示例"', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree?token=x',
+      url: `${TREE}?token=x`,
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
       notebooks: [],
       seedError: '示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：EEXIST: file already exists, mkdir',
@@ -223,7 +232,7 @@ describe('Notebook 第五页', () => {
   it('没有示例 ≠ 铺不进去：没有 seedError 时只说"没有"，不渲染那句诊断', async () => {
     status.mockResolvedValue({
       running: true,
-      url: 'http://127.0.0.1:7789/tree?token=x',
+      url: `${TREE}?token=x`,
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
       notebooks: [],
     });
@@ -277,7 +286,7 @@ describe('Notebook 第五页', () => {
    * 混在一起的症状是用户对着「准备环境」点了半天，而缺的那一层根本不在 venv 里 —— 界面必须说破区别。
    */
   it('kernel 表里没有 arena-pyspark：说清"准备环境修不了它"，并且不给那个按钮', async () => {
-    status.mockResolvedValue({ running: true, url: 'http://127.0.0.1:7789/tree', kernels: [], notebooks: [] });
+    status.mockResolvedValue({ running: true, url: TREE, kernels: [], notebooks: [] });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
     expect(screen.getByTestId('notebook-spec-missing').textContent).toContain('./start.sh --rebuild');
