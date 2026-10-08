@@ -1,7 +1,8 @@
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { createServer, request as nodeHttpRequest, type IncomingHttpHeaders, type Server } from 'node:http';
 import { networkInterfaces } from 'node:os';
-import type { AddressInfo } from 'node:net';
+import net, { type AddressInfo, type Socket as NetSocket } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { JUPYTER_BASE_URL, NOTEBOOK_PREFIX } from '@arena/shared';
 import { config } from '../../src/config.js';
@@ -156,6 +157,250 @@ function errorOf(body: string): string | null {
   } catch {
     return null;
   }
+}
+
+// ──────────── Task 4b：手工 websocket 客户端（判的是隧道，不是 RFC 6455 的实现） ────────────
+
+/**
+ * 这一小块**故意手搓**（掩码、扩展长度、拆帧），三条理由都承重：
+ * ① 不引新依赖是硬约束，而 `ws` 在这里只是传递包 —— 把它当直接依赖用，下次装包树一变就静默没掉；
+ * ② 要判的是"**我们那层**在 101 之后搬运字节"，拿现成客户端会把隧道的毛病与库的行为混成一锅；
+ * ③ 浏览器原生 WebSocket 不给请求头 ⇒ 生产上凭据只能走查询串，只有手搓才看得见我们发出去的每一个字节。
+ *
+ * 实测的形状（2026-10-09 在跑着的容器里，见 task-4b-report.md §2 原文）：
+ * - `POST /jupyter/api/sessions` ⇒ **201**，`model.kernel.id` 直接可用；`model.kernel.execution_state` 是
+ *   `"starting"`，而且**会一直停在 `starting`** —— REST 那份状态是 jupyter 从 iopub 抄来的，
+ *   而没有 ws 客户端接上时它压根不读 iopub。⇒ **不许"先轮询 execution_state 等到 idle 再连 ws"**：
+ *   那条在这个容器里永远等不到（第一版照 brief 写成轮询就会挂在这上面）。
+ * - 握手回话的头：`HTTP/1.1 101 Switching Protocols` + `server: TornadoServer/6.5.10` +
+ *   `upgrade: websocket` + `connection: Upgrade` + `sec-websocket-accept` + 一条 `set-cookie`；**没有凭据**。
+ * - 帧：opcode `0x1`（text），信封的 `channel` 在**顶层**（`iopub` / `shell`），
+ *   `parent_header` 是**扁平的**（`parent_header.msg_id`，不是 `parent_header.header.msg_id`）。
+ * - ⚠ 头几帧是**内核自己的启动/回放 status**，它们的 `parent_header.msg_id` 不是我们的那条 ——
+ *   所以"收到一条 stream 里带 42"必须**按 parent msg_id 认领**，否则会拿别人的输出当自己的功劳（假绿）。
+ * - ⚠ 一次 TCP chunk 里会**同时到好几帧**（实测 chunk 尺寸 `[631, 4311]`、`[625, 6807]`），
+ *   而一帧也可能跨两个 chunk ⇒ 拆帧必须带"剩字节"记账，不能按 chunk 一条一条解。
+ * - ⚠ 我们那条 `execute_request` 的 JSON 是 **242~332 字节** ⇒ 走的是"16 位扩展长度"那一档。
+ *   第一版探针把长度字节写成 `0x80 | payload.length`（>125 时溢出），jupyter 收到畸形帧、
+ *   **一帧都不回**：症状与"隧道坏了"一模一样。这就是"先手测再落地"救下来的那条。
+ */
+
+/** RFC 6455 握手校验的固定串：`sec-websocket-accept = base64(SHA1(key + 这个))`。 */
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+
+/** 客户端→服务端**必须** mask；`payload.length > 125` 时必须走 126/127 两档扩展（见上面那条实测）。 */
+function encodeClientTextFrame(text: string): Buffer {
+  const payload = Buffer.from(text, 'utf8');
+  const maskKey = randomBytes(4);
+  const masked = Buffer.alloc(payload.length);
+  for (let i = 0; i < payload.length; i += 1) masked[i] = (payload[i] ?? 0) ^ (maskKey[i % 4] ?? 0);
+  const fixed: number[] = [0x81]; // FIN | text
+  const extra: Buffer[] = [];
+  if (payload.length < 126) fixed.push(0x80 | payload.length);
+  else if (payload.length < 65536) {
+    fixed.push(0x80 | 126);
+    const l = Buffer.alloc(2);
+    l.writeUInt16BE(payload.length);
+    extra.push(l);
+  } else {
+    fixed.push(0x80 | 127);
+    const l = Buffer.alloc(8);
+    l.writeBigUInt64BE(BigInt(payload.length));
+    extra.push(l);
+  }
+  return Buffer.concat([Buffer.from(fixed), ...extra, maskKey, masked]);
+}
+
+/** 服务端→客户端**不许** mask ⇒ 只有 2/4/10 字节头。返回"能解出来的帧"与"还没齐的尾巴"。 */
+function decodeServerFrames(buf: Buffer): { frames: { opcode: number; payload: Buffer }[]; rest: Buffer } {
+  const frames: { opcode: number; payload: Buffer }[] = [];
+  let off = 0;
+  for (;;) {
+    if (buf.length - off < 2) break;
+    const opcode = (buf[off] ?? 0) & 0x0f;
+    const first = buf[off + 1] ?? 0;
+    const masked = (first & 0x80) !== 0;
+    let len = first & 0x7f;
+    let head = 2;
+    if (len === 126) {
+      if (buf.length - off < 4) break;
+      len = buf.readUInt16BE(off + 2);
+      head = 4;
+    } else if (len === 127) {
+      if (buf.length - off < 10) break;
+      len = Number(buf.readBigUInt64BE(off + 2));
+      head = 10;
+    }
+    if (masked) head += 4;
+    if (buf.length - off < head + len) break;
+    frames.push({ opcode, payload: buf.subarray(off + head, off + head + len) });
+    off += head + len;
+  }
+  return { frames, rest: buf.subarray(off) };
+}
+
+interface WsConn {
+  socket: NetSocket;
+  statusLine: string;
+  /** 整个握手回话的头（含状态行）。里面有 `set-cookie` ⇒ 永不放进任何断言消息，只许取具体头名。 */
+  head: string;
+  headers: Record<string, string[]>;
+  /** 头之后**已经到达**的字节（`rejectUpgrade` 那句 JSON 就落在这里）。 */
+  rest: Buffer;
+  /** 没等到 `\r\n\r\n` 就对侧就断了 ⇒ 三态里的"握手根本没成形"。 */
+  endedBeforeHead: boolean;
+}
+
+function parseHeadBlock(head: string): { statusLine: string; headers: Record<string, string[]> } {
+  const lines = head.split('\r\n');
+  const headers: Record<string, string[]> = {};
+  for (const line of lines.slice(1)) {
+    const cut = line.indexOf(':');
+    if (cut < 0) continue;
+    const key = line.slice(0, cut).trim().toLowerCase();
+    (headers[key] ??= []).push(line.slice(cut + 1).trim());
+  }
+  return { statusLine: lines[0] ?? '', headers };
+}
+
+/**
+ * 打开一条真 socket、发出 ws 握手、等回话的头。**'error' 与 'close' 都就地接住**：
+ * 被 `rejectUpgrade` 断掉是这条路径的**正常结局之一**，而逃出去的 'error' 会
+ * **把整个 vitest worker 崩掉、一个结论都没有**（Task 4 宿主档实测；本仓库同类事故是那条
+ * `void` 掉的 async 拒绝把服务带走）。
+ */
+function openNotebookWs(opts: { pathWithQuery: string; headers: Record<string, string>; deadlineMs: number }): Promise<WsConn> {
+  return new Promise((resolve) => {
+    const socket = net.connect(APP_PORT, '127.0.0.1');
+    let acc = Buffer.alloc(0);
+    let settled = false;
+    const finish = (endedBeforeHead: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const cut = acc.indexOf('\r\n\r\n');
+      const headLen = cut < 0 ? acc.length : cut;
+      const parsed = parseHeadBlock(acc.subarray(0, headLen).toString('utf8'));
+      socket.removeListener('data', onData);
+      socket.removeListener('close', onClose);
+      resolve({ socket, ...parsed, head: acc.subarray(0, headLen).toString('utf8'), rest: cut < 0 ? Buffer.alloc(0) : acc.subarray(cut + 4), endedBeforeHead });
+    };
+    const onData = (chunk: Buffer) => {
+      acc = Buffer.concat([acc, chunk]);
+      if (acc.includes('\r\n\r\n')) finish(false);
+    };
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(true), opts.deadlineMs);
+    socket.on('error', () => finish(true));
+    socket.on('data', onData);
+    socket.on('close', onClose);
+    socket.on('connect', () => {
+      const lines = Object.entries(opts.headers).map(([k, v]) => `${k}: ${v}`);
+      socket.write(`GET ${opts.pathWithQuery} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`);
+    });
+  });
+}
+
+const WS_HANDSHAKE_DEADLINE_MS = 15_000;
+
+/** 握手请求头：`Host` 必须是本机字面量（外层 origin 钩子先看它），`Sec-WebSocket-Key` 是 16 字节随机数的 base64。 */
+function wsHandshakeHeaders(pathKey: string, extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    host: `127.0.0.1:${APP_PORT}`,
+    upgrade: 'websocket',
+    connection: 'Upgrade',
+    'sec-websocket-key': pathKey,
+    'sec-websocket-version': '13',
+    ...extra,
+  };
+}
+
+const expectedAcceptOf = (key: string): string => createHash('sha1').update(`${key}${WS_GUID}`).digest('base64');
+
+/**
+ * 信封里**只留判据要的那几个字段**：原文可能含 cookie / 内部路径，而且失败消息会打印 actual，
+ * 所以这里一次性收窄，调用方拿不到整串（凭据纪律的另一半：Task 3 实测过两种泄露方向）。
+ */
+interface JupyterEnvelopeLite {
+  msgType: string;
+  channel: string;
+  parentMsgId: string;
+  contentStatus: string;
+  textHas42: boolean;
+  executionState: string;
+}
+
+function toEnvelopeLite(raw: string): JupyterEnvelopeLite {
+  let m: Record<string, unknown> = {};
+  try {
+    m = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return { msgType: '', channel: '', parentMsgId: '', contentStatus: '', textHas42: false, executionState: '' };
+  }
+  const header = (m.header ?? {}) as Record<string, unknown>;
+  const parent = (m.parent_header ?? {}) as Record<string, unknown>;
+  const content = (m.content ?? {}) as Record<string, unknown>;
+  return {
+    msgType: String(header.msg_type ?? ''),
+    channel: String(m.channel ?? ''),
+    parentMsgId: String(parent.msg_id ?? ''), // 实测：扁平，不是 parent_header.header.msg_id
+    contentStatus: String(content.status ?? ''),
+    textHas42: String(content.text ?? '').includes('42'),
+    executionState: String(content.execution_state ?? ''),
+  };
+}
+
+interface FrameDrain {
+  envelopes: JupyterEnvelopeLite[];
+  nonTextOpcodes: number[];
+  timedOut: boolean;
+  closed: boolean;
+  /** 搬运的字节里出现过凭据 —— 只回布尔，值永不在场。 */
+  leakedToken: boolean;
+}
+
+/** 一直读到 `stopWhen` 命中 / 对侧断 / 超时。三态里的第二、第三态靠它给结论。 */
+async function drainFrames(conn: WsConn, opts: { deadlineMs: number; stopWhen: (e: JupyterEnvelopeLite) => boolean }): Promise<FrameDrain> {
+  const envelopes: JupyterEnvelopeLite[] = [];
+  const nonTextOpcodes: number[] = [];
+  let leakedToken = false;
+  let buffer = conn.rest;
+  conn.rest = Buffer.alloc(0);
+  let closed = false;
+  const onData = (chunk: Buffer) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    const { frames, rest } = decodeServerFrames(buffer);
+    buffer = rest;
+    for (const f of frames) {
+      if (f.opcode !== 0x1) {
+        nonTextOpcodes.push(f.opcode);
+        continue;
+      }
+      const text = f.payload.toString('utf8');
+      if (holdsToken(text)) leakedToken = true;
+      envelopes.push(toEnvelopeLite(text));
+    }
+  };
+  const onClose = () => {
+    closed = true;
+  };
+  conn.socket.on('data', onData);
+  conn.socket.on('close', onClose);
+  conn.socket.on('end', onClose);
+  const deadline = Date.now() + opts.deadlineMs;
+  let timedOut = true;
+  while (Date.now() < deadline && !closed) {
+    if (envelopes.some(opts.stopWhen)) {
+      timedOut = false;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  if (envelopes.some(opts.stopWhen)) timedOut = false;
+  conn.socket.removeListener('data', onData);
+  conn.socket.removeListener('close', onClose);
+  conn.socket.removeListener('end', onClose);
+  return { envelopes, nonTextOpcodes, timedOut, closed, leakedToken };
 }
 
 // ──────────────────── 常驻：探针这条 plumbing 本身（宿主就能红） ────────────────────
@@ -502,6 +747,160 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('/jupyter 同源反代打在
     expect(String(res.headers['content-type']), '/api/health 回来的不是 JSON ⇒ 根路由被反代挤掉了').toContain('application/json');
     expect(errorOf(res.body) ?? '', '健康检查回了一个 error 码').toBe('');
   });
+
+  /**
+   * **整个 WI-94 的功能判据**（brief Task 4 Step 3）：穿过那条隧道，**在一个真内核上执行一行代码，
+   * 把结果读回来**。前面十条状态码全对也不等于"运行按钮能用" —— HTTP 那棵树通、
+   * `upgrade` 那半条没接上，是完全可能的两种坏法（本仓库有过"接线在不在"判不出来的先例）。
+   *
+   * ### 为什么用 `python3` 而不用 `arena-pyspark`
+   * 这一条判的是**通道**，与哪个内核无关；`arena-pyspark` 那份 180 秒的 JVM 启动已经有
+   * `kernel.test.ts` 在判（那条 smoke 归它）。把 Spark 塞进每条容器判据会让整个阶段变成分钟级。
+   *
+   * ### 为什么是 sessions 而不是直接 POST kernels（两条都手测过）
+   * 实测（`/tmp/wi94-t4b-probe4.out`）两条都成立：`POST /api/sessions` ⇒ **201** + `model.kernel.id`，
+   * 随后 `GET .../channels?session_id=…` ⇒ **101**；`POST /api/kernels` ⇒ **201**，
+   * 随后 `GET .../channels`（不带 session_id）⇒ 同样 **101**。选前者是因为**浏览器走的就是这条**
+   * （notebook 页面先建 session），而且顺带钉住"DELETE session 会把它的内核一起带走"
+   * （实测：session ⇒ 204，随后那个 kernel ⇒ **404**）—— 收尾不留活内核正是这条的形状。
+   *
+   * ### 三态三种话
+   * ① 握手没 101（`registerNotebookProxy` 里那次 `attachNotebookUpgrade` 没接上 / 守卫把本机探针拒了 /
+   *    jupyter 没在听）→ 查接线与上游；② 101 了但**一帧都没回** → 查 101 之后那两行 `pipe` 与 `head` 字节；
+   *    ③ 回了但不是我们要的那条（parent msg_id 对不上 / 全是内核自己的 status）→ 查搬运有没有改字节。
+   *    三条各有各的失败消息，不许合成一句"ws 不通"。
+   *
+   * ### 断言放在 try/finally **之外**（Task 3 实测的教训）
+   * finally 里只记录状态码不做断言：try 里第一条 expect 抛出后，finally 里的断言会再抛并**盖掉**前一条，
+   * 报告只显示收尾的坏点。收尾本身（DELETE）无条件执行，所以红的时候也不留活内核。
+   */
+  it('穿过隧道真跑一行代码：POST sessions → 手工 ws 握手 101 → execute_request → 读回 42 → 内核删干净', async () => {
+    const nbPath = `wi94-ws-smoke-${process.pid}-${Date.now()}.ipynb`;
+    const msgId = `wi94-msg-${process.pid}-${Date.now()}`;
+    const wsKey = randomBytes(16).toString('base64'); // 16 字节随机数的 base64（RFC 6455 §1.3）
+    // 键顺序与 Task 3 那条一样是探针的一部分：这份 body 不许被 parse→stringify 过。
+    const sessionBody = JSON.stringify({ name: nbPath, path: nbPath, type: 'notebook', kernel: { name: 'python3' } });
+    let sessionId = '';
+    let kernelId = '';
+    let conn: WsConn | null = null;
+    let deleteSessionStatus = 0;
+    let kernelAfterDelete = 0;
+    let healthAfter = 0;
+    let tunnelStatusAfter = 0;
+    try {
+      const created = await probe({
+        path: `${JUPYTER_BASE_URL}api/sessions`,
+        method: 'POST',
+        headers: { ...LOCAL_HOST_HEADER(), ...SAME_ORIGIN, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(sessionBody)) },
+        body: sessionBody,
+      });
+      expect(created.status, `POST /jupyter/api/sessions 回 ${created.status}（实测 201）⇒ 先分清是隧道坏了还是 jupyter 变了：` +
+        '把同一条 POST 原样打 127.0.0.1:' + config.notebook.port + ' 加 Authorization 对照，两边一致才是上游的形状变了').toBe(201);
+      const model = JSON.parse(created.body) as { id?: string; kernel?: { id?: string; execution_state?: string } };
+      sessionId = model.id ?? '';
+      kernelId = model.kernel?.id ?? '';
+      expect(sessionId.length, 'sessions 回话里没有 model.id ⇒ 下面那句 DELETE 没有对象，收尾纪律判不了').toBeGreaterThan(0);
+      expect(kernelId.length, 'sessions 回话里没有 model.kernel.id ⇒ 没有可连的 channels 地址（三态之外的第四态：那条 POST 的形状变了）').toBeGreaterThan(0);
+      // 实测事实钉成断言：REST 那份 execution_state 此刻是 "starting"，**而且不连 ws 就永远停在 starting**。
+      // 把它钉住是因为它是"下一个人为何不许改成轮询 idle"的答案（见文件里那段手搓 ws 的注释）。
+      expect(model.kernel?.execution_state, '实测前提变了：jupyter 不再从 REST 报 "starting" ⇒ 本档那段"不许轮询 execution_state"' +
+        '（它没有 ws 客户端时不读 iopub）要重读').toBe('starting');
+
+      conn = await openNotebookWs({
+        pathWithQuery: `${JUPYTER_BASE_URL}api/kernels/${kernelId}/channels?session_id=${sessionId}`,
+        headers: wsHandshakeHeaders(wsKey),
+        deadlineMs: WS_HANDSHAKE_DEADLINE_MS,
+      });
+      // 三态之一：握手没 101。
+      expect(conn.endedBeforeHead, 'ws 握手连一个完整的头都没等到（对侧直接断了 / 15s 超时）⇒ 这台 Node 的 upgrade 派发' +
+        '或 `attachNotebookUpgrade` 的接线问题；对照宿主档 `proxy.test.ts` 那条"上游不肯升级 ⇒ 至少有一句状态行"').toBe(false);
+      expect(conn.statusLine, 'ws 握手回的是「' + (conn.endedBeforeHead ? '(一句完整头都没等到)' : conn.statusLine) + '」而不是 101 ⇒ 三态之一（没升级）。' +
+        '排的顺序：① `registerNotebookProxy` 末尾那次 `attachNotebookUpgrade(...)` 还在不在；' +
+        '② 守卫有没有把这条本机探针拒掉（403 的话 body 里有 error 码，见 cross-site 那一条的写法）；' +
+        '③ 上游有没有肯升级（400/403 是 jupyter 答的：隧道注入的凭据没被认）。状态行原样搬回客户端是 Task 4 那条' +
+        '"静默断连最难查"的判据，所以这里能读到数字本身就说明有一件事没坏').toBe('HTTP/1.1 101 Switching Protocols');
+      // `sec-websocket-accept` 必须由**我们发出去的那个 key** 算出来：这一条把"101 是真握手"钉住，
+      // 而不是某个中间层自己编了一句状态行（重复 key 那类"React 只报 warning 而界面在撒谎"的形状）。
+      expect(conn.headers['sec-websocket-accept']?.[0], '101 但没有正确的 sec-websocket-accept ⇒ 那句握手回话不是 ws 端点给的').toBe(expectedAcceptOf(wsKey));
+      // 这两个逐跳头在握手回话里**必须转发**（RFC 6455；Firefox 缺 Connection 直接判失败）—— 见 proxy.ts 那段"不许照搬 HOP_BY_HOP"。
+      expect(conn.headers['upgrade']?.[0]).toBe('websocket');
+      expect(conn.headers['connection']?.[0]).toBe('Upgrade');
+      // 凭据纪律：握手回话里有 `set-cookie`（会话 cookie），所以整块头**不交给 matcher**，只走这个布尔。
+      expect(holdsToken(conn.head), '握手回话的头里出现隧道注入给上游的那份凭据 ⇒ 我们把自己的长期凭据写回了客户端').toBe(false);
+
+      conn.socket.write(encodeClientTextFrame(JSON.stringify({
+        header: { msg_id: msgId, msg_type: 'execute_request', version: '5.3', username: '', session: 's1', date: new Date().toISOString() },
+        parent_header: {}, metadata: {},
+        // brief 那个形状（只有 code/silent）实测就够：jupyter 会补 store_history 等默认值
+        // （它的告警"No channel specified, assuming shell"只说明信封少一个字段，不影响执行）。
+        content: { code: 'print(6*7)', silent: false },
+        buffers: [],
+      })));
+      const drain = await drainFrames(conn, {
+        deadlineMs: 25_000,
+        stopWhen: (e) => e.msgType === 'execute_reply' && e.parentMsgId === msgId,
+      });
+      // 三态之二：101 了但一帧都没回。
+      expect(drain.envelopes.length, '握手成功之后**一帧都没收到** ⇒ 三态之二：101 之后那半条管道没接上' +
+        '（`usocket.pipe(socket)` / `socket.pipe(usocket)` 少一行，或 `head` 那截字节被写进了 upstreamReq 把握手打成乱码）' +
+        `。非 text 帧收到 ${drain.nonTextOpcodes.length} 条`).toBeGreaterThan(0);
+      // 三态之三：回了，但不是我们要的那条。**按 parent msg_id 认领**是这条的全部意义 ——
+      // 实测头几帧是内核自己的启动/回放 status（parent 不是我们的 msg_id），不按 parent 认领就会拿别人的输出当功劳。
+      const ours = drain.envelopes.filter((e) => e.parentMsgId === msgId);
+      expect(ours.length, `回了 ${drain.envelopes.length} 帧，但没有一帧的 parent_header.msg_id 是我们发出去的那条 ⇒ 三态之三：` +
+        '搬运改过字节（掩码/扩展长度/分帧解错都会是这个症状），或请求根本没进内核').toBeGreaterThan(0);
+      expect(ours.some((e) => e.msgType === 'stream' && e.channel === 'iopub' && e.textHas42),
+        'execute_reply 收到了，但没有一条 iopub `stream` 里带着那行代码的输出 ⇒ 执行通了而**输出**没搬回来').toBe(true);
+      expect(ours.filter((e) => e.msgType === 'execute_reply').map((e) => e.contentStatus).join(','), '内核答的不是 ok').toBe('ok');
+      expect(drain.timedOut, `等 execute_reply 等到超时（共收到 ${drain.envelopes.length} 帧）`).toBe(false);
+      // 凭据纪律的另一半：**搬运回来的所有帧**里都不许有那份凭据（隧道是注入不是透传）。
+      expect(drain.leakedToken, '内核回话的帧里出现隧道注入的凭据 ⇒ 上游把我们的 Authorization 回显进了协议消息').toBe(false);
+    } finally {
+      conn?.socket.destroy();
+      // finally 里**只记数字不断言**（Task 3 实测：那里的断言会盖掉 try 里真正的坏点）。
+      // 收尾无条件：红了也不把内核留给真人（WI-93 记过"Jupyter 无守护"，反面就是"容器档留下一排活内核"）。
+      if (sessionId) deleteSessionStatus = await probe({ path: `${JUPYTER_BASE_URL}api/sessions/${sessionId}`, method: 'DELETE', headers: LOCAL_HOST_HEADER() }).then((r) => r.status, () => 0);
+      if (kernelId) kernelAfterDelete = await probe({ path: `${JUPYTER_BASE_URL}api/kernels/${kernelId}`, headers: LOCAL_HOST_HEADER() }).then((r) => r.status, () => 0);
+      healthAfter = await probe({ path: '/api/health', headers: LOCAL_HOST_HEADER() }).then((r) => r.status, () => 0);
+      tunnelStatusAfter = await probe({ path: `${JUPYTER_BASE_URL}api/status`, headers: { ...LOCAL_HOST_HEADER(), ...SAME_ORIGIN } }).then((r) => r.status, () => 0);
+    }
+
+    // ── try/finally 之后的断言：只有主链全对才会走到这里 ──
+    expect([200, 204], `收尾 DELETE session 回 ${deleteSessionStatus}（实测 204）⇒ 那个内核还在跑着，本档在污染真人的实例`).toContain(deleteSessionStatus);
+    expect(kernelAfterDelete, `删掉 session 之后那个 kernel 还读得到（${kernelAfterDelete}）⇒ 实测"DELETE session 会把它的内核一起带走"（随后应为 404）` +
+      '这个前提变了，收尾要改成显式 DELETE /api/kernels/<id>').toBe(404);
+    // "隧道不会把宿主进程带走"的判据本体（本项目有过一条 `void` 掉的 async 拒绝把整个服务带走的事故）：
+    // 上面那个 socket 是**升级过**的连接，`destroy()` 之后服务端那一半也在隧道自己的记账里。
+    expect(healthAfter, `跑完一条真 ws 隧道之后 /api/health 是 ${healthAfter}（期望 200）⇒ 7788 那个进程已经不在了`).toBe(200);
+    expect(tunnelStatusAfter, `跑完一条真 ws 隧道之后隧道的 /jupyter/api/status 是 ${tunnelStatusAfter}（期望 200）⇒ 进程活着而这棵子树坏了`).toBe(200);
+  }, 120_000);
+
+  /**
+   * 第二条通道的守卫（容器档那一半）：**HTTP 拦住了不等于 ws 也拦住了**。
+   * `upgrade` 不走路由 ⇒ Fastify 的 `onRequest` 钩子与 HTTP handler 都碰不到它；把
+   * `attachNotebookUpgrade` 里那次 `guardNotebookProxy` 摘掉，上面那条"真跑代码"照绿，
+   * 而"别人页面里的 iframe 能不能连进来执行代码"这件事就没有任何判据了。
+   * 这条就是这个摘掉的动作在容器档唯一的红（宿主档 `proxy.test.ts` 那条判的是同一件事的假上游形状）。
+   */
+  it('ws 握手也要过守卫：Sec-Fetch-Site: cross-site ⇒ 不是 101 而是 403 + notebook_cross_site', async () => {
+    const key = randomBytes(16).toString('base64');
+    const conn = await openNotebookWs({
+      pathWithQuery: `${JUPYTER_BASE_URL}api/kernels/deadbeef-not-used/channels`,
+      headers: wsHandshakeHeaders(key, { 'sec-fetch-site': 'cross-site' }),
+      deadlineMs: WS_HANDSHAKE_DEADLINE_MS,
+    });
+    try {
+      // 两种坏法分开说：① 一句状态行都没等到（被静默断连，最难查的那种）②有回话但不是我们的 403。
+      expect(conn.statusLine, 'cross-site 的 ws 握手回的是「' + (conn.endedBeforeHead ? '(一句状态行都没等到)' : conn.statusLine) + '」而不是 403 ⇒ ' +
+        '`upgrade` 事件里那次 `guardNotebookProxy` 不在位。这条就是"HTTP 上拦住了"与"另一条通道也拦住了"那笔差额的' +
+        '判据本体：把它摘掉，上面那条"真跑一行代码"照绿，而别人页面里的 iframe 就能连进来执行代码').toMatch(/^HTTP\/1\.1 403\b/);
+      // 内核 id 是编的：守卫必须在**打上游之前**就否决，否则到的会是 jupyter 的 400/404 而不是我们那句 403。
+      expect(errorOf(conn.rest.toString('utf8')), '403 但不是守卫那一条 ⇒ 拦它的是别的东西，这条判的就不是它想判的').toBe('notebook_cross_site');
+      expect(holdsToken(conn.head) || holdsToken(conn.rest.toString('utf8')), '否决回话里出现凭据 ⇒ 那句话把长期凭据回显了').toBe(false);
+    } finally {
+      conn.socket.destroy();
+    }
+  }, 30_000);
 });
 
 /** `existsSync` 只在常驻那一组用来把"为什么跳过"写成可判的东西（别让读者去猜这台是不是容器）。 */
