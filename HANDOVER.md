@@ -1336,6 +1336,21 @@
   ③ 让 notebook 的 Spark 会话也过 `spark-pool` 的队列（改动最大，且 notebook 是长会话、与"一题一 worker"的模型不合）。
   闸门形状：现在**没有**任何一条能判住"notebook 起第二个 JVM 时判题题的超时余量"，这条要配什么判据由 A2 一起定。
 
+- [ ] WI-96 "这条 kernel 要不要 IDE 那份 venv"是**按 id 猜**的，A2 会把 I-1 刚关掉的洞再挖开一次（收尾轮记账，2026-10-08，**本轮只记不做**）：
+  `server/src/notebooks/status.ts` 里那句 `const needsVenv = id === NOTEBOOK_KERNELS.pyspark;` 是那个问题的**唯一**答案来源，
+  而它判的是 id 相等 —— 于是 A2 新加的 `arena-scala` 一进来就恒为 `needsVenv: false` ⇒ `ready: true`、没有 `reason`、
+  不给「准备环境」按钮，**没有任何一道闸门会问一句"它要不要 venv"**（scala 的 argv 同样指向那个懒创建的 venv）。
+  这与刚被终审 I-1 关掉的"ready 在生产里恒为 true"是**结构上同一个洞**：区别只是那次有人来看，这次没有人被强制来看。
+  ｜修法归 A2：把"要哪一份环境"做成 `NOTEBOOK_KERNELS` 的字段（例如 `requiresEnv: 'ide-venv' | 'image'`），
+  `status.ts` 按字段判 ⇒ 新增一条 kernel 时**漏掉这个字段就是类型错误**，问题在编译期被回答，而不是等下一轮评审发现。
+  配套判据（同归 A2）：`status.test.ts` 里给 scala 那一行加"venv 缺失 ⇒ ready:false + reason 点名解释器路径"的用例，
+  并按 `runner-coverage` 那条"每个 judgeKind 都有双向往返"的先例，加一条"每个 kernel 都被问过要不要 venv"的覆盖判据。
+  ｜同一条里记一处**已披露的局限**（不是 bug，别当缺陷修）：`server/test/regression/ide-env-isolation.test.ts:52` 的
+  `CREDENTIAL_KEY_RE` 是一条**后缀** allowlist（只认大写键名以 `_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_KEY` 结尾），
+  所以 `ARENA_X_APIKEY`、`ARENA_X_DSN`、任何小写键名、以及经 `env_file:` 投递的 secret 都不在它眼里。
+  D1 判的是"下一个**长成这个样子**的凭据"（本轮实测：给 arena 的 `environment:` 加一行
+  `ARENA_PROBE_NEXT_TOKEN: x` ⇒ 只有 D1 红、且红在**点名那个键**）。要扩就先扩正则，并同步那条破坏性探针。
+
 - [ ] 【已决议：暂不做 · 2026-09-20 用户拍板】WI-38 JDK 21 与 Spark 并存的取舍（WI-26② 的评估结论）：镜像里 Spark 是 3.5.5，官方支持矩阵到 Java 17（21 要 Spark 4.0），而**同一个 JDK 既跑 javac/java 判算法题又跑 Spark**，整体升到 21 会把 pyspark / spark-scala 推到未支持路径。可行做法是并装 `openjdk-21-jdk-headless`（约 +400MB、stack 层要全量重建），只让 `java-junit` 用 21、Spark 继续用 17，并给 `RunnerConfig` 加 `jdk` 选项。
   当前损失面评估：record / sealed / switch 表达式在 17 就能编译，真正判不了的是**虚拟线程（21 正式）与 sequenced collections（21）**；而虚拟线程这类题本来就不适合"纯函数 + 用例"判分，所以先不付这个体积与重建成本。（"Spark 3.5 不支持 21"引自官方发布说明，本机未验证 —— 镜像里没有第二个 JDK）
 

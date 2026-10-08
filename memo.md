@@ -3405,3 +3405,38 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
   spec §11 里写"未测"，没有数字就不写数字。
 - **交付顺序照旧**：A1 完 ⇒ B（3 篇企业级 notebook，WI-90，每篇必须容器里 `nbconvert --execute` 真跑过
   且含**方向性 assert**）⇒ A2（真交互式 Scala kernel，WI-91，必需项）。分支 `jupyter-a1`，**未 push**。
+
+---
+
+## 里程碑 BC（2026-10-08，A1 收尾轮：一条红 E2E + 八处不诚实的注释 + 三条缺失的破坏性证明）
+
+**做了什么**：`npm run e2e` 在 HEAD 上是 1 failed / 73 passed（`tests/e2e/notebook-page.spec.ts:93` 钉着
+`db08cf8`  legitimately 改过的那句文案）。改法是**把两句字面判据换成钉不住就删不掉的名词**
+（`另一套解释器` / `安全边界`）+ 结构判据，并顺手撞出第二条过期判据：同一段里 `toHaveCount(3)` 也早就错了
+（I-5 把一段拆成两段 ⇒ 今天是 5 段），它排在字面判据之后所以从来没跑到过。逐字文案契约仍只有一份，
+在 `web/test/notebook.test.tsx` 的 `boundarySentences` × `boundaryCases`。
+
+**三条破坏性证明（都是当场做的，不是引用）**：
+- 删 `Notebook.tsx` 第一句那段 ⇒ e2e 红 `Expected substring: "另一套解释器"`；删安全边界那段 ⇒ 红
+  `Expected substring: "安全边界"`（两次都是 `docker cp` 重建后的 `web/dist` 进 e2e 容器打的真浏览器）。
+- `app.ts` 那条 origin 钩子改成无条件 return ⇒ 4 条红，全是 `expected 200 to be 403`
+  （`/api/notebook/status`、`/api/bank`、新加的非 API 那两条），43 passed；**不是** token 泄漏，内层合取还拒绝着。
+- compose 的 arena `environment:` 加一行 `ARENA_PROBE_NEXT_TOKEN: x` ⇒ **只有 D1 红**且点名那个键
+  （1 failed | 15 passed），证明"下一个凭据"那句话不是修辞。
+
+**新落的两条判据**（`server/test/api/notebook-api.test.ts`，18 → 20 passed）：非 API 那半棵树
+（`/no-such-page`、`/index.html`）对外来 Host 也必须是 403 而不是 404/HTML 外壳；以及 `@fastify/static`
+仍带 `Symbol.for('skip-override')`（root 层钩子盖得住静态资源这件事依赖它，而那个事实住在 `node_modules` 里）。
+宿主实测：`curl -H 'Host: evil.example'` 打 `/`、`/assets/`、`/index.html`、`/no-such-page`、`/api/health` 全 403。
+
+**八处注释/文档不诚实**（终审 N1–N8 + 两处 `db08cf8` 留下的"三句"）：最坏的是 N1 —— `HANDOVER.md` 与 `memo.md`
+都还写着"7788 没有任何 Host 白名单 / DNS rebinding 现在就行得通"，而 C-1 之后那是假的（下一轮照着它会把已经
+存在的守卫再加一遍）。逐条改法见 commit `2fea5f3`。
+
+**验证表**：`npm run e2e` ⇒ exit 0，74 passed（3.2m）；`npm run verify:fast` ⇒ exit 0（三次：`/tmp/vf24.log`、
+`/tmp/vf25.log`、commit `79d3a1e` 前置）；`bash -n scripts/verify.sh` ⇒ 0 且文件里 0 个 CR 字节（本轮只删注释行）。
+
+**已知问题 / 留给 A2**：新增 **WI-96**（`needsVenv` 按 `id === NOTEBOOK_KERNELS.pyspark` 判 ⇒ A2 的
+`arena-scala` 会静默 `ready: true`，与 I-1 刚关掉的洞结构同一形状；修法是把"要哪份环境"做成 `NOTEBOOK_KERNELS`
+的字段，让漏掉它变成类型错误）。同条记了 `CREDENTIAL_KEY_RE` 是**后缀** allowlist 这一已披露局限。
+**未跑**：`./start.sh --verify`（容器档由 controller 收尾）。分支 `jupyter-a1`，**未 push**。
