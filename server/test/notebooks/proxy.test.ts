@@ -48,10 +48,10 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  *
  * ## 与容器档的分工
  *
- * 宿主档**全部走回环对端**，所以"对端 = 这张网桥的网关"那一支在生产里怎么被走到，只有真容器判得住
- * （I-3 那笔账在 `server/test/notebooks/embed.test.ts` 还）。这里只判"注入的网关表在真 socket 上生效"
- * （那条要监听 `0.0.0.0`，见它自己的注释），因为它判的是**接线**：`app.ts` 把
- * `notebookGatewayAddresses` 透传给反代这一行如果被删掉，函数层的表判不出来。
+ * 宿主档的对端只有两种形状：回环，与"从本机非回环 IPv4 拨进来"（后者要监听 `0.0.0.0`，见那两条自己的注释
+ * —— 请求方向一条、websocket 一条，评审 I-1 补的是后者）。所以"对端 = 这张网桥的**网关**"那一支在生产里
+ * 怎么被走到，只有真容器判得住（I-3 那笔账在 `server/test/notebooks/embed.test.ts` 还）。宿主这里判得住的是
+ * **接线**：`app.ts` 把 `notebookGatewayAddresses` 透传给反代这一行如果被删掉，函数层的表判不出来。
  */
 
 const CANARY = 'proxy-test-token-7d3a'; // 仓库里的字面量、不是凭据；真 token 从不进这个文件（上面那条纪律讲的打印问题对它可以，对容器档不行）
@@ -145,12 +145,16 @@ async function startEcho(): Promise<number> {
  * 这里故意不做真的 websocket 帧 —— 隧道判的是 101 之后的**字节搬运**，字节级测试才是它的单元测试
  * （真 ws 语义 + 真内核归容器档 `embed.test.ts` 那一条）。
  *
- * 三个"夹具的讲究"其实各是一条判据的对象，别当装饰删：
+ * 四个"夹具的讲究"其实各是一条判据的对象，别当装饰删：
  * ① 101 那一行与紧跟的一截字节写在**同一次 `socket.write`** 里 ⇒ 隧道那侧的 upgrade 事件才会拿到非空的 `head`
  *   （反方向同理：客户端把握手与多出来的 4 字节合成一次写 ⇒ 隧道的 `head` 参数非空）；
  * ② 回话带**两条独立** `Set-Cookie`（评审 I-B 的 ws 那一半：数组必须原样搬成两行）；
  * ③ 回话带 `Upgrade` 与 `Connection`（RFC 6455 的握手回话必须带；把逐跳头"顺手全滤"会在这里被抓住 ——
- *   而 Firefox 缺 `Connection` 直接判握手失败，宿主之外的浏览器才会看到，所以判据只能钉在字节上）。
+ *   而 Firefox 缺 `Connection` 直接判握手失败，宿主之外的浏览器才会看到，所以判据只能钉在字节上）；
+ * ④ 回话带 `keep-alive` 与 `te`（评审 **I-2** 补的那两条）：它们是**该被滤掉**的逐跳头。少了这两条，
+ *   "滤掉"那一半在字节上根本不可见 —— 实测把 `upgradeResponseLines` 里那句过滤整行删掉（101 什么都放行），
+ *   原来这 24 条**全绿**（`24 passed / exit 0`，2026-10-09 复现评审的 #10）。③ 只钉住"例外不许扩大"，
+ *   ④ 钉的是"一般规则不许被整行删掉"，两个方向各有一颗牙。
  */
 interface WsUpstream {
   port: number;
@@ -179,6 +183,11 @@ function startWsEcho(): Promise<WsUpstream> {
         'sec-websocket-accept: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
         'upgrade: websocket\r\n' +
         'connection: Upgrade\r\n' +
+        // ↓ 上面注释里的 ④（评审 I-2）：这两条是**该被滤掉**的逐跳头，真 jupyter 的 101 里恰好没有
+        //   （4b §2 那份逐字头只有 server/date/access-control-allow-origin/upgrade/connection/accept/set-cookie），
+        //   所以"上游哪天多发一条"这个形状只能靠夹具造出来。tornado 换版本、或前面多一层代理就会发。
+        'keep-alive: timeout=5\r\n' +
+        'te: trailers\r\n' +
         'set-cookie: a=1; Path=/\r\n' +
         'set-cookie: b=2; Path=/; HttpOnly\r\n' +
         '\r\n' +
@@ -742,30 +751,43 @@ describe('/jupyter 同源反代：响应方向与路由地盘', () => {
  * 真 ws 语义 + 真内核 + 真帧往返归容器档（`embed.test.ts` 那条"跑起来一次"）。
  */
 describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => {
-  /** 浏览器那侧的握手长这样：GET + 那两个逐跳头 + key/version。**没有** Authorization（原生 WebSocket 加不了头）。 */
+  /**
+   * 浏览器那侧的握手长这样：GET + 那两个逐跳头 + key/version。**没有** Authorization（原生 WebSocket 加不了头）。
+   * ⚠ `connectHost` 与 `hostHeader` 是评审 **I-1** 补的两个入参，各有分工，都不许删：
+   * - `connectHost`：拨进去的**目标**地址。写 `0.0.0.0` 监听 + 从本机非回环 IPv4 拨进来 ⇒ 内核报给服务端的
+   *   对端就是那个地址（与请求方向那一组最后那条"对端不是本机 ⇒ 403"用的实测形状同一个，只是这里打的是握手）。
+   *   默认 `127.0.0.1`。
+   * - `hostHeader`：握手文本里那一行 `Host:` 的字面值。默认跟着端口走（"Host 是本机字面量"那一态），
+   *   要判 DNS rebinding 那一半必须能把它写成外来的。
+   * 返回值里的 `clientLocalAddress` 是**内核给这条连接选的源地址**（在 connect 之后立刻读，destroy 之后读不到），
+   * 用来证明对端不是喂出来的字符串。
+   */
   function handshakeRequest(opts: {
     port: number;
     path: string;
+    connectHost?: string;
+    hostHeader?: string;
     secFetchSite?: string;
     extraHeaders?: string;
     tail?: Buffer;
-  }): Promise<{ socket: Duplex; headBlock: Buffer }> {
-    const sock = net.connect(opts.port, '127.0.0.1');
+  }): Promise<{ socket: Duplex; headBlock: Buffer; clientLocalAddress: string | undefined }> {
+    const sock = net.connect(opts.port, opts.connectHost ?? '127.0.0.1');
     // 同上面那条纪律：客户端这边被对端 RST 时的 'error' 必须就地接住，否则死的是整个 worker
     // （而"用例挂到超时才给结论"是最难读的红）。断连之后 `readRaw` 会撞到它自己的 deadline，那句话才是结论。
     sock.on('error', () => undefined);
     return once(sock, 'connect')
       .then(() => {
+        const clientLocalAddress = sock.localAddress;
         const text =
           `GET ${opts.path} HTTP/1.1\r\n` +
-          `Host: 127.0.0.1:${opts.port}\r\n` +
+          `Host: ${opts.hostHeader ?? `127.0.0.1:${opts.port}`}\r\n` +
           'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
           'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n' +
           (opts.secFetchSite === undefined ? '' : `Sec-Fetch-Site: ${opts.secFetchSite}\r\n`) +
           (opts.extraHeaders ?? '') +
           '\r\n';
         sock.write(Buffer.concat([Buffer.from(text, 'latin1'), opts.tail ?? Buffer.alloc(0)]));
-        return readRaw(sock, { marker: '\r\n\r\n' }).then((headBlock) => ({ socket: sock as Duplex, headBlock }));
+        return readRaw(sock, { marker: '\r\n\r\n' }).then((headBlock) => ({ socket: sock as Duplex, headBlock, clientLocalAddress }));
       });
   }
 
@@ -788,10 +810,25 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
     // 101 的**两个头例外**：`Upgrade` 与 `Connection` 是"这是一个 101"的组成部分（RFC 6455 的握手回话必须带，
     // Firefox 缺 `Connection` 直接判失败）。把它们按"逐跳头不许转发"的一般规则"顺手修正"掉，
     // 本仓库只有这一条判据抓得住 —— 宿主之外的浏览器才会看到那个故障。
+    // 实测（2026-10-09 本档复现评审的 #11）：把那两个例外删掉 ⇒ 红的就是这两行，数字见下面那条计数断言的表。
     expect(head.toLowerCase()).toContain('upgrade: websocket');
     expect(head.toLowerCase()).toContain('connection: upgrade');
     // 评审 I-B 的 ws 那一半：两条 Set-Cookie 必须是两行（折成一行浏览器只收到一条畸形 cookie）
     expect((head.toLowerCase().match(/set-cookie:/g) ?? []).length, '上游 101 里的 Set-Cookie 条数被改了 ⇒ 会话 cookie 会静默丢').toBe(2);
+    /**
+     * 评审 **I-2**：例外只有上面那两个，**其余逐跳头仍然必须被滤掉**。夹具因此补了 `keep-alive` 与 `te`
+     * （上面 `startWsEcho` 的 ④）。形状选"计数 0"而不是 `not.toContain`：
+     * ① 这块头里有 `set-cookie`（凭据纪律里同一类"值不进消息"，虽然这里是假上游的假 cookie，也照同一个规矩走）；
+     * ② 计数能把"漏 1 条"与"漏 2 条"说清楚，`not.toContain` 不能。
+     * 实测（2026-10-09，本档三次变异，`cp` 备份 + 逐字节还原）：
+     * | 变异 | 补牙之前 | 补牙之后 |
+     * | --- | --- | --- |
+     * | 过滤整行删掉（101 什么都放行，评审的 #10） | `24 passed / exit 0` | `1 failed | 26 passed (27)`、exit 1、3.78s，红在 keep-alive 那条（`expected 1 to be +0`） |
+     * | 只放过 `te`（证明第二条不是装饰） | — | `1 failed | 26 passed (27)`、exit 1、3.68s，红在 te 那条 |
+     * | 把两个例外删掉照一般规则滤（评审的 #11） | `1 failed` | `1 failed | 26 passed (27)`、exit 1、3.69s，红在 `toContain('upgrade: websocket')` ⇒ **放行那一半的牙还在** |
+     */
+    expect((head.toLowerCase().match(/keep-alive:/g) ?? []).length, '上游 101 里的 keep-alive 被原样搬进浏览器 ⇒ 逐跳头过滤那一半坏了（101 那一支例外写得太宽）').toBe(0);
+    expect((head.toLowerCase().match(/\bte:/g) ?? []).length, '上游 101 里的 te 被原样搬进浏览器 ⇒ 同上（transfer-encoding 那一支更坏：客户端会把已升级的连接按 chunked 解释）').toBe(0);
 
     // 隧道建好之后按字节 echo：证明这条 socket 是**双向** pipe 的，不是只把客户端那半连上。
     // ⚠ 先把假上游写在 101 **同一个包里**的那 10 个字节读掉：不读的话这里"echo 回来的 4 个字节"
@@ -869,6 +906,96 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
     // 否决消息里不许回显外部输入，也不许出现凭据
     expect(body.toLowerCase()).not.toContain(CANARY.toLowerCase());
     expect(up.upgrades(), `上游收到了 ${up.upgrades() - before} 次 upgrade ⇒ 否决发生在**发给上游之后**`).toBe(before);
+    socket.destroy();
+  });
+
+  /**
+   * 评审 **I-1**（这一档最重要的一条，安全面）：上面那条 cross-site 只覆盖 `Sec-Fetch-Site` 那一半 ——
+   * ws 通道上守卫的**对端**与 **Host** 两半此前**零判据**。实测（2026-10-09，复现评审的 #13）：把
+   * `proxy.ts` 里那次 `guardNotebookProxy(...)` 的入参写成常量 `peerAddress:'127.0.0.1'` +
+   * `hostHeader:'127.0.0.1:7788'` ⇒ 原来 24 条**全绿 / exit 0**。
+   * HTTP 通道有两条真 socket 对端判据（请求方向那一组最后那条 + 容器档 `embed.test.ts` 第 7 条），
+   * ws 通道一条都没有 —— 而那条通道的另一端连着"在容器里以 root 执行代码"。
+   * ⚠ 外层那条 `bad_host` 钩子是 `app.addHook('onRequest', …)`（`server/src/api/app.ts:215`），
+   *   而 upgrade **不走路由** ⇒ 它管不到这里（这正是 `proxy.ts` 顶部 ② 那条性质）。所以本条断的
+   *   error 码必须是守卫那一个（`notebook_proxy_refused`），换成 `bad_host` 就说明拦它的是别的东西。
+   * 造"外来对端"照 HTTP 那一条的实测形状：服务端监听 `0.0.0.0`、客户端从本机非回环 IPv4 拨进来 ⇒
+   * 内核报出来的对端就是那个地址。**这里不出现假想地址**（喂字符串是 `proxyGuard.test.ts` 那张表的活）。
+   *
+   * 破坏性验证（2026-10-09 本档实测，三次都是 `cp` 备份 + 逐字节还原，`proxy.ts` md5 回到 `0e8207fa…`）：
+   * | 变异 | 结果 |
+   * | --- | --- |
+   * | 两个入参**一起**写死（复现评审的 #13） | `2 failed | 25 passed (27)`、exit 1、3.51s；两条分别红在"外来对端的握手没被守卫否决（第一行是 "HTTP/1.1 101 Switching Protocols"）"与"外来的 Host 竟然升级成功了" |
+   * | **只**写死 `peerAddress` | `1 failed | 26 passed (27)`、exit 1、3.72s ⇒ 对端那颗牙独立成立 |
+   * | **只**写死 `hostHeader` | `1 failed | 26 passed (27)`、exit 1、3.70s ⇒ Host 那颗牙独立成立 |
+   * 补牙之前那**一起写死两个入参**的变异是 `24 passed / exit 0`（本档复现评审的 #13，逐字一致）；
+   * 两种"半变异"旧闸门同样判不住（两半此前都是零判据），只是本轮没有把它们各跑一遍旧档 —— 表里那两行是**补牙之后**的读数。
+   */
+  it.skipIf(LAN_IPS.length === 0)(
+    'ws 握手的对端不是本机（从非回环接口拨进来、Host 写本机字面量）⇒ 403 notebook_proxy_refused，且上游一个 upgrade 都没收到',
+    async () => {
+      const up = await startWsEcho();
+      wsUpstreams.push(up);
+      const addr = LAN_IPS[0]!;
+      // `gatewayAddresses: []` 与 HTTP 那一版同一个理由：注入空表 = "往本机那一类里不加任何东西"，
+      // 于是这个 LAN 地址既不是回环也不在表里 ⇒ 守卫的缺省那一支走不到、对端那一半被单独判到。
+      const foreign = await injectApp({ token: CANARY, upstreamPort: up.port, gatewayAddresses: [], listenHost: '0.0.0.0' });
+      const before = up.upgrades();
+      const { socket, headBlock, clientLocalAddress } = await handshakeRequest({
+        port: foreign.port,
+        connectHost: addr,
+        // Host 写本机字面量 + Sec-Fetch-Site 合法：合取的另两半都点头 ⇒ 唯一的否决来源就是对端
+        hostHeader: `127.0.0.1:${foreign.port}`,
+        secFetchSite: 'same-origin',
+        path: `${JUPYTER_BASE_URL}api/kernels/deadbeef/channels`,
+      });
+      const head = headBlock.toString('latin1');
+      expect(/^HTTP\/1\.1 403/.test(head), `外来对端的握手没被守卫否决（第一行是 ${JSON.stringify(head.split('\r\n')[0] ?? '')}）⇒ 把 upgrade 那一次守卫的 peerAddress 写死成常量就是这个症状`).toBe(true);
+      const body = await readJsonBody(socket, headBlock);
+      const verdict = JSON.parse(body) as { error?: string; message?: string };
+      expect(verdict.error, '403 但不是守卫那一条 ⇒ 拦它的是别的东西，本条判的就不是守卫的对端那一半').toBe('notebook_proxy_refused');
+      // 说的是**哪一半**：守卫对两半各写一句话（proxyGuard.ts 的 `which`）。对端这一半的话必须在这里出现，
+      // Host 那一半的话必须不出现 —— 否则"两个入参一起写死"与"只写死 Host"这两种坏法分不开。
+      expect(verdict.message ?? '', '否决说的是 Host 那一半 ⇒ 对端这一半没被真的判到').toContain('对端地址不是本机');
+      expect(verdict.message ?? '', '否决同时说了两半 ⇒ 这条判据的对象不唯一').not.toContain('Host 头不是本机字面量');
+      expect(body, '否决消息不许回显对端地址（外部输入会进日志）').not.toContain(addr);
+      // 判据对象的证据（前置判据，缺了它就是"闸门是装饰"那一类）：内核给这条连接选的**源**地址确实不是回环
+      const src = clientLocalAddress ?? '';
+      expect(src.length, 'connect 之后读不到内核给的源地址 ⇒ 夹具坏了，本条没有判据对象').toBeGreaterThan(0);
+      expect(/^(127\.|::1$|::ffff:127\.)/.test(src), `这条拨出去用的源地址是 ${src}（回环形状 ⇒ 服务端看到的对端也是回环，本条判不到"外来对端"）`).toBe(false);
+      expect(up.upgrades(), `上游收到了 ${up.upgrades() - before} 次 upgrade ⇒ 否决发生在**注入之后**，越权已经发生`).toBe(before);
+      socket.destroy();
+    },
+  );
+
+  /**
+   * 评审 **I-1** 的另一半：DNS rebinding 那一半在 ws 上此前也没有负例（外层 `bad_host` 钩子不覆盖 upgrade，
+   * 而 HTTP 通道那一条 `Host: rebinding.example:7788 ⇒ 403 bad_host` 判的是**钩子**、不是守卫）。
+   * 这里对端仍是回环 ⇒ 唯一不点头的是 Host 那一半。
+   */
+  it('ws 握手的 Host 是外来的（rebinding.example:7788，对端仍是回环）⇒ 不是 101 而是 403 notebook_proxy_refused', async () => {
+    const up = await startWsEcho();
+    wsUpstreams.push(up);
+    const wsApp = await injectApp({ token: CANARY, upstreamPort: up.port });
+    const before = up.upgrades();
+    const { socket, headBlock } = await handshakeRequest({
+      port: wsApp.port,
+      path: `${JUPYTER_BASE_URL}api/kernels/deadbeef/channels`,
+      hostHeader: 'rebinding.example:7788',
+      secFetchSite: 'same-origin',
+    });
+    const head = headBlock.toString('latin1');
+    // 判"不是 101"而不是只判"是 403"：把 `hostHeader` 入参写死成常量时假上游会照回 101，那一支必须在这里红。
+    expect(head.startsWith('HTTP/1.1 101'), `外来的 Host 竟然升级成功了 ⇒ 守卫的 Host 那一半在 ws 上不在位（浏览器换成 rebinding 的 DNS 就能连进来执行代码）`).toBe(false);
+    expect(/^HTTP\/1\.1 403/.test(head), `外来 Host 的握手没被否决（第一行是 ${JSON.stringify(head.split('\r\n')[0] ?? '')}）`).toBe(true);
+    const body = await readJsonBody(socket, headBlock);
+    const verdict = JSON.parse(body) as { error?: string; message?: string };
+    expect(verdict.error, '这个码必须是守卫那一个；换成 bad_host 说明拦它的是外层钩子，本条就没判到守卫').toBe('notebook_proxy_refused');
+    expect(verdict.message ?? '', '否决说的是对端那一半 ⇒ Host 这一半没被真的判到').toContain('Host 头不是本机字面量');
+    expect(verdict.message ?? '', '否决同时说了两半 ⇒ 这条判据的对象不唯一').not.toContain('对端地址不是本机');
+    expect(body.toLowerCase(), '否决消息不许回显发出去的那个 Host 值，也不许出现凭据').not.toContain('rebinding.example');
+    expect(body.toLowerCase()).not.toContain(CANARY.toLowerCase());
+    expect(up.upgrades(), `上游收到了 ${up.upgrades() - before} 次 upgrade ⇒ 否决发生在**注入之后**`).toBe(before);
     socket.destroy();
   });
 
@@ -1061,8 +1188,37 @@ describe('隧道自己的两个纯函数（Task 4 的 websocket 通道共用同�
     // 调的是同一个函数）。"只有一处"讲的是"**只有一套判据**"，不是"**只调用一次**"：
     // websocket 不在路由表里，Fastify 的钩子与 HTTP handler 都碰不到它，所以它**必须**再调一次，
     // 否则"能打开页面"就变成"能绕过页面执行代码"（Task 4 变异②摘掉的正是 upgrade 里那一次）。
-    // 摘掉任何一次 ⇒ 计数变 1 ⇒ 本条红；而那一次被摘的**行为**后果由上面那两条 cross-site 用例判。
+    // 摘掉任何一次 ⇒ 计数变 1 ⇒ 本条红；而那一次被摘的**行为**后果由上面那一组守卫用例判
+    // （cross-site 的 Sec-Fetch-Site / 外来对端 / 外来 Host / 没有 token —— 评审 I-1 把后两条补进来之前，
+    //  摘掉入参里的 `req.socket.remoteAddress` 或 `req.headers.host` 是**没有红**的，见那两条的注释）。
     expect(code.filter((line) => line.includes('guardNotebookProxy(')).length, '隧道应当**每条通道各一次**调用同一个守卫（HTTP 一次 + upgrade 一次；判据本体住 proxyGuard.ts）').toBe(2);
     expect(code.join('\n'), '隧道不许自带第二套对端判据（那是 status.ts 那一半的语义，折进来会把"照样给链接"变成 403）').not.toMatch(/isLocalPeer|isLoopbackHostHeader|localGatewayAddresses/);
+  });
+
+  /**
+   * 评审 **I-3**：账本"掉出"这件事此前零判据。实测（2026-10-09 复现评审的 #12）：把 `trackTunnel` 里
+   * 那句 `socket.once('close', () => liveTunnels.delete(socket))` 删掉 ⇒ 原来 24 条**全绿 / exit 0**。
+   * 后果不是"关停变慢"而是"只进不出"：`liveTunnels` 会一直留住**已销毁的 Socket**（连带它们的读缓冲），
+   * 而长开的 notebook 页面恰恰是"反复建/断 ws"的常态（刷新、切页、重连）⇒ 服务端 RSS 缓涨，
+   * 而上面那条关停闸门照样 1ms 绿 —— 它只判"关停时能不能清干净"，判不出"平时攒了多少"。
+   * 形状选**结构性计数**（与本文件上面那条 structural 判据同形），不选"给 `attachNotebookUpgrade`
+   * 加一个返回 `tunnelCount()` 读数的形状"：后者要动 `server/src/notebooks/proxy.ts`，不在本档的改动清单里。
+   * ⚠ 诚实的局限（别把它读成行为判据）：这条判的是"摘账那一句在不在、且挂在 `once('close')` 上"，
+   *   **不是**"运行期这本账真的是空的"。要判后者需要那个读数 —— 已作为"需要动产品代码才能补严的一条"报上去。
+   * 破坏性验证（2026-10-09 本档实测，`cp` 备份 + 逐字节还原）：
+   * | 变异 | 补牙之前 | 补牙之后 |
+   * | --- | --- | --- |
+   * | 摘掉那句 `once('close', … delete …)`（评审的 #12） | `24 passed / exit 0` | `1 failed | 26 passed (27)`、exit 1、4.13s，红在"摘账那句应当恰好 1 处（现在是 0）" |
+   * | 把 `once` 换成 `on`（证明第三条不是装饰） | — | `1 failed | 26 passed (27)`、exit 1、3.60s，红在第三条那句事件形状 |
+   */
+  it('隧道的账本必须"进得出"：进账与摘账各恰好 1 处，且摘账那一句挂在 close 事件的 once 上', () => {
+    const src = readFileSync(join(process.cwd(), 'server', 'src', 'notebooks', 'proxy.ts'), 'utf8');
+    // 只数**代码行**（同上一条的理由：proxy.ts 里那段说明注释也写着这两个名字，注释不是第二处调用）
+    const code = src.split('\n').filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line));
+    const addLines = code.filter((line) => line.includes('liveTunnels.add('));
+    const deleteLines = code.filter((line) => line.includes('liveTunnels.delete('));
+    expect(addLines.length, `进账那句应当恰好 1 处（现在是 ${addLines.length}）⇒ 这本账是谁的要变了，关停那条闸门判的就不再是它`).toBe(1);
+    expect(deleteLines.length, `摘账那句应当恰好 1 处（现在是 ${deleteLines.length}）⇒ 0 处就是"只进不出"：已销毁的 socket 永远留在 Set 里，长开的页面会把 RSS 顶上去而没有任何闸门会红`).toBe(1);
+    expect(deleteLines[0] ?? '', '摘账不许挂在别的事件上：destroy() 之后 close 必然发一次，而 once 保证一条 socket 只摘一次（听 data/end 那种写法会漏掉半路被 RST 的连接）').toContain(`once('close'`);
   });
 });

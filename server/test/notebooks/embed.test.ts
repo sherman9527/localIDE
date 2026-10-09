@@ -35,11 +35,18 @@ import { localGatewayAddresses } from '../../src/notebooks/status.js';
  * `\b([A-Z][A-Z0-9_]{2,})\b` 从 `skipIf(...)` 的条件回指 `const` 声明再取 `process.env.X`。
  * 改成小写会让本文件从「孤儿检查」里静默退出、`env` 前缀降级成装饰、这一整组可以永远不再跑而**零条红**。
  *
- * ## 凭据纪律
+ * ## 凭据纪律（两个方向都要各判一次）
  *
  * 断言**不许**把凭据值写进失败消息：`expect(body).not.toContain(token)` 这种朴素写法在红的时候会把
  * "期望不包含的那一串"原样印进报告（本档第一版就是这样，一条红就把长期凭据写进了测试输出）。
  * 所以判"含不含凭据"一律走 `holdsToken()` 那一个布尔；值本身也从不进任何 `console`。token 为空时这条判据没有意义 ⇒ 前置断言会把它说成一句话而不是空过。
+ *
+ * ⚠ 另一半是 Task 3 评审 I-A / Task 4 评审 I-4 补的，`proxy.test.ts` 顶部"纪律"那一段写的就是这句话：
+ * **actual 里可能含真凭据的断言，也不许把 actual 交给 matcher** —— `toContain`/`toBe` 红的时候打印的是
+ * **actual**（`Failed Tests` 那一块的 `Received:` 是完整未截断的字符串），不只是 `not.toContain` 会打印期望值。
+ * 本档第 1 条"回来的确实是那份 HTML"原来正是 `expect(res.body.toLowerCase()).toContain('<html')`，而**同一条
+ * 用例下面**自己钉着"经隧道与直连的那份树页都含真凭据"（jupyter 把 token 写进 PageConfig）⇒ 一次偶发红就把
+ * 整页（含小写化后的 token）写进测试输出。现在它先算布尔、再判布尔：**"页面形状"这一类判据不碰 body 本身**。
  *
  * ## 这一档替 Task 2 还的那笔账（评审 I-3）
  *
@@ -499,7 +506,19 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('/jupyter 同源反代打在
     const res = await probe({ path: `${JUPYTER_BASE_URL}tree`, headers: { ...LOCAL_HOST_HEADER(), ...SAME_ORIGIN } });
     expect(res.status, `树页拿到 ${res.status}：隧道与 jupyter 之间任何一环坏了都是这里红（不是"页面本来就这样"）`).toBe(200);
     expect(res.headers['content-type'] ?? '', '反代没有把上游的 content-type 原样搬回来').toContain('text/html');
-    expect(res.body.toLowerCase(), '回来的不是那份 HTML ⇒ 可能被 SPA 兜底吃了').toContain('<html');
+    // 评审 I-4（Task 3 的 I-A 那一笔账，随本档补上）：**形状判据也不许把 body 交给 matcher**。
+    // 这份树页含真凭据（下面那条差分自己钉着），而 `toContain` 红的时候打印的是完整的 actual。
+    // 判据本身一个字没松：还是"回来的必须是那份 HTML"，只是先算布尔、再判布尔。
+    // 两个形状的差别是**在真容器里量的**（2026-10-09，同一条用例、同一个跑着的实例，只换断言形状）：
+    //   旧形状红 ⇒ `1 failed | 15 passed (16)`、exit 1、报告 5980 字节、含 1 块 `Received:`，
+    //     其中那份真凭据**逐字节**出现 0 次、**忽略大小写**出现 1 次 —— 与评审那句诚实定级吻合
+    //     （`start.sh` 的 token 是 `A-Za-z0-9` 大小写敏感，`.toLowerCase()` 让它当场不可直接用；
+    //      但任何去掉 `toLowerCase()` 的改写就变成逐字泄露，所以形状本身必须换掉）；
+    //   新形状红 ⇒ 同样 `1 failed | 15 passed (16)`、exit 1，但报告 2138 字节、凭据出现 **0** 次（两种判法都是 0）。
+    //   两次变异都**只换容器里那一份**（`docker cp` 进去、跑完把原字节 cp 回去），宿主工作树全程没动过；
+    //   收尾再 `up -d --build` 一次，并核过 `/app` 那一份与宿主 md5 逐字相同。日志只在容器 /tmp 里落地并当场删掉。
+    const looksHtml = res.body.toLowerCase().includes('<html');
+    expect(looksHtml, '回来的不是那份 HTML ⇒ 可能被 SPA 兜底吃了（只回布尔：整页正文不进报告，那里头有 PageConfig 的凭据）').toBe(true);
     expect(String(res.headers['content-security-policy'] ?? ''), '第五页要嵌这个页面，frame-ancestors 必须由我们写掉').toContain("frame-ancestors 'self'");
 
     // 凭据这一半**与 brief 不同**（brief 写的是"body 里没有 token"，那条在真容器里必红）：
