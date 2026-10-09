@@ -12,7 +12,12 @@
 
 ## Global Constraints
 
-- **数据不落 git**：一律 `spark.range(...)` + 确定性表达式 + **固定 `seed`**；不引外部数据集（离线构建与可复现两条都要求）。
+- **数据不落 git**：一律 `spark.range(...)` + 确定性表达式；不引外部数据集（离线构建与可复现两条都要求）。
+  ⚠ **"固定 seed"那句在本篇的写法下是空的**（2026-10-10 篇 1 实测顶回）：PySpark 的
+  `SparkSession.range(start, end, step, numPartitions)` **没有 `seed` 参数**，写 `spark.range(N, seed=7)`
+  直接 `TypeError`（seed 属于 `sample()` / `F.rand(seed)` 那一族）。而这里要的从来不是"seed"，是**可复现**：
+  `id % 5 < 2` 这类确定性表达式没有任何随机，换 seed 也换不出新形状 ⇒ 判据写成"确定性表达式"，
+  **不许为了照抄这句话去加一个不存在的参数，也不许改成 `F.rand(7)` 引入真随机**（那才需要 seed，且会把"每桶行数"变成每次不同的数）。
 - **单篇预算**：执行 ≤ 90s、峰值内存 ≤ 1GB —— **这是目标不是实测**，写完第一篇就用真实数字校准，超了先缩数据量（倾斜与文件数的现象在 50 万行上一样看得出来，"跑不完"才是真问题）。
 - **`local[*]` 的边界要写破**：凡涉及"分布式才有的失效模式"（节点级 shuffle、fetch failed、executor 被 broadcast 撑爆），文档里标"本机只能演示到这一层"，**不写成已验证**（纪律 2）。
 - **不教没验证过的东西**：不写 RDD 演化史/宽窄依赖背诵/DataFrame vs RDD 八股；不教生产集群 YARN/K8s 调参；不演示 Delta/Iceberg（镜像里没有）。
@@ -279,7 +284,7 @@ JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
    ```python
    N = 1_000_000
    events = (
-       spark.range(N, seed=7)
+       spark.range(N)
        .withColumn("user_id",
            f.when(f.col("id") % 5 < 2, f.lit("HOT"))                       # 恰好 40% 落到一个 key
             .otherwise(f.concat(f.lit("u"), (f.col("id") % 199_000).cast("string"))))
@@ -343,7 +348,7 @@ JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
    ```
 7. `code` ③ 解法 B/C —— 广播绕开 shuffle join（治 join 那一半）。断言押在**计划里的算子名**上：
    ```python
-   dim = (spark.range(50, seed=5)
+   dim = (spark.range(50)
           .select(f.concat(f.lit("u"), f.col("id").cast("string")).alias("user_id"),
                   f.col("id").alias("dim_v")))
    keys = events.select("user_id").distinct()
@@ -401,14 +406,18 @@ Commit：`feat(notebooks): WI-90 Task 2 —— 篇 1 倾斜与热点 key（加�
 结构同篇 1。关键单元（scratch 目录必须在**容器内可写、且不在 `data/notebooks`**，否则用户文件列表里会长出一堆 `wi90-*`）：
 
 ```python
-import glob, os, shutil, time
+import glob, os, shutil, tempfile, time
 from pyspark.sql import SparkSession, functions as f
 
 spark = SparkSession.builder.appName("wi90-02-small-files").getOrCreate()
-SCRATCH = f"/tmp/wi90-02-{os.getpid()}"           # 不进 data/notebooks：那是读者的工作区
-shutil.rmtree(SCRATCH, ignore_errors=True)
-df = spark.range(200_000, seed=11)
+# ⚠ `spark.range` 没有 seed 参数（见上面的全局约束，篇 1 实测顶回）—— 这里没有任何随机，确定性来自 range 本身
+df = spark.range(200_000)
+SCRATCH = tempfile.mkdtemp(prefix="wi90-02-")          # 不进 data/notebooks：那是读者的工作区
 ```
+
+（篇 1 落地时把 `f"/tmp/wi90-xx-{os.getpid()}"` 换成了 `tempfile.mkdtemp(prefix=...)`：同一个理由
+（不许写进 `data/notebooks`），但 `mkdtemp` 会**自己挑一个不冲突的路径**，而按 pid 拼的名字
+在 kernel 复用同一个 pid 时会撞上上一篇的残留。沿用篇 1 的形状，别再回退成手拼 `/tmp` 路径。）
 
 ① 现象 —— 默认 `shuffle.partitions=200` 的 `append` 反复写，是"目录爆炸"最常见的真实来源；这里用 `repartition(2000)` 一次性把它做出来：
 
