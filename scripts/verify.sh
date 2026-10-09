@@ -80,9 +80,11 @@ run "网页 IDE（执行内核与解耦边界）" npx vitest run server/test/ide
 
 # notebook kernel 真跑：只在**那个跑着 notebook 服务的容器**里点名（判据是上面那个 NB_SERVICE，
 # compose 只给 arena `ARENA_NOTEBOOK_SERVICE: "1"`；dev / tools 有容器标记但没有服务身份，理由见那里）。
-# 不给它单开 SKIP_ 开关。"漏跑"的兜底不是 assert-ran.mjs（那条只读判题矩阵的 json），而是
+# 不给它单开 SKIP_ 开关。kernel / embed 这两条**没接** assert-ran.mjs，"漏跑"的兜底是
 # 这个测试文件里那两条常驻解释断言（标了服务身份却没有 kernel 文件 ⇒ 当场红），加上
 # `notebook-compose.test.ts` ⑦（compose 那一侧每天在宿主跑，标记漂移在那里红，不用等一次 --verify）。
+# WI-90 那条「教程 notebook 可运行」阶段接的是 assert-ran.mjs 且带 `--require-no-skips`（下面），
+# 因为那一档的常驻组与容器组在同一个文件里，"整片 skip"在报告里长得像"跑过了"。
 # 门控写在**文件里**（describe.skipIf 的合取）而不是只写在这个 if 上：上面那条"单元测试"阶段本来就扫
 # server/test/notebooks/，宿主与 dev / tools 一样会跑到这个文件 —— 只靠阶段名点是挡不住的（评审 T10-1）。
 # 两个变量在阶段命令里都显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
@@ -99,7 +101,13 @@ if [ "$NB_SERVICE" = "1" ]; then
   # 这一档会红在"前置条件不成立"那句上，而毛病是环境没准备 —— 顺序让正常路径少一次冤红）。
   # 两个变量都得在命令行上：`verify-coverage.test.ts` 那条"env 门控的闸门必须被'设了那个变量'的阶段认领"
   # 读的是**阶段命令文本**（容器环境里已有的那份它看不见），这与 kernel / embed 那两处是同一课。
-  run "教程 notebook 可运行（结论层）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts
+  # WI-90 Task 5（交付档还的债）：这一档**也**接上 assert-ran.mjs，并与矩阵不同形状 —— 带 `--require-no-skips`。
+  # 为什么矩阵那一支的默认判据不够：常驻那一组（清单完整性 / 注册表形状 / marker 字面量…）在这里也绿，
+  # 于是"容器那一组整片被跳掉"看起来是 `10 passed / 4 skipped / 14 total`，`total-skipped===0` 永不触发 ⇒
+  # 只接默认判据等于没接（评审绕过口 3；实测：把 `describe.skipIf` 改成恒真，vitest 自己 exit 0，
+  # 而默认那一支报"10 passed / 4 skipped / 14 total ✓"）。这一档在容器里没有"合法跳过"这个东西 ⇒ 判据是 0 skipped。
+  run "教程 notebook 可运行（结论层）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts --reporter=json --outputFile=data/verify-tutorials.json
+  run "教程闸门确实跑到了" node scripts/assert-ran.mjs data/verify-tutorials.json "教程 notebook" --require-no-skips
 else
   printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\n（WI-90 Task 1 同一条路上一起跳过的还有「教程 notebook 可运行（结论层）」：宿主档只跑它那一组常驻判据（清单完整性 / 注册表形状 / nbconvert 参数形状 / 门控本身），真执行那两层要等容器档）\033[0m\n'
 fi

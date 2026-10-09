@@ -8,7 +8,7 @@ import { resolveProviders } from '../../src/llm/provider.js';
  * 所以**默认 skip**，否则 CI / `npm run verify` 会变慢且不稳定。
  * 手动开启：`ARENA_LLM_REAL=1 npx vitest run server/test/llm`
  * （需求 tasks.md 6.1 的"三次漂移 ≤1"就在这里跑，跑完把极差写进 memo.md。）
- * verify-gate: manual —— 这条闸门故意不进 verify.sh：它要登录态、外网和 10-20s 一次的真机调用。
+ * verify-gate: manual —— 由「游戏后端与前端测试」按目录认领，但那条阶段从不设 ARENA_LLM_REAL（这一档要登录态、外网和 10-20s 一次的真机调用），所以它是手动档。
  */
 const REAL = !!process.env.ARENA_LLM_REAL;
 

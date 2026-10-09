@@ -93,14 +93,44 @@ function gateVars(file: string): string[] {
   return [...vars];
 }
 
-/** 作者明知它是手动闸门 —— 写了这行就是"我知道它默认不跑，别替我报警"。 */
-function declaresManualGate(file: string): boolean {
-  return readFileSync(resolve(ROOT, file), 'utf8').includes('verify-gate: manual');
+/**
+ * 作者明知它是手动闸门 —— 写了这行就是"我知道它默认不跑，别替我报警"。
+ * ⚠ **但申报必须指着"认领这个文件的那条阶段"说**（WI-90 Task 5 补的，原判据是一个 `includes`）：
+ * 旧形状 `text.includes('verify-gate: manual')` 把**整个文件**从 env 判据里摘出去，而后面写什么都不重要 ⇒
+ * "加一行这样的注释 + 删掉那条专门阶段"就能让执行层彻底消失、报告里一行都没有（评审绕过口 2）。
+ * 现在要求：`verify-gate: manual` 那一行里带一个 **「阶段名」**，且那个名字 (a) 真实存在于 `stages()`、
+ * (b) 确实认领了这个文件 —— 两半各堵一种坏法：(a) 堵"随手编一个名字"，(b) 堵"指着一条毫不相干的阶段"
+ * （编不出 `(a)` 就红在本文件最后那条新用例上，红话会说出该怎么写）。
+ * 同一行只认第一个「」：申报是给机器读的，不是给散文留的空位。
+ * ⚠ **申报必须是"独立的一行"**（去掉注释符之后以 `verify-gate: manual` 开头）：散文里引用这串字面量
+ * （本文件下面那条新用例的注释就是这种引用）不算申报 —— 判据是"作者在申报"，不是"这串字符出现过"。
+ * 实测过反例：判据写成 `text.includes(...)` 时，**本文件自己的注释**被当成申报 ⇒ 守卫红在自己身上。
+ */
+function manualGate(file: string): { declared: boolean; label: string | null } {
+  const text = readFileSync(resolve(ROOT, file), 'utf8');
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/^\s*(?:\/\*+|\*+|\/\/)/, '').trim();
+    if (!line.startsWith('verify-gate: manual')) continue;
+    const m = /「([^」]+)」/.exec(line);
+    return { declared: true, label: m?.[1] ?? null };
+  }
+  return { declared: false, label: null };
 }
 
 describe('verify.sh 覆盖到每一个测试文件', () => {
   const all = stages();
   const patterns = all.flatMap((s) => s.patterns);
+
+  /**
+   * 一条**成立**的"手动闸门"申报：那行注释里点的阶段必须 (a) 真实存在、(b) 确实认领了这个文件。
+   * 只有成立时它才把文件从下面那条 env 判据里摘出去；不成立的申报**什么都不豁免**（红由
+   * 本文件最后那条新用例说清，env 那条也会顺带红 —— 两处红说的是同一件事，先查注释）。
+   */
+  const manualGateOk = (file: string): boolean => {
+    const { declared, label } = manualGate(file);
+    if (!declared || !label) return false;
+    return all.some((s) => s.label === label && claimed(file, s.patterns));
+  };
 
   it('脚本里确实有 vitest 阶段（防止改名把守卫一起废掉）', () => {
     expect(patterns.length).toBeGreaterThan(3);
@@ -118,7 +148,7 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
     //   设变量的那条只点名了 content）。
     const stranded = testFiles()
       .map((f) => ({ file: f, vars: gateVars(f) }))
-      .filter((x) => x.vars.length > 0 && !declaresManualGate(x.file))
+      .filter((x) => x.vars.length > 0 && !manualGateOk(x.file))
       // ⚠ **`every` 只能取在 `x.vars` 上**（这条是被撞出来的，不是审美选择）：
       // 判据要说的等式是「认领它的那条阶段，把这一文件门控要的变量**全都**设了」⇒ 量词落在文件那几个门上。
       // 写成 `s.vars.every(...)`（"阶段设的每个变量都在文件的门里"）看着是同义的，其实是**空判**：
@@ -132,6 +162,46 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
       `这些测试用 skipIf 门控，但没有任何"设了对应变量"的阶段认领它们：${stranded
         .map((x) => `${x.file}(${x.vars.join(',')})`)
         .join(', ')}`,
+    ).toEqual([]);
+  });
+
+  /**
+   * **申报口自己的判据**（WI-90 Task 5，评审绕过口 2）。上面那条 env 判据有一个"作者主动认账"的出口
+   * （`verify-gate: manual`），而出口若不核内容就等于没有：旧判据只 `includes('verify-gate: manual')`，
+   * 于是任意一行注释就能把一个文件从整条 env 判据里摘出去，配不上任何真实阶段。
+   * ⚠ 这条用例**永远会跑**（不门控、不 skip）—— 它判的是注释的形状，与 Jupyter / 判题栈无关。
+   * 三种坏法各自红：①写了申报却没有「阶段名」；②名字是编的（`stages()` 里找不到）；
+   * ③名字真存在但**不认领这个文件**（指着隔壁阶段说"我这边的账记在那儿"）。
+   * 破坏性验证（宿主档实测）：往 `kernel.test.ts` 写 `verify-gate: manual —— 由「不存在的阶段」手动跑` ⇒ 红；
+   * 改成真实的「单元测试（shared + exec + regression + notebooks + server 根级）」⇒ 绿。
+   */
+  it('申报"手动闸门"的注释必须指着一个真实存在、且确实认领了这个文件的阶段', () => {
+    const labels = all.map((s) => s.label);
+    const bad: string[] = [];
+    for (const file of testFiles()) {
+      const { declared, label } = manualGate(file);
+      if (!declared) continue;
+      if (!label) {
+        bad.push(`${file}：写了 verify-gate: manual 但那一行里没有「阶段名」⇒ 申报无法核对，等于免检金牌`);
+        continue;
+      }
+      if (!labels.includes(label)) {
+        bad.push(`${file}：申报的「${label}」在 verify.sh 的 vitest 阶段里不存在（编的名字，或者那条阶段已经被删了）`);
+        continue;
+      }
+      const stage = all.find((s) => s.label === label)!;
+      if (!claimed(file, stage.patterns)) {
+        bad.push(`${file}：申报的「${label}」确实存在，但它的路径清单不认领这个文件 ⇒ 记错了账本`);
+      }
+    }
+    expect(
+      bad,
+      `verify-gate: manual 的申报形状不成立：\n${bad.join('\n')}\n` +
+        '⇒ 修法是在那一行里点上"这条文件实际由哪条阶段认领"的阶段名，例如 ' +
+        '`verify-gate: manual —— 由「' +
+        (labels[0] ?? '某阶段') +
+        '」按目录认领，但那里从不设门控变量，所以它是手动档`。' +
+        '**把这条判据删掉不是修法**：删掉它 = 任何一行注释都能让一个 env 门控的闸门从执行层彻底消失',
     ).toEqual([]);
   });
 });
