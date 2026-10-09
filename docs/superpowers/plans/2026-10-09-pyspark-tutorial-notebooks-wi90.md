@@ -392,7 +392,7 @@ Commit：`feat(notebooks): WI-90 Task 2 —— 篇 1 倾斜与热点 key（加�
 
 **Files:**
 - Create: `content/notebooks/02-small-files-and-partitioning.ipynb`
-- Modify: `server/test/notebooks/tutorial-claims.ts` → `['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-drives-partitions', 'coalesce-not-shuffle', 'fewer-files-not-slower-read']`
+- Modify: `server/test/notebooks/tutorial-claims.ts` → `['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-drives-partitions', 'coalesce-not-shuffle', 'coalesce-cuts-files-not-rows']`
 
 - [ ] **Step 1: 登记 slug**（同上形状）
 
@@ -423,6 +423,11 @@ assert sizes[-1] < 1_000_000, sizes[-1]
 print("WI90[02-small-files-and-partitioning][file-count-is-what-you-write] OK")
 ```
 
+⚠ `len(files) == 2000` 与 `sizes[-1] < 1_000_000` 这两个数**都是写计划时的推测，不是实测**。
+先手测把真实数字量出来再落地：若空分区不产文件导致真实文件数 < 2000，那要改的是**这一条教的那句话**
+（"你写多少分区就有多少文件"在有空分区时不成立 —— 这本身就是一个值得写进教程的坑），
+不许改成 `>= 1500` 这种"总能过"的松弛判据。实测的两个数写进注释与提交信息。
+
 ② 取证 —— 读侧把小文件**合并成输入分区**，量的是 `getNumPartitions()`（确定性）：
 
 ```python
@@ -450,7 +455,7 @@ print("WI90[02-small-files-and-partitioning][open-cost-drives-partitions] OK")
 
 ```python
 spark.conf.set("spark.sql.shuffle.partitions", 200)
-plan_coalesce = df.coalesce(8).explainString() if False else df.coalesce(8)._jdf.queryExecution().simpleString()
+plan_coalesce = df.coalesce(8)._jdf.queryExecution().simpleString()
 plan_repart  = df.repartition(8)._jdf.queryExecution().simpleString()
 print(plan_coalesce); print(plan_repart)
 assert "Exchange" not in plan_coalesce, plan_coalesce          # coalesce 不引入 shuffle
@@ -458,7 +463,7 @@ assert "Exchange" in plan_repart, plan_repart                   # repartition �
 print("WI90[02-small-files-and-partitioning][coalesce-not-shuffle] OK")
 ```
 
-④ 量差异 —— 三种写法落盘的文件数与读回耗时（**耗时只打印**），断言只押"文件数下降、行数守恒、读回不慢于对照 2 倍"：
+④ 量差异 —— 三种写法落盘的文件数与读回耗时（**耗时只打印**），断言只押"文件数下降、行数守恒"：
 
 ```python
 few = f"{SCRATCH}/few"
@@ -466,11 +471,23 @@ t0 = time.perf_counter(); df.coalesce(8).write.mode("overwrite").parquet(few); t
 few_files = glob.glob(f"{few}/part-*.parquet")
 t1 = time.perf_counter(); rows_many = spark.read.parquet(many).count(); t_read_many = time.perf_counter() - t1
 t2 = time.perf_counter(); rows_few  = spark.read.parquet(few).count();   t_read_few  = time.perf_counter() - t2
-print("many:", len(files), "文件 / 读回", round(t_read_many, 2), "s   few:", len(few_files), "文件 / 读回", round(t_read_few, 2), "s")
-assert len(few_files) == 8 and rows_many == rows_few == 200_000
-assert t_read_few <= t_read_many * 2, (t_read_few, t_read_many)   # 这条是护栏，不是结论：真结论是人眼看耗时
-print("WI90[02-small-files-and-partitioning][fewer-files-not-slower-read] OK")
+bytes_many = sum(os.path.getsize(p) for p in files)
+bytes_few = sum(os.path.getsize(p) for p in few_files)
+print("many:", len(files), "文件 /", bytes_many, "字节 / 读回", round(t_read_many, 2), "s")
+print("few :", len(few_files), "文件 /", bytes_few, "字节 / 读回", round(t_read_few, 2), "s")
+assert len(few_files) == 8, len(few_files)
+assert rows_many == rows_few == 200_000, (rows_many, rows_few)
+assert bytes_few <= bytes_many, (bytes_few, bytes_many)   # 每文件 footer 那份固定开销，合并后确实省下来
+print("WI90[02-small-files-and-partitioning][coalesce-cuts-files-not-rows] OK")
 ```
+
+⚠ 这一条原来写的是 `assert t_read_few <= t_read_many * 2`（"读回不慢于对照 2 倍"），**按 Ruling(B1) 删掉了**：
+它名义上是"护栏不是结论"，但一条押耗时的断言就是会把闸门撞红的东西，而"护栏"这个词不改变它的性质。
+删掉之后 slug 也不许再留 `fewer-files-not-slower-read` —— 那个说法没有任何确定量在判它，
+留着就是"marker 宣称了一件没被证明的事"（正是这道闸门要拦的形状）。换成 `coalesce-cuts-files-not-rows`，
+押三件当场可判的：文件数、行数守恒、合并后总字节不增。
+**"更少文件不等于更快读"这句结论进 markdown**，带上上面打印的两个耗时，并按纪律 2 写清本机测不到真实集群那部分
+（`local[*]` 单进程，open 成本被同进程的 CPU 掩盖）。
 
 ⑤ 收尾（最后一个单元）：
 
@@ -494,7 +511,7 @@ spark.stop()
 
 **Files:**
 - Create: `content/notebooks/03-reading-the-plan-and-aqe.ipynb`
-- Modify: `server/test/notebooks/tutorial-claims.ts` → `['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-not-always-faster']`
+- Modify: `server/test/notebooks/tutorial-claims.ts` → `['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-coalescing-is-one-switch']`
 
 - [ ] **Step 1: 登记 slug**
 
@@ -527,30 +544,41 @@ assert coalesced < parts_planned, (coalesced, parts_planned)
 print("WI90[03-reading-the-plan-and-aqe][aqe-coalesces-shuffle-read] OK")
 ```
 
-`aqe-not-always-faster` 是这一篇最值钱也最容易被写成"调这个参数"的一条：小数据 + 额外 stage 边界 ⇒ AQE **可能更慢**。断言**不能**押耗时（Ruling(B1)），改成押一个确定的事实 —— 关掉 AQE 时那条 shuffle 读有 200 个分区，打开后被合并到更少，因此"更少分区"与"更快"是两件事，用同一份数据把两个数都打出来让人看见：
+`aqe-coalescing-is-one-switch` 是这一篇最值钱的一条，也是原计划写得最虚的一条。
+原文那条 slug 叫 `aqe-not-always-faster`，押的是 `assert coalesced < parts_planned and t_aqe_on > 0` ——
+两处毛病：**前半与 `aqe-coalesces-shuffle-read` 判的是同一个事实**（两条 marker、一件事，第二条什么都没加），
+**后半 `t_aqe_on > 0` 恒真**（一次 count 的耗时永远大于 0，这条断言不判任何东西，而"aqe-not-always-faster"
+这个名字宣称的东西没有任何东西在判它）。按 Ruling(B1) 与"marker 不许宣称未被证明的事"，改成：
 
 ```python
-def timed(action):
-    t = time.perf_counter(); out = action(); return round(time.perf_counter() - t, 3), out
-t_off, _ = timed(lambda: agg.count())
-spark.conf.set("spark.sql.adaptive.enabled", False)
-t_aqe_off, _ = timed(lambda: agg.count())
+# 换一个开关，判"是谁把读侧合并的"：coalescePartitions 关掉 ⇒ 合并这件事就没了
+# ⚠ 必须重新构造一个 agg 再执行：复用上一个已经产过 executedPlan 的 DataFrame，读到的可能是缓存的那份计划
+small = big.groupBy("k").agg(f.sum("v").alias("s"))
 spark.conf.set("spark.sql.adaptive.enabled", True)
-t_aqe_on, _ = timed(lambda: agg.count())
-print(f"合并到 {coalesced} 个分区（原 200）；耗时 AQE关={t_aqe_off}s AQE开={t_aqe_on}s")
-assert coalesced < parts_planned and t_aqe_on > 0
-print("WI90[03-reading-the-plan-and-aqe][aqe-not-always-faster] OK")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", False)
+_ = small.count()
+plan_txt2 = small._jdf.executedPlan().toString()
+print("\n".join(ln for ln in plan_txt2.splitlines() if "AQEShuffleRead" in ln))
+m2 = re.search(r"AQEShuffleRead", plan_txt2)
+merged2 = parse_executed_read_partitions(plan_txt2)   # 与上面同一个解析函数，落地时抽成一个本地 helper，不要复制两份正则
+print(f"关掉 coalescePartitions ⇒ 读侧分区数 {merged2}（计划里是 {parts_planned}）")
+assert merged2 == parts_planned, (merged2, parts_planned)
+print("WI90[03-reading-the-plan-and-aqe][aqe-coalescing-is-one-switch] OK")
 ```
 
-⚠ 这一条的 `assert` 故意只押确定量，结论那句"更少不等于更快"写在 markdown 里并**带上本篇实测的两个耗时**（数字来自当场跑，符合纪律四）。
+**"更少分区 ≠ 更快"这句结论降级到 markdown**，并带上当场打印的两个耗时（AQE 开 / 关各一次 `count()`）——
+数字来自本篇实测，符合纪律四；但它**不进断言**，因为一条押耗时的断言就是把闸门交给机器负载
+（`local[*]` 上 CPU 抢不过判题池时它先红，而红出来的话是"教程坏了"）。
+markdown 里那句要按纪律 2 收口：本机能量到的是"AQE 把读侧合并了、并多出一层 stage 边界"，
+"因此在真实集群上更慢/更快"**标未验证**。
 
 - [ ] **Step 3: 手测 + 闸门 + 校准**（同上。若 `AQEShuffleRead` 在本镜像的文本形状不同，改解析并**把实测原文贴进注释**，不许放宽断言）
 
-- [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② 把 `_ = agg.count()` 删掉（不触发执行就读 executedPlan）⇒ `aqe-coalesces-shuffle-read` 必须红在"认不出 AQEShuffleRead"（这条是"顺序依赖"的判据，最容易静默坏掉）；③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红。
+- [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② 把 `_ = agg.count()` 删掉（不触发执行就读 executedPlan）⇒ `aqe-coalesces-shuffle-read` 必须红在"认不出 AQEShuffleRead"（这条是"顺序依赖"的判据，最容易静默坏掉）；③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红；④ 把 `coalescePartitions.enabled` 那行删掉（= 让它保持默认 true）⇒ `aqe-coalescing-is-one-switch` 必须红在"读侧被合并了"（这一条同时证明"这一篇真的在判那个开关"，而不是判 AQE 大开关）。
 
 - [ ] **Step 5: markdown**：⑤ 追问链"怎么证明 broadcast 把 executor 撑爆了"（本机标未验证：`local[*]` 没有独立 executor 内存这条线，只能看 `BroadcastExchange` 的 size 估计）、"AQE 为什么看不到 CBO"；题库指针 `bd-pyspark-0002` 与 `bd-pyspark-0010`（非等值时间窗 join 换不了 BroadcastHashJoin，计划退化最典型）。
 
-- [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 4 —— 篇 3 计划解读与 AQE（"更少分区 ≠ 更快"押确定量）`）
+- [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 4 —— 篇 3 计划解读与 AQE（合并读侧归 coalescePartitions，"不总是更快"降级到 markdown）`）
 
 ---
 
