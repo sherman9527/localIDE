@@ -89,6 +89,8 @@ TypeScript 5.7 strict，`tsc -b` 三栈引用构建（`shared → server → web
 | GET·POST | `/ide/env`、`/ide/env/command`、`/ide/env/reset` | 依赖环境（WI-87）：清单（GET，含占用字节）、命令窗口（POST，SSE 逐行回显）、回到镜像默认（POST reset）。落点在命名卷，**判题看不到**（见 `docs/JUDGING.md`） |
 | GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + 拼给宿主的链接。token **只按 socket 对端附上**（`isLocalPeer`：回环或本进程默认网关；不是 `Host` 头，那玩意客户端想写什么就写什么）；非本机对端照样给链接、只是里面没有凭据。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
 | POST | `/notebook/prepare-env` | 显式建 IDE 那个 venv（`arena-pyspark` kernel 的 argv 指着它）。成功只有 `{ok:true}`，失败是 `200 + {ok:false, reason}`。**铺示例不在这条路上** —— 那是上面那个 GET 顺带做的，两件事坏的是不同的东西 |
+| GET | `/notebook/files` | 第五页**左栏那棵树**（WI-94 Task 5）：只读目录、不读内容，与"这次铺了什么"（上面那个 GET 的 `notebooks` 字段）是两件事，所以分两个口子。Jupyter 没起来也照答；读不到是 `error` 字段，不是空数组 |
+| ALL | `/jupyter/*` | 同源反代（WI-94 Task 3/4）：HTTP 与 **websocket** 两条通道都隧道到**同一个容器里的** Jupyter。上游写死在组合根（`127.0.0.1:config.notebook.port`，默认 8888；那个注入口子只为测试开 —— 上游可配等于给一个没有鉴权的服务加一条 SSRF）。jupyter 自己带 `--ServerApp.base_url=/jupyter/`，所以回话里的绝对路径生来就在 `/jupyter/` 下面。token 由服务端注入、客户端塞的那一份**先摘掉**；放行判据只有 `proxyGuard.ts` 那一处，不过就 403/503 |
 | POST | `/judge` | 同步判题（兜底路径） |
 | POST | `/judge/stream` | 同一链路的 SSE 形态：`queued → log* → result` |
 | POST | `/grade` | 主观题评分 |
@@ -276,13 +278,22 @@ c/cpp 的依赖只能 apt 预装、mysql/redis 的"依赖"是那个服务本身�
 pyspark 的解释器由**与判题共用**的常驻池持有（单独开环境会撞红线一）。
 红线本身的落地与验证见 `docs/JUDGING.md` 最后一段。
 
-### Notebook：第五页只做入口，真界面是容器里那个 Jupyter
+### Notebook：第五页是两栏（左文件树 + 右内嵌），真界面经同源反代过来
 
-A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`）。
-`server/src/notebooks/` 两个文件：
-`seed.ts`（`content/notebooks/*.ipynb` → `data/notebooks/`，**缺失才复制**，绝不覆盖用户改过的那份）与
-`status.ts`（探活 + 解 `/api/kernelspecs` + 拼给宿主的链接 + `isLocalPeer`）。前端 `web/src/pages/Notebook.tsx`
-是**入口不是 iframe**：状态卡、kernel 徽标、一个能点开的地址、三句常驻的边界话。
+A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`）建的是"入口页"，
+WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`）。
+`server/src/notebooks/` 五个文件：
+`seed.ts`（`content/notebooks/*.ipynb` → `data/notebooks/`，**缺失才复制**，绝不覆盖用户改过的那份）、
+`status.ts`（探活 + 解 `/api/kernelspecs` + 拼给宿主的**逃生链接** + `isLocalPeer`）、
+`files.ts`（左栏那棵树：只读目录名，Jupyter 没起来也照答，读不到给 `error` 而不是空数组）、
+`proxy.ts`（`/jupyter/*` 的两条通道：HTTP 与内核 ↔ 页面的 websocket，逐跳头摘掉、客户端塞的 token 先摘再注入我们那份）与
+`proxyGuard.ts`（**唯一的放行判据**：对端 + `Host` 的合取，不过就 403/503）。
+前端 `web/src/pages/Notebook.tsx`：状态卡（后端四种形状各一句，不许合并）+「准备环境」+
+"这次铺了什么"那份示例清单 + 五段常驻边界话（默认折进 `<details>`）+ 左栏树 + 右栏 iframe。
+**内嵌那一路不带凭据**：iframe 的 src 只是同源路径，token 在服务端注入；
+`running:false` 时那棵子树结构上到不了（摆一个空白 iframe 就是说谎 —— e2e 那个实例永远是这一态，
+它的判据就建在这条上：`tests/e2e/notebook-page.spec.ts` 钉 `notebook-frame` / `notebook-tree` 计数为 0，
+同时钉 `notebook-files` 照旧列得出文件）。
 
 四条边界，每条都有闸门，不是约定：
 
@@ -319,11 +330,33 @@ A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-de
   WI-87 的 reset 会删掉整个 venv 目录，那样"重置环境"会顺手删掉 kernel 而界面不解释为什么。
   kernelspec 与 notebook 的 warehouse/Derby（`data/notebook-warehouse/`）都与判题侧分开。
 
-容器档那一组（`server/test/notebooks/kernel.test.ts`，30 条，门控写成文件内部的 `it.skipIf` + 一条永远会跑的
-伴生断言）判的是**真服务与真文件系统**，不是 mock：`nbconvert --execute` 真跑 `00-smoke-pyspark.ipynb`
-（`venv ok` / `rows 15`）、读活进程 `/proc/<pid>/environ` 的 PATH 首项、探 DNAT 目标上有没有人听、
-**直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter** 解 kernelspecs（同文件里那组假 `/proc` 树 /
-假 executed-notebook JSON 的用例是宿主侧的 plumbing，另一码事）。
+容器档那两个阶段判的是**真服务与真文件系统**，不是 mock：
+
+- **「Notebook 运行时（kernel 真跑）」**点名 `kernel.test.ts`（35 条：容器那一组 10 条 + 那条要真 `/proc`
+  的发现，两者都在宿主档跳 ⇒ 宿主报 `35 tests | 11 skipped`）与 `embed.test.ts`（18 条：反代打在**真**Jupyter 上，
+  含"穿过隧道真的执行了一行代码"）。判据形状：`nbconvert --execute` 真跑 `00-smoke-pyspark.ipynb`
+  （`venv ok` / `rows 15`）、读活进程 `/proc/<pid>/environ` 的 PATH 首项、探 DNAT 目标上有没有人听、
+  **直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter** 解 kernelspecs（同文件里那组假 `/proc` 树 /
+  假 executed-notebook JSON 的用例是宿主侧的 plumbing，另一码事）。
+- **「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」**（WI-90）：`tutorials.test.ts` 14 条里
+  有 4 条要真 Spark，三篇 senior 级教程（`content/notebooks/01-skew-and-hot-keys.ipynb`、
+  `02-small-files-and-partitioning.ipynb`、`03-reading-the-plan-and-aqe.ipynb`）**各起一次 session 真跑**。
+  实测（2026-10-10 的 `./start.sh --verify`，量具 = vitest 的 per-test duration，取自
+  `data/verify-tutorials.json`）：**26.31s / 56.31s / 18.98s，三篇合计 ≈101.6s** ——
+  单篇目标 ≤90s、闸门硬预算 `TUTORIAL_TIMEOUT_MS=120s`（cell 级超时按秒从它推导，"单位是秒不是毫秒"
+  由常驻那组按量级判住）。整档 CV 里那两条阶段的原文：`教程 notebook：14 passed / 0 skipped / 14 total ✓`，
+  上一条阶段则报 `Test Files 2 passed (2) / Tests 53 passed (53)`（kernel 35 + embed 18，容器里 0 skipped）。
+  两层判据缺任何一层都放过一种真实的坏法：**执行层** = 零 `output_type=error` 且 kernel 必须是
+  `arena-pyspark`（写成 `python3` 照样跑得绿，而它跑在镜像自带的系统解释器上 ⇒ 红线①的示范）；
+  **结论层** = `server/test/notebooks/tutorial-claims.ts` 那份注册表里每条方向性结论都要打出
+  `WI90[篇名][slug] OK`，且"打出的集合"与"注册表"**双向相等**（只看"没报错"抓不到"有人把 assert 删了"，
+  只核注册表抓不到"有人把注册表里那条 slug 删掉让已经红的结论变绿"）。
+  教程里那个 Spark 是 **`--master local[2]`**（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的
+  `PYSPARK_SUBMIT_ARGS`），不是判题 `spark-scala` runner 那个 `local[*]` —— 同一份镜像里的 Spark，
+  但会话、warehouse 与 Derby 都不是同一个（`data/notebook-warehouse/`）。
+  ⚠ 这一档接的是 `assert-ran.mjs --require-no-skips`，**不是**矩阵那一支的默认判据：常驻那 10 条在任何机器都绿，
+  于是"容器那一组整片被跳掉"报出来是 `10 passed / 4 skipped / 14 total` 而 vitest 仍 exit 0。
+
 `GET` 顺手铺示例是**故意**留在读路径上的（页面不做定时轮询 ⇒ 那点 `stat`/`copyFile` 只随点击发生，
 这是计划自查里挂给 Task 10 用数据判的那条，结论：保持现状）。
 
@@ -583,13 +616,22 @@ ARENA_E2E_KEEP=1 npm run e2e                       # 留现场排查
 
 `scripts/verify.sh` 的阶段：lint → typecheck → 前端构建 → **产物预算** → 单元测试 →
 题库只增不减 → 题库闸门（覆盖度 + 出处审计，`ARENA_FULL_GATE=1`）→ 游戏后端与前端测试 →
-网页 IDE →（容器内）判题回归矩阵 → 断言矩阵真跑到了 →（宿主）E2E。
+网页 IDE →（**只有那个跑着 notebook 服务的容器**）Notebook 运行时（kernel 真跑）→
+教程 notebook 可运行（结论层）→ 教程闸门确实跑到了 →（除非 `SKIP_JUDGE=1`）判题回归矩阵 →
+断言矩阵真跑到了 →（除非 `SKIP_E2E=1`，E2E 归宿主）E2E。
+notebook 那三条都在 `ARENA_NOTEBOOK_SERVICE=1` 的分支里：宿主既没有 arena-pyspark kernel 也没有 Jupyter，
+`--dev` / `--tools` 那两台有容器标记但没有服务身份（compose 里写了为什么），所以那里整段跳过并打印一句实话。
+门控同时写在**测试文件里**（`describe.skipIf` 的合取）—— 只靠阶段名点是挡不住的，
+因为"单元测试"那条阶段本来就扫 `server/test/notebooks/`。
 
 **门禁自己也要被门禁**（`server/test/regression/`）：`typecheck-coverage`（测试文件是否纳入类型检查）、
 `verify-coverage`（每个 `*.test.ts` 是否被 verify.sh 某阶段认领，并检查 env 门控的闸门是否真被
-"设了那个变量"的阶段认领）、`runner-coverage`
-（每个 judgeKind 是否有双向往返测试）、`assert-ran.mjs`（判题矩阵整片 skip 也算失败）。
-加新目录/新栈时它们会要求你接线。
+"设了那个变量"的阶段认领；**申报"故意手动跑"的那一行注释现在必须指着一条真实存在、且确实认领了这个文件的
+阶段** —— 旧的 `includes('verify-gate: manual')` 等于免检金牌：任意一行注释就能把整个文件摘出 env 判据，
+配一次"删掉那条专门阶段"就让执行层彻底消失而报告里一行都没有）、`runner-coverage`
+（每个 judgeKind 是否有双向往返测试）、`assert-ran.mjs`（**闸门不许静默绿**：判题矩阵整片 skip 也算失败；
+WI-90 那条「教程 notebook 可运行」接的是同一条脚本但多带 `--require-no-skips`，因为它的常驻那一组在任何机器都绿，
+"容器那一组整片被跳掉"在报告里长得像跑过了）。加新目录/新栈时它们会要求你接线。
 
 **前端改动额外一条：必须在真浏览器里看过。** 本项目有过三个"静默降级"缺陷
 （评分 401 掉到人工自检表、模型输出内层引号毁掉 JSON、桥 token 漂移），它们在断言下全是绿的。
@@ -610,13 +652,15 @@ localLearning/
 │  ├─ bank/             loader / hide（软删除）/ ingest（append-only）
 │  ├─ judge/            registry / workspace / process / guards / runners/*(6)
 │  ├─ ide/              runner / languages / 执行内核（与做题共用一个容器，边界由 boundary.test.ts 把住）
-│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + token 按 socket 对端释放）
+│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + 逃生链接的 token 按 socket 对端释放）
+│  │                    / files（左栏那棵树）/ proxy（`/jupyter/*` 的 HTTP + websocket 两条隧道）
+│  │                    / proxyGuard（唯一的放行判据）
 │  ├─ llm/              rubric / provider / providers/*(4) / cli / settings
 │  ├─ game/             daily / review / xp / streak / weekly / adaptive / achievements
 │  ├─ db/               node:sqlite（WAL + user_version 迁移）
 │  └─ config.ts / log.ts / ports.ts
 ├─ web/src/             pages(6：Today/Bank/Progress/Question/Ide/Notebook) / components(13) / lib / styles / router.tsx
-├─ content/             questions(7 类 252 题) / knowledge / curriculum / jd-cache / hidden.json
+├─ content/             questions(7 类 252 题) / notebooks(smoke + 三篇 PySpark 教程) / knowledge / curriculum / jd-cache / hidden.json
 ├─ data/                arena.db(.wal) / logs / judge / e2e / llm-bridge.log   ← 不进 git
 ├─ docker-cache/        npm / pip / maven 缓存（依赖全留在仓库内）
 ├─ docker/              Dockerfile / entrypoint.sh / mirrors.sh

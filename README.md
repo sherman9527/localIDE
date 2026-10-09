@@ -116,15 +116,18 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 
 ## Notebook
 
-顶栏第五项 **Notebook**（`#/notebook`，懒加载 —— 首屏仍然是 1 JS + 1 CSS）。这一页**不是**嵌进来的 Jupyter，
-它只做三件事：说清服务在不在、给 kernel 徽标、给一个能点开的地址
-（`http://127.0.0.1:7789/jupyter/tree?token=…` —— token 只在你本机点开的那次通信里附上去，判据是**合取**：
+顶栏第五项 **Notebook**（`#/notebook`，懒加载 —— 首屏仍然是 1 JS + 1 CSS）。这一页是**两栏**（WI-94）：
+左栏是那棵文件树（数据来自 `GET /api/notebook/files`：只读目录、不读内容，**Jupyter 没起来也照答**），
+右栏是**内嵌在本页的 Jupyter** —— iframe 的 src 是同源路径 `/jupyter/…`，由 7788 那个 Node 反代到容器里的
+Jupyter（`docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起，它自己带 `--ServerApp.base_url=/jupyter/`，
+所以页面里每个链接生来就在 `/jupyter/` 下面）。内嵌这一路**不带凭据**：token 由服务端在反代里注入，
+放行判据不过就在隧道里回 403/503；`running:false` 时那棵子树结构上到不了，页面上不会摆一个空白 iframe。
+状态卡那边另留一条**逃生链接**（`http://127.0.0.1:7789/jupyter/tree?token=…` —— 在新标签页打开时才需要，
+且 token 只在你本机点开的那次通信里附上去，判据是**合取**：
 **socket 对端地址**（内核给的）与 **`Host` 头是本机字面量**（`localhost` / `127.x` / `::1`）两条都要成立，
 因为单看对端拦不住 DNS rebinding（那种攻击里对端真的是 `127.0.0.1`），单看头拦不住局域网里伪造头的人；
 判不上的那些连接照样给链接，只是里面没有凭据）。同一个 `Host` 判据还管着**整个 API**（外来 Host ⇒ 403，
 因为这个服务没有鉴权、一直靠"只绑宿主回环"活着），但它**不替代**绑回环：Host 谁都写得出来。
-真界面是容器里那个 Jupyter，
-由 `docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起。
 
 - **kernel 就是网页 IDE 那份环境**：`PySpark (arena)` 的 argv 指向 `/opt/arena-ide-env/python/bin/python`，
   所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。**这条同时是判题那条红线的第二个入口**
@@ -133,6 +136,21 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
   闸门与页面都拦不住这种写法（红线①的可复现性靠**镜像 + 闸门**，见 `docs/JUDGING.md` 红线①最后两段）。
 - **示例**在 `content/notebooks/*.ipynb`（进 git、可 diff）。启动时"缺失才复制"进 `data/notebooks/`，
   **绝不覆盖你改过的那份**；铺不进去（只读挂载 / 磁盘满）会单独说成一句话，不伪装成"没有示例"。
+  里面是 `00-smoke-pyspark.ipynb`（环境自检，`kernel.test.ts` 真跑它）加**三篇 senior 级 PySpark 教程**（WI-90）：
+  `01-skew-and-hot-keys`（数据倾斜与热 key：加盐两阶段 + 广播阈值改 join 的算子）、
+  `02-small-files-and-partitioning`（小文件：落盘文件数 = 非空 writer 数、读侧打包、`openCostInBytes` 的方向与流传口径相反）、
+  `03-reading-the-plan-and-aqe`（读执行计划与 AQE：合并读侧归 `coalescePartitions` 那一个开关）。
+  **它们不是"读读就好"的文档**：容器档把它们**各真起一次 Spark 跑一遍**（`./start.sh --verify` 的
+  「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」两条阶段）。判据两层 ——
+  执行层（零 cell 异常，且 kernel 必须是 `arena-pyspark`）与结论层（每条方向性结论都要打出一个
+  `WI90[篇名][slug] OK` 标记，打出的集合与 `server/test/notebooks/tutorial-claims.ts` 那份注册表**双向相等**）。
+  实测用时（2026-10-10 的 `./start.sh --verify` 那一趟，量具 = vitest 报的那条用例 duration，
+  取 `data/verify-tutorials.json`）：篇 1 **26.31s**、篇 2 **56.31s**、篇 3 **18.98s**，三篇合计 **≈101.6s**；
+  同一天单跑那一条阶段量到 25.86 / 55.50 / 18.44（≈99.8s），差别在负载不在判据。
+  单篇目标 ≤90s、闸门硬预算 120s（`TUTORIAL_TIMEOUT_MS`），kernel 是 **`local[2]`** 而不是判题 `spark-scala`
+  那个 `local[*]`。跑完不留活内核：每篇最后一个 cell 必须是语句级的 `spark.stop()`，
+  且"打印 marker 的那个 cell 里必须有语句级 `assert`" —— 这两条在**宿主档**（每次提交都跑的那一档）就有牙，
+  不必等一次 10-20 分钟的容器验证。教程正文里**不留 outputs**（⑤段每个数字都写来源，跑一遍才看得见）。
 - **Spark 的表与判题分开**：notebook 用自己的 warehouse 与 Derby（`data/notebook-warehouse/`），
   你在 notebook 里建的表 IDE 与判题都看不见 —— 刻意的隔离，否则两边抢同一把 Derby 锁。
 - **Jupyter 掉了不会自己回来**：`./start.sh` 在镜像没变时不重建容器（实测 `Recreate` 计数 0），
@@ -177,7 +195,9 @@ npm run hooks:install   # 一次性：把 .githooks/pre-commit 接到 git
    带 `ARENA_REQUIRE_STACKS=1` 时"有题因栈不可用被跳过"也判红（`./start.sh --verify` 默认带；
    不带的话，在没起 mysqld/redis-server 的容器里跑，全部 mysql/redis 题会静默跳过而结果仍全绿）。
 3. **矩阵"整片 skip 也算失败"**（`scripts/assert-ran.mjs`）：判题套件在没有真栈时是 `it.skip` 且 exit 0，
-   所以除了 vitest 自己，还要断言"确实执行过 N 条用例"。
+   所以除了 vitest 自己，还要断言"确实执行过 N 条用例"。WI-90 那条「教程 notebook 可运行」接的是**同一条脚本
+   但多带 `--require-no-skips`** —— 那个文件里常驻那一组（10 条）在任何机器都绿，所以"容器那一组整片被跳掉"
+   报出来是 `10 passed / 4 skipped / 14 total` 而 vitest 仍 exit 0：默认那一支对它必须是装饰。
 4. **题库闸门**（`npm run bank:check`，`--full` 打开覆盖度）：结构合法、题数只增不减、每类题量与"当年新技术占比 ≥40%"、
    算法题里经典重复题 ≤15%、答案点名的『用例「X」』必须真存在、答案里写出来的等式逐条重算
    （`answer-arithmetic.test.ts`）、每家的 `probe_naive.py` 退出 0。
@@ -187,7 +207,10 @@ npm run hooks:install   # 一次性：把 .githooks/pre-commit 接到 git
    所以测试目录必须在某个 tsconfig 的 include 里、且根 `typecheck` 真的 `-p` 点名了它（`--dry` 这种空跑直接判红）。
 7. **门禁自己也要被门禁**（`server/test/regression/verify-coverage.test.ts`）：每个 `*.test.ts` 必须被 `verify.sh`
    某个阶段认领；**env 门控的闸门还必须被"真设了那个变量"的阶段认领**（曾经有一条闸门躺在被认领的目录里
-   却从来没执行过），故意手动的用 `verify-gate: manual` 申报。
+   却从来没执行过），故意手动的用 `verify-gate: manual` 申报 —— 但那行申报现在**必须独立成行、且指着一条
+   真实存在、确实认领了这个文件的阶段**（`verify-gate: manual —— 由「游戏后端与前端测试」按目录认领…`）。
+   旧的形状是一个 `includes('verify-gate: manual')`：任意一行注释就能把整个文件摘出 env 判据，
+   配一次"删掉那条专门阶段"就让执行层彻底消失而报告里一行都没有。
 8. **前端产物预算**（`scripts/check-bundle.mjs`）：首屏只能有 1 个 JS + 1 个 CSS（两边都断言）且 gzip 不超预算，
    入口里出现 zod / CodeMirror 就判红 —— 拆包的成果最容易被一次"顺手 import"悄悄还回去。
 9. **仓库自带脚本的语法与行尾**（`server/test/regression/scripts-syntax.test.ts`）：根目录与 `scripts/**/*.mjs`
