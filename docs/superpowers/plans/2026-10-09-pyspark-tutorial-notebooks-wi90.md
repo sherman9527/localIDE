@@ -545,6 +545,31 @@ spark.stop()
 
 - [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 3 —— 篇 2 小文件与物理设计（读侧合并用 getNumPartitions 量）`）
 
+### Task 3 落地后按实测订正（2026-10-10；上面那些"推测值"有六处被量出来的数字否掉，留原文作为论证过程）
+
+1. **`openCostInBytes` 是加在每个文件上的字节成本（加性项）**，调小 ⇒ 打包更狠 ⇒ 分区**更少**。
+   `maxPartitionBytes` 钉 128MB 时实测阶梯：`0→3 / 1MB→16 / 2MB→32 / 出厂 4MB→63 / 64MB→1000`。
+   ⇒ 本节原来那对配置（`openCost=0` + `maxBytes=1MB`）实测给 **3**，断言 `n_split > n_merged` 会红；
+   "每文件一个分区"要靠把 `maxPartitionBytes` 压到 1MB（实测恰好 2000），压到 512B（低于单文件字节）⇒ **4000 > 文件数**
+   （parquet 在输入分区规划这一层按字节可切）。slug 因此改名 **`open-cost-is-additive`**。
+   ⚠ 我给的另一个候选名 `max-bytes-not-open-cost-decides-it` **也不成立**（主导项恰恰是 openCost）—— 实现者按实测拒了两个候选名、用了机制名，这是对的。
+2. **① 的现象不依赖关掉 AQE**：显式 `repartition(200/2000)` 两档都落 200/2000 个文件，
+   **AQE 的 `coalescePartitions` 只合它自己推导出来的那个分区数**（聚合那一路实测 199→1）。
+   ⇒ 上面那条"⚠⚠ 不开 AQE 就必然红"是我从篇 1 的**聚合**数字推广到**显式 repartition** 得到的错误结论；
+   前提断言仍保留（形状对），但红话改成"配置被删了，不是现象消失了"。**教训：一个算子族量出来的数不许推广到另一个族。**
+3. **`coalesce` 不能提升并行度**：`spark.range(200_000)` 在 `local[2]` 上只有 **2** 个分区（= `defaultParallelism`，不是 200），
+   所以 ④ 那句 `df.coalesce(8).write ⇒ 8 个文件`实测落 **2** 个文件。⇒ 合并写的源改成 ② 读回来的 63 个输入分区（恰好 8），
+   并把"2 分区的源 coalesce(8) 还是 2"本身断言出来。
+4. **空分区不产文件，连 `.crc` 都不留**：`len(files)==2000` 侥幸成立（round-robin 无空分区），但聚合那族实测 **199/200**；
+   目录条目账目实测 `199 数据 + 199 crc + _SUCCESS + ._SUCCESS.crc = 400` ⇒ 正文写成"文件数 = **非空 writer** 数"。
+5. **合并写的总字节不逐次稳定**（950,484 ↔ 950,544 / 978,523 ↔ 978,615，漂约 0.01%）
+   ⇒ 断言里只留不等式与计数（`bytes_few < bytes_many`、`avg_few > 100 × avg_many`、文件数、行数），正文表格标注漂移。
+6. **`SET -v` 不列某些键**（`spark.sql.files.openCostInBytes` 查不到；`spark.sql.maxRecordsPerFile` 这一版 `conf.get` 读不到；
+   整型键传非数字 default 会抛 `IllegalArgumentException` 而不是返回 default）⇒ "出厂值怎么读"这件事在篇 3 的派发里已单独提醒。
+
+成本实测：本篇 56-66s（篇 1 是 34s），其中 **20.3s 花在"写出 2000 个文件"那一步** —— 那是现象本体，缩不掉。
+三篇排队时 `TUTORIAL_TIMEOUT_MS=120s` 那对预算要在交付档再确认一次。
+
 ---
 
 ## Task 4：篇 3 `03-reading-the-plan-and-aqe`（计划解读与 AQE）
