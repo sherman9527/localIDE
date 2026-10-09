@@ -709,8 +709,23 @@ markdown 里那句要按纪律 2 收口：本机能量到的是"AQE 把读侧合
   npm run verify:fast > /tmp/wi90-t5-fast.log 2>&1; echo "FAST_EXIT=$?"
   npm run e2e > /tmp/wi90-t5-e2e.log 2>&1; echo "E2E_EXIT=$?"
   ```
-  核对（逐项贴实测）：`CV_EXIT=0`；新增那条阶段出现**恰好 1 次**、区域内 `skip` 计数 0（**判据用行/字节，先证明区间非空**）；`tutorials.test.ts` 的条数与 `3 passed/0 failed`（三篇 + 清单完整性 + 常驻组）；`kernel.test.ts` 仍 `30 passed`；`embed.test.ts` 条数不减；判题矩阵 `跳过 0`。
+  核对（逐项贴实测）：`CV_EXIT=0`；新增那条阶段出现**恰好 1 次**、区域内 `skip` 计数 0（**判据用行/字节，先证明区间非空**）；
+  **条数的基线按落地后的实况核（这里原来写的"3 passed"是计划期的推测，已作废）**：`tutorials.test.ts` 应为 **14 tests**
+  （三篇执行 + 常驻那组，其中常驻含清单完整性、`00-` 封口、注册表形状、`markerOf` 字面量基准、单位、
+  marker 单元必须有 assert、末 cell 必须 `spark.stop()`、两条判据形状自检）、`kernel.test.ts` 应为 **35 tests | 11 skipped**
+  （30 条原样 + Task 1 抽件时那 5 条真-error 形状判据由 `584c249` 加进来）、`embed.test.ts` 条数不减、
+  判题矩阵 `跳过 0`。⚠ `server/**` 是烤进镜像的：`--verify` 自己会 build，但**别只 `up -d` 就信绿**
+  （篇 2 那一轮就因为容器里是旧 `server/` 源码，报过一次"打出注册表里没有的标记"的假红）。
   E2E 跑在 e2e 独立实例（宿主 `127.0.0.1:7798`），它**没有 token ⇒ 不起 jupyter**，所以那里能诚实判的只有"文件列表在 Jupyter 没起来时也要如实显示"——这一条若 WI-94 Task 6 已覆盖就写"已覆盖，见 `tests/e2e/notebook-page.spec.ts`"，**不要**为了凑绿伪造一次带 Jupyter 的 e2e 实例。
+- [ ] **Step 1b: 把这道闸门自己接进"整片 skip 也算失败"那一族**（Task 1+2 评审的两条绕过口，交付档还）
+  ① 那条 notebook 阶段**没接** `scripts/assert-ran.mjs` ⇒ 把 `gateVars()` 解不出的变量名改成 camelCase、
+     或让容器里那个 `describe.skipIf` 恒 skip，**整片 skipped 仍然 exit 0**（判题矩阵那条早就接了，这一条没接）。
+     ⇒ 改成 `--reporter=json --outputFile=…` + `node scripts/assert-ran.mjs … 教程`（与矩阵同一形状）。
+  ② `verify-coverage.test.ts` 那句 `includes('verify-gate: manual')` 会把**整个文件**从 env 判据里摘出，
+     不要求后面跟一个真实存在的阶段 label ⇒ "一条注释 + 删掉阶段"就能让执行层彻底消失而报告里一行都没有。
+     ⇒ 要求那串后面必须跟一个**在 `stages()` 里存在**的 label，解析不出来就红。
+  两条各配**破坏性验证**（①：让容器档那条恒 skip ⇒ 必须红；②：写一个不存在的 label ⇒ 必须红），还原后绿。
+
 - [ ] **Step 2: 真浏览器（如果 WI-94 已内嵌，这一步在真页面上看这三篇）**：`#/notebook` 左栏出现三个文件、点开其中一篇能进编辑器、console error 与 warning 都 0、故意停 ~60 秒再看服务还在。**任何一步做不到就如实报告并登记 WI，不许把"页面渲染出来了"当成"能跑"。**
 - [ ] **Step 3: 数字校准**：把三篇的真实执行用时写进 `README.md` 的 notebook 一节（"单篇实测 Xs，闸门预算 120s"），并核对每篇的⑤段里出现的每个数字都能在本篇跑一遍后看见（来源标注或当场量），**不留 outputs**。
 - [ ] **Step 4: 记忆与工作板**：`memo.md` 里程碑（做了什么/验证表带真实退出码/已知问题/教训 —— 教训至少含"耗时不能当结论层判据"与"`getNumPartitions()` 这类确定量能把教学结论钉死"两条）；`HANDOVER.md` WI-90 → COMPLETED 附验证命令与结果，并把后续批次（v2/v3 的 9 类主题）作为新 WI 或保留在规格的引用上写清。
