@@ -40,6 +40,24 @@ export const TUTORIAL_CLAIMS: Record<string, string[]> = {
   // coalesce-cuts-files-not-rows = 合并写出恰好 8 个文件、行数两种读法都 200000、总字节不增、平均单文件涨 100 倍以上。
   //   （它原先宣称的"读回不慢于对照"按 Ruling(B1) 删了：那条押耗时的 assert 本身就是会撞红的东西。）
   '02-small-files-and-partitioning.ipynb': ['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-is-additive', 'coalesce-not-shuffle', 'coalesce-cuts-files-not-rows'],
+  // 篇 3（WI-90 Task 4）。每条 slug 只挂一句结论（评审 m1 的粒度规矩），同一 cell 里多条 assert 的"侧面"在此写明：
+  // broadcast-threshold-changes-join = 阈值改的是 join 的算子名**与** `Exchange hashpartitioning` 的条数（实测 2/2/0），
+  //   三档（-1 / 512 / 4096）把编译期估计夹住 ⇒ 那一个 cell 的 assert 分别是：三档各自的算子名（正面）、
+  //   关掉与低于估计时不许出现 Broadcast、放开时不许残留 SortMergeJoin（反向，篇 1 立的形状）、
+  //   Exchange 计数（本篇新加的那一条）、`512 < est(dim)=600 < 4096 < est(big)=3,200,000`（"比的是这个数"的依据）——
+  //   五处全是"阈值改的是这一格 join 的计划形状，而它比的是编译期规模估计"这一句话的不同侧面；
+  // shuffle-partitions-is-a-plan-number = 计划里那个 shuffle 分区数是配置写的、不是数据要的：
+  //   同一格的 assert 是 AQE 关这个前提、`getNumPartitions()` 200/8 两头、计划文本里 `hashpartitioning(键, N)` 的 N 跟着动、
+  //   "两头都跑过"那条、以及空桶对照（@200 桶只落 44 个非空文件）—— 前四条是正面+对照，最后一条是那句话的下半句；
+  // aqe-coalesces-shuffle-read = AQE 把聚合那次 shuffle 的**读侧**分区合并了（实测 200 → 1），且依据是它自己产出的运行时统计：
+  //   assert 是"执行前/只 count() 之后 formatted 文本里没有 AQEShuffleRead"（顺序判据，实测）+
+  //   "finalize 之后有 == Final Plan == 与 AQEShuffleRead" + "读侧分区数 < 计划里的数" + Statistics 那行可解析出字节数；
+  // aqe-coalescing-is-one-switch = 决定合并的是 coalescePartitions 那一个**子**开关，不是 adaptive.enabled 大开关：
+  //   三格对照 (关,开)→200 / (开,开)→1 / (开,关)→200 逐位相等，另加两条痕迹对照
+  //   （关掉子开关时 ShuffleQueryStage 与 Statistics 仍在 ⇒ 统计照收、只是不合并；关掉大开关时它们整层消失）。
+  // ⚠ 这一篇没有 aqe-not-always-faster 那条 slug：它押的是 `coalesced < planned and t > 0`，前半与上一条重复、
+  //   后半恒真（Ruling(B1) 已否）。"更少分区 ≠ 更快"只活在 notebook 的 markdown 里，本机实测方向反倒是 AQE 更快。
+  '03-reading-the-plan-and-aqe.ipynb': ['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-coalescing-is-one-switch'],
 };
 
 /**
