@@ -29,6 +29,17 @@ export const TUTORIAL_CLAIMS: Record<string, string[]> = {
   // salting-preserves-result = 加盐前后两个结果集三个集合差全为 0（这条比"变快"硬）；
   // broadcast-changes-plan = 广播阈值改变 join 的算子名（计划文本，不是时间）。
   '01-skew-and-hot-keys.ipynb': ['hot-key-dominates', 'salting-halves-max-partition', 'salting-preserves-result', 'broadcast-changes-plan'],
+  // 篇 2（WI-90 Task 3）。每条 slug 对应的断言都写在 notebook 的单元里，且**只押确定量**（耗时一律只打印）：
+  // file-count-is-what-you-write = 写出时的分区数 2000 == 落盘 part-*.parquet 数 2000，且中位文件 983 字节；
+  // small-files-get-merged-on-read = 2000 个文件读回来只有 63 个输入分区，`input_file_name()` 去重求和恰好 == 2000（合并没漏文件）；
+  // open-cost-is-additive = ⚠ 这条**改了名**（原名 `open-cost-drives-partitions` 是简报里的推测名，方向被实测顶回）：
+  //   `openCostInBytes` 是加在每个文件上的字节成本，调小 ⇒ 打包更狠 ⇒ 分区更少
+  //   （实测同 128MB 预算下 0→3、1MB→16、2MB→32、出厂 4MB→63、64MB→1000；"每文件一个分区"要靠压 maxPartitionBytes 到 1MB ⇒ 2000）；
+  // coalesce-not-shuffle = 计划里 coalesce(8) 是 `Coalesce 8` 且**没有 Exchange**，repartition(8) 有 `RoundRobinPartitioning(8)`，
+  //   另外断出 coalesce 不能提升并行度（local[2] 的 2 分区源 coalesce(8) 还是 2）；
+  // coalesce-cuts-files-not-rows = 合并写出恰好 8 个文件、行数两种读法都 200000、总字节不增、平均单文件涨 100 倍以上。
+  //   （它原先宣称的"读回不慢于对照"按 Ruling(B1) 删了：那条押耗时的 assert 本身就是会撞红的东西。）
+  '02-small-files-and-partitioning.ipynb': ['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-is-additive', 'coalesce-not-shuffle', 'coalesce-cuts-files-not-rows'],
 };
 
 /**
