@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
@@ -20,6 +20,27 @@ import { executedNotebookEvidence, nbconvertCrashEvidence } from './notebook-evi
  * 阶段命令上的 `env` 前缀降级成装饰（同一课见 `kernel.test.ts` 那段「这两个标识符的**大小写是承重的**」）。
  * ⚠ 引用别的文件一律用**用例名/注释锚**，不用行号 —— 本仓库的既有教训就是"行号会漂"（`kernel.test.ts` 自己
  * 就把一处注释从"`:35`"订正成"那条早就挪窝了"）。
+ *
+ * ## 给教程作者的两条规矩（评审 m1；篇 2/3 照这个形状写，写歪了会红在这里）
+ *
+ * **m1（slug 的命名粒度）**：注册表是"本篇结论的**索引**"，所以**一个 marker 只能 gate 一个结论**。
+ * 一个 code cell 里想放多条 `assert` 只有两种合法形状：
+ * ① 它们是**同一个结论的不同侧面**（前提/对照/边界可以搭同一条 marker 的车，但要在 cell 的注释里写明
+ *    "这条 marker gate 的是哪一句结论、这几条 assert 各自是它的哪一面"）；② 否则**拆 slug**（一个结论一个 marker）。
+ * 反面就是篇 1 落地时的形状：`hot-key-dominates` 顺带 gate 了"错量法对倾斜不敏感"这条**关于度量**的结论，
+ * `salting-halves-max-partition` 顺带 gate 了"中间态不再倾斜" —— 两个下标各挂 2~3 件事，
+ * 于是"哪条结论坏了"要从红话往下读 cell 才知道。本轮不动注册表（改它等于改 marker 契约，要三篇一起改），
+ * 但**新写的篇 2/3 不许再这样**；下标与结论一旦不是一一对应，本文件那条"marker 单元必须有 assert"
+ * 也只能证明"有人判了"，证明不了"判的是那句结论"。
+ *
+ * **M1（结论层拦不住的最后一处）**：执行层 + marker 双向相等拦得住"删 assert 又删 print"，
+ * 但**删 assert、留着那行 print** 只需一处编辑，就能让一条方向性结论没人判而整档全绿 ——
+ * 而 Ruling(B1) 的立身理由恰恰是"有人把 assert 删了"。常驻那组的「每条已登记 marker 所在的那个 code cell
+ * 里必须有 assert」判的就是它，判据取的是**盘上的 notebook 源码**（不是容器里 nbconvert 的输出）：
+ * 同一份字节，但在 45s 的宿主档就有牙、每次提交都跑，破坏性验证也当场能做（见下面那两条变异）。
+ * ⚠ 它的**射程要说清楚**：判的是"那个 cell 里至少有一条语句级的 `assert`"，即"有人在判这件事"；
+ * 它**不判阈值对不对**、也不判那条 assert 与 marker 说的那句结论是否同一件事 ——
+ * 那半边（把阈值上收进注册表、marker 行尾带实测数值）被有意记账给交付档（评审 M1 的第 ② 半），本轮不做。
  */
 const IN_CONTAINER = process.env.ARENA_IN_CONTAINER === '1';
 const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
@@ -27,6 +48,12 @@ const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
 /** `execFileSync` 的预算：nbconvert 自己的秒级超时之外再给一段收尾，否则两层的数字撞在一起分不出谁到点。 */
 const EXEC_SLACK_MS = 15_000;
 const EXEC_TIMEOUT_MS = TUTORIAL_TIMEOUT_MS + EXEC_SLACK_MS;
+/**
+ * cell 级超时（**秒**，nbclient 那层按秒算）。它同时是：发给 nbconvert 的参数、
+ * 以及崩溃消息里要点名给排查者的那个数 —— 两处共用一个常量，因为"报错说的秒数"与"实际发出去的秒数"
+ * 各写一份就是评审 M2 抓的那种漂。
+ */
+const CELL_TIMEOUT_S = Math.floor(TUTORIAL_TIMEOUT_MS / 1000);
 /**
  * vitest 那一层的预算**必须大于** `execFileSync` 的预算（常驻那组判这条不等式）。
  * 反过来的形状是真实的坑：`vitest.config.ts` 的 `testTimeout` 是 60s，而规格给单篇教程的预算是 90s ——
@@ -61,7 +88,7 @@ function nbconvertArgv(notebook: string): string[] {
     '--ExecutePreprocessor.allow_errors=True',
     // 单位是**秒**（nbclient 的 `ExecutePreprocessor.timeout` 按秒算），所以这里从毫秒预算推导；
     // "推导出来的是秒而不是毫秒"由常驻那条按量级判住（`120` 当成 ms 写会推导出 0 秒）。
-    `--ExecutePreprocessor.timeout=${Math.floor(TUTORIAL_TIMEOUT_MS / 1000)}`,
+    `--ExecutePreprocessor.timeout=${CELL_TIMEOUT_S}`,
     notebook,
   ];
 }
@@ -78,6 +105,25 @@ function printedSlugs(stdout: string[], file: string): string[] {
   }
   return [...found].sort();
 }
+
+/**
+ * 盘上那份 notebook 的**源码单元**（只取 code cell，`source` 按 nbformat 可以是串或按行数组）。
+ * 常驻那组那两条"源码级"判据读的就是它 —— 读盘而不是读容器里 nbconvert 的输出，为的是同一份字节
+ * 在 45s 的宿主档就有牙（每次提交都跑），而不是等一次 10-20 分钟的容器验证才发现结论没人判了。
+ */
+function codeCellSources(notebookPath: string): string[] {
+  const nb = JSON.parse(readFileSync(notebookPath, 'utf8')) as { cells?: Array<{ cell_type?: string; source?: string | string[] }> };
+  return (nb.cells ?? [])
+    .filter((c) => c.cell_type === 'code')
+    .map((c) => (Array.isArray(c.source) ? c.source.join('') : (c.source ?? '')));
+}
+
+/**
+ * "这个单元里真的有人在判"的判据：取**语句级**的 `assert`（行首允许缩进），所以
+ * 注释里写一句 `# assert ...`、或把结论只留在 `print` 里都不算数。
+ * 写在同一行的复合语句（`x = 1; assert x`）这里不收 —— 那种写法本身就该拆成两行。
+ */
+const hasStatementAssert = (src: string): boolean => src.split('\n').some((line) => /^\s*assert\b/.test(line));
 
 /**
  * 两层判据，缺任何一层都会放过一种真实的坏法：
@@ -119,7 +165,9 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('教程 notebook 容器里�
         } catch (err) {
           // 这一条路**不该**是"某个 cell 抛了异常"：allow_errors=True 保证那种情况退 0、错误落成数据。
           // 走到这里说的是"这一档跑不起来"（kernel 没注册 / venv 缺失 / DeadKernelError / 撑破 maxBuffer / 到点）。
-          throw new Error(nbconvertCrashEvidence(err));
+          // 预算要**由这里传进去**（评审 M2）：公共件原来带着 `kernel.test.ts` 的 180s/200s 一起被搬过来，
+          // 而这一档到点的是 135s —— 教程超时是最可能的真故障，报成别人的数字就等于把人赶去查隔壁文件。
+          throw new Error(nbconvertCrashEvidence(err, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S }));
         }
         const { stdout, errors } = executedNotebookEvidence(raw);
 
@@ -212,6 +260,65 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
     expect(markerOf('02-x.ipynb', 'a-b'), '只有 .ipynb 后缀被去掉，目录/其它点号不动').toBe('WI90[02-x][a-b] OK');
   });
 
+  /**
+   * **M1（评审）：marker 所在的那个 code cell 里必须有语句级 `assert`。**
+   * 它堵的是执行层与结论层都圆不上的那一处编辑：把 `assert` 删掉、留着下面那行 `print("WI90[...] OK")` ⇒
+   * 零异常、marker 全打到、双向相等照过 —— 一条方向性结论从此没人判，而全档绿。
+   * 同一份判据还顺手判死另一种"定向蒙人"：把 marker 改成循环里拼出来的 print（`for slug in [...]: print(f"WI90[…][{slug}] OK")`）
+   * 之后 stdout 看起来完全正确，但**字面量**在源码里根本不存在 ⇒ 下面第一条 `hits` 为空就是它，
+   * 所以红话要说清"marker 必须是字面量"。
+   * ⚠ 射程（评审 M1 第 ② 半不做，这里就只判到这一层）：**有没有人判**，不判**阈值对不对**、
+   * 也不判那条 assert 与 marker 那句结论是否同一件事。那半边要动三篇的写法与注册表形状，记账给交付档。
+   * 破坏性验证（两条变异，宿主档实测）：① 删掉一条 assert 留着它的 marker print；② 四条 marker 塞进一个不 assert 的循环。
+   */
+  it('每条已登记 marker 所在的那个 code cell 里必须至少有一条 assert（删 assert 留 print 不许绿）', () => {
+    for (const [file, claims] of Object.entries(TUTORIAL_CLAIMS)) {
+      const sources = codeCellSources(join(config.notebook.seedDir, file));
+      for (const slug of claims) {
+        const marker = markerOf(file, slug);
+        const hits = sources.map((src, idx) => ({ src, idx })).filter((c) => c.src.includes(marker));
+        expect(
+          hits.length,
+          `${file} 的结论 ${slug}：marker 字面量「${marker}」在**任何** code cell 源码里都不存在 ⇒ ` +
+            '两种坏法之一：①那行 print 被删了/改了格式（容器档那条也会红，两处说的是同一件事）；' +
+            '②print 被挪进循环或函数里用 f-string 拼出来 —— 执行层看到的输出是对的，但**闸门读的是字节**，' +
+            '拼出来的 marker 让"这条结论被判过"重新变成人肉检查。改的是教程（把那行字面量 print 与它的断言放回同一个单元），不是删这条判据',
+        ).toBeGreaterThan(0);
+        for (const hit of hits) {
+          expect(
+            hasStatementAssert(hit.src),
+            `${file} 的结论 ${slug}：打印 marker 的那个 code cell（本篇第 ${hit.idx + 1} 个 code cell）里**一条语句级 assert 都没有** ⇒ ` +
+              `那行「${marker}」现在是**没有证据的自报**：执行层零异常、结论层双向相等都会绿，` +
+              '而 Ruling(B1) 立身的那件事（有人把 assert 删了）恰好发生在这里。' +
+              '改的是教程正文：把那条判断该结论的 assert 加回这个单元（押确定量，别押耗时），不是删这条判据、也不是删 marker',
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  /**
+   * **m6（评审）：篇 1 导语承诺"最后一个单元是 `spark.stop()`：闸门跑完不留活内核"，
+   * 而这条承诺原本一个字都没判** —— 承诺写在教程里、判据不存在，就是本仓库点过名的"文档比代码先行"。
+   * 补成结构性判据：每篇已登记教程的**最后一个 code cell** 源码里必须有 `spark.stop()`。
+   * 为什么能常驻：它判的是盘上的字节，与 Jupyter 无关；删掉那一行的坏法在宿主档就红。
+   * 为什么值得判（不是审美）：容器档是一篇接一篇跑的，前一篇留着活内核 ⇒ 下一篇文章性地多一个 JVM
+   * （内存与那句 120s 预算都是它的受害者，而红出来像"新那篇太慢"）。WI-93 记的是同一类"没人收尾"的账。
+   */
+  it('每篇教程的最后一个 code cell 必须 spark.stop()（导语那句承诺要有牙）', () => {
+    for (const file of Object.keys(TUTORIAL_CLAIMS)) {
+      const sources = codeCellSources(join(config.notebook.seedDir, file));
+      expect(sources.length, `${file} 一个 code cell 都没有 ⇒ 它不可运行，marker 那两条也无从谈起（先确认文件名没写错）`).toBeGreaterThan(0);
+      const last = sources[sources.length - 1]!;
+      expect(
+        last,
+        `${file} 的最后一个 code cell 里没有 \`spark.stop()\`（它现在是：${JSON.stringify(last.slice(0, 80))}）⇒ ` +
+          '教程导语那句"闸门跑完不留活内核"就成了假话，且容器档下一篇教程会多背一个活着的 Spark JVM（预算与内存都是它的账）。' +
+          '改的是教程：把 stop 放回最后一个单元（`print("stopped")` 之类的收尾可以跟在它后面，但 stop 不许被删），不是删这条判据',
+      ).toContain('spark.stop()');
+    }
+  });
+
   /** 参数形状（`allow_errors=True` 这一条尤其）。这一组在宿主就有牙，不必等一次真崩溃才知道解析器没跑。 */
   it('nbconvert 的参数形状：allow_errors=True / --stdout 必须在，timeout 由毫秒预算按秒推导', () => {
     const argv = nbconvertArgv('/tmp/whatever.ipynb');
@@ -230,6 +337,43 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
     // 症状长得像"教程坏了"。所以判"推导出的秒数落在合理区间"，而不是判那个字面量。
     expect(seconds >= 30 && seconds <= 600, `--ExecutePreprocessor.timeout 推导出来是 ${seconds} 秒，不在 30~600 之间 ⇒ 单位写错或 TUTORIAL_TIMEOUT_MS 的量级漂了（它是毫秒）`).toBe(true);
     expect(IT_TIMEOUT_MS, `vitest 那一层的预算（${IT_TIMEOUT_MS}）必须大于 execFileSync 的（${EXEC_TIMEOUT_MS}），否则先打死的是 vitest，报出来的是 "Test timed out"（说不到那句"先想超时"）`).toBeGreaterThan(EXEC_TIMEOUT_MS);
+  });
+
+  /**
+   * **M2（评审）：`nbconvertCrashEvidence()` 自己的形状判据。**
+   * 它过去只在崩溃路径执行 —— **绿跑永远碰不到它**，所以"它说的那句话对不对"这件事本身没人判过；
+   * 抽成两档共用的公共件之后，一次漂移的爆炸半径翻倍（评审 M2）。判三件事：
+   * ① **有界**：喂 10000 字节的 stderr（Spark 的真实日志实践上没有上界），消息不许跟着长；
+   * ② **说得出超时**：消息里必须出现"预算"与 timeout/超时 —— 这是这条函数存在的意义，
+   *    少了它，被 SIGTERM 杀掉的那种红就只剩"这一档跑不起来"三条不相干的猜测；
+   * ③ **不许拿着别人的数字说话**：带 budget 的那次必须点出**本档**的 135s/120s、且**不出现** 180
+   *    （180 是 `kernel.test.ts` 的预算；逐字搬运时它跟着搬进了公共件，于是教程超时会被报成隔壁文件的数字，
+   *    把人引去查一个没跑过的实例 —— 评审 M2 抓的就是这一条）；不带 budget 的那次不许出现**任何**裸秒数点名。
+   */
+  it('nbconvertCrashEvidence 的形状：消息有界、枚举里必须有超时、预算由调用方给而不是写死', () => {
+    const huge = 'x'.repeat(10_000);
+    // 被 SIGTERM 杀掉（execFileSync 超时的形状：没有 code，killed=true）
+    const killedMsg = nbconvertCrashEvidence({ killed: true, signal: 'SIGTERM', stdout: huge, stderr: huge }, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S });
+    expect(killedMsg.length, `崩溃消息必须**有界**（实际 ${killedMsg.length} 字符）⇒ stderr 的搬运要有上限`).toBeLessThan(2_000);
+    expect(killedMsg, '超时那一支要说得出"预算"，否则读报告的人只剩三条不相干的猜测').toContain('预算');
+    expect(killedMsg, '超时那一支要说得出 timeout/超时').toMatch(/timeout|超时/);
+    expect(killedMsg, 'killed=true 那一支不许照着"以 code=… 非 0 退出"那三条讲（那种情况下压根没有 exit code，照那段讲就是把人往 kernel 注册上赶）').not.toContain('以 code=');
+    expect(killedMsg, `带 budget 的那次要点名**本档**的 execFileSync 预算（${Math.round(EXEC_TIMEOUT_MS / 1000)}s）`).toContain(`${Math.round(EXEC_TIMEOUT_MS / 1000)}s`);
+    expect(killedMsg, `带 budget 的那次要点名**本档**的 cell 级超时（${CELL_TIMEOUT_S}s）`).toContain(`${CELL_TIMEOUT_S}s`);
+    // ③ 这条是 M2 的本体：公共件里不许留着隔壁文件的预算。
+    expect(killedMsg, '消息里不许出现 180（那是 kernel.test.ts 的 execFileSync 预算，本档根本没用它）').not.toMatch(/\b180\b/);
+
+    // 不带 budget 的那一支（`kernel.test.ts` 就是这种调用形状）：仍然要有"预算到点"这一条，只是不许点名秒数。
+    const unnamed = nbconvertCrashEvidence({ killed: true, signal: 'SIGTERM', stdout: huge, stderr: huge });
+    expect(unnamed.length, `不点名那一支同样要有界（实际 ${unnamed.length} 字符）`).toBeLessThan(2_000);
+    expect(unnamed, '不点名也要说得出"预算到点"这回事').toContain('预算');
+    expect(unnamed, '公共件不许替调用方猜秒数（135/120 是本档的，180 是隔壁的，都不许写死在这里）').not.toMatch(/(135|120|180)s/);
+
+    // 真的非 0 退出（有 code）那一支：枚举里必须仍然留着超时这一条，否则一次"重构掉那句提醒"就把最可能的坏法删了。
+    const codeMsg = nbconvertCrashEvidence({ code: 1, stderr: huge }, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S });
+    expect(codeMsg, '非 0 退出那一支的枚举里不许丢掉超时/预算这一条（它是最常见的那一种）').toContain('预算');
+    expect(codeMsg, '有 code 时才许说"非 0 退出"').toContain('非 0 退出');
+    expect(codeMsg.length, `非 0 退出那一支也要有界（实际 ${codeMsg.length} 字符）`).toBeLessThan(2_000);
   });
 
   /**
