@@ -346,16 +346,28 @@ export default function Notebook() {
                 </p>
               ) : /* ⚠ 第四种形状（评审 I-1）：那一发**整请求失败**（非 2xx / 连不上）⇒ 响应体里既没有
                    `files` 也没有服务端的 `error` 字段，上面那两句都不成立，于是这一句必须自己说。
-                   判据是 `!listing && filesError`，与上下两支**结构互斥**（同一个三元，三者不可能同时渲染）：
+                   判据是 `!listing && filesError`，与上下几支**结构互斥**（同一个三元，任何两句不可能同时渲染）：
                    少了这一支，左栏就是一片不解释的空白 —— 本轮开发中旧容器上那条路由回 404 时就是这个形状。
-                   ⚠ 这一支刻意**只判 `!listing`**（一次都没读到过）。手上还挂着上一轮读到的列表而这一轮
-                   刷新失败（`listing && filesError`）是**第五种**形状，今天没有任何判据 —— 它与状态卡那条
-                   `error && data`（「这次没读到，下面显示的是上一次读到的状态」）同型，本轮按派发词的范围
-                   不扩，登记在 task-7a-report.md 待裁，别让下一个读者以为它已经被守住了。 */
+                   ⚠ 这一支刻意**只判 `!listing`**（一次都没读到过）：手上还挂着旧列表是**第五种**形状，
+                   由下面那一支接管（Task 7c 按裁定补，此前它一句都不说）。 */
               !listing && filesError ? (
                 <p className="tiny faint" data-testid="notebook-tree-unread">
                   这一次没读到左栏那份列表（不是"目录里没有"，也不是"服务端说读不到"—— 那一发压根没有答复）：
                   <span className="mono">{filesError}</span>
+                </p>
+              ) : /* ⚠ 第五种形状（Task 7c）：`listing && filesError` = 上一轮读回来了、这一轮刷新整发失败。
+                   `useAsync` 失败那一支保留 `prev.data`（`web/src/lib/hooks.ts:41`），所以旧的那几份**还挂在
+                   上面的列表里** —— 此时一句都不说就是拿上一轮的真相冒充刚读到的（状态卡对同一件事早有先例：
+                   「这次没读到，下面显示的是上一次读到的状态」）。
+                   它排在 `notebook-tree-empty` **之前**不是随手放的：旧的列表恰好是空的（上一轮"没有"、这一轮
+                   "没读到"）时，先报"没读到"才是真话 —— 让"目录里现在没有笔记"赢就会把"还不知道"说成"没有"，
+                   正是本文件第三条注释那条纪律的反面。
+                   与第一支（服务端在响应里给了 `error` 字段）的重叠由链序决定：上一轮带 `listing.error` 而这一轮
+                   又整发失败时，说出去的是**服务端那句原话**，这一支不抢（那句至少还是读回来过的东西）。
+                   判据：`web/test/notebook.test.tsx`「上一轮列表还在、这一轮刷新失败 ⇒ …不抢答另三句」。 */
+              listing && filesError ? (
+                <p className="tiny faint" data-testid="notebook-tree-stale">
+                  这次没读到，下面列的是上一次读到的那一份：<span className="mono">{filesError}</span>
                 </p>
               ) : /* ⚠ 这里必须判 `listing &&`（= "这一次读回来了"），不能写
                    `(listing?.files ?? []).length === 0`：后者在"还没读回来"时也是 0，于是首屏会闪一句

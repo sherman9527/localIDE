@@ -34,6 +34,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *    （下面那条 pending 的用例钉的就是它；`seedError` 那对用例是同一个纪律的先例）。
  *    第四种（评审 I-1）：**那一发整请求失败**（404 / 连不上）⇒ 第三句 `notebook-tree-unread` 说话，
  *    三句两两互斥。它不是③的重复：③说的是"请求跑完了、服务端答不出目录"，这一句说的是"没有答复"。
+ *    第五种（Task 7c 按裁定补）：**旧列表还挂着、这一轮刷新失败**（`listing && filesError`）⇒
+ *    `notebook-tree-stale` 说"这次没读到，下面是上一次读到的"。四句是同一条三元链的四个分支 ⇒ 结构上互斥。
  * ④ 换状态要真的换到 DOM 上：点左栏某份笔记 ⇒ **同一个 iframe 节点**换 `src`（换节点=每次点击都
  *    重启一遍 Jupyter 页面，那是功能故障，不是审美问题）。
  *
@@ -77,6 +79,20 @@ afterEach(() => {
 beforeEach(() => {
   files.mockResolvedValue({ files: [] });
 });
+
+/**
+ * 左栏那四句形状**任何两句都不同时出现**的总判据（Task 7d 补）。
+ *
+ * 为什么已有的一堆 `queryByTestId(...).toBeNull()` 还不算这条：它们是"从某一支的视角逐个点名另几支"，
+ * 点名是手写死的 —— 第四句加进来时没人回头给前三条补 `toBeNull()`（本轮之前 `-unread` 那条就没点 `-stale`），
+ * 于是"漏点对"会静默通过。这一条一次顶满 6 对：新增第五、第六句时它自动把它们收进正则，不需要谁记得。
+ *
+ * 它判的是**结构**而不是内容：`data-testid` 前缀 `notebook-tree-` 下还挂着 `notebook-tree`（容器）与
+ * `notebook-tree-item`（列表项），所以用 `^(...)$` 全匹配只取那四句话本身。
+ * `toHaveLength(0 或 1)` 而不是 `<= 1`：0 只允许出现在"还没读回来"那一态，写松就把"四句全哑"也放过了。
+ */
+const treeLinesSpeaking = (): string[] =>
+  screen.queryAllByTestId(/^notebook-tree-(error|unread|stale|empty)$/).map((el) => el.getAttribute('data-testid') ?? '?');
 
 const up = {
   running: true,
@@ -250,6 +266,7 @@ describe('Notebook 第五页', () => {
     expect(line.textContent).toContain('读不到 notebook 工作目录');
     expect(line.textContent).toContain('EPERM');
     expect(screen.queryByTestId('notebook-tree-empty'), '读不到时说"目录里没有"就是第二条谎').toBeNull();
+    expect(treeLinesSpeaking(), '四句里同时说了两句 = 那条三元链被拆成了独立 if').toHaveLength(1);
   });
 
   /**
@@ -266,6 +283,7 @@ describe('Notebook 第五页', () => {
     await screen.findByTestId('notebook-frame');
     expect(screen.queryByTestId('notebook-tree-empty'), '没读到就说"没有"，是与 seedError 同型的谎').toBeNull();
     expect(screen.queryByTestId('notebook-tree-error')).toBeNull();
+    expect(treeLinesSpeaking(), 'pending 那一态四句都不该说（说了就是抢答）').toHaveLength(0);
   });
 
   /**
@@ -291,6 +309,41 @@ describe('Notebook 第五页', () => {
     expect(line.textContent, '不带上错误文本 = 只说"没读到"，读者分不清是路由不在还是连不上').toContain('HTTP 404');
     expect(screen.queryByTestId('notebook-tree-empty'), '没读到却说"目录里没有" = 把不知道说成没有').toBeNull();
     expect(screen.queryByTestId('notebook-tree-error'), '那句"读不到"判的是服务端给的 error 字段，这一发压根没有响应').toBeNull();
+    expect(treeLinesSpeaking(), '四句里同时说了两句 = 那条三元链被拆成了独立 if').toHaveLength(1);
+  });
+
+  /**
+   * **第五种形状：手上还挂着上一轮读到的列表，而这一轮刷新失败**（`listing && filesError`）。
+   * 状态卡对同一件事早有先例（`error && data` ⇒「这次没读到，下面显示的是上一次读到的状态」），
+   * 左栏过去没有：列还显示旧的那两份、一句"这次没读到"都不说 = 拿上一轮的真相冒充刚读到的
+   * （本项目在桥 token 上付过同一次学费）。Task 7a 把它登记成"没有判据"，本轮（7c）按裁定补上。
+   *
+   * 判据要同时钉住两头，缺一头都是假绿：
+   *  - 只钉"新句在场" ⇒ 有人把它写成"每次都说话"（连一次都没读到过也在说）也判不住；
+   *  - 只钉"旧列表还在" ⇒ 有人把 `useAsync` 改成失败时清空 data（那变成"没有笔记"那句谎）也判不住。
+   * 四句**互斥**由渲染点那一条三元链的结构保证（`web/src/pages/Notebook.tsx` 的 `notebook-tree-*` 链）。
+   * 下面把另三句逐个 `toBeNull()` 是**点名式**的、会漏点对（第四句加进来时前三条并没回头补），
+   * 所以另有 `treeLinesSpeaking()` 那条总判据一次顶满 6 对 —— 叠出同时两句，就是那条链被拆成独立 `if` 的第一天。
+   */
+  it('上一轮列表还在、这一轮刷新失败 ⇒ 左栏说"这次没读到，下面是上一次读到的"，且不抢答另三句', async () => {
+    status.mockResolvedValue(up);
+    files.mockResolvedValueOnce({ files: ['01-skew.ipynb', '02-partitions.ipynb'] });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getAllByTestId('notebook-tree-item')).toHaveLength(2));
+    expect(screen.queryByTestId('notebook-tree-stale'), '第一轮就报"这次没读到" = 这一轮明明读到了').toBeNull();
+
+    // 换掉默认实现 ⇒ 从下一次请求起整发失败（`useAsync` 失败那一支保留 prev.data，见 web/src/lib/hooks.ts:41）
+    files.mockRejectedValue(new Error('HTTP 503'));
+    fireEvent.click(screen.getByTestId('notebook-reload'));
+
+    const line = await screen.findByTestId('notebook-tree-stale');
+    expect(line.textContent).toContain('这次没读到');
+    expect(line.textContent, '不带上错误文本 = 只说"没读到"，读者查不到坏在哪').toContain('HTTP 503');
+    expect(screen.getAllByTestId('notebook-tree-item'), '那句话讲的是"下面是上一次读到的"，旧列表被清空就成了两句互相打脸').toHaveLength(2);
+    expect(screen.queryByTestId('notebook-tree-empty'), '这一轮没读到 ⇒ 不许说"目录里现在没有笔记"').toBeNull();
+    expect(screen.queryByTestId('notebook-tree-error'), '那句是服务端给的 error 字段，这一发压根没有响应体').toBeNull();
+    expect(screen.queryByTestId('notebook-tree-unread'), '那句判的是"一次都没读到过"，这里手上明明有一份旧的').toBeNull();
+    expect(treeLinesSpeaking(), '四句里同时说了两句 = 那条三元链被拆成了独立 if').toHaveLength(1);
   });
 
   /**
