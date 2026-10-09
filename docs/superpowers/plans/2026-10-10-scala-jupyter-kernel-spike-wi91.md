@@ -108,12 +108,21 @@ Run: `npx vitest run server/test/notebooks`（探针不是 test 文件，所以�
 - [ ] **Step 1: 离线取件（来源与校验必须写死）**
 
 从 Almond 的 GitHub releases 取 **`almond_2.12`** 那份发行包（版本在本任务里确定并写进 `docker/BUILDINFO.md`）。
+⚠ **2026-10-10 控制端量到的前置**：v0.15.0 的 release 只有**三个 228KB 的启动器资产**
+（`almond-scala-2.12` / `2.13` / `3.9`，URL 形状 `.../releases/download/v0.15.0/almond-scala-2.12`）——
+228KB 装不下一个 kernel，那是 coursier 生成的 app launcher，**运行时**才去解析依赖。
+⇒ 这一档要答的问题不是"能不能让它跑"，是"**能不能不靠运行时网络让它跑**"：构建期把 jar 取全，或预置一份 coursier 缓存进镜像。
+**两条都要第三次尝试才可能成 ⇒ 按停止条件停下记账**（"运行时需不需要网络"要**实测**：断网复跑一次，别读文档下结论）。
 取件脚本放 `scripts/fetch-almond.sh`（与既有 `docker-cache/` 那套同一形状）：URL、落盘路径、**sha256 校验**、
 校验失败的报错要说清"哪个文件、期望什么、拿到什么"（不许 `curl -f || true` 那种静默跳过）。
 
 - [ ] **Step 2: kernelspec 落地**
 
 `docker/jupyter/kernels/arena-scala-almond/kernel.json`，`argv` 用 `java -cp <almond jars> almond.Almond … --classloader <…>` 那份，
+**探索期每条路径用自己的 id**（`arena-scala-almond` / `arena-scala-toree` / `arena-scala-imain`），
+`arena-scala` 这个中性名留给 Task 5 接入那一步（`NOTEBOOK_KERNELS` 只能有一个真相，而"哪条胜出"正是本版要答的问题）。
+⚠ 探索期的这些 id **在页面上看不到**是预期行为：`status.ts` 的 allow-list 由 `NOTEBOOK_KERNELS` 派生，
+没登记进去的 kernel 会被过滤掉；探针走 `--ExecutePreprocessor.kernel_name=<id>`，不经页面。
 并把 Spark 的类路径加进去（`/opt/spark/jars/*` + `/opt/spark-jars/*`）—— 这一步是路径 A 真正的风险点：
 **Almond 默认用 coursier 在运行时解析依赖**，离线镜像里解析不到就等于"kernel 能起、`import spark` 起不来"。
 两种接法都要试**并各记一次实测**：①`--predef` 里把 Spark 的 jar 加进类路径；②`%dep` 之类运行时解析（离线预期失败，失败就写下失败原文）。
@@ -124,7 +133,7 @@ Run: `npx vitest run server/test/notebooks`（探针不是 test 文件，所以�
 docker compose up -d --build arena
 docker compose exec -T arena jupyter kernelspec list
 docker compose exec -T arena python3 -m nbconvert --to notebook --execute --stdout \
-  --ExecutePreprocessor.kernel_name=arena-scala --ExecutePreprocessor.timeout=180 \
+  --ExecutePreprocessor.kernel_name=arena-scala-almond --ExecutePreprocessor.timeout=180 \
   server/test/notebooks/fixtures/99-probe-scala.ipynb
 ```
 记：三条判据是否成立、镜像体积增量（`docker images` 再量一次）、构建时长、启动 kernel 的墙钟时间、
