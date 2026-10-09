@@ -8,7 +8,7 @@
 
 **Tech Stack:** Fastify 5（`node:http` 原生 `reply.raw`/`reply.hijack()`、`addContentTypeParser('*')`、`removeContentTypeParser`）、`node:http` + `node:net`（无新依赖）、React 18 + 既有 `web/src/styles/base.css` token、Vitest、Playwright（宿主 Edge）。
 
-**Spec:** `HANDOVER.md` 的 WI-94 条目（设计已在会话中批准并记在那里，含 2026-10-08 终审 N1 的更正）；父项目设计见 `docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`；A1 的实施计划 `docs/superpowers/plans/2026-10-16-jupyter-notebook-runtime-a1.md` 的 Task 5-10 是本轮要接的上一档。
+**Spec:** `HANDOVER.md` 的 WI-94 条目（设计已在会话中批准并记在那里，含 2026-10-08 终审 N1 的更正）；父项目设计见 `docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`；A1 的实施计划 `docs/superpowers/plans/2026-10-05-jupyter-notebook-runtime-a1.md` 的 Task 5-10 是本轮要接的上一档。
 
 > **状态（2026-10-10）：七档全部落地并收口**（代码 HEAD `e42737d`）。
 > 逐格 checkbox **没有回填**：造出 70 多个没人读的格子不等于留下证据。实测数字与每条破坏性验证在
