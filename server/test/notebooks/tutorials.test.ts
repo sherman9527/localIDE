@@ -175,7 +175,12 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
     // `00-` 是上面那条的**排除项**，所以它自己必须是个封闭集合：否则"新写一篇取名 00-intro.ipynb"
     // 就从这道闸门旁边走过去了 —— 这一条就是那个洞的盖子（它归 kernel.test.ts 判，那里只判 smoke 那一篇）。
     const smokes = inDir.filter((f) => f.startsWith(SMOKE_PREFIX));
-    expect(smokes, `${config.notebook.seedDir} 里以 ${SMOKE_PREFIX} 开头的教程必须恰好是 ${SMOKE_FILE}（那一一篇由 kernel.test.ts 判）。` + `现在这张表是 ${JSON.stringify(smokes)} ⇒ 有人新写了一篇 00- 开头的教程，它不会被任何一道"可运行"闸门跑` + `；改名（01-/02-/03-）并在 tutorial-claims.ts 登记才是修法`).toEqual([SMOKE_FILE]);
+    expect(
+      smokes,
+      `${config.notebook.seedDir} 里以 ${SMOKE_PREFIX} 开头的文件必须恰好是 ${SMOKE_FILE}（那一篇由 kernel.test.ts 真跑）。现在这张表是 ${JSON.stringify(smokes)} ⇒ 两种坏法之一：` +
+        `①有人**新写了一篇 ${SMOKE_PREFIX} 开头的教程** —— 它落在上面那条的排除项里，于是不会被任何一道"可运行"闸门跑（改名 01-/02-/03- 并在 tutorial-claims.ts 登记才是修法）；` +
+        `②${SMOKE_FILE} 被删了或改名了 —— 那 kernel.test.ts 那条「smoke notebook 跑完并打出 venv ok」也会红，两处红说的是同一件事，先查哪个是真的动过。`,
+    ).toEqual([SMOKE_FILE]);
     expect(Object.keys(TUTORIAL_CLAIMS).filter((f) => f.startsWith(SMOKE_PREFIX)), `注册表里不许出现 ${SMOKE_PREFIX} 开头那一篇：它由 kernel.test.ts 真跑，这里再跑一遍 = 容器档多起一次 Spark（40-90s），而两次结果不构成两条判据`).toEqual([]);
   });
 
@@ -187,7 +192,7 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
   it('注册表非空时每条 slug 形状合法（marker 拼错 ⇒ 那条判据永远只能靠人肉看）', () => {
     for (const [file, claims] of Object.entries(TUTORIAL_CLAIMS)) {
       expect(file.endsWith('.ipynb'), `注册表的 key 必须是文件名：${file}`).toBe(true);
-      expect(file.includes('/'), `注册表的 key 只是文件名，不带目录：${file}`).toBe(false);
+      expect(/[/\\]/.test(file), `注册表的 key 只是文件名，不带目录分隔符：${file}`).toBe(false);
       // "每篇至少一条结论"：一条都没有的教程 = 执行层过了但结论层是空的 = Ruling(B1) 要防的那件事。
       expect(claims.length, `${file} 在注册表里一条结论都没登记 ⇒ 这道闸门对它只剩"没报错"，` + '而"没报错"正是本仓库记过的不够的那一半（有人把 assert 删了照样绿）').toBeGreaterThan(0);
       expect(new Set(claims).size, `${file} 的 slug 有重复 ⇒ marker 核对做了两遍同一件事`).toBe(claims.length);
