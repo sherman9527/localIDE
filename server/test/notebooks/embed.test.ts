@@ -276,8 +276,19 @@ function parseHeadBlock(head: string): { statusLine: string; headers: Record<str
  * 被 `rejectUpgrade` 断掉是这条路径的**正常结局之一**，而逃出去的 'error' 会
  * **把整个 vitest worker 崩掉、一个结论都没有**（Task 4 宿主档实测；本仓库同类事故是那条
  * `void` 掉的 async 拒绝把服务带走）。
+ *
+ * `readDelayMs`（Task 6b）：**发出握手之后先不挂 reader** 那么多毫秒。这不是"模拟慢客户端"的装饰：
+ * 隧道若在写完回话之后立刻 `destroy()`，回话可能整块留在用户态、或以 RST 作废掉对侧**还没被读走**的
+ * 字节 —— 只有"还没来得及读"的那位读者会撞上它，而那正是派发词里"curl 成功、浏览器失败"的维度。
+ * ⚠ 延迟窗口里也必须有一个 'error' 接住者（否则那条 socket 的 error 逃出去就是 worker 没结论），
+ * 而它**不许**提前把结果定成"没等到"：真相等要等 `start()` 之后 `deadlineMs` 那一段。
  */
-function openNotebookWs(opts: { pathWithQuery: string; headers: Record<string, string>; deadlineMs: number }): Promise<WsConn> {
+function openNotebookWs(opts: {
+  pathWithQuery: string;
+  headers: Record<string, string>;
+  deadlineMs: number;
+  readDelayMs?: number;
+}): Promise<WsConn> {
   return new Promise((resolve) => {
     const socket = net.connect(APP_PORT, '127.0.0.1');
     let acc = Buffer.alloc(0);
@@ -285,7 +296,7 @@ function openNotebookWs(opts: { pathWithQuery: string; headers: Record<string, s
     const finish = (endedBeforeHead: boolean) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       const cut = acc.indexOf('\r\n\r\n');
       const headLen = cut < 0 ? acc.length : cut;
       const parsed = parseHeadBlock(acc.subarray(0, headLen).toString('utf8'));
@@ -298,13 +309,23 @@ function openNotebookWs(opts: { pathWithQuery: string; headers: Record<string, s
       if (acc.includes('\r\n\r\n')) finish(false);
     };
     const onClose = () => finish(true);
-    const timer = setTimeout(() => finish(true), opts.deadlineMs);
-    socket.on('error', () => finish(true));
-    socket.on('data', onData);
-    socket.on('close', onClose);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const start = () => {
+      // 延迟窗口里对侧就已经断掉的那些形状：不必再等满 deadlineMs，手上的字节就是结论
+      if (socket.destroyed && !acc.includes('\r\n\r\n')) {
+        finish(true);
+        return;
+      }
+      socket.on('data', onData);
+      socket.on('close', onClose);
+      timer = setTimeout(() => finish(true), opts.deadlineMs);
+    };
+    socket.on('error', () => undefined); // 延迟窗口里也必须有人接（见上面那段）
     socket.on('connect', () => {
       const lines = Object.entries(opts.headers).map(([k, v]) => `${k}: ${v}`);
       socket.write(`GET ${opts.pathWithQuery} HTTP/1.1\r\n${lines.join('\r\n')}\r\n\r\n`);
+      if (opts.readDelayMs) setTimeout(start, opts.readDelayMs);
+      else start();
     });
   });
 }
@@ -913,6 +934,139 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('/jupyter 同源反代打在
         '判据本体：把它摘掉，上面那条"真跑一行代码"照绿，而别人页面里的 iframe 就能连进来执行代码').toMatch(/^HTTP\/1\.1 403\b/);
       // 内核 id 是编的：守卫必须在**打上游之前**就否决，否则到的会是 jupyter 的 400/404 而不是我们那句 403。
       expect(errorOf(conn.rest.toString('utf8')), '403 但不是守卫那一条 ⇒ 拦它的是别的东西，这条判的就不是它想判的').toBe('notebook_cross_site');
+      expect(holdsToken(conn.head) || holdsToken(conn.rest.toString('utf8')), '否决回话里出现凭据 ⇒ 那句话把长期凭据回显了').toBe(false);
+    } finally {
+      conn.socket.destroy();
+    }
+  }, 30_000);
+
+  /**
+   * Task 6b #1 —— **`/api/events/subscribe` 那条 ws 穿过真 jupyter 走通**（宿主档判不了这一条：
+   * 它判的是字节搬运的形状，而"这一端点到底会不会推一帧"只有真上游能答）。
+   *
+   * 这条缺陷的形状是控制端在真浏览器里实测到的（2026-10-09，`#/notebook` 的 console）：
+   * `WebSocket connection to 'ws://127.0.0.1:7788/jupyter/api/events/subscribe' failed:
+   * Connection closed before receiving a handshake response` —— 而 `curl` 走同一条隧道拿到 101
+   * 并真的收到了 `contents_service/v1` 那一帧。kernel 那条 `channels` ws 一直是通的，
+   * **只有 events 这一条不通** ⇒ 这个对比本身就是定位线索，而它需要一条常驻判据才不会再漂移。
+   *
+   * ### 为什么要"先订上、再改盘"
+   * jupyter 的 events 是**发布**型的：没有谁改了盘，订阅者就什么都收不到。而"一帧都没收到"
+   * 与"根本连不上"在只数帧长的判据里是同一个症状（派发词那句"一帧都没有就是没通"）。
+   * 所以先握手、再 PUT 一份临时笔记，把那条 `contents_service/v1` 事件**自己造出来**。
+   *
+   * ### 与上面那条"真跑一行代码"的分工
+   * 那一条判 `channels`（执行），这一条判 `events/subscribe`（页面一开就订的那一条）。
+   * 两条共用同一个手搓客户端，因为要判的都是"我们那层在 101 之后搬运字节"。
+   */
+  it('events 那条 ws：穿过隧道完整握手 101，并且真的收到至少一帧（先订上、再改盘把事件造出来）', async () => {
+    const key = randomBytes(16).toString('base64');
+    const name = `wi94-events-smoke-${process.pid}-${Date.now()}.ipynb`;
+    const contentsPath = `${JUPYTER_BASE_URL}api/contents/${name}`;
+    const body = '{"type":"notebook","content":{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}}';
+    let conn: WsConn | null = null;
+    let putStatus = 0;
+    let cleanup = 0;
+    /** 帧的**形状**读数，不存原文：事件负载里是路径与 session 名（外部输入），不进断言消息。 */
+    const shapes = { textFrames: 0, otherOpcodes: [] as number[], sawEventsSchema: false, leakedToken: false, totalBytes: 0 };
+    try {
+      conn = await openNotebookWs({
+        pathWithQuery: `${JUPYTER_BASE_URL}api/events/subscribe`,
+        headers: wsHandshakeHeaders(key, SAME_ORIGIN),
+        deadlineMs: WS_HANDSHAKE_DEADLINE_MS,
+      });
+      // ① 握手根本没成：这一支就是浏览器那句 "closed before receiving a handshake response" 的形状。
+      expect(conn.endedBeforeHead, 'events 握手连一句完整的回话都没等到（对侧一个字节都不发就断了 / 超时）⇒ ' +
+        '这正是派发词里那条实测失败措辞的形状：隧道里任何一支"不回一个字节就把连接关掉"都会红在这里').toBe(false);
+      expect(conn.statusLine, `events 握手回的是「${conn.statusLine}」而不是 101 ⇒ 上游不肯升级这一条端点，` +
+        '或守卫把这条本机探针拒了（403/503 的 body 里有 error 码），或 upgrade 那半条接线没了').toBe('HTTP/1.1 101 Switching Protocols');
+      expect(conn.headers['sec-websocket-accept']?.[0], '101 但 sec-websocket-accept 对不上我们发出去的 key ⇒ 那句回话不是 ws 端点给的').toBe(expectedAcceptOf(key));
+      expect(conn.headers['upgrade']?.[0], '101 少了 upgrade 头（RFC 6455 的握手回话必须带）').toBe('websocket');
+      expect(conn.headers['connection']?.[0], '101 少了 connection: Upgrade（Firefox 缺它直接判握手失败）').toBe('Upgrade');
+      expect(holdsToken(conn.head), '握手回话的头里出现隧道注入的凭据 ⇒ 我们把长期凭据写回了客户端').toBe(false);
+
+      // ② 订上之后才有意义的事：**先挂 reader，再造事件**。顺序反了事件就发在订阅之前，
+      // 于是"一帧都没收到"既可能是"没通"也可能是"没东西可推" —— 那两条必须能被区分开。
+      let buffer = conn.rest;
+      conn.rest = Buffer.alloc(0);
+      const feed = (chunk: Buffer) => {
+        buffer = Buffer.concat([buffer, chunk]);
+        shapes.totalBytes += chunk.length;
+        const { frames, rest } = decodeServerFrames(buffer);
+        buffer = rest;
+        for (const f of frames) {
+          if (f.opcode !== 0x1) {
+            shapes.otherOpcodes.push(f.opcode); // 控制帧（ping/close 等）：计数，不当事件
+            continue;
+          }
+          const text = f.payload.toString('utf8');
+          if (holdsToken(text)) shapes.leakedToken = true;
+          shapes.textFrames += 1;
+          // 只取"是不是那份 events schema"这一个布尔（负载原文不进任何消息）
+          try {
+            const parsed = JSON.parse(text) as { schema_id?: unknown };
+            if (typeof parsed.schema_id === 'string' && parsed.schema_id.startsWith('https://events.jupyter.org/')) shapes.sawEventsSchema = true;
+          } catch {
+            /* 非 JSON 的一帧不算事件，算进 textFrames 就够本条用了 */
+          }
+        }
+      };
+      conn.socket.on('data', feed);
+      conn.socket.on('error', () => undefined); // 收尾 destroy 之后的 ECONNRESET 不许逃出去带走 worker
+
+      const saved = await probe({
+        path: contentsPath,
+        method: 'PUT',
+        headers: { ...LOCAL_HOST_HEADER(), ...SAME_ORIGIN, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)) },
+        body,
+      });
+      putStatus = saved.status;
+      expect(saved.status, `造事件那一次 PUT 回 ${saved.status}（期望 2xx）⇒ 事件根本没能发出来，` +
+        '下面"一帧都没收到"就失去了判据对象（先修这一次写入）').toBeLessThanOrEqual(299);
+
+      // jupyter 的 events 是异步广播；实测（控制端 curl 那一次）一帧在几百毫秒内就到。
+      // 给 15 秒，是因为这一档跑在一台可能正在起 Spark JVM 的容器里。
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline && shapes.textFrames === 0) await new Promise((r) => setTimeout(r, 50));
+      // ③ 一帧都没有 = 那半条管道是断的（101 交了、字节没搬）
+      expect(shapes.textFrames, `握手成功之后 15 秒内**一帧 text 都没收到**（控制帧收到 ${shapes.otherOpcodes.length} 条、` +
+        `搬运的字节共 ${shapes.totalBytes} 个）⇒ 101 之后那半条管道没接上，或上游把这个订阅当成了空连接`).toBeGreaterThan(0);
+      // ④ 收到的那确实是 events 那一族（否则"有帧"不等于"这条端点通了"）
+      expect(shapes.sawEventsSchema, `收到 ${shapes.textFrames} 帧，但没有一帧的 schema_id 以 https://events.jupyter.org/ 开头 ⇒ ` +
+        '订到的不是 events（负载原文按纪律不进这条消息）').toBe(true);
+      expect(shapes.leakedToken, 'events 的帧里出现隧道注入的凭据 ⇒ 上游把我们注入的东西回显进了协议消息').toBe(false);
+    } finally {
+      conn?.socket.destroy();
+      if (putStatus >= 200 && putStatus <= 299) {
+        cleanup = await probe({ path: contentsPath, method: 'DELETE', headers: { ...LOCAL_HOST_HEADER(), ...SAME_ORIGIN } }).then((r) => r.status, () => 0);
+      }
+    }
+    // 收尾纪律与"真跑一行代码"那条同一口径：红了也不在真人的工作目录里留一份测试笔记。
+    expect([200, 204], `收尾删除回 ${cleanup} ⇒ 容器的工作目录里留下了 ${name}（WI-40 的隔离纪律）`).toContain(cleanup);
+  }, 60_000);
+
+  /**
+   * Task 6b #2 —— **在真 jupyter 面前，被拒的握手也必须把回话说完整**。
+   * 宿主档那两条钉的是假上游（回 200 / socket 直接 error）；这一条钉的是生产上真的会撞到的那一支：
+   * 上游把这条 upgrade 当普通请求答了（实测：一个不存在的 kernel 的 `channels` ⇒ **404**）。
+   * 修之前隧道只回 `HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n` —— **一句状态行，没有 body**：
+   * 浏览器会报"Unexpected response code"，但 `curl` 与运维查不到"是谁拒的、为什么"，
+   * 而这一层最恨的形状就是沉默的降级。现在那一句必须带 error 码。
+   * ⚠ 客户端**晚 400ms 才开始读**（派发词那个维度的容器版）：写完就 `destroy()` 的回话
+   *   可能被整块留在用户态、或以 RST 作废掉对侧还没读走的字节。
+   */
+  it('上游在真 jupyter 面前拒绝升级（不存在的 kernel 的 channels ⇒ 404）时，回话必须带一句可判别的 JSON', async () => {
+    const key = randomBytes(16).toString('base64');
+    const conn = await openNotebookWs({
+      pathWithQuery: `${JUPYTER_BASE_URL}api/kernels/wi94-no-such-kernel/channels`,
+      headers: wsHandshakeHeaders(key, SAME_ORIGIN),
+      deadlineMs: WS_HANDSHAKE_DEADLINE_MS,
+      readDelayMs: 400,
+    });
+    try {
+      expect(conn.endedBeforeHead, '上游拒绝升级时客户端一句回话都没等到 ⇒ "不回一个字节就把连接关掉"那类分支又回来了').toBe(false);
+      expect(conn.statusLine, `这条应当是上游给的那句 404（实际回的是「${conn.statusLine}」）⇒ 状态码原样搬运那一半坏了`).toMatch(/^HTTP\/1\.1 404\b/);
+      expect(errorOf(conn.rest.toString('utf8')), '只有一句状态行、body 里读不到 error 码 ⇒ 上游拒绝的那一支又变回沉默（查不到是谁拒的）').toBe('notebook_upgrade_refused');
       expect(holdsToken(conn.head) || holdsToken(conn.rest.toString('utf8')), '否决回话里出现凭据 ⇒ 那句话把长期凭据回显了').toBe(false);
     } finally {
       conn.socket.destroy();

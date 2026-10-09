@@ -3,6 +3,7 @@ import { Readable, type Duplex } from 'node:stream';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { JUPYTER_BASE_URL, NOTEBOOK_PREFIX } from '@arena/shared';
 import { config } from '../config.js';
+import { logInfo, logWarn } from '../log.js';
 import { guardNotebookProxy, type ProxyVerdict } from './proxyGuard.js';
 
 export interface NotebookUpstream {
@@ -134,14 +135,79 @@ function upgradeResponseLines(headers: IncomingHttpHeaders): string[] {
   return lines;
 }
 
-/** 握手被否决时的回话：JSON + 明确的状态码。静默断连是这一层最难查的故障（"页面转圈、控制台什么都不说"）。 */
-function rejectUpgrade(socket: Duplex, status: number, body: { error: string; message: string }): void {
+/** 状态行里那句 reason phrase：只允许字母数字与 ` _-`，且截到 48 字符。 */
+const safeReason = (raw: string | undefined, fallback: string): string => {
+  const cleaned = (raw ?? '').replace(/[^A-Za-z0-9 _-]/g, '');
+  return cleaned ? cleaned.slice(0, 48) : fallback;
+};
+
+/** 回话里那句状态行的短语（我们自己知道的那几个状态码）。 */
+const REASON_PHRASE: Record<number, string> = { 200: 'OK', 403: 'Forbidden', 404: 'Not Found', 502: 'Bad Gateway', 503: 'Service Unavailable' };
+
+/**
+ * **日志与失败消息的形状（Task 6b）**：这一层的故障以前是"页面转圈、控制台一句话、服务端一行日志都没有"。
+ * 现在每一条没升级成功的隧道都会留下一行 warn，字段只有两样：
+ * - `code`：Node 的错误码（`ECONNRESET` / `ECONNREFUSED` / `ERR_INVALID_CHAR` 那一类**有界枚举**）；
+ *   **不用 `err.message`** —— 那些 message 会把上游 `host:port`、甚至请求行拼进去，而请求行里有
+ *   我们注入的 `?token=`（Task 3/4 各实测过一种泄露方向，这一支两种都要防）。
+ * - `path`：**剥掉查询串**的路径。`req.url` 的查询串是外部输入（客户端能自己塞 token），
+ *   而且 `onRequest` 那条 pino 记录已经把完整 URL 写过一遍，这里不缺这一半信息。
+ *
+ * 失败消息本体也不回显任何外部输入（Host 头值、对端地址、上游给的短语原值）—— 与 `proxyGuard.ts`
+ * 那一句同一个纪律：那句话会进响应体、也会被记进日志。
+ */
+function loggablePath(url: string): string {
+  const cut = url.indexOf('?');
+  return cut < 0 ? url : url.slice(0, cut);
+}
+
+/**
+ * `upgrade` 事件交出来的那条 socket **运行时是 `net.Socket`**（类型上只是 `Duplex`），
+ * 所以 `destroySoon()` 要走这个窄化：它是"排空再关"那一半（`end()` 只发 FIN、不保证把已排队的写
+ * 送完之后就放手），而少了它这条 socket 会停在半关状态被 `app.close()` 等 —— Task 4d 那张表量的
+ * 正是"等一条不自愈的连接"。真的没有这个方法（测试里塞的裸 Duplex）时，下面那条 1 秒兜底 timer
+ * 就是同一件事的第二道保险，两种形状都不许把回话留在用户态。
+ */
+type FlushThenClose = Duplex & { destroySoon?: () => void };
+const closeAfterFlush = (socket: Duplex): void => {
+  (socket as FlushThenClose).destroySoon?.();
+};
+
+/**
+ * 把一条**没升级成功**的隧道收尾：一次写完状态行 + 头部 + JSON body，然后 `end()` + `destroySoon()`。
+ *
+ * ⚠ 这里**不许**用 `socket.write(...)` 紧跟 `socket.destroy()`（Task 6b 之前就是这么写的，两处都是）。
+ * `destroy()` 的语义是"立刻放弃这个 handle，**已排队但还没交给内核的字节整块丢掉**"，收尾发的还是 RST
+ * 而不是 FIN —— 症状正是派发词里那条实测：浏览器报
+ * `Connection closed before receiving a handshake response`（**一个字节都没拿到**），
+ * 而 `curl` 走同一条隧道拿到 101/4xx：差的是"谁在对侧还没读就已经把连接作废"这一个维度。
+ * `destroySoon()` 是"排空再关"，`end()` 是"发 FIN"，两者合起来才保证回话真的出去了。
+ * 那条 1 秒的兜底 timer 是给"对端已经死了、`finish` 永远不来"那一支的：`app.close()` 等的正是这种
+ * socket（Task 4d 那张表量过），而不 `unref` 的 timer 自己也会把退出拖住 —— 两个方向都要收。
+ */
+function answerUpgradeFailure(socket: Duplex, status: number, reason: string, body: { error: string; message: string }): boolean {
+  if (socket.destroyed || !socket.writable) return false; // 对端已经不在了：回话写不出去，日志由调用方记
   const payload = JSON.stringify(body);
   socket.write(
-    `HTTP/1.1 ${status} ${status === 403 ? 'Forbidden' : status === 503 ? 'Service Unavailable' : 'Not Found'}\r\n` +
-      `content-type: application/json; charset=utf-8\r\ncontent-length: ${Buffer.byteLength(payload)}\r\nconnection: close\r\n\r\n${payload}`,
+    `HTTP/1.1 ${status} ${reason}\r\n` +
+      'content-type: application/json; charset=utf-8\r\n' +
+      `content-length: ${Buffer.byteLength(payload)}\r\n` +
+      'connection: close\r\n\r\n' +
+      payload,
   );
-  socket.destroy();
+  socket.end();
+  closeAfterFlush(socket);
+  const timer = setTimeout(() => {
+    if (!socket.destroyed) socket.destroy();
+  }, 1000);
+  timer.unref?.();
+  socket.once('close', () => clearTimeout(timer));
+  return true;
+}
+
+/** 握手被否决时的回话：JSON + 明确的状态码。静默断连是这一层最难查的故障（"页面转圈、控制台什么都不说"）。 */
+function rejectUpgrade(socket: Duplex, status: number, body: { error: string; message: string }): void {
+  answerUpgradeFailure(socket, status, REASON_PHRASE[status] ?? 'Forbidden', body);
 }
 
 /** Node 22.21+/24 上有这个可写属性（宿主 24.10.0 与容器 24.10.0 实测都是 `function`）；更旧的没有。 */
@@ -249,10 +315,20 @@ export function attachNotebookUpgrade(
     // 让 Node 按 unhandled rejection 结束了服务；这里死掉的会是 arena 本身）。
     socket.on('error', () => socket.destroy());
     const url = req.url ?? '';
+    const path = loggablePath(url);
+    /**
+     * 这条隧道结没结过案（101 交出去了 / 失败回话写出去了）。三个终态分支会挤在同一个回合里
+     * （典型的一条：我们回完 502 → `destroySoon()` → `close` → `socket.on('close')` 把 `upstreamReq`
+     * 拆掉 → 它自己又 emit 一次 'error'）。没有这个闩，第二次进来会把已经结案的隧道再写成一次失败，
+     * 还会多记一行日志把真实原因冲掉。
+     */
+    let concluded = false;
     if (!url.startsWith(JUPYTER_BASE_URL)) {
       // 收窄成功时这一支到不了（Node 不会把别人的 upgrade 交给我们）；到得了的唯一原因是这台 Node
       // 没有那个开关 ⇒ 我们的监听者已经吃下了整台服务器的 upgrade ⇒ 静默 = 客户端挂死，所以显式回一句再断。
       if (narrowing) return;
+      concluded = true;
+      logWarn('notebook-proxy', 'notebook_upgrade_not_claimed', { path, error: 'notebook_upgrade_not_ours' });
       rejectUpgrade(socket, 404, {
         error: 'notebook_upgrade_not_ours',
         message: '同源反代只隧道 /jupyter/ 那一棵子树的 websocket；这一条不是它的。' +
@@ -270,7 +346,13 @@ export function attachNotebookUpgrade(
       secFetchSite: asHeader(req.headers['sec-fetch-site']),
       ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }),
     });
-    if (!verdict.ok) return rejectUpgrade(socket, verdict.status, { error: verdict.error, message: verdict.message });
+    if (!verdict.ok) {
+      // 否决也要留下一行（Task 6b）：这一支以前只回话不记账，"谁在试着绕过守卫"事后查不到。
+      // 记的是**错误码 + 状态 + 剥掉查询串的路径**，头值与对端地址都不在场（`proxyGuard.ts` 顶部同一条纪律）。
+      concluded = true;
+      logWarn('notebook-proxy', 'notebook_upgrade_guard_refused', { path, error: verdict.error, status: verdict.status });
+      return rejectUpgrade(socket, verdict.status, { error: verdict.error, message: verdict.message });
+    }
     // 守卫点头之后，这条 socket 就**归隧道所有**了 ⇒ 进账（否决的那一支由 `rejectUpgrade` 自己 destroy，不进账：
     // 账本只装"我们打算长期持有"的连接，装进否决那条会让它变成一份永远摘不掉的脏账）。
     trackTunnel(socket);
@@ -289,6 +371,7 @@ export function attachNotebookUpgrade(
       },
     });
     upstreamReq.on('upgrade', (ures, usocket, uhead) => {
+      concluded = true; // 从这里往后的断连是**正常收尾**，下面那两支都不许再插手这条隧道
       usocket.on('error', () => socket.destroy()); // 同上：这一侧逃出去的 'error' 也会带走进程
       trackTunnel(usocket); // 上游那一半同样进账（与上面那条是一对兜底：实测摘掉**任一条**仍绿、**两条都摘**才红 ⇒ 判据对象是这本账在不在，不是哪一格）
       socket.write(`HTTP/1.1 101 Switching Protocols\r\n${upgradeResponseLines(ures.headers).join('\r\n')}\r\n\r\n`);
@@ -300,12 +383,43 @@ export function attachNotebookUpgrade(
       usocket.on('close', () => socket.destroy());
     });
     upstreamReq.on('response', (res) => {
-      // 上游不肯升级（403/404/503）：把状态码原样回给客户端再断 —— 静默断连最难查
-      socket.write(`HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? 'Bad Gateway'}\r\nconnection: close\r\n\r\n`);
+      // 上游**不肯**升级（它把这条握手当普通请求答了：200/302/4xx/5xx）。
+      // Task 6b 之前这里只写一行状态就 destroy —— 浏览器至少能看见状态码，但 `curl` 与事后排查都拿不到
+      // "是谁、为什么"，而沉默的降级正是本仓库最恨的那个形状。现在：状态码原样 + 一句 JSON + 一行 warn。
+      // ⚠ 状态行与 body 必须**一次写完、然后排空再关**（`answerUpgradeFailure` 那一节的 RST 那一段）。
+      const status = res.statusCode ?? 502;
+      concluded = true;
+      logWarn('notebook-proxy', 'notebook_upgrade_rejected', { path, status });
+      answerUpgradeFailure(socket, status, safeReason(res.statusMessage, REASON_PHRASE[status] ?? 'Bad Gateway'), {
+        error: 'notebook_upgrade_refused',
+        message: `上游没有把这条连接升级成 websocket（它回的是 ${status}）。状态码原样搬给你这一侧 —— ` +
+          '这与"你不许用"是两件事：后者会带一个 403/503 与守卫那句话，这里是上游自己不肯升级，' +
+          '去查那个进程还活着没、这个路径它认不认。',
+      });
       res.resume();
-      socket.destroy();
+      upstreamReq.destroy();
+      // 收尾（`end()` + 排空再关）已经在 `answerUpgradeFailure` 里做完了，这里不再动那条 socket
     });
-    upstreamReq.on('error', () => socket.destroy());
+    upstreamReq.on('error', (err) => {
+      // 这一支修之前是 `() => socket.destroy()`：**一条字节都不回就把连接关掉** ——
+      // 与派发词里那条实测失败措辞（`Connection closed before receiving a handshake response`）完全吻合。
+      if (concluded) return; // 已经结案（101 或已回话）的那一支，这一条只是收尾的连锁
+      concluded = true;
+      const code = typeof (err as NodeJS.ErrnoException).code === 'string' ? String((err as NodeJS.ErrnoException).code) : 'unknown';
+      // 对端已经不在了（浏览器切页/关 iframe 把握手掐了）⇒ 回话写不出去，那不是故障，别报 502、
+      // 也别升级成 warn（否则每次刷新都要刷一行假报警）。但**照样留下一行可查的话**。
+      if (socket.destroyed || !socket.writable) {
+        logInfo('notebook-proxy', 'notebook_upgrade_aborted', { path, code });
+        return;
+      }
+      logWarn('notebook-proxy', 'notebook_upgrade_upstream_error', { path, code });
+      answerUpgradeFailure(socket, 502, 'Bad Gateway', {
+        error: 'notebook_upgrade_upstream_unreachable',
+        message: `同源反代打不到容器里的 Jupyter（${deps.authority}），错误码 ${code}。` +
+          '这与"你不许用"是两件事 —— 前者是那个进程没起来或半路掉了（缺 token / 镜像没带 Jupyter / 跑过又掉了），' +
+          '后者会带一个 403 与守卫那句话。',
+      });
+    });
     socket.on('close', () => upstreamReq.destroy()); // 浏览器切页/关 iframe ⇒ 上游那个握手续着也没用
     upstreamReq.end();
   });

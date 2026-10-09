@@ -220,6 +220,77 @@ function startWsEcho(): Promise<WsUpstream> {
   }));
 }
 
+/**
+ * Task 6b 的两台新假上游，各钉一条**真浏览器里实测到过**的故障形状（控制端 2026-10-09 在
+ * `#/notebook` 上看到 `WebSocket connection to 'ws://127.0.0.1:7788/jupyter/api/events/subscribe'
+ * failed: Connection closed before receiving a handshake response` —— 措辞的意思是"连接被关掉而客户端
+ * 一个字节响应都没拿到"，不是 403、不是状态码不对）。
+ *
+ * ① `startWsWrongStatus`：上游对一条 upgrade **回 200 而不是 101**（上游拒绝/异常、或它把这条当普通
+ *    请求答了）。隧道原来的作为是"只回一行状态、没有 body、没有 content-type、也不记日志" —— 浏览器
+ *    至少能看见状态码，但 `curl` 与运维看不见"是谁拒的"，而这一层最恨的形状就是沉默的降级。
+ * ② `startWsRst`：上游**连上之后一个字节都不发就把 socket 打断**（`ECONNRESET`）。隧道走的是
+ *    `upstreamReq.on('error', () => socket.destroy())` —— 那一支**不回一个字节**，与上面那句失败
+ *    措辞完全吻合，是本档钉的主案发现场。
+ *
+ * 两台都照 `startWsRefusal` 的收尾纪律：自己记账 `live`，`close()` 里先 `destroy()` 再 `close()`
+ * （一条断掉的断言会留下还开着的隧道 socket，而 `srv.close()` 等它 ⇒ 60s 钩子超时 ×N ⇒ worker 崩掉、
+ * 整档没有结论 —— 那次学费写在 `startWsRefusal` 的注释里）。
+ */
+function startWsWrongStatus(status: number): Promise<{ port: number; hits: () => number; close: () => Promise<void> }> {
+  let hits = 0;
+  const live = new Set<Socket>();
+  const srv = createServer((_req, res) => {
+    hits++;
+    // 200 且带 body：这是"上游把握手当普通请求答了"的形状（tornado 的 `prepare()` 里拒一次就是这类）
+    res.writeHead(status, { 'content-type': 'text/plain', connection: 'close' });
+    res.end('upstream-says-200-not-101');
+  });
+  srv.on('connection', (s) => {
+    live.add(s);
+    s.on('close', () => live.delete(s));
+  });
+  return new Promise<void>((r) => srv.listen(0, '127.0.0.1', r)).then(() => ({
+    port: (srv.address() as AddressInfo).port,
+    hits: () => hits,
+    close: async () => {
+      for (const s of live) s.destroy();
+      live.clear();
+      srv.closeAllConnections?.();
+      await new Promise<void>((r) => srv.close(() => r()));
+    },
+  }));
+}
+
+/** 上游连上、读完请求头、**一个字节都不写**就把连接打断 ⇒ 隧道的 `upstreamReq` 收到 `ECONNRESET`。 */
+function startWsRst(): Promise<{ port: number; hits: () => number; close: () => Promise<void> }> {
+  let hits = 0;
+  const live = new Set<Socket>();
+  const srv = net.createServer((s) => {
+    live.add(s);
+    s.on('close', () => live.delete(s));
+    s.on('error', () => s.destroy()); // 同 startWsEcho 那条：没人接住的 'error' 会把 vitest 的 worker 带走
+    let acc = '';
+    s.on('data', (c) => {
+      acc += c.toString('latin1');
+      if (!acc.includes('\r\n\r\n')) return;
+      hits++;
+      s.destroy(); // 不回一个字节 —— 这正是派发词里那句"上游 socket 直接 error"的形状
+    });
+  });
+  return new Promise<void>((r) => srv.listen(0, '127.0.0.1', r)).then(() => ({
+    port: (srv.address() as AddressInfo).port,
+    hits: () => hits,
+    close: async () => {
+      // 这台是 `net.createServer`（不是 http.Server），**没有** `closeAllConnections()`：
+      // 上面那张自己记账的 `live` 就是这里唯一管用的收尾（同 `startWsEcho` 那段理由）。
+      for (const s of live) s.destroy();
+      live.clear();
+      await new Promise<void>((r) => srv.close(() => r()));
+    },
+  }));
+}
+
 /** 上游**不肯**升级的那一台：握手请求被它当普通请求答 404（brief 里那句"静默断连最难查"的反面判据）。 */
 function startWsRefusal(): Promise<{ port: number; close: () => Promise<void> }> {
   const live = new Set<Socket>();
@@ -292,7 +363,16 @@ function readRaw(socket: Duplex, want: { marker: string } | { bytes: number }, t
           step();
         })
         .catch((err: unknown) => {
-          if ((err as Error).name === 'TimeoutError') { leftover.set(socket, acc); step(); return; } // 回到 deadline 那句人话
+          const e = err as Error & { cause?: Error };
+          // Task 6b：`events.once(..., { signal: AbortSignal.timeout(ms) })` 在**这台 Node 上**抛的是
+          // `AbortError`（`cause` 才是 `TimeoutError`），而旧的那一支只认 `name === 'TimeoutError'`
+          // ⇒ 零字节那一支把裸 AbortError 抛给了用例，红是红了，**结论那句话却没说出来**。
+          // 两种名字都算"到点了"，因为这里等的就是同一个 deadline；红必须是有结论的红。
+          if (e.name === 'TimeoutError' || e.name === 'AbortError' || e.cause?.name === 'TimeoutError') {
+            leftover.set(socket, acc);
+            step();
+            return;
+          }
           reject(err as Error);
         });
     };
@@ -770,6 +850,15 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
     secFetchSite?: string;
     extraHeaders?: string;
     tail?: Buffer;
+    /**
+     * Task 6b：**发出握手之后先不读**那么多毫秒，再开始读回话。
+     * 这不是"模拟慢客户端"的装饰，它是那条 RST/未 flush 故障的判据对象：隧道若在写完回话之后立刻
+     * `socket.destroy()`，回话可能**整块留在用户态没发出去**（Node 的 `destroy()` 文档明写"pending data
+     * will be discarded"），也可能以 RST 结束而把对侧**还没被读走**的接收队列作废。写得快、也马上开始读的
+     * `curl` 抓到那几字节，浏览器抓不到 —— 症状就是派发词里那句"curl 同一条隧道成功、浏览器失败"。
+     * 所以这一档必须有一位"还没开始读"的读者，否则两种形状在宿主档里看起来都是绿的。
+     */
+    readDelayMs?: number;
   }): Promise<{ socket: Duplex; headBlock: Buffer; clientLocalAddress: string | undefined }> {
     const sock = net.connect(opts.port, opts.connectHost ?? '127.0.0.1');
     // 同上面那条纪律：客户端这边被对端 RST 时的 'error' 必须就地接住，否则死的是整个 worker
@@ -787,7 +876,9 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
           (opts.extraHeaders ?? '') +
           '\r\n';
         sock.write(Buffer.concat([Buffer.from(text, 'latin1'), opts.tail ?? Buffer.alloc(0)]));
-        return readRaw(sock, { marker: '\r\n\r\n' }).then((headBlock) => ({ socket: sock as Duplex, headBlock, clientLocalAddress }));
+        const read = () => readRaw(sock, { marker: '\r\n\r\n' }).then((headBlock) => ({ socket: sock as Duplex, headBlock, clientLocalAddress }));
+        if (!opts.readDelayMs) return read();
+        return new Promise<void>((r) => setTimeout(r, opts.readDelayMs)).then(read);
       });
   }
 
@@ -1031,6 +1122,149 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
     expect(/^HTTP\/1\.1 404/.test(head), `上游不肯升级时应当把它的 4xx 回话搬给客户端（第一行是 ${JSON.stringify(head.split('\r\n')[0] ?? '')}）`).toBe(true);
     expect(head.toLowerCase()).toContain('connection: close');
     socket.destroy();
+  });
+
+  /**
+   * Task 6b #1 —— 上游对 upgrade **回 200 而不是 101** 的那一支。
+   * 修法之前它只回一行状态（没有 body、没有 content-type、也没有日志）：浏览器确实不会挂死，
+   * 但"是谁、在哪一支、为什么拒"这条信息一行都没留下 —— 那正是本仓库最恨的"沉默的降级"形状
+   * （`dev_verify_workflow.md` 与 `HANDOVER.md` 里那条"点了没反应"）。
+   * 所以这一条判两半：**状态行原样**（不改写成 502，也不许吞掉）+ **一句可判别的 JSON**（带错误码）。
+   */
+  it('上游对握手回 200（不是 101）⇒ 状态行原样 + 一句带错误码的 JSON（不许只有一行状态、更不许零字节）', async () => {
+    const up = await startWsWrongStatus(200);
+    wsUpstreams.push(up);
+    const wsApp = await injectApp({ token: CANARY, upstreamPort: up.port });
+    const { socket, headBlock } = await handshakeRequest({
+      port: wsApp.port,
+      path: `${JUPYTER_BASE_URL}api/events/subscribe`,
+      secFetchSite: 'same-origin',
+    });
+    const head = headBlock.toString('latin1');
+    expect(/^HTTP\/1\.1 200/.test(head), `上游把握手当普通请求答 200 时，隧道要把那个状态码原样回话（第一行是 ${JSON.stringify(head.split('\r\n')[0] ?? '')}）`).toBe(true);
+    expect(head.toLowerCase()).toContain('connection: close');
+    expect(head.toLowerCase()).toContain('content-type: application/json');
+    const body = await readJsonBody(socket, headBlock);
+    expect(body).toContain('notebook_upgrade_refused');
+    // 凭据纪律（回话方向）：那句话里不许出现我们注入的 token，也不许出现客户端给的外部输入原值
+    const leakedCanary = body.includes(CANARY);
+    expect(leakedCanary, '否决握手的响应体里出现了注入的凭据').toBe(false);
+    expect(up.hits(), '上游确实被问到过一次（否则本条判的是夹具，不是隧道）').toBe(1);
+    socket.destroy();
+  });
+
+  /**
+   * Task 6b #2 —— 派发词点名的**主案发现场**：上游 socket 直接 error（连上、读完请求头、一个字节不发就断）。
+   * 修之前那一条是 `upstreamReq.on('error', () => socket.destroy())` —— **一条字节都不回**，
+   * 与浏览器那句 `Connection closed before receiving a handshake response` 完全吻合。
+   * 本条判的是"客户端拿到的是可读的失败"：502 + JSON + 那句提到"容器里的 Jupyter 没起来"的话。
+   */
+  it('上游 socket 直接 error（连上就断、不回字节）⇒ 客户端拿到 502 + notebook_upgrade_upstream_unreachable，而不是零字节', async () => {
+    const up = await startWsRst();
+    wsUpstreams.push(up);
+    const wsApp = await injectApp({ token: CANARY, upstreamPort: up.port });
+    const { socket, headBlock } = await handshakeRequest({
+      port: wsApp.port,
+      path: `${JUPYTER_BASE_URL}api/events/subscribe`,
+      secFetchSite: 'same-origin',
+    });
+    const head = headBlock.toString('latin1');
+    expect(/^HTTP\/1\.1 502/.test(head), `上游 socket 报错时隧道不许"不回一个字节就把连接关掉"（第一行是 ${JSON.stringify(head.split('\r\n')[0] ?? '')}）`).toBe(true);
+    expect(head.toLowerCase()).toContain('connection: close');
+    const body = await readJsonBody(socket, headBlock);
+    expect(body).toContain('notebook_upgrade_upstream_unreachable');
+    const leakedCanary = body.includes(CANARY);
+    expect(leakedCanary, '上游错误的那句响应体里出现了注入的凭据').toBe(false);
+    expect(up.hits(), '上游至少被问到过一次（这条判的是"问到之后断了"，不是"根本没连上"）').toBe(1);
+    socket.destroy();
+  });
+
+  /**
+   * Task 6b #3 —— **写完就 destroy** 的那一支（回话整块留在用户态 / 以 RST 结束）。
+   * 这是"curl 成功、浏览器失败"那个差异的维度：`curl` 发完立刻读，字节赶得上；浏览器（以及本条这个
+   * "延迟 300ms 才开始读"的探针）没赶上就被作废 ⇒ 控制台只剩一句"closed before receiving a handshake
+   * response"，服务端一行日志都没有。
+   * 四种形状一遍扫（守卫否决 ×2 + 上游拒绝 + 上游 error），任何一种回零字节都红在这里。
+   * ⚠ 这四支共用同一个前提：**回话必须一次写完、然后 `end()`（FIN）而不是 `destroy()`（RST）**。
+   */
+  it('失败回话的四种形状：客户端晚 300ms 才开始读也必须收到那句状态行（不许"写完整块留在用户态"）', async () => {
+    const noTok = await injectApp({ token: '', upstreamPort }); // 守卫 503 那一支（与下面 403 两支不同的来源）
+    const wrongStatus = await startWsWrongStatus(200);
+    wsUpstreams.push(wrongStatus);
+    const wrongApp = await injectApp({ token: CANARY, upstreamPort: wrongStatus.port });
+    const rst = await startWsRst();
+    wsUpstreams.push(rst);
+    const rstApp = await injectApp({ token: CANARY, upstreamPort: rst.port });
+    const shapes: { label: string; port: number; secFetchSite: string; status: string }[] = [
+      { label: '守卫否决（cross-site）', port: appPort, secFetchSite: 'cross-site', status: '403' },
+      { label: '守卫否决（这台没有 token）', port: noTok.port, secFetchSite: 'same-origin', status: '503' },
+      { label: '上游把握手当普通请求答 200', port: wrongApp.port, secFetchSite: 'same-origin', status: '200' },
+      { label: '上游 socket 直接 error', port: rstApp.port, secFetchSite: 'same-origin', status: '502' },
+    ];
+    const lines: string[] = [];
+    for (const shape of shapes) {
+      const { socket, headBlock } = await handshakeRequest({
+        port: shape.port,
+        path: `${JUPYTER_BASE_URL}api/events/subscribe`,
+        secFetchSite: shape.secFetchSite,
+        readDelayMs: 300,
+      });
+      const first = headBlock.toString('latin1').split('\r\n')[0] ?? '';
+      lines.push(`${shape.label} → ${first}`);
+      socket.destroy();
+    }
+    // 判据：四支都必须回一句 HTTP 状态。零字节那一支会在 `readRaw` 自己的 deadline 上红，
+    // 那句话就是结论（而不是"用例挂死"）。
+    for (const line of lines) expect(line.split('→')[1]?.trim().startsWith('HTTP/1.1 '), `那一支没把失败回话说完整：${line}`).toBe(true);
+    expect(lines.filter((l) => /→ HTTP\/1\.1 (403|503|200|502)/.test(l)).length, '四支各有自己的状态码，一支都不许多也不许少').toBe(4);
+  });
+
+  /**
+   * Task 6b #4 —— **静默本身要能被事后查到**：上游 error 与上游拒绝那两支各记一条 warn，
+   * 字段只有"错误码 + 路径（剥掉查询串）"，**没有 token、没有客户端给的外部输入原值**。
+   * 派发词那句"把 err 的 code/message 落到日志（日志里不许出现 token 与外部输入的原值）"判在这里。
+   * ⚠ 只判 `err.code` 不判 `err.message`：Node 的那些 message 会把上游 host:port 拼进去（本机内部地址，
+   *   勉强可接受），但 `ERR_INVALID_CHAR` 一类会把**请求行**带进来，而那一份含我们注入的 `?token=`。
+   */
+  it('上游拒绝 / 上游 error 两支都要落一条 warn：字段是错误码与路径，凭据与外部输入原值不许在场', async () => {
+    const wrongStatus = await startWsWrongStatus(200);
+    wsUpstreams.push(wrongStatus);
+    const wrongApp = await injectApp({ token: CANARY, upstreamPort: wrongStatus.port });
+    const rst = await startWsRst();
+    wsUpstreams.push(rst);
+    const rstApp = await injectApp({ token: CANARY, upstreamPort: rst.port });
+    // ⚠ 每台 app 有**自己的日志文件**：`injectApp` 给每条用例一个新的 `data/test-tmp/proxy-*` 目录，
+    // 而 `LOG_DIR` 是从 `config.dataDir` 派生的（`log.ts` 顶部）⇒ 第一支的 warn 落在第一台的目录里。
+    // 读错文件会让"另一支没记日志"看起来像"记了却查不到"，而反过来把两台并成一个文件又会造出假绿。
+    const MARK = '?token=client-side-canary-must-not-be-logged';
+    const cases: { app: Injected; logIndex: number; event: string; codeIn: string | null }[] = [
+      { app: wrongApp, logIndex: logHandles.length - 2, event: 'notebook_upgrade_rejected', codeIn: null },
+      { app: rstApp, logIndex: logHandles.length - 1, event: 'notebook_upgrade_upstream_error', codeIn: 'ECONNRESET' },
+    ];
+    for (const c of cases) {
+      const { socket } = await handshakeRequest({
+        port: c.app.port,
+        path: `${JUPYTER_BASE_URL}api/events/subscribe${MARK}`,
+        secFetchSite: 'same-origin',
+      });
+      socket.destroy();
+    }
+    for (const c of cases) {
+      const log = logHandles[c.logIndex];
+      if (!log) throw new Error(`第 ${c.logIndex} 台 app 没有登记 log 句柄 ⇒ 本条没有判据对象`);
+      log.probe();
+      await log.flush();
+      const text = readFileSync(log.file(), 'utf8');
+      expect(text, `那一支隧道失败没留下日志行（缺的事件：${c.event}）⇒ "查得到"这件事根本没有实现`).toContain(c.event);
+      // 排查要的两样在：**剥掉查询串的路径** + 有界枚举的错误码
+      expect(text).toContain(`${JUPYTER_BASE_URL}api/events/subscribe`);
+      if (c.codeIn) expect(text).toContain(c.codeIn);
+      // 而凭据与查询串里的外部输入**不在**。⚠ 判的是"命中几项"这个数，不是把 actual 交给 matcher ——
+      // 红的时候 `toContain` 会把整段日志（与"期望不包含的那一串"）印进报告，Task 3 与评审 I-A 各实测过
+      // 一种泄露方向。这里 CANARY 是宿主档的假凭据（不是真凭据），但形状与容器档必须一致。
+      const hits = [CANARY, 'client-side-canary-must-not-be-logged'].filter((secret) => text.includes(secret)).length;
+      expect(hits, `warn 日志里出现了不该出现的串（只报数量，不报值）：${hits} 项`).toBe(0);
+    }
   });
 
   /**
