@@ -16,8 +16,20 @@
  * ⚠ 空表是 Task 1 的**正确状态**（教程是 Task 2/3/4 的交付物）。
  * 那时这张表一旦有了条目而 `content/notebooks/` 里还没有对应的文件，红的是"注册表与目录不一致"，
  * 反过来（有文件没条目）红的是同一句 —— 两个方向都是它，所以"加了教程忘了接闸门"不会静默。
+ *
+ * ⚠ 2026-10-10（WI-90 Task 2 落地）：表已经非空，上面那段"空表是正确状态"是**历史**。
+ * 而且这里登记什么，教程里就必须**恰好**打出什么：`tutorials.test.ts` 的结论层是双向相等的
+ * （少一条 = 结论被删/改跑/marker 漂格式；多一条 = 有结论没登记，它对闸门是隐形的）。
+ * 所以给教程加一条方向性结论 = 同时改这个文件，改一边就红。
  */
-export const TUTORIAL_CLAIMS: Record<string, string[]> = {};
+export const TUTORIAL_CLAIMS: Record<string, string[]> = {
+  // 篇 1（WI-90 Task 2）。四条 slug 各自对应的断言写在 notebook 的单元里：
+  // hot-key-dominates = 最大 shuffle 桶占 47.5% 的行（确定量，不是耗时）；
+  // salting-halves-max-partition = 加盐两阶段把它压到一半以下；
+  // salting-preserves-result = 加盐前后两个结果集三个集合差全为 0（这条比"变快"硬）；
+  // broadcast-changes-plan = 广播阈值改变 join 的算子名（计划文本，不是时间）。
+  '01-skew-and-hot-keys.ipynb': ['hot-key-dominates', 'salting-halves-max-partition', 'salting-preserves-result', 'broadcast-changes-plan'],
+};
 
 /**
  * 单篇教程的执行预算（**毫秒**）。规格给的目标是"单篇 ≤ 90s"，这里留 120s 是余量不是预算。
