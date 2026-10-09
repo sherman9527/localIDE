@@ -17,7 +17,9 @@ import { executedNotebookEvidence, nbconvertCrashEvidence } from './notebook-evi
  * ⚠ 这两个标识符的**大小写是承重的**（评审 I-4）：`verify-coverage.test.ts` 的 `gateVars()` 用
  * `\b([A-Z][A-Z0-9_]{2,})\b` 从 `skipIf(...)` 的条件回指 `const` 声明，再从中取 `process.env.X`。
  * 改成 camelCase ⇒ `gateVars()` 解不出变量名 ⇒ 本文件从「env 门控」那条判据里静默退出，
- * 阶段命令上的 `env` 前缀降级成装饰（同一课见 `kernel.test.ts:51`）。
+ * 阶段命令上的 `env` 前缀降级成装饰（同一课见 `kernel.test.ts` 那段「这两个标识符的**大小写是承重的**」）。
+ * ⚠ 引用别的文件一律用**用例名/注释锚**，不用行号 —— 本仓库的既有教训就是"行号会漂"（`kernel.test.ts` 自己
+ * 就把一处注释从"`:35`"订正成"那条早就挪窝了"）。
  */
 const IN_CONTAINER = process.env.ARENA_IN_CONTAINER === '1';
 const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
@@ -51,7 +53,7 @@ function nbconvertArgv(notebook: string): string[] {
     // 解析器读的是这份 stdout（执行后的整本 notebook）。少了它，`--stdout` 没写出来 ⇒ 拿不到 JSON。
     '--stdout',
     /**
-     * **必带**（`kernel.test.ts:392` 那段已经趟过一次）：不带的话 cell 一报错 nbclient 就抛、
+     * **必带**（`kernel.test.ts` 那条「smoke notebook 跑完并打出 venv ok」里已经趟过一次）：不带的话 cell 一报错 nbclient 就抛、
      * nbconvert 退非 0、`execFileSync` 就地 throw ⇒ 下面那份"取 stdout 行与 error 条目"的解析
      * **一行都执行不到**，承诺的有界证据（cell 号 + 异常名）在最该出现的那一次缺席，
      * 报告里剩下的是 node 把整段 Spark stderr 拼进 message。
@@ -94,7 +96,7 @@ function printedSlugs(stdout: string[], file: string): string[] {
  */
 describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('教程 notebook 容器里真执行', () => {
   /** 全新卷上 IDE venv 还不存在 ⇒ nbconvert 会挂在"解释器文件找不到"，那不是教程坏了。
-   *  这一条把那种前提**说成前提**（`kernel.test.ts:351` 同一课）。
+   *  这一条把那种前提**说成前提**（`kernel.test.ts` 那个 `beforeAll` 的注释「全新卷上 venv 还不存在」是同一课）。
    *  ⚠ 它故意不是 `beforeAll` 里的"静默跳过"：本仓库的规矩是前提不成立要说成一条红/一条话，
    *  不是 `return`。容器档走 `./start.sh --verify` 时，前面的「Notebook 运行时」阶段已经由
    *  `kernel.test.ts` 的 `beforeAll` 把 venv 建出来了（幂等，锁在 `server/src/ide/env.ts`），
