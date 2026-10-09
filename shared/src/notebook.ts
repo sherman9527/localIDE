@@ -76,6 +76,18 @@ export interface NotebookPrepareResponse {
 }
 
 /**
+ * `GET /api/notebook/status` 的 `notebooks` 说的是"**这一次**铺了什么"（seed 的动作结果），
+ * 而这一条说的是"工作目录里**现在**有什么"（左栏那棵树）。两个语义不许合并成一个字段：
+ * 合并之后"铺过 3 份"与"目录里还剩 3 份"在改过文件的用户那儿会分家。
+ */
+export interface NotebookFilesResponse {
+  /** 相对 workDir 的 .ipynb 文件名（不含路径），已排序 */
+  files: string[];
+  /** 「这一次读不到」的原因 —— 与"目录里就是没有"是两句话（`seedError` 那条纪律的同一条） */
+  error?: string;
+}
+
+/**
  * kernel id 的唯一真相：镜像里的 kernelspec 目录名、entrypoint、后端探活、前端默认选择、
  * 测试断言全指向这里。写死字符串会漂移，而漂移的表现不是报错，是"下拉框里那个 kernel 永远 ready:false"。
  */

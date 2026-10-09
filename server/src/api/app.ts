@@ -52,6 +52,7 @@ import { findLanguage } from '../ide/languages.js';
 import { notebookStatus } from '../notebooks/status.js';
 import { registerNotebookProxy, type NotebookUpstream } from '../notebooks/proxy.js';
 import { seedNotebooks } from '../notebooks/seed.js';
+import { listNotebookFiles } from '../notebooks/files.js';
 import type {
   DebugAction,
   DebugSessionsResponse,
@@ -70,6 +71,7 @@ import type {
   IdeRunRequest,
   IdeRunResponse,
   NotebookFile,
+  NotebookFilesResponse,
   NotebookPrepareResponse,
   NotebookStatusResponse,
   ReplFeedRequest,
@@ -675,6 +677,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       return { ok: false, reason: (err as Error).message };
     }
   });
+
+  // MARK: /api/notebook/files（第五页左栏那棵树；读目录不读内容，Jupyter 没起来也照答）
+  app.get(`${api}/notebook/files`, async (): Promise<NotebookFilesResponse> => listNotebookFiles());
 
   // MARK: /api/judge（同步兜底）
   app.post(`${api}/judge`, async (request, reply) => {

@@ -15,6 +15,7 @@ import type {
   IdeEnvResetResponse,
   IdeRunRequest,
   IdeRunResponse,
+  NotebookFilesResponse,
   NotebookPrepareResponse,
   NotebookStatusResponse,
   ReplFeedRequest,
@@ -286,6 +287,8 @@ export const api = {
   // notebook（A1 档）：状态只读，建环境是显式动作 —— 与 IDE 同一套"重活不挂在 GET 上"
   notebookStatus: (opts?: RequestOptions) =>
     get<NotebookStatusResponse>('/notebook/status', { ...opts, label: '读取 notebook 状态' }),
+  notebookFiles: (opts?: RequestOptions) =>
+    get<NotebookFilesResponse>('/notebook/files', { ...opts, label: '读取 notebook 列表' }),
   notebookPrepareEnv: (opts?: RequestOptions) =>
     post<NotebookPrepareResponse>('/notebook/prepare-env', {}, { ...opts, label: '准备依赖环境' }),
   grade: (body: GradePostRequest, opts?: RequestOptions) =>
