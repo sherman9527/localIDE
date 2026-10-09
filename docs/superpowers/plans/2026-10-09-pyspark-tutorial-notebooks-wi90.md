@@ -19,7 +19,10 @@
   `id % 5 < 2` 这类确定性表达式没有任何随机，换 seed 也换不出新形状 ⇒ 判据写成"确定性表达式"，
   **不许为了照抄这句话去加一个不存在的参数，也不许改成 `F.rand(7)` 引入真随机**（那才需要 seed，且会把"每桶行数"变成每次不同的数）。
 - **单篇预算**：执行 ≤ 90s、峰值内存 ≤ 1GB —— **这是目标不是实测**，写完第一篇就用真实数字校准，超了先缩数据量（倾斜与文件数的现象在 50 万行上一样看得出来，"跑不完"才是真问题）。
-- **`local[*]` 的边界要写破**：凡涉及"分布式才有的失效模式"（节点级 shuffle、fetch failed、executor 被 broadcast 撑爆），文档里标"本机只能演示到这一层"，**不写成已验证**（纪律 2）。
+- **`local[2]` 的边界要写破**（**不是 `local[*]`** —— 篇 1 实测：`docker/jupyter/kernels/arena-pyspark/kernel.json`
+  把 argv 钉成 `--master local[2] --driver-memory 512m`，所以 `defaultParallelism=2`，而"200 个 shuffle 分区开 AQE 只落 2 个文件"
+  这类数字**只有按 `local[2]` 讲才对得上**；写 `local[*]` 就是一句和不上任何数的话）。
+  凡涉及"分布式才有的失效模式"（节点级 shuffle、fetch failed、executor 被 broadcast 撑爆），文档里标"本机只能演示到这一层"，**不写成已验证**（纪律 2）。
 - **不教没验证过的东西**：不写 RDD 演化史/宽窄依赖背诵/DataFrame vs RDD 八股；不教生产集群 YARN/K8s 调参；不演示 Delta/Iceberg（镜像里没有）。
 - **题库指针必须是具体题 id**：`bd-pyspark-0001`、`bd-pyspark-0002`、`bd-pyspark-0005`、`bd-pyspark-0010` 四道都在 `content/questions/big-data/`（已核实存在）。留"哪道题"这种描述就是留占位符。
 - **文档里的每个数字**：要么是本篇当场量出来的（读者跑一遍就能看到），要么带来源标注。**不提交 outputs**（见下面的 Ruling(B0)）。
@@ -524,7 +527,7 @@ print("WI90[02-small-files-and-partitioning][coalesce-cuts-files-not-rows] OK")
 留着就是"marker 宣称了一件没被证明的事"（正是这道闸门要拦的形状）。换成 `coalesce-cuts-files-not-rows`，
 押三件当场可判的：文件数、行数守恒、合并后总字节不增。
 **"更少文件不等于更快读"这句结论进 markdown**，带上上面打印的两个耗时，并按纪律 2 写清本机测不到真实集群那部分
-（`local[*]` 单进程，open 成本被同进程的 CPU 掩盖）。
+（kernel 是 `local[2]`：一个 JVM 两个线程，open 成本被同进程的 CPU 掩盖）。
 
 ⑤ 收尾（最后一个单元）：
 
@@ -551,6 +554,41 @@ spark.stop()
 - Modify: `server/test/notebooks/tutorial-claims.ts` → `['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-coalescing-is-one-switch']`
 
 - [ ] **Step 1: 登记 slug**
+
+- [ ] **Step 1b: cell 清单（篇 1/篇 2 落地后补齐这一节 —— 前两档的简报都有一张"每格判什么"的清单，
+  原来这一档只给了三段代码骨架，那就等于让实现者自己决定一篇 senior 教程的结构。按前两篇已定的形状补齐）**
+
+  1. `markdown` 标题格：这一篇要回答的坏结果是**"给了你一份 plan，你先读哪三行"**（与前两篇的"一个 task 跑了 40 分钟"、
+     "目录爆炸"各自分工，不许互相复述）。开头就写破三件事：本机能演示到哪一层（`local[2]` 不是 `local[*]`，
+     没有节点、没有 fetch failed、driver 512MB）、结论押在确定量而耗时只打印、内核必须选 `arena-pyspark` 以及为什么（红线①）。
+  2. `code` 会话格：`getOrCreate()` + 打印 `spark.version` / `master` / `defaultParallelism`，
+     并**先 `SET -v` 读一遍本篇要改的那几个键的出厂值**（篇 1 的形状：默认值不许背，要当场读）。
+  3. `code` 数据格：`big = spark.range(N)` 加确定性表达式造两列 —— `k = id % 50`（聚合键，50 个键 ⇒ 不倾斜，
+     这一篇讲的是**计划形状**不是倾斜，别把篇 1 的现象搬过来）、`v = (id % 100).cast("long")`（long，理由同篇 1：
+     整数加法与顺序无关）。维表 `dim = spark.range(50)` 上一格已给形状。**N 先按 ≤ 90s 预算定，量完再调**（篇 2 用 200,000，
+     本篇要跑好几次 200 分区的聚合，`local[2]` 上可能更慢 —— 超了就减 N，不许减判据）。
+  4. `markdown` ① 现象：逐节读 `simpleString()` —— `Exchange hashpartitioning(...)` 是那次 shuffle、
+     `HashAggregate` 的输入分区数从哪来、`WholeStageCodegen` 被什么打断（Exchange / `AQEShuffleRead` /
+     `ColumnarToRow`），以及**为什么 `explain()` 不能当判据**（它 print 然后返回 None，篇 1 实测过）。
+  5. `code` ①：把那张表按"每一行是什么"讲完，只 print 不断言（这是给读者看的地图）。
+  6. `code` ② `shuffle-partitions-is-a-plan-number`：`adaptive=False` + `shuffle.partitions=200` ⇒
+     `agg.rdd.getNumPartitions() == 200`（配置说话），再换成 8 量一次证明那个数**是被配置写的、不是猜的**。
+  7. `code` ③ `broadcast-threshold-changes-join`：两个阈值**各新建一个 DataFrame**取计划（篇 1 的 lazy val 坑），
+     断言两头各自的算子名，并把"关掉阈值不许出现 Broadcast / 放开不许残留 SortMergeJoin"两条反向断言一起带上（篇 1 已立的形状）。
+  8. `code` ④ `aqe-coalesces-shuffle-read` + `aqe-coalescing-is-one-switch`：见下面 Step 2 那两段（**先手测 executedPlan 的文本形状**）。
+  9. `code` ⑤ 耗时对照：AQE 开 / 关各跑一次 `count()`，**只 print 两个数**；这里就是"更少分区 ≠ 更快"那句话的现场，
+     但它不进任何 assert。
+  10. `markdown` ⑥ 速查表 + 追问链 + 本篇没验的东西（逐条列，纪律 2），并**必须**含一条把答案推到机制层的追问
+      （规格 §7.3 要求的就是这一条）。
+  11. `markdown` 题库指针格：`bd-pyspark-0002` 与 `bd-pyspark-0010`，各自说清"对应本篇哪一节"。
+  12. `code` 收尾：`spark.stop()`（**必须是最后一个 code cell** —— `tutorials.test.ts` 现在有一条结构性判据判它，m6）。
+
+  ⚠ **三条从前两篇的评审里定下来的写法纪律，这一篇从第一天就按它写**（前两篇都返了工）：
+  ① **每个打 marker 的 cell 里必须有语句级 `assert`**（宿主档有牙，删 assert 留 print 会直接红，别再制造一次）；
+  ② **一条 slug 只挂一句结论**：同一 cell 里多条 assert 若是"同一结论的不同侧面"（前提 / 对照）可以在注册表注释里写明后搭车，
+     否则拆 slug（拆就要同时改注册表与 marker，改一边红在双向相等）；
+  ③ **"实测"两个字只能用在真的打印过的东西上**（篇 1 有条"（实测）"其实全篇没打印那个配置键，被抓到）；
+  跨版本史实本镜像量不到的，写"未逐版本核实，迁移以官方配置页为准"，**不要编版本号**。
 
 - [ ] **Step 2: 写 notebook**（要点与判据形状；**AQE 那两处的计划文本形状必须先手测**，本篇是四道判据里最容易"照猜写断言"的一篇）
 
@@ -605,7 +643,7 @@ print("WI90[03-reading-the-plan-and-aqe][aqe-coalescing-is-one-switch] OK")
 
 **"更少分区 ≠ 更快"这句结论降级到 markdown**，并带上当场打印的两个耗时（AQE 开 / 关各一次 `count()`）——
 数字来自本篇实测，符合纪律四；但它**不进断言**，因为一条押耗时的断言就是把闸门交给机器负载
-（`local[*]` 上 CPU 抢不过判题池时它先红，而红出来的话是"教程坏了"）。
+（`local[2]` 上 CPU 抢不过判题池时它先红，而红出来的话是"教程坏了"）。
 markdown 里那句要按纪律 2 收口：本机能量到的是"AQE 把读侧合并了、并多出一层 stage 边界"，
 "因此在真实集群上更慢/更快"**标未验证**。
 
@@ -613,7 +651,7 @@ markdown 里那句要按纪律 2 收口：本机能量到的是"AQE 把读侧合
 
 - [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② 把 `_ = agg.count()` 删掉（不触发执行就读 executedPlan）⇒ `aqe-coalesces-shuffle-read` 必须红在"认不出 AQEShuffleRead"（这条是"顺序依赖"的判据，最容易静默坏掉）；③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红；④ 把 `coalescePartitions.enabled` 那行删掉（= 让它保持默认 true）⇒ `aqe-coalescing-is-one-switch` 必须红在"读侧被合并了"（这一条同时证明"这一篇真的在判那个开关"，而不是判 AQE 大开关）。
 
-- [ ] **Step 5: markdown**：⑤ 追问链"怎么证明 broadcast 把 executor 撑爆了"（本机标未验证：`local[*]` 没有独立 executor 内存这条线，只能看 `BroadcastExchange` 的 size 估计）、"AQE 为什么看不到 CBO"；题库指针 `bd-pyspark-0002` 与 `bd-pyspark-0010`（非等值时间窗 join 换不了 BroadcastHashJoin，计划退化最典型）。
+- [ ] **Step 5: markdown**：⑤ 追问链"怎么证明 broadcast 把 executor 撑爆了"（本机标未验证：kernel 是 `local[2]`，一个 JVM 里两个线程，没有独立 executor 内存这条线，只能看 `BroadcastExchange` 的 size 估计）、"AQE 为什么看不到 CBO"；题库指针 `bd-pyspark-0002` 与 `bd-pyspark-0010`（非等值时间窗 join 换不了 BroadcastHashJoin，计划退化最典型）。
 
 - [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 4 —— 篇 3 计划解读与 AQE（合并读侧归 coalescePartitions，"不总是更快"降级到 markdown）`）
 
