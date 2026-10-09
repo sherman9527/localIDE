@@ -1023,3 +1023,148 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
     }
   });
 });
+
+// ──────── 常驻：`nbconvertCrashEvidence` 喂的是**真 error**（不需要容器、不需要 Jupyter） ────────
+
+/**
+ * 这一组判的是「这一档为什么跑不起来」那句判读**本身**。它存在的理由是一条具体的病：
+ * `tutorials.test.ts` 那组常驻形状判据喂的是**手搓的对象**（`{code: 1, …}`、`{killed: true, signal: 'SIGTERM'}`），
+ * 而 node 的 `execFileSync` 真抛出来那份**长得不一样** —— 退出码在 `status` 上、`signal` 在非正常退出时是
+ * **`null`（不是 `undefined`）**。旧判读按 `e.code === undefined && e.signal !== undefined` 判"被信号终止"，
+ * 于是**每一条真实故障**（`{status:1, signal:null}`）都落进"先想超时/预算"那一支，
+ * 而真正会指路的那一支（kernel 没注册 / venv 缺失 / DeadKernelError / 撑破 maxBuffer）永远走不到。
+ * 全绿下面一句静默错的话 —— 本仓库为这个形状付过两次学费（桥 token、`kernels` vs `kernelspecs`）。
+ * ⇒ 这里每一条都**真的 spawn 一个子进程**去拿 node 抛的那个 error，原样喂进去，不碰手搓对象。
+ * 用 `process.execPath` 起 node 自己：宿主档就能跑（本文件常驻那一组的规矩：不等容器）。
+ *
+ * 每条都有两段，两段都是判据：
+ * ① **先钉住真 error 的形状**（`status`/`signal`/`code` 各是什么）。少了这一段，"造真 error"这件事自己坏掉
+ *    （哪天 execFileSync 不抛了、或 node 换了字段）判据就只是安静地喂进别的东西。形状漂移时这条会红，
+ *    红的话说的是"去重读 `notebook-evidence.ts` 里那张实测表"，不是"这里写错了"。
+ * ② 再看 `nbconvertCrashEvidence()` 说的是哪一支。四支各说各的话，所以断言用的是**每支独有的措辞锚点**：
+ *    `被信号终止`（外力那一支）／`以 code=`（非 0 退出那一支）／`可执行文件`（spawn 那一支）／
+ *    `DeadKernelError`（只在非 0 退出那一支的枚举里）。锚点改名要两处一起改 —— 那不是脆弱，
+ *    是"这句话必须说得出这一支"的另一种写法（`tutorials.test.ts` 那条 `not.toContain('以 code=')` 用的是同一个锚点）。
+ */
+
+/**
+ * 故意用**两个在别的档位都没出现过的数字**（`kernel.test.ts` 那条 smoke 是 180s，`tutorials.test.ts` 是 135s/120s）：
+ * 这一组要证明的是"消息里那个秒数是**调用方传进来的**"。拿 180 或 135 来判，公共件里写死同一个数也能蒙过去。
+ */
+const CRASH_BUDGET = { execTimeoutMs: 41_000, cellTimeoutS: 37 };
+
+/**
+ * 跑一次**注定失败**的 `execFileSync`，把 node 抛的那个 error 原样交出去。
+ * 没抛就是这一条没有判据对象 ⇒ 当场红（不许退化成"那就喂一份手搓的"，那正是本轮的病根）。
+ */
+function realExecError(run: () => unknown): Record<string, unknown> {
+  try {
+    run();
+  } catch (err) {
+    return err as Record<string, unknown>;
+  }
+  throw new Error('execFileSync 没有抛 ⇒ 这一条没有真 error 可喂（node 的行为变了，或者这里的命令写错了）。把"没抛"当成通过，就是又造一个绿下面的谎');
+}
+
+/** 失败消息的截断预览：判据红的时候要把"它到底说了哪一支"印出来，但不能把 800 字节的 stderr 也印进报告。 */
+const msgPeek = (msg: string): string => msg.slice(0, 240);
+
+describe('nbconvertCrashEvidence 吃真 error 的四支判读（常驻，宿主也跑）', () => {
+  it('真 error ①：非 0 退出（status=3、signal=null）⇒ 报 code=3，不许落进"被信号终止/先想超时"那一支', () => {
+    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'process.exit(3)'], { encoding: 'utf8' }));
+    // 这两个断言就是本轮的病灶本身：退出码在 `status`，而 `signal` 是 `null` —— 旧判读把 `null !== undefined`
+    // 读成"有 signal"，于是这一种（真故障最常见的那一种）每次都走错支。
+    expect(err.status, `node 给的退出码不在 status 上（实际 ${JSON.stringify(err.status)}）⇒ 下面那几条的对象已经不是"真非 0 退出"了，先重读 notebook-evidence.ts 那张实测表`).toBe(3);
+    expect(err.signal, `signal 不是 null（实际 ${JSON.stringify(err.signal)}）⇒ 同上：这一条喂进去的就不是"进程自己非 0 退出"那个形状`).toBeNull();
+
+    const msg = nbconvertCrashEvidence(err, CRASH_BUDGET);
+    expect(msg, `非 0 退出要说得出退出码是几（实际：${msgPeek(msg)}）`).toContain('code=3');
+    expect(msg, `这一支要明说"非 0 退出"（实际：${msgPeek(msg)}）`).toContain('非 0 退出');
+    expect(
+      msg,
+      '真非 0 退出**不许**被报成"被信号终止 ⇒ 先想超时/预算"。这一条断言就是本轮的修复本身：旧实现里 ' +
+        '`signal` 是 null 而判据写的是 `!== undefined`，于是每一条真故障都从这一支走（`被 signal=` 是旧措辞，' +
+        '一起拦着：改了锚点也不许把这句话放回非 0 退出那一支）。实际：' +
+        msgPeek(msg),
+    ).not.toMatch(/被信号终止|被 signal=|先想超时/);
+    expect(msg, '这一支该指的是"这一档跑不起来"的那几条前提（kernel 注册 / venv / DeadKernelError / maxBuffer）').toMatch(/DeadKernelError/);
+    expect(msg.length, `崩溃消息必须**有界**（实际 ${msg.length} 字符）`).toBeLessThan(2_000);
+  });
+
+  it('真 error ②：execFileSync 预算到点（真 SIGTERM）⇒ 落"被信号终止"那一支，并带上调用方传的预算', () => {
+    // 真的把子进程挂住、真的让 execFileSync 的 timeout 到点：node 给的是 `{code:'ETIMEDOUT', status:null, signal:'SIGTERM'}`
+    // （宿主 Windows 与容器 Linux 实测同形 —— 见 notebook-evidence.ts 那张表）。
+    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'setTimeout(() => {}, 1_000_000_000)'], { encoding: 'utf8', timeout: 250 }));
+    expect(err.signal, `到点这一种的 signal 不是 SIGTERM（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是"预算到点"那个形状`).toBe('SIGTERM');
+    expect(err.status, `被外力结束时没有退出码（实际 ${JSON.stringify(err.status)}）`).toBeNull();
+
+    const msg = nbconvertCrashEvidence(err, CRASH_BUDGET);
+    expect(msg, `预算到点要说得出"被信号终止"（实际：${msgPeek(msg)}）`).toContain('被信号终止');
+    expect(msg, '超时那一支要说得出"预算"，否则读报告的人只剩几条不相干的猜测').toContain('预算');
+    expect(msg, '超时那一支要说得出 timeout/超时').toMatch(/timeout|超时/);
+    expect(msg, `带 budget 的那次要点名**调用方**的 execFileSync 预算（${Math.round(CRASH_BUDGET.execTimeoutMs / 1000)}s；实际：${msgPeek(msg)}）`).toContain(`${Math.round(CRASH_BUDGET.execTimeoutMs / 1000)}s`);
+    expect(msg, `cell 级超时的秒数也要在（${CRASH_BUDGET.cellTimeoutS}s）—— 单位与预算这句话不许退回写死`).toContain(`${CRASH_BUDGET.cellTimeoutS}s`);
+    expect(msg, '到点那一支不许照着"以 code=… 非 0 退出"讲（那种情况下压根没有退出码，照那段讲就是把人往 kernel 注册上赶）').not.toContain('以 code=');
+    expect(msg, '到点那一支不许把 kernel/venv 那几条前提当结论（它们各有自己的用例，且在这里没有被判）').not.toContain('DeadKernelError');
+    expect(msg, '到点那一支不该把人支去调输出缓冲（那是 ENOBUFS 那一条的话，这里有独立的形状）').not.toContain('maxBuffer');
+    expect(msg.length, `超时那一支也要有界（实际 ${msg.length} 字符）`).toBeLessThan(2_000);
+  });
+
+  it('真 error ③：spawn 级失败（code="ENOENT" 是**字符串**）⇒ 单独一支说"可执行文件不在"，不进上面两支', () => {
+    const err = realExecError(() => execFileSync('arena-no-such-executable-wi92-xyz', ['--version'], { encoding: 'utf8' }));
+    expect(typeof err.code, `spawn 级失败的 code 应当是字符串错误名（实际 ${JSON.stringify(err.code)}）`).toBe('string');
+    expect(err.code, `这里要的是 ENOENT（实际 ${JSON.stringify(err.code)}）`).toBe('ENOENT');
+    // ENOENT 的 `status` 是 null（不是"退出码是 null"，是"根本没有退出码"）；`signal` 也是 null —— 命令没跑起来。
+    expect(err.status, `spawn 失败没有退出码（实际 ${JSON.stringify(err.status)}）`).toBeNull();
+
+    const msg = nbconvertCrashEvidence(err, CRASH_BUDGET);
+    expect(msg, `spawn 那一支要把 node 的错误名带出来（实际：${msgPeek(msg)}）`).toContain('ENOENT');
+    expect(msg, `ENOENT 说的是**可执行文件不在**（宿主档没有 jupyter 是正常的、容器里红在这里才是镜像坏了）；实际：${msgPeek(msg)}`).toContain('可执行文件');
+    expect(msg, '命令连启动都没成功 ⇒ 不许读成"被信号终止/先想超时"（这里压根没有 signal）').not.toMatch(/被信号终止|被 signal=|先想超时/);
+    expect(msg, 'ENOENT 不是退出码 ⇒ 不许印成"以 code=… 非 0 退出"，也不许附上 kernel/venv 那三条前提').not.toContain('以 code=');
+    expect(msg, 'spawn 那一支不许出现非 0 退出那一支的枚举（DeadKernelError 前提是 kernel 起过）').not.toContain('DeadKernelError');
+    expect(msg.length, `spawn 那一支也要有界（实际 ${msg.length} 字符）`).toBeLessThan(2_000);
+  });
+
+  it('真 error ④：什么数都拿不到 ⇒ 兜底那条把原 error 的名与消息带出来（不许静默），且总长有界', () => {
+    const marker = '内核在半路没了-marker-7f3a';
+    const msg = nbconvertCrashEvidence(new Error(marker), CRASH_BUDGET);
+    expect(msg, `兜底必须把原 error 的**消息**带出来（实际：${msgPeek(msg)}）—— 这一条的全部意义是"不许静默"某一种坏法`).toContain(marker);
+    expect(msg, `原 error 的**名**也要在（判"是普通 Error 还是 execFileSync 那一种"靠它；实际：${msgPeek(msg)}）`).toContain('Error');
+    expect(msg, '判不出来的那一支不许假装落在上面任何一支里（锚点不许出现在这里）').not.toMatch(/被信号终止|被 signal=|先想超时/);
+    expect(msg, '判不出来就不许编一个 code=').not.toContain('以 code=');
+    expect(msg, '判不出来也不许顺嘴说"可执行文件不在"（那是 ENOENT 那一支的话）').not.toContain('可执行文件');
+
+    // 原 error 的消息可以任意长（`execFileSync` 那句 `Command failed:` 整段拼进了 stderr，Spark 的日志实践上没有上界）
+    // ⇒ 兜底这一支的"带出原文"必须带着上限，否则有界性就从一个分支退化掉了。
+    const huge = nbconvertCrashEvidence(new Error('y'.repeat(20_000)), CRASH_BUDGET);
+    expect(huge.length, `原 error 的消息要截断（实际 ${huge.length} 字符）`).toBeLessThan(2_000);
+    expect(huge, '截断要留下痕迹，不许悄悄变短').toContain('截断');
+
+    // 连名与消息都没有（`{}` 那种）：不许空串、不许静默，也不许猜成上面三支之一
+    const bare = nbconvertCrashEvidence({}, CRASH_BUDGET);
+    expect(bare.length, `空形状也要有界（实际 ${bare.length} 字符）`).toBeLessThan(2_000);
+    expect(bare, `兜底至少要说清"这份 error 里既没有 status 也没有 signal 也没有 code"（实际：${msgPeek(bare)}）`).toMatch(/没有|无法判读/);
+    expect(bare).not.toMatch(/被信号终止|先想超时|以 code=/);
+  });
+
+  /**
+   * 第五条不是派单点名的，而是实测撞出来的**另一件事实**：撑破 `maxBuffer` 时 node 给的不是退出码，
+   * 而是 `{code:'ENOBUFS', status:null, signal:'SIGTERM'}` ⇒ 它在形状上属于"被外力结束"那一族，
+   * 但它的**结论**与"预算到点"是两件事（该改的是缓冲上限，不是秒数）。
+   * 少了这一条，那一族就还是一句"先想超时"，而读的人去调一个根本没撞上的数字。
+   */
+  it('真 error ⑤：撑破 maxBuffer（ENOBUFS + SIGTERM）⇒ 说 maxBuffer，不许说"预算到点"的那两个秒数', () => {
+    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'console.log("x".repeat(200_000))'], { encoding: 'utf8', maxBuffer: 1024 }));
+    expect(err.code, `maxBuffer 溢出的错误名应当是 ENOBUFS（实际 ${JSON.stringify(err.code)}）⇒ 这一条喂进去的不是那个形状`).toBe('ENOBUFS');
+    expect(err.signal, `node 结束它用的信号（实际 ${JSON.stringify(err.signal)}）`).toBe('SIGTERM');
+
+    const msg = nbconvertCrashEvidence(err, CRASH_BUDGET);
+    expect(msg, `ENOBUFS 要说的是输出缓冲撑破了（实际：${msgPeek(msg)}）`).toContain('maxBuffer');
+    expect(msg).toContain('ENOBUFS');
+    expect(msg, '这一种**不是**预算到点 ⇒ 不许点调用方那两个秒数（点了就会有人去调一个没撞上的数字）').not.toContain(`${Math.round(CRASH_BUDGET.execTimeoutMs / 1000)}s`);
+    expect(msg, '非 0 退出那一支的枚举不许出现在这里').not.toContain('DeadKernelError');
+    expect(msg).not.toContain('以 code=');
+    expect(msg.length, `ENOBUFS 那一支也要有界（实际 ${msg.length} 字符）`).toBeLessThan(2_000);
+  });
+});
