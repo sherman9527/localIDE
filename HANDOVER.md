@@ -1191,7 +1191,28 @@
   里 notebook 原本一个字都没有，现在有了；`.superpowers/` 补进 `.dockerignore`（此前 app 阶段 `COPY . .`
   会把会话笔记烤进本地镜像）——**它改的是镜像构建，控制者要在这个 HEAD 之后再跑一次容器档收尾**。
   ｜**仍未做/未测**：spec §11 的镜像增量与常驻内存两项**未测**（照写"未测"，没有数字就不编）；
-  Jupyter 无守护 → WI-93；notebook 内嵌（设计已批准）→ WI-94。
+  Jupyter 无守护 → WI-93；notebook 内嵌已交付 → 见下方 WI-94（COMPLETED）。
+
+- [x] WI-94 **notebook 内嵌**（第五页从"跳出去开 7789"改成同源 `/jupyter/*` 反代 + 左文件树右 notebook）｜计划 `docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`，七档全部收口，2026-10-09～10-10
+  ｜形状（与批准的设计一致，且四处按实测改过）：jupyter 自己带 `--ServerApp.base_url=/jupyter/`，前缀的唯一真相在
+  `shared/src/notebook.ts`；`/jupyter/*` 由 `server/src/notebooks/proxy.ts` **手写**反代（HTTP + websocket 两条通道，零新依赖），
+  凭据只在服务端注入（HTTP 走 `Authorization`，ws 只能走 `?token=`，客户端自带的 `token` 一律先摘）⇒ **页面上没有凭据**；
+  放行是**三事合取**（`proxyGuard.ts`：对端本机 ∧ Host 本机字面量 ∧ `Sec-Fetch-Site ∈ {same-origin, 缺席}`），三个否决各有状态码
+  （503 `notebook_not_configured` / 403 `notebook_proxy_refused` / 403 `notebook_cross_site`）；ws 侧另有一条独立判据 —— 它不走路由，
+  Fastify 的钩子碰不到它，所以守卫在 `upgrade` 事件里**再判一次同一个函数**。
+  ｜**顺手修掉的生产缺陷**：一条活着的 websocket 会把容器优雅退出拖成 SIGKILL（`stop -t 30` 实测 32 秒 / `ExitCode 137`，
+  ⇒ `store.close()` 与收尾一行都不执行），根因是 `socket.write()` 紧跟 `socket.destroy()` 会**丢掉已排队的字节**；
+  修法是隧道自己记账 + `onClose` 之前先 `preClose` 排空再关（`index.ts` 与 `compose.yml` 一字未改），修后 **1 秒 / `ExitCode 0`**。
+  ｜验证：`./start.sh --verify` → `CV_EXIT=0`、notebook 阶段出现 **1** 次、该区间内 skip **0**、`embed.test.ts 18 passed` + `kernel.test.ts 30 passed` = `48 passed`、判题矩阵 `158 道全部可判、跳过 0`；`npm run verify:fast` → `FAST_EXIT=0`；`npm run e2e` → **74 passed**；
+  闸门自己的闸门 `verify-coverage`/`typecheck-coverage`/`runner-coverage` 全绿，三档合计约 `1934 passed / 18 skipped`（每条 skip 都有出处，没写成"0 skipped"）。
+  ｜**真浏览器实测**（这一条是功能成立判据，此前任何一档都没证过）：点左栏 → iframe 打开笔记 → 两次 `Shift+Enter` →
+  prompt 从 `[3]:` 变 `[2]:` ⇒ 本次会话起了**全新** `arena-pyspark` kernel、经隧道执行并流回输出；320/480/1440 三档无横向溢出、
+  窄屏堆叠、页头自动换行；console 口径按实测改成"**我们自己的 bundle 0 error / 0 warning**；内嵌的 Notebook 7 自带 2 error / 31 warning，
+  已用**不经隧道的 7789 对照组**逐条归类为上游噪音"。
+  ｜本轮推翻的判断（都留在 `memo.md`）：`POST /api/contents/<file>` 不是 2xx（存路径是 PUT）、"响应体不含 token"不是可判形状
+  （上游 PageConfig 自带）、摘掉守卫时红的是外层 origin 钩子不是守卫、`removeContentTypeParser` 那处删错形态是**挂死而不是红**
+  （挂死的门禁比红更坏）、`?token=` 泄漏的第二条路是 Fastify 自带的 pino 请求日志。
+
 
 ## IN PROGRESS
 
@@ -1309,28 +1330,28 @@
   才值得那 10–20 分钟的冷构建）。
   ｜**加不加守护是一次决定，不是修复**：监督循环（restart 策略 / 看门狗）意味着任何一次 jupyter 崩溃都可能
   连带重建容器，而重建会带走正在跑的 **IDE 调试会话与判题任务** ⇒ 需要用户点头。本轮**故意没做**。
-- [ ] WI-94 notebook **内嵌**（设计已批准，**未实施**）：把第五页从"跳出去开 7789"改成同源 `/jupyter/*`
-  ｜形状：7788 上做同源反代 `/jupyter/*` → 容器内 8888，jupyter 侧配 `--ServerApp.base_url=/jupyter/`，
-  token 由**服务端注入**（HTTP 请求走 header；**websocket 必须走 `?token=`** —— 浏览器给不了 ws 握手设请求头）。
-  ｜**不引新依赖**：`ws` 只是被 hoist 上来的传递包、**不是** `server` 声明的依赖 ⇒ 用 `http`/`net` +
-  `upgrade` 事件手写这一层（把传递包当直接依赖用 = 下次装包树一变就静默没掉）。
-  ｜**必须有的闸门（这条是硬前提，不是收尾打磨）**：被代理的那棵子树上要加 `Host` 白名单 +
-  `Sec-Fetch-Site ∈ {same-origin, none}`，**fail-closed** —— 因为一旦 7788 注入 token，
-  "谁能把报文发到 7788"就等价于"谁能在容器里执行代码"。
-  ｜**2026-10-08 收尾轮更正（终审 N1）**：这一段原先写的是"7788 今天**没有任何 Host 白名单**"与
-  "对那张未鉴权的题库做 **DNS rebinding 现在就行得通**" —— 两条在 C-1 之后**都不成立**，
-  别照着它们去补一道已经存在的守卫。今天成立的是：`server/src/api/app.ts` 那条 origin 级 `onRequest`
-  钩子（`isLoopbackHostHeader`，fail-closed）把 Host 不是本机字面量的请求**整个 origin 判 403**，
-  含无鉴权的 `/api/bank`、静态资源与 SPA 兜底（实测宿主 `curl -H 'Host: evil.example'` 对
-  `/`、`/assets/`、`/no-such-page`、`/api/health` 全部 403）；判据在 `server/test/api/notebook-api.test.ts`。
-  ｜**这道守卫仍然不够 WI-94 用**，缺的是三件事，所以那条"硬前提"没被顺手做掉：
-  ① 它判的是**头的形状**，不是鉴权、也不替代"只绑宿主回环"（闸门 `compose-ports.test.ts`）——
-  Host 谁都写得出来：本机上的任何进程、将来任何反代转发时填的 `127.0.0.1` 都过得了这一层；
-  ② **socket 对端**那一半只在释放 token 的那条路由上判（合取，终审 C-1），别的路由没有对端判据；
-  ③ 它看不见 `Sec-Fetch-Site`，也管不到 `/jupyter/*` 那棵树上的 websocket 握手 —— 注入 token 之后
-  "能把报文发到 7788"依然等价于"能在容器里执行代码"，那一层必须自己 fail-closed。
-  （原先那句"要不要补这道守卫由用户定"也随之作废：守卫已经在 `7c5f9dc` 之后加上了，
-  要不要**再加** `Sec-Fetch-Site` 那一层才是等用户点头的东西。）
+  ｜**同一条账的反面（WI-94 Task 5/6/6b 合并评审实测，2026-10-09）**：内嵌之后每份**被打开过**的笔记都会留下一个活的内核
+  （`arena-pyspark` 会带一个 `local[2]` 的 Spark JVM）—— 三次"开→切页/刷新→再开"实测 `kernels=1 / sessions=1 / id 不变`，
+  ⇒ **是复用不是每次攒一个**；但 SPA 内切页只让 `connections` 掉到 0、内核照样活着，且 entrypoint **没配**
+  `c.ServerApp.identity` 之外的 `cull_idle_timeout` ⇒ 攒的是"每份打开过的笔记各一个 JVM"，活到 session 被删或 jupyter 重启。
+  与 WI-95（抢 CPU）是同一族账，加不加 culling 同样是一次决定。
+
+- [ ] WI-97 `start.sh` / `start.ps1` 的 `report_notebook` 有**冷启动竞态**（WI-94 收尾轮实测，2026-10-10）：
+  `./start.sh --verify` 那一次横幅打印"7789 上没有 HTTP 应答"，而 2 分钟后同一条路径探 `…/jupyter/login` 是 **200** ——
+  判据是 `000`（没人监听），与 jupyter 还在启动这件事无关。按 A1 的裁定 R4"横幅只打印不判红"本轮**没加 retry**，
+  因为加 retry 会把"起不来"与"起得慢"混成同一句话；要收的话得先决定"横幅该等多久、超时后说什么"。
+
+- [ ] WI-98 把逃生链接改指**同源** `/jupyter/tree`，让长期凭据彻底不进任何 URL（WI-94 的 `Ruling(4)`/`Ruling(10)` 记账，2026-10-10）：
+  今天凭据出现在四处 —— ① `GET /api/notebook/status` 的 `url` 字段（合取门控，我们生成的）② 由它渲染进的逃生链接 `href`
+  （同一个值，所以顶文档 HTML 里能看到）③ 上游 jupyter 自己的 PageConfig（`7789` 直连也有，不由我们负责）
+  ④ 日志（两条路都已收窄：`app.ts` 的 `onResponse` 与 Fastify 自带 pino 的 `incoming request`，都只剥查询串里 `token` 这一个键）。
+  ｜改法：逃生链接换成同源相对路径 `/jupyter/tree` ⇒ 隧道守卫自己判"能不能放"，①② 这两处从此不存在，
+  C-1 的"往 URL 塞 token"那一支也变多余 —— 那是**设计级改动**（要重开 C-1 那张合取表的验收），所以不在 WI-94 里顺手做。
+
+- [ ] WI-99 `flushLogs()` 不在优雅退出路径里（WI-94 Task 4d 照亮，2026-10-10）：`index.ts` 在 `app.close()` 之后只调
+  `store.close()` + `process.exit(0)`，**不排空日志队列** ⇒ 崩溃之外的一次正常退出也可能丢掉尾部几行。
+  同档另外两条实测先记在这：优雅退出成没成功**只能判 `State.ExitCode`**（那条路径不打印新行），
+  而 Task 4 之前一条活 ws 就能把它拖成 SIGKILL（32s/137 → 修后 1s/0）。
 
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），

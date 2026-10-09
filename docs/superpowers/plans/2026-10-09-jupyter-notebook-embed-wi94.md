@@ -10,6 +10,14 @@
 
 **Spec:** `HANDOVER.md` 的 WI-94 条目（设计已在会话中批准并记在那里，含 2026-10-08 终审 N1 的更正）；父项目设计见 `docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-design.md`；A1 的实施计划 `docs/superpowers/plans/2026-10-16-jupyter-notebook-runtime-a1.md` 的 Task 5-10 是本轮要接的上一档。
 
+> **状态（2026-10-10）：七档全部落地并收口**（代码 HEAD `e42737d`）。
+> 逐格 checkbox **没有回填**：造出 70 多个没人读的格子不等于留下证据。实测数字与每条破坏性验证在
+> `.superpowers/sdd/2026-10-09-jupyter-notebook-embed-wi94/progress.md`，结论与教训在 `memo.md` 里程碑 BD，
+> 三档验证表在 `HANDOVER.md` 的 WI-94 条目。
+> 本文件**凡是与实测冲突的地方都已就地订正**，不是原稿留档：被推翻的四处判据（`POST /api/contents/<file>` 不是 2xx、
+> "响应体不含 token" 不是可判形状、摘守卫时红的是外层 origin 钩子、CSP 的假设与真 jupyter 相反）、
+> 以及两处验收口径（console 要按**来源**判、凭据实际有**四处**含 Fastify 自带 pino 那条请求日志）。
+
 ## Global Constraints
 
 这些是每一任务隐含都要满足的，逐字来自仓库规则（`.qoder/rules/dev_verify_workflow.md`、`rule.md`）与既有闸门：
@@ -1347,7 +1355,12 @@ Expected: `BUILD_EXIT=0`。**不许**用 `docker cp` 代替重建（那只活在
 顺序与判据都是硬的，一条都不许省：
 1. `browser_navigate` → `http://127.0.0.1:7788/#/notebook`；
 2. `browser_console_messages` ⇒ **error 与 warning 都为 0**（warning 也算：本项目那次"切到 mysql 之后 python 的调试面板还赖在页面上"就是只在 warning 里出现的）；
-3. `browser_snapshot` / `browser_evaluate` 断：`notebook-frame` 存在、它的 `src` 是 `/jupyter/…`、**整页 HTML 里不含 token 字符串**（从页面里读 `document.documentElement.innerHTML`，与 `.env` 的值比对，比对结果只报"含/不含"，**绝不打印 token**）；
+3. `browser_snapshot` / `browser_evaluate` 断：`notebook-frame` 存在、它的 `src` 是**同源相对** `/jupyter/…`（写死 host 会让 iframe 跨源 ⇒ 被守卫拒）；
+   **console 的 error 与 warning 按"来源"判**：我们自己的 bundle（`/assets/…`）必须 0 条，iframe 里 Notebook 7 自带的噪音
+   （实测 2 error / 31 warning：`No active debugger session`、菜单项重复、`reading 'schema'`、yjs）要用
+   **不经隧道的 7789 对照组**逐条归类后才能放行 —— 2026-10-09 实测：这条对照组给不出"我们的页面也脏"，只给出"上游自带"。
+   ~~整页 HTML 不含 token~~ 这条**不成立**（逃生链接的 href 是我们渲染的，见完成判据 #3 的 ③）：改判"iframe 的 src 与
+   我们写的响应头不含 token"，比对结果只报"含/不含"、**绝不打印 token 值**。
 4. 点左栏第一份示例笔记 ⇒ `src` 变成 `/jupyter/notebooks/<它>`；
 5. **在 iframe 里真跑一次**：`browser_evaluate` 取 iframe 的 `contentDocument`（同源，读得到）确认 notebook UI 已加载、cell 计数 > 0；再用 Playwright 在 frame 里点 cell → `Enter` → `Shift+Enter`，等 `Out[ ]` 里出现结果。**这一步是"内嵌真能用"的唯一判据**，前四步都判不到它。若 `arena-pyspark` 起不来（venv 未建）就先点页面上的「准备环境」，等它完成再看 —— 那一条路径本来就在页面上；
 6. **换一次状态再看 DOM**：切到 `#/`（今日）再切回 `#/notebook` ⇒ 只有一个 `notebook-frame`、没有残留的第二块面板；
@@ -1368,7 +1381,10 @@ Expected: `BUILD_EXIT=0`。**不许**用 `docker cp` 代替重建（那只活在
 ## 完成判据（全部满足才算 WI-94 做完）
 
 1. 三个退出码 `CV_EXIT=0` / `FAST_EXIT=0` / `E2E_EXIT=0`，且容器档 notebook 阶段确实跑了、区域里 `skip` 为 0、判题矩阵 `跳过 0`。
-2. 真浏览器里：console error 与 warning 都为 0；iframe 里那份 notebook **真的执行了一行代码并出了结果**；切走再切回没有残留面板；停顿 60 秒服务还在。
+2. **真浏览器**里：我们自己的 bundle（`/assets/…`）error 与 warning **都为 0**；iframe 里那份 notebook **真的执行了一行并出了结果**（判据是本次会话起了新 kernel、prompt 计数往前走，不是"页面渲染出来了"）；切走再切回没有残留面板；停顿 60 秒服务还在；320/480/1440 无横向溢出。
+   ⚠ 口径按 2026-10-09 实测改过：原稿写的是"整页 console 0/0"，而实测内嵌的 Notebook 7 **自带** 2 error / 31 warning
+   （`No active debugger session`、菜单项重复、`reading 'schema'`、yjs），且**不经隧道直连 7789 也一样有**（对照组量过）
+   ⇒ 判"我们的页面干净"要按**来源**分，含混宣称 0/0 会让下一个人去砍上游噪音、砍不到就把 iframe 撤了。
 3. **凭据只住在一个地方**（Task 3 落地后按实测收窄，原稿那句"页面上任何链接、任何响应体都不含 token"是**假的**）：
    ① **由我们生成**的东西 —— 自己拼的链接、响应头、错误消息、日志 —— 不含凭据；
    ② 上游 HTML 里那份 PageConfig token 是 jupyter 自己的既有形状（直连 7789 也一样有），由一条**差分断言**
@@ -1377,6 +1393,12 @@ Expected: `BUILD_EXIT=0`。**不许**用 `docker cp` 代替重建（那只活在
    ③ 附带一条实现纪律：**不许写 `expect(body).not.toContain(config.notebook.token)`** ——
    vitest 在失败时会把"期望不包含的那一串"印进报告，一次失败就把长期凭据写进测试输出（Task 3 实测撞到过一次）。
    统一走只返回布尔的 helper（`embed.test.ts` 的 `holdsToken()`），失败消息里只出现 `true`/`false`。
+   ⚠ 但**"实际值含凭据"与"期望值含凭据"是两个方向**（Task 6 实测）：`expect(body.toLowerCase()).toContain('<html')`
+   红的时候会把整棵树页（含小写化后的凭据）原样印进 `Received:` ⇒ 正向断言也不许把 body 交给 matcher。
+   ④ **凭据会进日志的两条路**（Task 7 补的，第一次收窄只写了"日志"这一整词而没数清有几条）：
+   我们自己 `onResponse` 那一行，与 **Fastify 自带的 pino `incoming request`**（在 stdout，`docker logs`/`./start.sh --logs` 都带得走）。
+   两处现在都只剥查询串里 `token` 这一个键、保留路径与其它参数，各有"摘掉剥除 ⇒ 红"的判据。
+   "只在 stdout、不进 `data/logs/`"**不是**安全边界。
 4. `/jupyter` 这个字面量只在 `shared/src/notebook.ts` 出现一次，其余全为派生或由闸门按派生值查文本。
 5. `package.json`（server/web/shared 三处）一个字节都没变。
 6. `memo.md` 里程碑 + `HANDOVER.md` 已移动 WI-94；每条新闸门的破坏性验证结果写在代码注释里而不是"应该会被抓到"。

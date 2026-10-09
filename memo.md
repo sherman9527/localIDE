@@ -3465,3 +3465,58 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 `arena-scala` 会静默 `ready: true`，与 I-1 刚关掉的洞结构同一形状；修法是把"要哪份环境"做成 `NOTEBOOK_KERNELS`
 的字段，让漏掉它变成类型错误）。同条记了 `CREDENTIAL_KEY_RE` 是**后缀** allowlist 这一已披露局限。
 **未跑**：`./start.sh --verify`（容器档由 controller 收尾）。分支 `jupyter-a1`，**未 push**。
+
+## 里程碑 BD：WI-94 notebook 内嵌（同源反代两条通道 + 两栏页面）—— 七档里被实测推翻八处（2026-10-09 ~ 10-10）
+
+**做了什么**：第五页从"跳出去开 7789 的独立标签页"改成**同一页里内嵌**：左文件树 + 右 iframe，
+`/jupyter/*` 由 7788 自己做**同源反代**打到容器里的 8888。形状与批准的设计一致，但落地时按实测改了四处：
+
+- **前缀的唯一真相**在 `shared/src/notebook.ts`（`NOTEBOOK_PREFIX` / `JUPYTER_BASE_URL` / `notebookDocPath()`），
+  jupyter 侧 `--ServerApp.base_url=/jupyter/` 由它派生 —— 这一改打穿了 5 处既有判据（`kernel.test.ts` 的 `/tree` 探针、
+  `start.sh`/`start.ps1` 的探测与横幅、`status.ts` 的探活与拼链接），全部改到派生值并由闸门按派生值查文本。
+- **凭据只在服务端注入**：HTTP 走 `Authorization: token …`，websocket 只能走 `?token=`（浏览器给不了 ws 握手设头），
+  客户端自己塞的 `token` 一律先摘 ⇒ 页面上不再有凭据形状的链接。
+- **放行是三事合取**（`proxyGuard.ts`：对端本机 ∧ Host 本机字面量 ∧ `Sec-Fetch-Site ∈ {same-origin, 缺席}`），
+  三个否决各有码（503 没配 / 403 不是本机 / 403 页面是别人家的）；ws 不走路由 ⇒ 守卫在 `upgrade` 事件里**再判一次同一个函数**。
+- **零新依赖**：隧道只用 `node:http`/`node:net`/`node:crypto` + Fastify 自带能力（`ws` 是被 hoist 的传递包，用它是欠债）。
+
+**验证表（三档全量，最后一遍在 `e42737d` 之后）**：
+
+| 档 | 命令 | 实测 |
+| --- | --- | --- |
+| 宿主快档 | `npm run verify:fast` | `FAST_EXIT=0`（九阶段；`✓ verify 全部通过`） |
+| 宿主 E2E | `npm run e2e` | `E2E_EXIT=0`，**74 passed (3.5m)**，failed/skipped 各 0 |
+| 容器全档 | `./start.sh --verify` | `CV_EXIT=0`；notebook 阶段出现 **1** 次；区间内 skip **0**（先证非空再判）；`embed 18` + `kernel 30` ⇒ `48 passed (48)`；矩阵 `158 道全部可判、跳过 0`；判题矩阵 `527 passed / 7 skipped / 534 total ✓`；阶段合计约 `1934 passed / 18 skipped`（每条 skip 都有出处，**没写成"0 skipped"**） |
+| 功能成立 | Playwright MCP 打 `127.0.0.1:7788/#/notebook` | 点左栏 → iframe 开笔记 → 两次 `Shift+Enter` → prompt `[3]:` → **`[2]:`**（本次会话起了全新 `arena-pyspark` kernel，经隧道执行并流回输出）；320/480/1440 无横向溢出、窄屏堆叠、页头自动换行；停 62 秒服务与隧道都活着 |
+| 门禁的门禁 | `verify-coverage` / `typecheck-coverage` / `runner-coverage` / `scripts-syntax` | 全绿；新容器档判据真被"设了两个门控变量"那条阶段认领（摘掉认领 ⇒ 红） |
+
+**这一轮被实测推翻的判断有八处**（每一条都改到了代码/注释/计划，不是留在脑子里）：
+① `POST /api/contents/<file>` 不是 2xx（不存在 404、已存在 400；"存到这个路径"是 **PUT**）；
+② "响应体不含 token"不是可判形状 —— Notebook 7 自己把 token 写进树页 PageConfig，直连 `7789` 也有；
+③ 摘掉反代守卫时红的那两条其实归**外层 origin 钩子**，守卫的"对端那一半"要另造一态才判得住；
+④ `removeContentTypeParser` 删错形态给的**不是红而是挂死**（`content-length` 说了字节而没送 ⇒ 假上游等不到 end，worker 退不掉）；
+⑤ 期望值**含**凭据与实际值**含**凭据是两个方向：`expect(body).not.toContain(token)` 失败时会把那一串印进报告，
+   而 `toContain('<html')` 失败时把整棵树页印进报告 —— 两种都写过、都被实测抓到；
+⑥ `end()`+`destroySoon()` 换成裸 `destroy()` 这条变异**闸门全绿**（loopback 上字节其实都送达），
+   只有**纯 RST（不先 `end()`）**才 0 字节 ⇒ 注释口径按格收窄，不许替实现吹牛；
+⑦ `execution_state` 在**没有 ws 客户端时恒为 `starting`** ⇒ "轮询到 idle 再连 ws"是常驻挂死；
+⑧ 优雅退出泄漏的第二条路是 **Fastify 自带的 pino `incoming request`**（在 stdout，不在 `data/logs/`），
+   只收我们手写那一行等于没收。
+
+**顺手修掉一个生产缺陷**：一条活着的 websocket 会把容器优雅退出拖成 SIGKILL（`stop -t 30` 实测 **32 秒 / ExitCode 137**
+⇒ `store.close()` 与收尾一行都不执行），根因是 `socket.write()` 紧跟 `socket.destroy()` 丢掉已排队字节；
+修法是隧道自己记账 + `preClose`（avvio 的 `onClose` 会排在 Fastify 关 server 之后，实测过）排空再关，
+`index.ts` 与 `compose.yml` **一字未改**；修后 **1 秒 / `ExitCode 0`**。"开着 notebook 页面"是常态，不是边角。
+
+**教训（写死，供后续档引用）**：
+1. **"用例数不是覆盖率"**：一张 11 行的合取表实际只判住 4 支决定；评审做 18 次变异，6 次"改了实现而 23 条全绿"。
+   凡真值表形状都要问一句"**少掉一整支时它红不红**"。
+2. **判据要钉在"实现自己改变形状"那一侧**：多值 `Cookie` 在请求方向被 Node 自己合并 ⇒ 判不了；回话方向才是我们的代码。
+3. **`toContain` 会放走"重复 directive 让整条 CSP 作废"** —— 这种"看起来更宽松所以永远命中"的断言要换成计数。
+4. **注释里不许有没测过的因果**。本轮三次把"推测"写成"实测"，每次都靠下游（实现者或评审）推翻才现形；
+   连评审自己的修法也可能判不住（`172.18.0.7` 那一行拦不住朴素等值表，得另造变异）。
+5. **一个派发词别装"实现 + 六条破坏性验证 + 三档 + 浏览器"**：这条链被 150 轮上限打断五次，全靠边做边落盘的报告才没丢工作。
+
+**已知问题 → 工作板**：`WI-97`（`report_notebook` 冷启动竞态）、`WI-98`（逃生链接改指同源 ⇒ 凭据彻底不进 URL，属设计级）、
+`WI-99`（`flushLogs()` 不在优雅退出路径里）、`WI-93` 追加"每份打开过的笔记各留一个活内核、没配 `cull_idle_timeout`"、
+`WI-95`（现在判题池之外是**两个** JVM：pyspark kernel + 未来 Scala kernel）、`WI-96`（`needsVenv` 按 id 猜，A2 会挖开）。
