@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import {
@@ -103,8 +103,16 @@ export interface AppDeps {
   bank: BankPort;
   store: ProgressStore;
   clock?: Clock;
-  /** 组合根可开日志；默认关闭，测试噪声小 */
-  logger?: boolean;
+  /**
+   * 组合根可开日志；默认关闭，测试噪声小。
+   *
+   * 收 `true`（生产：`index.ts` 就是这么传的）也收 pino 的配置对象（测试把 `stream` 指到内存 sink，
+   * 于是"凭据有没有落到 stdout 那一行"在宿主档就有了判据 —— Task 7d 那条）。
+   * **不论传哪一种，`redact` 都由 `logOptionsOf` 统一加上**：如果只有 `true` 那一条路被收窄，
+   * "凭据不进日志"就退化成了"调用方恰好没改配置时才成立"。
+   * 不收 logger 实例（`loggerInstance` 那条路）：实例的配置我们从外面碰不到，redact 加不上 ⇒ 判据会假绿。
+   */
+  logger?: NonNullable<FastifyServerOptions['logger']>;
   /** 前端产物目录（测试可注入临时目录验证 SPA 回退） */
   webDist?: string;
   /**
@@ -193,16 +201,65 @@ function errorResult(message: string): JudgeResult {
  * 键匹配带 `i`：`TOKEN=` 这种写法同样是凭据，宁可多遮一个键。只认 `?`/`&` 之后的键位，
  * 所以路径里出现的 `token=` 字样（`/x/token=abc`）不动 —— 那是路径，不是凭据参数。
  *
- * ⚠ **本轮收窄的是我们这一份文件日志**：生产（`index.ts` 的 `logger: true`）下 Fastify 自己的 pino
- * `incoming request` 那一行仍带**原样 `req.url`**（2026-10-09 实测形状：`{"req":{"method":"GET","url":"/probe?token=<值>"…},"msg":"incoming request"}`），
- * 而它走 stdout/docker logs、不在 `data/logs/` 里 ⇒ 那是第二处，不在本轮范围内、已上报待裁。
+ * ⚠ **两处日志都走这一个 helper**（Task 7d 把第二处收了）：
+ *  1. 我们自己的文件日志（`onResponse` 那一行，写进 `data/logs/`）—— 在钩子里显式调它；
+ *  2. Fastify 自带的 pino 日志（`logger: true` 时 `incoming request` / 500 那几行，走 **stdout**，
+ *     `docker logs` 与 `./start.sh --logs` 都会把它端到人面前）—— 由下面 `logOptionsOf()` 把它
+ *     挂成 pino 的 `redact` censor。**"只在 stdout、不在 data/logs"不是安全边界**，所以它不留待裁。
+ *
+ * 第二处的形状是 2026-10-10 实测的（三种形状都量过，见 task-7d-report.md）：
+ *  - 裸 `logger: true` ⇒ `{"req":{"method":"GET","url":"/probe?token=<值>&x=1",…},"msg":"incoming request"}`（泄漏）；
+ *  - `redact: {paths:['req.url']}`（默认 censor）⇒ `"url":"[Redacted]"` —— **整条遮掉，路径与其余参数一起没了**，
+ *    而 `npm run logs -- --trace <id>` 那条排查链路要的正是路径 ⇒ 不选；
+ *  - `redact: {paths:['req.url'], censor: 函数}` ⇒ `"url":"/probe?token=[已隐藏]&x=1"` —— 路径与 `x=1` 逐字保留。
+ *    pino 10.3.1 的 censor 拿到的是**序列化之前**的那个字段值（实测 `path=["req","url"]`），
+ *    所以这里可以直接复用同一个 `redactTokenInLogUrl`，不需要"整行 JSON 正则"那种会切坏结构的写法。
+ *
+ * ⚠ `redact` 只治**结构化字段**，治不了**拼进 msg 字符串**的那一份。实测（裸 Fastify，没有本文件的
+ * `setNotFoundHandler`）：`GET /missing?token=<值>` 会让框架自己打
+ * `"msg":"Route GET:/missing?token=<值> not found"` —— 把 `msg` 也塞进 `redact.paths` 虽然遮得住值，
+ * 但 censor 拿到的是整个字符串，`[^&]*` 会一路吃到结尾，实测连尾巴那句 ` not found` 一起吞掉，
+ * 等于为了收窄毁掉另一条日志的语义 ⇒ 不这么修。
+ * 本文件末尾那个 `setNotFoundHandler` 把这一面挡住了：实测（本 app + 真 sink）404 那一发只有两行
+ * （`incoming request` + `request completed`），框架那句带 URL 的 msg 根本不出现，而我们自己的 404
+ * 话术取的是 `request.url.split('?')[0]`（本来就不带查询串）。
+ * 判据在 `server/test/api/logger-url-redact.test.ts`：它连 404 与 503 一起扫"每一行都不含 canary"。
  */
 const redactTokenInLogUrl = (rawUrl: string): string => rawUrl.replace(/([?&]token=)[^&]*/gi, '$1[已隐藏]');
+
+/** pino `redact` 的 censor：值就是那条 URL 原文（序列化之前），所以只需要字符串形状才处理。 */
+const censorUrlField = (value: unknown): unknown => (typeof value === 'string' ? redactTokenInLogUrl(value) : value);
+
+/** 传给 pino 的 `redact`：路径固定为 `req.url`（Fastify 默认 req serializer 放 URL 的那一处）。 */
+const URL_REDACT = { paths: ['req.url'], censor: censorUrlField };
+
+/**
+ * 把 `AppDeps.logger` 装配成最终给 Fastify 的那份配置，**`redact` 由这一道统一加**。
+ *
+ * 为什么不给调用方关掉的口子：判据是"凭据不落盘"，如果它只在"调用方没自己配 logger"时才成立，
+ * 等于没覆盖 —— 今天 `index.ts` 传 `true`，明天谁加个 `{ level: 'debug' }` 就静默回到原样。
+ * 所以生产那一支（`true`）与测试那一支（配置对象）返回的是**同一个 `URL_REDACT` 常量**，
+ * sink 那条判据测到的行为因此直接适用于生产（`server/test/api/logger-url-redact.test.ts` 把这一句钉住）。
+ * 调用方自己配了 `redact` 时把它的 paths 并进来（不丢人家的工作），censor 沿用它自己的
+ * （若它写的是整条遮，那是它主动选的取舍，测试的"含路径"判据会当场红 —— 不是静默降级）。
+ *
+ * ⚠ 不接 pino **实例**（`loggerInstance` 那条路）：实例的配置从外面碰不到，redact 加不上。
+ * `FastifyServerOptions['logger']` 这个 union 本来就只有 `boolean | 配置对象` 两种形状，
+ * 所以这里不需要额外的运行时无效分支。
+ */
+export function logOptionsOf(input: AppDeps['logger']): NonNullable<AppDeps['logger']> {
+  if (!input) return false;
+  if (typeof input === 'boolean') return { redact: URL_REDACT };
+  const redact = input.redact;
+  if (redact === undefined) return { ...input, redact: URL_REDACT };
+  if (Array.isArray(redact)) return { ...input, redact: { paths: [...redact, ...URL_REDACT.paths], censor: censorUrlField } };
+  return { ...input, redact: { ...redact, paths: [...(redact.paths ?? []), ...URL_REDACT.paths], censor: redact.censor ?? censorUrlField } };
+}
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { judge, grade, bank, store } = deps;
   const clock: Clock = deps.clock ?? { now: () => new Date() };
-  const app = Fastify({ logger: deps.logger ?? false });
+  const app = Fastify({ logger: logOptionsOf(deps.logger) });
   const api = API_PREFIX;
 
   /**

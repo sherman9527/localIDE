@@ -54,6 +54,10 @@ async function main(): Promise<void> {
     grade: gradePort,
     bank: bankPort,
     store,
+    // ⚠ 这里的 `true` **不等于**"pino 原样打"：`buildApp` 会把它装配成配置对象并统一挂上 `redact`
+    // （`api/app.ts` 的 `logOptionsOf`），因为 stdout 那一侧的 `incoming request` 带着原样 `req.url`，
+    // 而 stdout 会经 `docker logs` / `./start.sh --logs` 端到人面前。级别仍是默认的 info。
+    // 判据：`server/test/api/logger-url-redact.test.ts`。
     logger: true,
     webDist: config.webDist,
   });
