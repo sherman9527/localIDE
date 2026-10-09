@@ -314,10 +314,18 @@ JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
    ```
    ⚠ `explain` 里的算子名随版本变（3.5 是 `Scan parquet`，4.x 起有 `FileScanCompute` 一类）。所以②里**以本篇实际跑出的文本为准**贴，不写"你也会看到这行"；本篇只做一件脆弱性最低的计划解读：
    ```python
-   plan = plain._jdf.executedPlan().toString() if plain.rdd.getNumPartitions() else plain._jdf.queryExecution().simpleString()
-   print(plain.explain())          # 教学用：让人看见 Exchange hashpartitioning 那一行
-   assert "Exchange" in plain.explain(), "计划里没有 shuffle ⇒ 这一篇的现象在这台机器上不成立，别改断言，改数据"
+   plan = df._jdf.queryExecution().simpleString()   # ⚠ 唯一在本镜像可用的取计划写法，见下面那条实测
+   print(plan)                                     # 教学用：让人看见 Exchange hashpartitioning 那一行
+   assert "hashpartitioning(user_id, 8)" in plan, "计划里没有那次 shuffle ⇒ 前提不成立，别改断言，改数据/配置"
    ```
+   ⚠⚠ 这一段原计划写的是 `plain._jdf.executedPlan()` 与 `assert "Exchange" in plain.explain()`，
+   **两条都是坏的 API 用法，篇 1 落地时实测顶回**（2026-10-10）：
+   `df._jdf` 是 Java `Dataset`，它**没有** `executedPlan()` / `physicalPlan()`（`Py4JError: Method executedPlan([]) does not exist`，
+   要取执行计划得走 `df._jdf.queryExecution().executedPlan()`）；`DataFrame.explainString` 在 3.5.5 不存在；
+   而 `df.explain()` 是 **print 到 stdout 然后返回 `None`** —— 原写法 `assert "Exchange" in plain.explain()` 实际是 `in None`，
+   直接 `TypeError`（红是红了，但红的原因是"用错了 API"，不是"结论不成立"，这种红会把人引去改断言）。
+   ⇒ 三篇教程取计划文本一律 `df._jdf.queryExecution().simpleString()`（执行后的计划才需要 `queryExecution().executedPlan()`）；
+   `explain()` 只用来打印给读者看。
 5. `code` ③ 解法 A —— 加盐两阶段聚合（治**聚合**那一半）：
    ```python
    SALT = 16
@@ -564,7 +572,7 @@ spark.conf.set("spark.sql.adaptive.enabled", True)
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", True)
 import re
 _ = agg.count()                                  # AQE 只在 shuffle 物化之后才有统计可决策
-plan_txt = agg._jdf.executedPlan().toString()
+plan_txt = agg._jdf.queryExecution().executedPlan().toString()
 print("\n".join(ln for ln in plan_txt.splitlines() if "AQE" in ln or "ShufflePartitions" in ln))
 m = re.search(r"AQEShuffleRead\s*(?:coalesced|partitioning\s+([\w ]+))?\s*(?:\(\d+\)\s*)?(\d+)\s*partition", plan_txt)
 assert m, f"没从 executedPlan 里认出 AQEShuffleRead ⇒ 这台镜像的回话形状与假设不同，把上面打印的计划行读一遍再改解析，别放宽断言"
@@ -586,7 +594,7 @@ small = big.groupBy("k").agg(f.sum("v").alias("s"))
 spark.conf.set("spark.sql.adaptive.enabled", True)
 spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", False)
 _ = small.count()
-plan_txt2 = small._jdf.executedPlan().toString()
+plan_txt2 = small._jdf.queryExecution().executedPlan().toString()
 print("\n".join(ln for ln in plan_txt2.splitlines() if "AQEShuffleRead" in ln))
 m2 = re.search(r"AQEShuffleRead", plan_txt2)
 merged2 = parse_executed_read_partitions(plan_txt2)   # 与上面同一个解析函数，落地时抽成一个本地 helper，不要复制两份正则
