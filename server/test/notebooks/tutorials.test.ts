@@ -119,11 +119,42 @@ function codeCellSources(notebookPath: string): string[] {
 }
 
 /**
- * "这个单元里真的有人在判"的判据：取**语句级**的 `assert`（行首允许缩进），所以
- * 注释里写一句 `# assert ...`、或把结论只留在 `print` 里都不算数。
- * 写在同一行的复合语句（`x = 1; assert x`）这里不收 —— 那种写法本身就该拆成两行。
+ * 三引号块的**行级状态机**（篇 2 复审补的；不做 Python 级解析，就四行）：把处在 `"""` / `'''` 块**内部**的行剔掉。
+ * 为什么需要它：`hasStatementAssert` 原先只看"行首是不是 assert"，于是"把真 assert 删掉、在 docstring 里补一行
+ * `assert True`"就能同时骗过执行层与这条牙 —— 而这条牙判的是"有人在判"，字符串里那一行谁都没判。
+ * 目标不是做 parser，是把那条路堵到**得写两处、且肉眼可见**（必须真有一条落在字符串块外面的语句级 assert）。
+ * 规则：①一行的三引号出现次数为奇数 ⇒ 跨过一次边界；②行首（去掉缩进）就是三引号的那一行算块内部 ——
+ * 那是定界符本身，`"""assert True"""` 这种"整行都在字符串里"的写法不许算数。
  */
-const hasStatementAssert = (src: string): boolean => src.split('\n').some((line) => /^\s*assert\b/.test(line));
+function statementLines(src: string): string[] {
+  const kept: string[] = [];
+  let inStringBlock = false;
+  for (const line of src.split('\n')) {
+    const isDelimiter = /^\s*(?:"""|''')/.test(line);
+    if (!inStringBlock && !isDelimiter) kept.push(line);
+    if ((line.match(/(?:"""|''')/g) ?? []).length % 2 === 1) inStringBlock = !inStringBlock;
+  }
+  return kept;
+}
+
+/**
+ * "这个单元里真的有人在判"的判据：取**语句级**的 `assert`（行首允许缩进），所以
+ * 注释里写一句 `# assert ...`、把结论只留在 `print` 里、或者**塞进 docstring / 三引号字符串块**都不算数
+ * （最后那一条是篇 2 复审抓到的形状：删 assert + 在字符串里补一行，旧判据会点头）。
+ * 写在同一行的复合语句（`x = 1; assert x`）这里不收 —— 那种写法本身就该拆成两行。
+ * 它自己的形状判据在本文件末尾那两条常驻用例里（"门禁自己也要被门禁"）。
+ */
+const hasStatementAssert = (src: string): boolean => statementLines(src).some((line) => /^\s*assert\b/.test(line));
+
+/**
+ * `spark.stop()` 的**语句级**判据（篇 2 复审补的第二处形状漏洞）：原来那条用 `toContain('spark.stop()')`，
+ * 于是"最后一个单元只剩一行 `# spark.stop()` 注释"也算绿 —— 而这条判据的存在理由恰恰是导语那句
+ * "闸门跑完不留活内核"。按三篇的实际形状钉死：整行就是 `spark.stop()`（允许行尾注释），且不许在字符串块里。
+ * ⚠ `spark.sparkContext.stop()` 这种写法**故意不收**：三篇写的都是 `spark.stop()`，而只停 SC 会把 session
+ * 状态留着；真要换形状，先改三篇的教程，别把这里放宽。
+ */
+const SPARK_STOP_LINE = /^\s*spark\.stop\(\)\s*(?:#.*)?$/;
+const hasStatementSparkStop = (src: string): boolean => statementLines(src).some((line) => SPARK_STOP_LINE.test(line));
 
 /**
  * 两层判据，缺任何一层都会放过一种真实的坏法：
@@ -304,6 +335,8 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
    * 为什么能常驻：它判的是盘上的字节，与 Jupyter 无关；删掉那一行的坏法在宿主档就红。
    * 为什么值得判（不是审美）：容器档是一篇接一篇跑的，前一篇留着活内核 ⇒ 下一篇文章性地多一个 JVM
    * （内存与那句 120s 预算都是它的受害者，而红出来像"新那篇太慢"）。WI-93 记的是同一类"没人收尾"的账。
+   * ⚠ 篇 2 复审把"有那串字节"升成"有那条语句"：旧形状是 `toContain('spark.stop()')`，把那一行改成
+   * `# spark.stop()` 注释照样绿（变异实测：旧判据绿、新判据红，见本文件末尾那条形状用例）。
    */
   it('每篇教程的最后一个 code cell 必须 spark.stop()（导语那句承诺要有牙）', () => {
     for (const file of Object.keys(TUTORIAL_CLAIMS)) {
@@ -311,12 +344,42 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
       expect(sources.length, `${file} 一个 code cell 都没有 ⇒ 它不可运行，marker 那两条也无从谈起（先确认文件名没写错）`).toBeGreaterThan(0);
       const last = sources[sources.length - 1]!;
       expect(
-        last,
-        `${file} 的最后一个 code cell 里没有 \`spark.stop()\`（它现在是：${JSON.stringify(last.slice(0, 80))}）⇒ ` +
+        hasStatementSparkStop(last),
+        `${file} 的最后一个 code cell 里没有**语句级**的 \`spark.stop()\`（它现在开头是：${JSON.stringify(last.slice(0, 80))}）⇒ ` +
           '教程导语那句"闸门跑完不留活内核"就成了假话，且容器档下一篇教程会多背一个活着的 Spark JVM（预算与内存都是它的账）。' +
-          '改的是教程：把 stop 放回最后一个单元（`print("stopped")` 之类的收尾可以跟在它后面，但 stop 不许被删），不是删这条判据',
-      ).toContain('spark.stop()');
+          '⚠ 判据是语句级的（篇 2 复审补的）：`# spark.stop()` 这样的注释、把它写进 docstring、或整行前后还有别的东西，' +
+          '都不算 —— 旧版用 `toContain(\'spark.stop()\')`，留一行注释就能骗过它。' +
+          '改的是教程：把 stop 放回最后一个单元**单独一行**（`print("stopped")` 之类的收尾可以跟在它后面，但 stop 不许被删），不是删这条判据',
+      ).toBe(true);
     }
+  });
+
+  /**
+   * **判据自己也要被门禁**（`.qoder/rules/dev_verify_workflow.md` 第 3 条）：上面那两条形状修复
+   * （三引号状态机、`spark.stop()` 语句级）如果只是"改了注释说现在严了"，那下一次有人把它们改回去
+   * 不会有任何东西红。这两条用例就是那两处形状的红线本身 —— 它们**不需要 notebook 也不需要 Jupyter**，
+   * 喂的是内存里的字符串，所以宿主档每次提交都跑。
+   * 每条都带一次真实变异证明（不是只信这几个字面量）：见本文件末尾注释与本轮报告。
+   */
+  it('hasStatementAssert 不认三引号块里的 assert（docstring 里补一行不许算数）', () => {
+    // 正面：真语句级 assert（含缩进）必须收 —— 不收就把三篇全撞红，那是另一种坏法
+    expect(hasStatementAssert('assert True'), '最裸的一行 assert 都不认 ⇒ 判据废了').toBe(true);
+    expect(hasStatementAssert('x = 1\n    assert x == 1'), '缩进的 assert 也是语句级的（notebook 里普遍这么写）').toBe(true);
+    expect(hasStatementAssert('"""doc"""\nassert True'), '同行闭合的定界符不许把后面那行真 assert 吃掉').toBe(true);
+    // 反面：字符串块内部的那一行不算"有人在判"
+    expect(hasStatementAssert('def f():\n    """说明\n    assert True\n    """\n    pass'), 'docstring 里的 assert 不算数（篇 2 复审补的形状漏洞）').toBe(false);
+    expect(hasStatementAssert("def f():\n    '''说明\n    assert True\n    '''\n    pass"), "''' 块同样要剔掉（三篇的 docstring 用的是三单引号）").toBe(false);
+    expect(hasStatementAssert('    """assert True"""'), '整行都在字符串里 ⇒ 不算').toBe(false);
+    expect(hasStatementAssert('# assert 只是注释\nprint("没有判断")'), '注释与 print 都不算 —— 这条从旧版就成立').toBe(false);
+  });
+
+  it('spark.stop() 的判据是语句级的（留一行注释、或写进字符串里，都不许绿）', () => {
+    expect(hasStatementSparkStop('spark.stop()\nprint("stopped")'), '本篇的实际形状必须收').toBe(true);
+    expect(hasStatementSparkStop('spark.stop()  # 收尾'), '行尾注释不许制造第二条坏法').toBe(true);
+    expect(hasStatementSparkStop('# spark.stop()'), '旧版 toContain 就是被这一行骗过的 ⇒ 现在必须不收').toBe(false);
+    expect(hasStatementSparkStop('"""说明\nspark.stop()\n"""'), '写在字符串块里的那一行不算停过内核').toBe(false);
+    expect(hasStatementSparkStop('print("别忘了 spark.stop()")'), '埋在 print 里也不算').toBe(false);
+    expect(hasStatementSparkStop('sc.stop()'), '只停 SC 故意不收：三篇都写 spark.stop()，要换形状先改教程').toBe(false);
   });
 
   /** 参数形状（`allow_errors=True` 这一条尤其）。这一组在宿主就有牙，不必等一次真崩溃才知道解析器没跑。 */
