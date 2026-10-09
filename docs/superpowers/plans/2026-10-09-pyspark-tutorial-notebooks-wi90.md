@@ -398,6 +398,7 @@ Commit：`feat(notebooks): WI-90 Task 2 —— 篇 1 倾斜与热点 key（加�
 **Files:**
 - Create: `content/notebooks/02-small-files-and-partitioning.ipynb`
 - Modify: `server/test/notebooks/tutorial-claims.ts` → `['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-drives-partitions', 'coalesce-not-shuffle', 'coalesce-cuts-files-not-rows']`
+  （第三条纹许按实测改名，见 Step 2 ② 那条 ⚠：注册表与 notebook 里的 marker 必须同时改，改一边就红在双向相等那条）
 
 - [ ] **Step 1: 登记 slug**（同上形状）
 
@@ -423,6 +424,8 @@ SCRATCH = tempfile.mkdtemp(prefix="wi90-02-")          # 不进 data/notebooks�
 
 ```python
 many = f"{SCRATCH}/many"
+spark.conf.set("spark.sql.adaptive.enabled", False)   # ⚠ 见下面那条"篇 1 实测顶回"
+spark.conf.set("spark.sql.shuffle.partitions", 2000)  # 与 repartition(2000) 同一个数：教的是"你写多少分区就有多少文件"
 df.repartition(2000).write.mode("overwrite").parquet(many)
 files = glob.glob(f"{many}/part-*.parquet")
 sizes = sorted(os.path.getsize(p) for p in files)
@@ -431,6 +434,13 @@ assert len(files) == 2000, len(files)
 assert sizes[-1] < 1_000_000, sizes[-1]
 print("WI90[02-small-files-and-partitioning][file-count-is-what-you-write] OK")
 ```
+
+⚠⚠ **这一条在 AQE 开着的时候必然红，而原因正是本篇要教的东西之一**（2026-10-10 由篇 1 实测确定，
+不是推测）：篇 1 量到 `shuffle.partitions=200` + AQE 开 ⇒ 落盘只有 **2 个文件**（`local[2]` 的
+`defaultParallelism`），因为 `coalescePartitions` 在写侧就把分区合掉了。
+所以这一节**必须显式关掉 AQE** 才能得到"2000 个分区 = 2000 个文件"那个现象；
+而"为什么开着 AQE 就合成了 2 个文件"本身就值得写进 ① 的 markdown（它是"你设的分区数只是上限"这一课的现成数字）。
+关掉 AQE 这件事要写成**前提断言**（与篇 1 ② 同一形状：红话要说得出"是配置没了，不是现象消失了"）。
 
 ⚠ `len(files) == 2000` 与 `sizes[-1] < 1_000_000` 这两个数**都是写计划时的推测，不是实测**。
 先手测把真实数字量出来再落地：若空分区不产文件导致真实文件数 < 2000，那要改的是**这一条教的那句话**
@@ -459,6 +469,16 @@ print("openCost=0 且每分区预算 1MB ⇒ 输入分区数", n_split)
 assert n_split > n_merged, (n_merged, n_split)
 print("WI90[02-small-files-and-partitioning][open-cost-drives-partitions] OK")
 ```
+
+⚠ **上面这两行配置的方向很可能是反的，落地前必须先量**（写计划时我以为 `openCost=0` 会让分区数爬回文件数量级，
+但决定读侧打包的是"每个分区的预算 `maxPartitionBytes`"对"单个文件的真实字节数"的比值：
+篇 2 的文件每个只有几百字节到几 KB，`maxPartitionBytes=1MB` 时一个分区照样装得下上千个文件 ⇒ 分区数可能**比 `n_merged` 更少**）。
+真要得到"每个文件自己一个分区"，是把 `maxPartitionBytes` 压到**小于单文件字节数**那一侧。
+⇒ 做法：先跑一次把三组配置的**实测分区数**打出来（默认 / 只改 openCost / 只改 maxPartitionBytes 到小于文件大小），
+再据此定这一节教的那句话与断言方向。**marker 的名字也必须跟着实测结论改**
+（如果量出来是"`maxPartitionBytes` 才主导、`openCostInBytes` 在这种文件尺寸下几乎不动"，
+那 slug 就该叫 `max-bytes-not-open-cost-decides-it` —— 这一条按事实写反而是本篇最有价值的纠正，
+因为"小文件多就一定是 openCost 的锅"是网上流传的口径）。**不许为了保住我原来的 slug 把断言改成恒真。**
 
 ③ 解法 —— `coalesce` 不 shuffle、`repartition` 全 shuffle，断言押在计划文本：
 
