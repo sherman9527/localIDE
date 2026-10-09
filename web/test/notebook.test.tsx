@@ -32,6 +32,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * ③ 左栏那份列表的两种"空"各占一处：有 `error` ⇒「这一次读不到」；`files:[]` 且没有 `error` ⇒
  *    「目录里就是没有」。**还没读到**则是第三种形状 —— 既不是说谎的时刻，也不许抢答"没有"
  *    （下面那条 pending 的用例钉的就是它；`seedError` 那对用例是同一个纪律的先例）。
+ *    第四种（评审 I-1）：**那一发整请求失败**（404 / 连不上）⇒ 第三句 `notebook-tree-unread` 说话，
+ *    三句两两互斥。它不是③的重复：③说的是"请求跑完了、服务端答不出目录"，这一句说的是"没有答复"。
  * ④ 换状态要真的换到 DOM 上：点左栏某份笔记 ⇒ **同一个 iframe 节点**换 `src`（换节点=每次点击都
  *    重启一遍 Jupyter 页面，那是功能故障，不是审美问题）。
  *
@@ -264,6 +266,31 @@ describe('Notebook 第五页', () => {
     await screen.findByTestId('notebook-frame');
     expect(screen.queryByTestId('notebook-tree-empty'), '没读到就说"没有"，是与 seedError 同型的谎').toBeNull();
     expect(screen.queryByTestId('notebook-tree-error')).toBeNull();
+  });
+
+  /**
+   * **第四种形状：那一发整请求失败**（非 2xx / 连不上）—— 评审 I-1，也是本轮开发中真实发生过的形状：
+   * 旧容器上 `curl /api/notebook/files` 回 404，而页面一句话都不说（`useAsync` 的 `error` 当时没被解构），
+   * 左栏只剩"文件管理"一项 ⇒ 读者只会以为目录被清空了。同一个文件对 status 早有先例
+   * （「这次没读到，下面显示的是上一次读到的状态」），左栏没有 ⇒ 本轮补上，并由这条钉住。
+   *
+   * 三句话**互斥**是这条的形状判据：
+   *  - `notebook-tree-empty`   = "读过，目录里就是没有"；
+   *  - `notebook-tree-error`   = **服务端**在响应里回了 `error` 字段（"我读了，读不到"）；
+   *  - `notebook-tree-unread`  = 连那一发都没跑完（本条）—— 它必须带错误文本，否则"没读到"仍是半句谎
+   *    （读者分不清 404「路由不在」与「连不上」，那两件修的是不同东西）。
+   *
+   * 破坏性验证（本轮实测，红法见 task-7a-report.md）：把页面里 `!listing && filesError` 那一支删掉 ⇒ 本条红。
+   */
+  it('那一发整请求失败（404 / 连不上）⇒ 左栏说一句"这一次没读到列表"并带上错误文本，且不抢答另外两句', async () => {
+    status.mockResolvedValue(up);
+    files.mockRejectedValue(new Error('HTTP 404'));
+    render(<Notebook />);
+    const line = await screen.findByTestId('notebook-tree-unread');
+    expect(line.textContent).toContain('这一次没读到');
+    expect(line.textContent, '不带上错误文本 = 只说"没读到"，读者分不清是路由不在还是连不上').toContain('HTTP 404');
+    expect(screen.queryByTestId('notebook-tree-empty'), '没读到却说"目录里没有" = 把不知道说成没有').toBeNull();
+    expect(screen.queryByTestId('notebook-tree-error'), '那句"读不到"判的是服务端给的 error 字段，这一发压根没有响应').toBeNull();
   });
 
   /**

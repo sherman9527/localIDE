@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +17,8 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  * 判据里有两句方向相反的话各占一条用例：**"没有"**（`files:[]` 且无 `error`）与
  * **"读不到"**（`files:[]` 且有 `error`）—— 把后者说成前者就是本仓库最恨的静默降级
  * （`shared/src/notebook.ts` 的 `seedError` 是同一条纪律的孪生）。
+ * 第三句谎（评审 M-4）由软链那两条管：**"目录里有，但过滤器看不见"** —— 它报出来的形状与"没有"
+ * 一模一样，两句判据都抓不到，所以它需要一条自己的用例（以及一条"这条用例到底跑没跑"的解释断言）。
  *
  * 隔离：照 `notebook-api.test.ts` 的 `injectApp` 注入 `ARENA_DATA_DIR` 到临时目录 ——
  * `workDir` 默认就是真人的 `data/notebooks/`，不注入的话单测会去数用户自己写的笔记（WI-40），
@@ -107,6 +109,36 @@ afterEach(async () => {
   madeDirs = [];
 });
 
+/**
+ * 软链到底能不能建，**必须探一次**，不许假设：Windows 上没有开发者模式 / 管理员权限时
+ * `symlinkSync` 直接 `EPERM`（本机 2026-10-09 实测读数：`SYMLINK_FAIL code= EPERM`）。
+ *
+ * 形状照 `server/test/regression/publish-identity.test.ts`（那条的成因是 `.dockerignore` 排掉 `.git`）：
+ * 跳过用 `it.skipIf` ⇒ 报告自己写出「1 skipped」；**另起一条永远会跑的 it** 解释"为什么会跳过"，
+ * 因为"没权限"与"夹具坏了 / 平台根本不该跳过"必须分开 —— 写成 `try/catch → return` 的话，
+ * 宿主上这条闸门会静默变成装饰品（`dev_verify_workflow.md` 第 3 条点名的正是那一类故障）。
+ * 探到的目录交给 `afterEach` 的 `madeDirs` 一起收（同一条"先排空日志再删目录"的纪律）。
+ */
+function probeSymlinkSupport(): { ok: boolean; code: string | null; listedAsSymlink: boolean } {
+  const dir = mkdtempSync(join(process.cwd(), 'data', 'test-tmp', 'notebook-files-symlink-probe-'));
+  madeDirs.push(dir);
+  try {
+    writeFileSync(join(dir, 'target.ipynb'), '{}');
+    symlinkSync(join(dir, 'target.ipynb'), join(dir, 'link.ipynb'), 'file');
+    // 顺量一条"机制"：`readdirSync(withFileTypes)` 给那个条目的 Dirent 到底认不认得出软链
+    // （`files.ts` 那个过滤器读的就是这一个布尔值，不 follow 目标）。
+    const listedAsSymlink = readdirSync(dir, { withFileTypes: true }).find((e) => e.name === 'link.ipynb')?.isSymbolicLink() === true;
+    return { ok: true, code: null, listedAsSymlink };
+  } catch (err) {
+    return { ok: false, code: (err as NodeJS.ErrnoException).code ?? 'unknown', listedAsSymlink: false };
+  }
+}
+
+const SYMLINK = probeSymlinkSupport();
+
+/** 只有"这台平台的软链需要特权"这一类原因才允许跳过（EPERM/EEXIST/ENOTSUP/EACCES）；别的都是夹具坏了。 */
+const SYMLINK_DENIED_CODES = ['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP'];
+
 describe('GET /api/notebook/files', () => {
   it('目录里有两份笔记 ⇒ 只列 .ipynb，按名字排，别的文件不出现', async () => {
     const { app, dir } = await injectApp();
@@ -157,5 +189,49 @@ describe('GET /api/notebook/files', () => {
     // 路由被并进注释、被缩进到别的块里、或整个消失，这里都必须红。
     expect(/^ {2}app\.get\(`\$\{api\}\/notebook\/files`/m.test(src), 'WI-87 的学费：一次编辑把路由并进注释，indexOf 断言照样绿').toBe(true);
     expect((await app.inject({ method: 'GET', url: `${API_PREFIX}/notebook/files` })).statusCode).toBe(200);
+  });
+
+  /**
+   * **第三种谎（评审 M-4）**：`files.ts` 原先只认 `e.isFile()` ⇒ **软链进去的 `.ipynb` 既不报错也不出现**，
+   * 界面报的是"目录里现在没有笔记"（`files:[]` 且无 `error`），而真相是"有，但我的过滤器看不见"。
+   * 那两句判据（"没有" / "读不到"）都覆盖不到它 —— 它不是那两句中的任何一句，是第三条没人说过的谎。
+   * 这一条同时钉一个裁定：`.ipynb` 这个名字**只要出现在目录里就算一份**，不管它是实体还是软链
+   * （软链指向哪儿、甚至指向不存在的目标，都不是这个只读列目录接口该判断的事 —— 打开它的是 Jupyter）。
+   *
+   * ⚠ 本条在**建不了软链的平台上会 skip**（本机 Windows 实测 `EPERM`，见上面那段探针注释）：
+   * 跳过由下一条永远会跑的 it 解释，报告里写成「1 skipped」，不是静默通过。
+   * 破坏性验证（本轮实测）：把过滤器里的 `|| e.isSymbolicLink()` 摘掉 ⇒ 在能建软链的平台上（容器档 =
+   * Linux/root）`Tests 1 failed | 6 passed`，红的正是本条；本机那一档它压根不跑。
+   */
+  it.skipIf(!SYMLINK.ok)('软链进去的 .ipynb 也要出现在列表里（isFile() 单用 = 第三种谎：有但看不见）', async () => {
+    const dir = await mkdtemp(join(process.cwd(), 'data', 'test-tmp', 'notebook-files-symlink-'));
+    madeDirs.push(dir);
+    await writeFile(join(dir, 'a-real.ipynb'), '{}');
+    symlinkSync(join(dir, 'a-real.ipynb'), join(dir, 'z-link.ipynb'), 'file');
+    const body = listNotebookFiles(dir);
+    expect(body.error, '列一个正常的目录不该报错；这里出现 error 就是另一件事了').toBeUndefined();
+    expect(
+      body.files,
+      '软链的那份也是"目录里真有一份笔记"：把它过滤掉 = 把"有"说成"没有"（M-4 的静默消失）',
+    ).toEqual(['a-real.ipynb', 'z-link.ipynb']);
+  });
+
+  /**
+   * 永远会跑（上面那条的"判据对象存在吗"）：能建软链的平台上钉"过滤器读的那个布尔值确实是软链"，
+   * 建不了的平台上钉"原因必须是平台特权，不许是夹具坏了"。摘掉 `isSymbolicLink()` 在本机撞不到红，
+   * 就是撞在这一档的 skip 读数上 —— 而这条保证那个 skip 是**有名字**的。
+   */
+  it('软链用例要么真的在跑，要么跳过的原因必须是"这台平台不给建软链"', () => {
+    if (SYMLINK.ok) {
+      expect(
+        SYMLINK.listedAsSymlink,
+        '软链建出来了，但 readdir 的 Dirent 不认它是软链 ⇒ 上面那条用例的判据对象不存在了（过滤器读的就是这个布尔值）',
+      ).toBe(true);
+      return;
+    }
+    expect(
+      SYMLINK_DENIED_CODES,
+      `建软链失败的原因是不可理解的 ${String(SYMLINK.code)} —— 那不是"平台不给权限"，不许当跳过混过去（夹具坏了要去修夹具）`,
+    ).toContain(String(SYMLINK.code));
   });
 });

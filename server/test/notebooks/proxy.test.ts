@@ -1180,12 +1180,25 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
   });
 
   /**
-   * Task 6b #3 —— **写完就 destroy** 的那一支（回话整块留在用户态 / 以 RST 结束）。
-   * 这是"curl 成功、浏览器失败"那个差异的维度：`curl` 发完立刻读，字节赶得上；浏览器（以及本条这个
-   * "延迟 300ms 才开始读"的探针）没赶上就被作废 ⇒ 控制台只剩一句"closed before receiving a handshake
-   * response"，服务端一行日志都没有。
-   * 四种形状一遍扫（守卫否决 ×2 + 上游拒绝 + 上游 error），任何一种回零字节都红在这里。
-   * ⚠ 这四支共用同一个前提：**回话必须一次写完、然后 `end()`（FIN）而不是 `destroy()`（RST）**。
+   * Task 6b #3 —— **写完就 destroy** 的那一支。这一条真正判住的是"那一支**一个字节都不回**"，
+   * 不是"写完但没排空就关"—— 这个区别本轮由评审 I-2（= Task 6b 的 L1）实测钉出来，写在这儿免得下一个人
+   * 再把它当成被守着的能力。
+   *
+   * 四种形状一遍扫（守卫否决 ×2 + 上游拒绝 + 上游 error），任何一种**回零字节**都红在这里 —— 这是本条的判据本体。
+   * 实测（变异跑的是本档全量；括号外的数字是本轮逐个重跑的读数，那一档今天 32 条）：
+   *  - 摘掉整个 `answerUpgradeFailure`（那一支不回字节）⇒ **红 3 条**；
+   *  - 上游拒绝那一支回到"只回一行状态行、没有 body"（照 `7c8e2df` 原样回写）⇒ **红 4 条**；
+   *  - 删掉调用点那条 `logWarn` ⇒ **红 1 条**（那是 #4 那一条的对象，不是本条）；
+   *  - `end()+destroySoon()` → 裸 `destroy()` ⇒ **全档绿**；
+   *  - `destroySoon()` → `resetAndDestroy()`（`end()` 仍在前面）⇒ **全档绿**；
+   *  - 连 `end()` 一起摘掉（纯 RST `resetAndDestroy()`）⇒ **红 9 条**（被守着的"RST"是这一档）。
+   * 中间那两行为什么判不住：本机回环上这个量级的 `write()` 当场交给内核，`destroy()` 无处可丢 ——
+   * 微测（关法 × {84B, 4 MiB} × {0ms, 300ms 后才挂 reader}）里 `fix` 与 `destroy` 六格**全部 100% 送达**，
+   * 只有"不先 `end()` 的纯 RST"六格全 **0 字节 + `ECONNRESET`**。⇒ **本条守得住纯 RST，守不住
+   * "该 `end()` 却用了 `destroy()`"**；别把 Task 6b 那句"三种关法都送出 84/84"读成"闸门完全不守 RST"，
+   * 也别再试图"把 payload 放大到超出发送缓冲"造判据（4 MiB 那一格已经把它否掉了）。
+   * `end()+destroySoon()` 留着的真理由是语义严格更安全 + Task 4d 那条"半关 socket 拖住 `app.close()`"
+   * —— 后者由本文件那条 `app.close()` 用例判，不由本条判。
    */
   it('失败回话的四种形状：客户端晚 300ms 才开始读也必须收到那句状态行（不许"写完整块留在用户态"）', async () => {
     const noTok = await injectApp({ token: '', upstreamPort }); // 守卫 503 那一支（与下面 403 两支不同的来源）
@@ -1223,8 +1236,11 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
    * Task 6b #4 —— **静默本身要能被事后查到**：上游 error 与上游拒绝那两支各记一条 warn，
    * 字段只有"错误码 + 路径（剥掉查询串）"，**没有 token、没有客户端给的外部输入原值**。
    * 派发词那句"把 err 的 code/message 落到日志（日志里不许出现 token 与外部输入的原值）"判在这里。
-   * ⚠ 只判 `err.code` 不判 `err.message`：Node 的那些 message 会把上游 host:port 拼进去（本机内部地址，
-   *   勉强可接受），但 `ERR_INVALID_CHAR` 一类会把**请求行**带进来，而那一份含我们注入的 `?token=`。
+   * ⚠ 只判 `err.code` 不判 `err.message`：`message` 是无界字符串、且会把上游 `host:port`（本机内部地址）
+   *   拼进去，形状不可枚举 ⇒ 这一层的字段只要 `code` + 剥掉查询串的 `path`。
+   *   ⚠ 原先这里写的理由是"`ERR_INVALID_CHAR` 一类会把**请求行**带进来，而那一份含我们注入的 `?token=`"——
+   *   那半句**已被评审 M-2 实测否证**（7 种错误形状的 message 里 token 命中 0：Node 不回显头值、请求行，
+   *   也不回显上游响应字节）。纪律不许放宽（本条判的正是"凭据与外部输入原值不在场"），但那句因果别再抄走。
    */
   it('上游拒绝 / 上游 error 两支都要落一条 warn：字段是错误码与路径，凭据与外部输入原值不许在场', async () => {
     const wrongStatus = await startWsWrongStatus(200);
@@ -1265,6 +1281,52 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
       const hits = [CANARY, 'client-side-canary-must-not-be-logged'].filter((secret) => text.includes(secret)).length;
       expect(hits, `warn 日志里出现了不该出现的串（只报数量，不报值）：${hits} 项`).toBe(0);
     }
+  });
+
+  /**
+   * 凭据口径的**第四处**（评审第 9 件④，Ruling(10) 那句"三句式"漏掉的那一处）：
+   * 我们自己的 HTTP 访问日志（`api/app.ts` 的 `onResponse`）过去**原样记 `request.url`** ⇒
+   * 只要有任何客户端把凭据塞进 7788 的查询串，它就落盘。实测分布：今天的日志 **0 条**，
+   * 而 `arena-2026-10-08-p7.log` 里有 **1 条** `GET /jupyter/api/kernels/<id>/channels?token=<24 位>` ⇒ status 400。
+   * 那一条**不是我们的代码生成的**（逃生链接今天指向 7789、不带查询串打到 7788），是某个客户端自己塞的
+   * ⇒ "今天不发生"不等于"结构上不可能"，这一处要由判据守着，不由运气守着。
+   *
+   * 本条钉三件事，缺一不可（"改成不打日志"两边都不许：路径与其余参数正是排查要的东西）：
+   * ① 那一行**确实在**（少了这一半，"日志压根没写"也会看起来像"没泄露"= 假绿）；
+   * ② `token` **这一个键**的值被换成占位，而路径与其余查询参数**逐字**保留 ——
+   *   `path=%2Fnotebooks` 必须还是 `%2F`：谁把剥除改写成 `new URLSearchParams(...).toString()`，
+   *   这里就会因为 `+`/重编码而红（那是把日志改成"另一份真相"，不是收窄）；
+   * ③ 凭据值命中 **0 次**，且只报数量不报值（Task 3 评审 I-A 的纪律：`toContain` 的失败输出会把 actual 打进报告）。
+   *
+   * 破坏性验证（本轮实测）：把 `url: redactTokenInLogUrl(request.url)` 换回 `url: request.url` ⇒ 本条红在 ①② 之外
+   * 的那一句（`那一行里 token 的值没被换成占位`），31→31 条里唯一红的就是它。
+   */
+  it('客户端把凭据塞进 7788 的查询串 ⇒ HTTP 访问日志那一行只写占位，路径与其余参数照旧逐字在场', async () => {
+    const SECRET = 'access-log-canary-must-not-be-logged';
+    const res = await rawRequest({
+      connectHost: '127.0.0.1',
+      port: appPort,
+      path: `${JUPYTER_BASE_URL}api/contents?path=%2Fnotebooks&token=${SECRET}`,
+      headers: { 'sec-fetch-site': 'same-origin' },
+    });
+    // 前置判据：这一发真的走完了（403/503 的话 onResponse 记的是另一条形状，本条就没了判据对象）
+    expect(res.status, '请求没被反代放行 ⇒ 本条要判的那一行日志根本没机会产生').toBe(200);
+
+    const log = logHandles[0];
+    if (!log) throw new Error('beforeEach 那台 app 没有登记 log 句柄 ⇒ 本条没有判据对象');
+    log.probe();
+    await log.flush();
+    const text = readFileSync(log.file(), 'utf8');
+    const lines = text.split('\n').filter((l) => l.includes('"module":"http"') && l.includes(`${JUPYTER_BASE_URL}api/contents`));
+    expect(lines.length, '访问日志里没有那一行 ⇒ "没泄露"只是因为压根没记（这是假绿，不是判据通过）').toBeGreaterThan(0);
+    // ② 路径 + 其余参数逐字在场，token 那一个键换成占位
+    expect(lines[0], '路径被一起改写了 ⇒ 排查时认不出这是哪一发').toContain(`${JUPYTER_BASE_URL}api/contents`);
+    expect(lines[0], '其余查询参数被顺手剥掉了（派发词明令不许）：path=%2Fnotebooks 必须逐字还在').toContain('path=%2Fnotebooks');
+    expect(lines[0], '那一行里 token 的值没被换成占位 ⇒ 凭据落盘了').toContain('token=[已隐藏]');
+    expect(lines[0], '占位之外的 token 参数不许被改写：这一行里 "token=" 只能出现一次').not.toContain(`token=${SECRET}`);
+    // ③ 只报数量，不把 actual 交给 matcher
+    const hits = [SECRET, CANARY].filter((secret) => lines[0]?.includes(secret)).length;
+    expect(hits, `访问日志里出现了不该出现的串（只报数量，不报值）：${hits} 项`).toBe(0);
   });
 
   /**

@@ -277,9 +277,16 @@ function parseHeadBlock(head: string): { statusLine: string; headers: Record<str
  * **把整个 vitest worker 崩掉、一个结论都没有**（Task 4 宿主档实测；本仓库同类事故是那条
  * `void` 掉的 async 拒绝把服务带走）。
  *
- * `readDelayMs`（Task 6b）：**发出握手之后先不挂 reader** 那么多毫秒。这不是"模拟慢客户端"的装饰：
- * 隧道若在写完回话之后立刻 `destroy()`，回话可能整块留在用户态、或以 RST 作废掉对侧**还没被读走**的
- * 字节 —— 只有"还没来得及读"的那位读者会撞上它，而那正是派发词里"curl 成功、浏览器失败"的维度。
+ * `readDelayMs`（Task 6b）：**发出握手之后先不挂 reader** 那么多毫秒。
+ * ⚠ 口径（评审 I-2 = Task 6b 的 L1，本轮按实测改准）：这一维**今天没有判据**。上一版把它写成
+ * "隧道若写完回话就 `destroy()`，回话可能整块留在用户态、字节会被作废" —— 微测否证了它：
+ * 关法 × {84B, 4 MiB} × {0ms, 300ms 后才挂 reader} 六格里，`end()+destroySoon()` 与裸 `destroy()`
+ * **全部 100% 送达**（本机回环上这个量级的 `write()` 当场交给内核，`destroy()` 无处可丢），
+ * 只有"**不先 `end()`** 的纯 RST"六格全 0 字节 + `ECONNRESET` —— 而那一格**是**被守着的：本轮在宿主档把
+ * `answerUpgradeFailure` 的收尾换成"不先 `end()` 的 `resetAndDestroy()`"，`proxy.test.ts` **红 9 条**
+ * （回零字节撞在"必须收到状态行"那类判据上）。⇒ 这个延迟留着的理由是"它就是那个真实症状的形状"
+ * （浏览器在拿到 101 之前不挂 reader），**不是**"它守着排空再关"；`end()+destroySoon()` 留着的真理由
+ * 也不在这儿（语义严格更安全 + Task 4d 的 `app.close()`，逐格表见 `proxy.ts` 的 `answerUpgradeFailure`）。
  * ⚠ 延迟窗口里也必须有一个 'error' 接住者（否则那条 socket 的 error 逃出去就是 worker 没结论），
  * 而它**不许**提前把结果定成"没等到"：真相等要等 `start()` 之后 `deadlineMs` 那一段。
  */

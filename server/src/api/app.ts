@@ -175,6 +175,30 @@ function errorResult(message: string): JudgeResult {
   };
 }
 
+/**
+ * 访问日志里的 URL：**只**把查询串里 `token` 这一个键的值换成占位，路径与其余参数逐字保留。
+ *
+ * 为什么这一处要收窄（评审第 9 件④ —— 凭据口径里 Ruling(10) 那句"三句式"漏掉的第四处）：
+ * `onResponse` 过去原样记 `request.url`，而**查询串是外部输入** —— 任何客户端把凭据塞进 7788 的 URL 就会落盘。
+ * 实测：今天的日志 0 条，但 `arena-2026-10-08-p7.log` 有 1 条
+ * `GET /jupyter/api/kernels/<id>/channels?token=<24 位>` ⇒ status 400。那一条不是我们的代码写的
+ * （逃生链接指向 7789、也不带查询串打到 7788），是某个客户端自己塞的 ⇒ "今天不发生"不等于结构上不可能。
+ *
+ * 为什么**只**动这一个键、而不是"整个查询串不打"或"把 url 换成 message 原值"：
+ * 路径与其余参数正是排查要的东西（`npm run logs -- --trace <id>` 那条链路靠它），
+ * 而 `token` 的值对排查没有任何价值（要复现那一发可以看 traceId）。
+ *
+ * 实现刻意用**正则替换值**而不是 `new URLSearchParams(...).toString()` 再拼回去：后者会把 `%2F` 重写成 `+`、
+ * 把参数的顺序与编码也一起"整理"一遍 ⇒ 日志就不再是那一次请求的**原样**了（那是另造一份真相）。
+ * 键匹配带 `i`：`TOKEN=` 这种写法同样是凭据，宁可多遮一个键。只认 `?`/`&` 之后的键位，
+ * 所以路径里出现的 `token=` 字样（`/x/token=abc`）不动 —— 那是路径，不是凭据参数。
+ *
+ * ⚠ **本轮收窄的是我们这一份文件日志**：生产（`index.ts` 的 `logger: true`）下 Fastify 自己的 pino
+ * `incoming request` 那一行仍带**原样 `req.url`**（2026-10-09 实测形状：`{"req":{"method":"GET","url":"/probe?token=<值>"…},"msg":"incoming request"}`），
+ * 而它走 stdout/docker logs、不在 `data/logs/` 里 ⇒ 那是第二处，不在本轮范围内、已上报待裁。
+ */
+const redactTokenInLogUrl = (rawUrl: string): string => rawUrl.replace(/([?&]token=)[^&]*/gi, '$1[已隐藏]');
+
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const { judge, grade, bank, store } = deps;
   const clock: Clock = deps.clock ?? { now: () => new Date() };
@@ -242,7 +266,8 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const record = {
       traceId: (request as TracedRequest).traceId,
       method: request.method,
-      url: request.url,
+      // 查询串里的 `token` 换成占位再落盘（见上面那段：客户端自己塞进 7788 的凭据同样会走到这里）
+      url: redactTokenInLogUrl(request.url),
       status: reply.statusCode,
       ms: Math.round(reply.elapsedTime),
     };

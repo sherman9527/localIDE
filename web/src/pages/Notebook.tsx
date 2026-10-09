@@ -44,7 +44,9 @@ import { Badge, Loading } from '../components/AsyncState';
  * 还有一条**与上面四态正交**的诊断：`seedError`（示例铺不进去，评审 I-1）。它不许并进那四态里 ——
  * 并进去就把"磁盘/挂载的事"说成"服务的事"了；状态那一行此刻照旧说实话，这一句只在示例那一块说。
  * 左栏那份列表（`notebookFiles`）用的是**同一条纪律的孪生**：有 `error` ⇒「这一次读不到」，
- * `files:[]` 且没有 `error` ⇒「目录里就是没有」，**还没读到** ⇒ 两句都不许说。
+ * `files:[]` 且没有 `error` ⇒「目录里就是没有」，**还没读到** ⇒ 两句都不许说，
+ * **那一发整请求失败**（404 / 连不上，评审 I-1）⇒ 第三句「这一次没读到左栏那份列表」+ 错误文本。
+ * 三句两两互斥（同一条三元链，结构上不可能同时出现），少任何一句都是一次静默降级。
  *
  * 这里**不做定时轮询**：状态一栏有个「刷新状态」按钮，「准备环境」完成后自动重读一次。
  * 理由是那个 GET 会顺手铺示例（`server/src/api/app.ts` 的路由里），定时轮询=定时做一遍磁盘 I/O；
@@ -117,8 +119,11 @@ export default function Notebook() {
    *    页面上挂着的就是那份占位空数组 ⇒ "目录里现在没有笔记"在**这一次读还没回来**时上了屏。
    *    那正是 `seedError` 那一族纪律要拦的谎（把"还不知道"说成"没有"），而拦法就是把"还不知道"
    *    在类型里表示出来：`null` = 没读过，`{files: []}` = 读过、真的没有。
+   * ③ `error` **必须解构出来**（评审 I-1）：`files:[]` 无 `error` 是"没有"、有 `error` 是服务端说"读不到"，
+   *    而**整发请求失败**（404 / 连不上）时那两个字段都不在场 —— 不接 `error` 的话左栏就一句话都不说，
+   *    读者只会以为目录被清空了。这个形状不是假想：本轮开发中旧容器上那条路由真的回过 404。
    */
-  const { data: listing, reload: reloadFiles } = useAsync<NotebookFilesResponse | null>(
+  const { data: listing, error: filesError, reload: reloadFiles } = useAsync<NotebookFilesResponse | null>(
     (signal) => (data?.running ? api.notebookFiles({ signal }) : Promise.resolve(null)),
     [data?.running],
   );
@@ -338,6 +343,19 @@ export default function Notebook() {
               {listing?.error ? (
                 <p className="tiny faint" data-testid="notebook-tree-error">
                   {listing.error}
+                </p>
+              ) : /* ⚠ 第四种形状（评审 I-1）：那一发**整请求失败**（非 2xx / 连不上）⇒ 响应体里既没有
+                   `files` 也没有服务端的 `error` 字段，上面那两句都不成立，于是这一句必须自己说。
+                   判据是 `!listing && filesError`，与上下两支**结构互斥**（同一个三元，三者不可能同时渲染）：
+                   少了这一支，左栏就是一片不解释的空白 —— 本轮开发中旧容器上那条路由回 404 时就是这个形状。
+                   ⚠ 这一支刻意**只判 `!listing`**（一次都没读到过）。手上还挂着上一轮读到的列表而这一轮
+                   刷新失败（`listing && filesError`）是**第五种**形状，今天没有任何判据 —— 它与状态卡那条
+                   `error && data`（「这次没读到，下面显示的是上一次读到的状态」）同型，本轮按派发词的范围
+                   不扩，登记在 task-7a-report.md 待裁，别让下一个读者以为它已经被守住了。 */
+              !listing && filesError ? (
+                <p className="tiny faint" data-testid="notebook-tree-unread">
+                  这一次没读到左栏那份列表（不是"目录里没有"，也不是"服务端说读不到"—— 那一发压根没有答复）：
+                  <span className="mono">{filesError}</span>
                 </p>
               ) : /* ⚠ 这里必须判 `listing &&`（= "这一次读回来了"），不能写
                    `(listing?.files ?? []).length === 0`：后者在"还没读回来"时也是 0，于是首屏会闪一句
