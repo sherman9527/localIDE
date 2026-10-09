@@ -1,0 +1,583 @@
+# 子项目 B（WI-90）：三篇 senior PySpark 教程 notebook 实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 交付 3 篇能**当场量出差异**的 senior 级 PySpark 教程 notebook，并把"可运行"变成一道**容器里真执行的闸门**（结论反了闸门就红，不是"没报错就算过"）。
+
+**Architecture:** 教程住在 `content/notebooks/<篇名>.ipynb`（进 git，A1 的 `seed.ts` 负责"缺失才复制"到 `data/notebooks/`）；新增一道容器档闸门 `server/test/notebooks/tutorials.test.ts` 用 `jupyter nbconvert --execute` 逐篇执行，判两层：执行层（无 cell 异常、kernel 是 `arena-pyspark`）与**结论层**（每篇的方向性结论在 notebook 里写成真 `assert`，并各自打一行 `WI90[<篇>][<结论>] OK` 标记；闸门按注册表核对**每条标记都出现了**）。
+
+**Tech Stack:** PySpark 3.5.5（镜像现有版本，**不降到 3.4**，见 A1 规格那条裁定）、`jupyter nbconvert`、Vitest、`scripts/verify.sh` 的容器档阶段。
+
+**Spec:** `docs/superpowers/specs/2026-10-05-pyspark-enterprise-notebooks-design.md`（五段结构、主题清单、纪律四条、闸门设计、§8"明确不做"全在里头）。依赖的前置：`docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`（同源反代与两栏页面必须**先落地**，因为本计划第三篇起就要用它交付）。
+
+## Global Constraints
+
+- **数据不落 git**：一律 `spark.range(...)` + 确定性表达式 + **固定 `seed`**；不引外部数据集（离线构建与可复现两条都要求）。
+- **单篇预算**：执行 ≤ 90s、峰值内存 ≤ 1GB —— **这是目标不是实测**，写完第一篇就用真实数字校准，超了先缩数据量（倾斜与文件数的现象在 50 万行上一样看得出来，"跑不完"才是真问题）。
+- **`local[*]` 的边界要写破**：凡涉及"分布式才有的失效模式"（节点级 shuffle、fetch failed、executor 被 broadcast 撑爆），文档里标"本机只能演示到这一层"，**不写成已验证**（纪律 2）。
+- **不教没验证过的东西**：不写 RDD 演化史/宽窄依赖背诵/DataFrame vs RDD 八股；不教生产集群 YARN/K8s 调参；不演示 Delta/Iceberg（镜像里没有）。
+- **题库指针必须是具体题 id**：`bd-pyspark-0001`、`bd-pyspark-0002`、`bd-pyspark-0005`、`bd-pyspark-0010` 四道都在 `content/questions/big-data/`（已核实存在）。留"哪道题"这种描述就是留占位符。
+- **文档里的每个数字**：要么是本篇当场量出来的（读者跑一遍就能看到），要么带来源标注。**不提交 outputs**（见下面的 Ruling(B0)）。
+- **闸门断言只押确定性量**：分区行数占比、文件数、`getNumPartitions()`、计划里的算子名。**耗时只打印、不断言** —— 时间断言在 CI 上必抖，那是给下一颗假阳性埋雷（Ruling(B1)）。
+- 仓库四条不可跳过：任何改动都要跑验证且没看到通过输出前不许说"完成"；TDD 红必须"因缺功能而红"+ 破坏性验证；门禁自己也要被门禁（`verify-coverage`）；跨 session 记忆更新。
+- 不引新依赖；`.env` 不读不打印；提交身份逐条 env 传 noreply，不许 `--no-verify`/amend/push；不占 7799。
+
+### Ruling(B0)：教程 notebook **不提交 outputs**（与 A1 的 smoke 同一形状）
+
+规格 §7.4 那句"要么本篇当场量出来（可点开看输出）"有两种读法。取"当场量"这一种：
+`content/notebooks/00-smoke-pyspark.ipynb` 已立了先例并写了理由 —— 执行产物属于执行的那一刻，
+把结果抄进 git 只会让"教程里的数字"变得不可追（不知道哪天、哪个镜像跑出来的），
+而"哪个镜像"这件事在本仓库是可验证的（`docker/BUILDINFO.md` 承诺重建即可复现）。
+⇒ 读者点开看到的是**待运行的**代码，跑一遍就有数；闸门跑的是同一份。
+代价照实写：页面上的教程在**没运行之前没有数字**，所以⑤段速查表里的结论必须是**不依赖具体数字**的定性表述。
+
+### Ruling(B1)：结论层用 **marker**，不只是"没报错"
+
+只看 `output_type == 'error'` 的闸门有一种坏法抓不到：**有人把 `assert` 那行删了**。
+删掉之后照样"零异常"，而教程的结论那一半已经没人管了。
+⇒ 每篇在每条方向性结论之后 `print("WI90[<篇>][<结论 slug>] OK")`，闸门按一份**注册表**核对每条标记都出现。
+配套判据：注册表里的结论集合 = notebook 里实际出现的标记集合（多一条、少一条都红），
+所以"新增一条结论忘了登记"与"删一条结论"都会红。
+
+---
+
+## 文件结构
+
+| 文件 | 职责 |
+| --- | --- |
+| `content/notebooks/01-skew-and-hot-keys.ipynb` | 篇 1：倾斜与热点 key（现象→取证→三种解法→量差异→速查+追问） |
+| `content/notebooks/02-small-files-and-partitioning.ipynb` | 篇 2：小文件与物理设计 |
+| `content/notebooks/03-reading-the-plan-and-aqe.ipynb` | 篇 3：计划解读与 AQE |
+| `server/test/notebooks/tutorials.test.ts` | 容器档闸门：逐篇执行 + 两层断言 + 清单完整性 + 常驻门控解释 |
+| `server/test/notebooks/tutorial-claims.ts` | 结论注册表（每篇该出现哪些标记）。与 notebook 分文件，是因为闸门要**独立于被测物**声明期望 |
+| `scripts/verify.sh` | 新增一条容器档阶段（与「Notebook 运行时」同级），并把新文件从「单元测试」的目录扫描里排除 |
+| `README.md` / `docs/ARCHITECTURE.md` / `HANDOVER.md` / `memo.md` | 数字校准与 WI-90 落板 |
+
+`server/test/notebooks/tutorials.test.ts` 复用 `kernel.test.ts` 里已经打磨过的两件工具：`executedNotebookEvidence(raw)`（从 `--stdout` 那份 notebook JSON 里只取 stdout 行与 error 条目）与 `nbconvertCrashEvidence(err)`（非 0 退出时说清**是哪一种**坏法，含 `timeout` 那一支）。**不要**在第二个文件里重写第三份解析。
+
+---
+
+## Task 1：闸门骨架 + 注册表 + 接线（先让"跑一篇 smoke"成立）
+
+**为什么闸门排在写教程之前**：这一档的交付物是"可运行的教程"，而"可运行"必须是一条会红的判据。
+先把闸门立在一篇已有 notebook 上（`00-smoke-pyspark.ipynb`），后面每加一篇就少一处不确定性。
+反过来先写教程再补闸门，症状是"教程写完发现跑不完 90 秒"——那时返工的是内容。
+
+**Files:**
+- Create: `server/test/notebooks/tutorial-claims.ts`
+- Create: `server/test/notebooks/tutorials.test.ts`
+- Modify: `scripts/verify.sh`（新增阶段 + `--exclude`）
+- Test-Modify: 无（新文件）
+
+**Interfaces:**
+- Consumes: `config.notebook.seedDir`（= `content/notebooks`）、`config.notebook.port`、`config.ideEnvDir`、`venvPythonPath()`（`server/src/ide/env.js`）、`NOTEBOOK_KERNELS.pyspark`
+- Produces:
+  ```ts
+  /** 每篇教程必须出现的结论标记（slug，不含 `WI90[` 前缀）。新增结论必须在这里登记，否则闸门红。 */
+  export const TUTORIAL_CLAIMS: Record<string, string[]>;   // key = notebook 文件名（不含目录）
+  export const TUTORIAL_TIMEOUT_MS = 120_000;
+  export function markerOf(file: string, slug: string): string;   // `WI90[<file 去 .ipynb>][<slug>] OK`
+  ```
+
+- [ ] **Step 1: 写红的判据**
+
+`server/test/notebooks/tutorials.test.ts`：
+
+```ts
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { NOTEBOOK_KERNELS } from '@arena/shared';
+import { config } from '../../src/config.js';
+import { venvPythonPath } from '../../src/ide/env.js';
+import { TUTORIAL_CLAIMS, TUTORIAL_TIMEOUT_MS, markerOf } from './tutorial-claims.js';
+import { executedNotebookEvidence, nbconvertCrashEvidence } from './kernel.test-helpers.js'; // ← 见 Step 2 的说明
+
+const IN_CONTAINER = process.env.ARENA_IN_CONTAINER === '1';
+const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
+
+/**
+ * 教程 notebook 的**可运行性**闸门（子项目 B）。只在"那个跑着 notebook 服务的容器"里有判据对象：
+ * 门控写在**文件里**（合取两个变量），形状照 `kernel.test.ts` / `embed.test.ts`，理由也相同 ——
+ * 只靠阶段名点是挡不住的（评审 T10-1），`server/test/notebooks/` 这个目录本来就被「单元测试」阶段扫。
+ *
+ * 两层判据，缺任何一层都会放过一种真实的坏法：
+ * ① 执行层：`output_type === 'error'` 的 cell 数必须为 0，且 kernel 是 `arena-pyspark`。
+ *    ⚠ kernel 那条不是装饰：`metadata.kernelspec.name` 写成 `python3` 的教程照样能跑绿，
+ *    而它跑在**镜像自带的系统解释器**上 —— 那正是红线①要拦在判题环境外面的那个，
+ *    于是"教程里 `!pip3 install` 装进哪套环境"从教学变成了踩线示范。
+ * ② 结论层（`TUTORIAL_CLAIMS`）：每篇声明的方向性结论都必须打出 marker。
+ *    只看"没报错"抓不到**有人把 assert 删了**（Ruling(B1)）：删掉之后零异常、结论那一半没人管。
+ */
+describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('教程 notebook 容器里真执行', () => {
+  /** 全新卷上 IDE venv 还不存在 ⇒ nbconvert 会挂在"解释器文件找不到"，那不是教程坏了。
+   *  这一条把那种前提**说成前提**（`kernel.test.ts:351` 同一课），并让常驻那一组去判"该不该跑"。 */
+  it('IDE venv 必须已存在（否则这一档的判据对象不成立，先按页面「准备环境」）', () => {
+    expect(existsSync(venvPythonPath(config.ideEnvDir)), `venv 解释器不在 ${venvPythonPath(config.ideEnvDir)} ⇒ arena-pyspark kernel 起不来。这一条不是教程坏了，是这一档还没有判据对象`).toBe(true);
+  });
+
+  for (const [file, claims] of Object.entries(TUTORIAL_CLAIMS)) {
+    it(`${file}：跑通、kernel 对、每条方向性结论都打出 marker`, () => {
+      const notebook = join(config.notebook.seedDir, file);
+      expect(existsSync(notebook), `注册表里有 ${file} 而 ${config.notebook.seedDir} 里没有这个文件 ⇒ 有人删了教程没删注册表（或写错文件名）`).toBe(true);
+
+      let raw: string;
+      try {
+        raw = execFileSync(
+          'jupyter',
+          ['nbconvert', '--to', 'notebook', '--execute', '--stdout', '--ExecutePreprocessor.allow_errors=True', `--ExecutePreprocessor.timeout=${Math.floor(TUTORIAL_TIMEOUT_MS / 1000)}`, notebook],
+          { encoding: 'utf8', timeout: TUTORIAL_TIMEOUT_MS + 15_000, maxBuffer: 32 * 1024 * 1024 },
+        );
+      } catch (err) {
+        throw new Error(nbconvertCrashEvidence(err));
+      }
+      const { stdout, errors } = executedNotebookEvidence(raw);
+      expect(errors, `${file} 有 cell 抛异常：\n${errors.join('\n')}`).toEqual([]);
+
+      const nb = JSON.parse(raw) as { metadata?: { kernelspec?: { name?: string } } };
+      expect(nb.metadata?.kernelspec?.name, `${file} 跑在内核 ${nb.metadata?.kernelspec?.name} 上而不是 ${NOTEBOOK_KERNELS.pyspark} ⇒ 它可能在系统解释器上跑，教程里装的包会进判题那套环境（红线①）`).toBe(NOTEBOOK_KERNELS.pyspark);
+
+      for (const slug of claims) {
+        const marker = markerOf(file, slug);
+        expect(stdout.some((line) => line.includes(marker)), `${file} 没打出结论标记 ${marker} ⇒ 那条结论被删了、被改跑了，或 assert 根本没执行（Ruling(B1)）`).toBe(true);
+      }
+    });
+  }
+
+  /** 清单完整性：注册表必须覆盖 `content/notebooks/` 里**每一篇**（`00-smoke` 除外，它归 `kernel.test.ts` 判）。
+   *  少了这一条，"新写一篇忘了接闸门"是完全静默的 —— 页面看得到、文件列表看得到，只有没人跑它。 */
+  it('content/notebooks 里的每篇教程都必须在注册表里（新写一篇忘了登记 ⇒ 红在这里）', () => {
+    const files = readdirSync(config.notebook.seedDir)
+      .filter((f) => f.endsWith('.ipynb') && !f.startsWith('00-'))
+      .sort();
+    const registered = Object.keys(TUTORIAL_CLAIMS).sort();
+    expect(registered, '注册表与目录不一致：加了教程没登记，或登记了不存在/已删的文件名').toEqual(files);
+  });
+});
+
+/** 常驻：门控本身在宿主也要被判住（形状照 `kernel.test.ts:796` 那一组 —— 合取的两半各自能红）。 */
+describe('教程闸门的门控本身（常驻，宿主也跑）', () => {
+  it('注册表非空且每条 slug 形状合法（marker 拼错 ⇒ 那条判据永远只能靠人肉看）', () => {
+    expect(Object.keys(TUTORIAL_CLAIMS).length).toBeGreaterThan(0);
+    for (const [file, claims] of Object.entries(TUTORIAL_CLAIMS)) {
+      expect(file.endsWith('.ipynb'), `注册表的 key 必须是文件名：${file}`).toBe(true);
+      expect(new Set(claims).size, `${file} 的 slug 有重复 ⇒ marker 核对做了两遍同一件事`).toBe(claims.length);
+      for (const slug of claims) expect(slug, `${file} 的 slug 形状不合：${slug}`).toMatch(/^[a-z0-9][a-z0-9-]{2,60}$/);
+    }
+  });
+});
+```
+
+- [ ] **Step 2: 把 `kernel.test.ts` 的两件工具抽成可共享模块**
+
+`executedNotebookEvidence` / `nbconvertCrashEvidence` 现在住在 `kernel.test.ts` 里（未导出）。
+**不要**复制第三份，也不要从测试文件 import 测试文件（`kernel.test.ts` 一 import 就带着它那些 `describe.skipIf` 跑一遍）。
+做法：把两个函数原样搬到新文件 `server/test/notebooks/notebook-evidence.ts`（**只搬实现，注释跟着走**，
+包括那段"枚举里必须有 `timeout` 这一条自己"的教训），`kernel.test.ts` 改成 `import { … } from './notebook-evidence.js'`，
+`tutorials.test.ts` 也 import 它。搬完必须确认 `kernel.test.ts` 在容器档里**条数与结果一字不变**（30 条），
+因为这两个函数是它的一部分判据的实现。
+
+- [ ] **Step 3: 写注册表（本任务只登记 smoke 之外的东西 ⇒ 先给一篇都没有的空表）**
+
+`server/test/notebooks/tutorial-claims.ts`：
+
+```ts
+/**
+ * 每篇教程必须打出的**结论 slug**（闸门按这份表核对 marker，Ruling(B1)）。
+ * 它故意住在 notebook **外面**：期望值若由被测文件自己声明，"删一条结论"就同时删掉了判据。
+ * slug 的形状 `[a-z0-9-]`：它要出现在 marker 里、也要出现在失败消息里，别放空格与中文。
+ */
+export const TUTORIAL_CLAIMS: Record<string, string[]> = {};
+
+export const TUTORIAL_TIMEOUT_MS = 120_000;
+
+export function markerOf(file: string, slug: string): string {
+  return `WI90[${file.replace(/\.ipynb$/, '')}][${slug}] OK`;
+}
+```
+
+Run: `npx vitest run server/test/notebooks/tutorials.test.ts`（宿主）⇒ 常驻那一组**必须红**在
+`expect(Object.keys(...).length).toBeGreaterThan(0)` —— 这是"因缺功能而红"（还没写教程）。
+`describe.skipIf` 那一组在宿主是 skip，符合设计。
+
+- [ ] **Step 4: verify.sh 接线**
+
+`scripts/verify.sh`：
+- 在 `NB_SERVICE = 1` 那条 `run "单元测试（…）"` 的 `--exclude` 列表里补第三个：`--exclude server/test/notebooks/embed.test.ts` 之后加 `--exclude server/test/notebooks/tutorials.test.ts`，并在紧邻注释里补一句：**同一登记路径**，排除的理由与 `embed.test.ts` 相同（每条都真起 Spark，在目录扫描里会与专门阶段各跑一遍）。
+- 在「Notebook 运行时（kernel 真跑）」那条**之后**新增一条同级阶段：
+  ```bash
+  run "教程 notebook 可运行（结论层）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts
+  ```
+  两个变量都在命令行显式设一遍不是冗余：`verify-coverage` 那条"env 门控的闸门必须被'设了那个变量'的阶段认领"读的是**阶段命令文本**（实测过它先红后绿的接线形状，见 `kernel.test.ts` 与 `embed.test.ts` 那两处注释）。
+
+Run: `npx vitest run server/test/regression/verify-coverage.test.ts` ⇒ 必须绿（它现在是红的，因为新文件还没被认领）。
+
+- [ ] **Step 5: 破坏性验证（闸门也要被门禁）**
+
+1. 注册表里塞一条不存在的 slug（`{ '00-x.ipynb': ['ghost'] }`）⇒ 清单完整性那条必须红；
+2. 把 `tutorials.test.ts` 从阶段命令里删掉 ⇒ `verify-coverage` 必须红；
+3. 把 `kernel.test.ts` 里 `executedNotebookEvidence` 的调用改成返回 `{stdout: [], errors: []}` ⇒ `kernel.test.ts` 必须红（证明 Step 2 那次搬运**没有把它的判据搬空**）；
+4. 手工 `cp` 一份带一条真 `assert False` 的临时 notebook 进 seedDir、登记、跑 ⇒ 必须红在"有 cell 抛异常"；把它改成 `assert True` 但**不打 marker** ⇒ 必须红在"没打出结论标记"（这一条是 Ruling(B1) 的正面证据）；
+5. 全部还原，`npx vitest run server/test/notebooks/tutorials.test.ts server/test/notebooks/kernel.test.ts`（宿主）⇒ 常驻那一组绿、容器那一组 skip。
+
+- [ ] **Step 6: 三档**
+
+`npm run verify:fast > /tmp/wi90-t1-fast.log 2>&1; echo "FAST_EXIT=$?"` ⇒ 0；
+容器档这一档先不跑全量（还没有教程可跑），但要跑一次**单点**确认搬运没坏：
+`docker compose up -d --build arena` + 容器内 `npx vitest run server/test/notebooks/kernel.test.ts` ⇒ `30 passed`。
+（⚠ `up -d --build` 可能报 `Container … Running` 而**没重建**：验之前先核对容器里那份文件与宿主一致 —— WI-94 Task 4c 就是这么抓到并做了 md5 核对。）
+
+- [ ] **Step 7: Commit**（`test(notebooks): WI-90 Task 1 —— 教程可运行闸门（执行层 + 结论 marker）与两件工具抽出共享`）
+
+---
+
+## Task 2：篇 1 `01-skew-and-hot-keys`（倾斜与热点 key）
+
+**Files:**
+- Create: `content/notebooks/01-skew-and-hot-keys.ipynb`
+- Modify: `server/test/notebooks/tutorial-claims.ts`（登记本篇 slug）
+
+**Interfaces:**
+- Consumes: Task 1 的闸门与 `markerOf`
+- Produces: 一篇能在容器里被 `nbconvert --execute` 跑通的 notebook，slug 集合 =
+  `['hot-key-dominates', 'salting-halves-max-partition', 'salting-preserves-result', 'broadcast-changes-plan']`
+
+- [ ] **Step 1: 先把注册表登记上（让它红）**
+
+`TUTORIAL_CLAIMS` 加：
+
+```ts
+  '01-skew-and-hot-keys.ipynb': ['hot-key-dominates', 'salting-halves-max-partition', 'salting-preserves-result', 'broadcast-changes-plan'],
+```
+
+- [ ] **Step 2: 写 notebook（4 段结构 + 代码单元逐个如下）**
+
+JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
+
+```json
+{"cells": [ /* 见下 */ ],
+ "metadata": {"kernelspec": {"display_name": "PySpark (arena)", "language": "python", "name": "arena-pyspark"},
+              "language_info": {"name": "python"}},
+ "nbformat": 4, "nbformat_minor": 5}
+```
+
+单元按顺序（`md` = markdown，`code` = code）：
+
+1. `md` 标题与本篇要回答的问题：**"一个 task 跑了 90% 时间"这个坏结果，怎么用本地这台机器量出来、三种解法各治哪一半**。写破边界：本机是 `local[*]`，没有节点级 shuffle 与 fetch failed，"某台机器被拖垮"这类失效模式本机演示不了，凡涉及它都标未验证。
+2. `code` 建立 session（**不预设 shuffle 分区**，配置在①里显式设，读者看得见）：
+   ```python
+   import time
+   from pyspark.sql import SparkSession, functions as f
+
+   spark = SparkSession.builder.appName("wi90-01-skew").getOrCreate()
+   spark.conf.set("spark.sql.shuffle.partitions", 8)
+   spark.conf.set("spark.sql.adaptive.enabled", False)   # 先关掉 AQE：① 要量的是"没有它时"的坏形状
+   print("spark", spark.version)
+   ```
+3. `code` ① 现象 —— 确定性造一个 40% 落在同一个 key 上的事实表：
+   ```python
+   N = 1_000_000
+   events = (
+       spark.range(N, seed=7)
+       .withColumn("user_id",
+           f.when(f.col("id") % 5 < 2, f.lit("HOT"))                       # 恰好 40% 落到一个 key
+            .otherwise(f.concat(f.lit("u"), (f.col("id") % 199_000).cast("string"))))
+       .withColumn("amount", (f.col("id") % 100).cast("long"))              # long：两种聚合顺序之和必须逐位相等
+   )
+   events.createOrReplaceTempView("events")
+   print("行数", events.count())
+   ```
+4. `code` ② 取证 —— 把"一个分区占大头"量成一个数（**分区行数占比**，不靠耗时）：
+   ```python
+   def max_partition_share(df):
+       """聚合后每个分区（≈每个 hash 桶）的行数占比，降序。这是"倾斜"最便宜也最可复现的量法：
+       它不看耗时，因此在同一镜像上每次都给同一个数。"""
+       counts = df.rdd.mapPartitions(lambda it: iter([sum(1 for _ in it)])).collect()
+       total = sum(counts)
+       return sorted((c / total for c in counts), reverse=True), total
+
+   plain = events.groupBy("user_id").agg(f.sum("amount").alias("amount"), f.count().alias("n"))
+   shares_before, _ = max_partition_share(plain)
+   hot_share = (events.filter(f.col("user_id") == "HOT").count()) / N
+   print("每个分区的行数占比（前 5）", [round(s, 4) for s in shares_before[:5]])
+   print("HOT 这个 key 占全表比例", round(hot_share, 4))
+
+   assert hot_share > 0.35, hot_share
+   assert shares_before[0] > 0.30, shares_before
+   print(marker := "WI90[01-skew-and-hot-keys][hot-key-dominates] OK")
+   ```
+   ⚠ `explain` 里的算子名随版本变（3.5 是 `Scan parquet`，4.x 起有 `FileScanCompute` 一类）。所以②里**以本篇实际跑出的文本为准**贴，不写"你也会看到这行"；本篇只做一件脆弱性最低的计划解读：
+   ```python
+   plan = plain._jdf.executedPlan().toString() if plain.rdd.getNumPartitions() else plain._jdf.queryExecution().simpleString()
+   print(plain.explain())          # 教学用：让人看见 Exchange hashpartitioning 那一行
+   assert "Exchange" in plain.explain(), "计划里没有 shuffle ⇒ 这一篇的现象在这台机器上不成立，别改断言，改数据"
+   ```
+5. `code` ③ 解法 A —— 加盐两阶段聚合（治**聚合**那一半）：
+   ```python
+   SALT = 16
+   salted = (
+       events.withColumn("salt", f.col("id") % SALT)
+       .groupBy("user_id", "salt")
+       .agg(f.sum("amount").alias("amount"), f.count().alias("n"))
+   )
+   unsalted = salted.groupBy("user_id").agg(f.sum("amount").alias("amount"), f.sum("n").alias("n"))
+   shares_after, _ = max_partition_share(unsalted)
+   print("加盐后每个分区行数占比（前 5）", [round(s, 4) for s in shares_after[:5]])
+
+   assert shares_after[0] < shares_before[0] / 2, (shares_before[0], shares_after[0])
+   print("WI90[01-skew-and-hot-keys][salting-halves-max-partition] OK")
+   ```
+6. `code` ④ 量差异 —— 加盐**不许改变答案**（这条最硬，也最容易被"看起来更快"盖过去）：
+   ```python
+   only_plain = plain.join(unsalted, ["user_id"], "left_anti").count()
+   only_salted = unsalted.join(plain, ["user_id"], "left_anti").count()
+   mismatch = (
+       plain.join(unsalted, ["user_id"], "inner")
+       .filter((plain.amount != unsalted.amount) | (plain.n != unsalted.n))
+       .count()
+   )
+   print("只在一侧的 key", only_plain, only_salted, "值不一致的 key", mismatch)
+   assert (only_plain, only_salted, mismatch) == (0, 0, 0), (only_plain, only_salted, mismatch)
+   print("WI90[01-skew-and-hot-keys][salting-preserves-result] OK")
+   ```
+7. `code` ③ 解法 B/C —— 广播绕开 shuffle join（治 join 那一半）。断言押在**计划里的算子名**上：
+   ```python
+   dim = (spark.range(50, seed=5)
+          .select(f.concat(f.lit("u"), f.col("id").cast("string")).alias("user_id"),
+                  f.col("id").alias("dim_v")))
+   keys = events.select("user_id").distinct()
+   smj = keys.join(dim, "user_id", "left")
+   spark.conf.set("spark.sql.autoBroadcastJoinThreshold", -1)
+   plan_smj = smj.explainString() if hasattr(smj, "explainString") else smj._jdf.queryExecution().toString()
+   spark.conf.set("spark.sql.autoBroadcastJoinThreshold", 10 * 1024 * 1024)
+   plan_bcast = smj._jdf.queryExecution().toString()
+   print("关掉广播阈值：", [ln for ln in plan_smj.splitlines() if "Join" in ln][:4])
+   print("放开广播阈值：", [ln for ln in plan_bcast.splitlines() if "Join" in ln][:4])
+   assert "SortMergeJoin" in plan_smj, "阈值关了还不走 sort-merge ⇒ 本机数据形状与假设不符，别改断言，看上面的计划行"
+   assert "BroadcastHashJoin" in plan_bcast
+   print("WI90[01-skew-and-hot-keys][broadcast-changes-plan] OK")
+   ```
+   ⚠ 上面那份 `hasattr` 试探是**给你手测用的脚手架**，落地时删掉：先用一次性脚本跑出两种阈值下的真实计划文本，**按实测算子名写断言**，把没用的分支删干净。
+   ⚠ ③ 解法 C（`hint("skew")` + `spark.sql.adaptive.skewJoin.enabled`）**不断言**：AQE 的 skew join 只在 shuffle 统计真倾斜时才生效，`local[*]` 上小数据常常不触发。写成"跑一遍看计划与 `explain()` 里有没有 skew 痕迹，把实测文本贴在这里"，并明确一句：**skew hint 救 join、救不了聚合**（这是本篇最值钱的一句话，不需要时间也能成立）。
+8. `code` 计时对照（只打印，不断言）：三种写法各跑一次 `count()` 与真实聚合，打印耗时与 `shares_before/shares_after`。
+9. `md` ⑤ 速查表（`spark.sql.shuffle.partitions`、`advisoryPartitionSizeThreshold`、`adaptive.*`、`skewJoin.*`：默认值 / 什么时候动 / 动错的表征）+ 追问链（count distinct 为什么更容易倾斜、空 key 怎么处理、**为什么 skew hint 救不了聚合**——这条要推到机制层：聚合的倾斜发生在 hash 分区那一步，而 skew join 的改写只针对 join 的 key）。
+10. `md` 题库指针：`bd-pyspark-0001`（匿名流量占九成的 UV：热点 key 拆分 + 两阶段精确去重 —— 本篇面试题的本体）与 `bd-pyspark-0002`（join 右表多版本导致行数膨胀：先收敛维度再广播 —— 广播绕开倾斜那一解）。
+11. `code` 收尾：`spark.stop()`（**最后一个单元**；闸门据此不往容器里丢活内核，WI-93 那条"没守护"的反面是"闸门跑完攒一核"）。
+
+- [ ] **Step 3: 手测 → 落闸门 → 校准**
+
+```bash
+docker compose up -d --build arena
+docker compose exec -T arena env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts > /tmp/wi90-t2-gate.log 2>&1; echo "GATE_EXIT=$?"
+```
+Expected: `GATE_EXIT=0`，本篇用时 ≤ 90s（超了就缩 `N`，并同步改①里那两条阈值 —— 阈值与数据量必须一起校准）。
+**把本篇真实跑出来的数字**（行数、`hot_share`、`shares_before[0]`、`shares_after[0]`、三种写法的耗时、spark 版本）写进⑤段与提交信息。
+
+- [ ] **Step 4: 破坏性验证（这一篇要给结论层一次真的反证）**
+
+1. 把①里 `id % 5 < 2` 改成 `id % 5 == 0`（20% 而非 40%）⇒ `hot-key-dominates` 那条 marker 之前的 `assert` 必须红，且红在**断言**不是异常栈丢失；
+2. 把⑤的 `assert shares_after[0] < shares_before[0] / 2` **删掉**（结论被删的坏法）⇒ 闸门必须红在"没打出结论标记"（这就是 Ruling(B1) 存在的理由，实测输出贴进注释）；
+3. 把 `metadata.kernelspec.name` 改成 `python3` ⇒ 必须红在 kernel 那条（红线①的教学版示范）；
+4. 全部还原，`GATE_EXIT=0`。
+
+- [ ] **Step 5: 宿主档 + Commit**
+
+`npm run verify:fast > /tmp/wi90-t2-fast.log 2>&1; echo "FAST_EXIT=$?"` ⇒ 0（常驻那一组要能判住注册表形状与清单一致性）。
+Commit：`feat(notebooks): WI-90 Task 2 —— 篇 1 倾斜与热点 key（加盐不改变答案是硬证据）`
+
+---
+
+## Task 3：篇 2 `02-small-files-and-partitioning`（小文件与物理设计）
+
+**Files:**
+- Create: `content/notebooks/02-small-files-and-partitioning.ipynb`
+- Modify: `server/test/notebooks/tutorial-claims.ts` → `['file-count-is-what-you-write', 'small-files-get-merged-on-read', 'open-cost-drives-partitions', 'coalesce-not-shuffle', 'fewer-files-not-slower-read']`
+
+- [ ] **Step 1: 登记 slug**（同上形状）
+
+- [ ] **Step 2: 写 notebook**
+
+结构同篇 1。关键单元（scratch 目录必须在**容器内可写、且不在 `data/notebooks`**，否则用户文件列表里会长出一堆 `wi90-*`）：
+
+```python
+import glob, os, shutil, time
+from pyspark.sql import SparkSession, functions as f
+
+spark = SparkSession.builder.appName("wi90-02-small-files").getOrCreate()
+SCRATCH = f"/tmp/wi90-02-{os.getpid()}"           # 不进 data/notebooks：那是读者的工作区
+shutil.rmtree(SCRATCH, ignore_errors=True)
+df = spark.range(200_000, seed=11)
+```
+
+① 现象 —— 默认 `shuffle.partitions=200` 的 `append` 反复写，是"目录爆炸"最常见的真实来源；这里用 `repartition(2000)` 一次性把它做出来：
+
+```python
+many = f"{SCRATCH}/many"
+df.repartition(2000).write.mode("overwrite").parquet(many)
+files = glob.glob(f"{many}/part-*.parquet")
+sizes = sorted(os.path.getsize(p) for p in files)
+print("文件数", len(files), "最小/中位/最大字节", sizes[0], sizes[len(sizes)//2], sizes[-1])
+assert len(files) == 2000, len(files)
+assert sizes[-1] < 1_000_000, sizes[-1]
+print("WI90[02-small-files-and-partitioning][file-count-is-what-you-write] OK")
+```
+
+② 取证 —— 读侧把小文件**合并成输入分区**，量的是 `getNumPartitions()`（确定性）：
+
+```python
+spark.conf.set("spark.sql.files.maxPartitionBytes", 128 * 1024 * 1024)
+spark.conf.set("spark.sql.files.openCostInBytes", 4 * 1024 * 1024)
+merged = spark.read.parquet(many)
+n_merged = merged.rdd.getNumPartitions()
+print("2000 个文件读回来 ⇒ 输入分区数", n_merged)
+assert n_merged < len(files) // 2, (n_merged, len(files))
+print("WI90[02-small-files-and-partitioning][small-files-get-merged-on-read] OK")
+```
+
+把"合并"这个默认行为**关掉**，分区数就会爬回文件数量级 —— 这一条是 `openCostInBytes` 的正面证据：
+
+```python
+spark.conf.set("spark.sql.files.openCostInBytes", 0)
+spark.conf.set("spark.sql.files.maxPartitionBytes", 1024 * 1024)
+n_split = spark.read.parquet(many).rdd.getNumPartitions()
+print("openCost=0 且每分区预算 1MB ⇒ 输入分区数", n_split)
+assert n_split > n_merged, (n_merged, n_split)
+print("WI90[02-small-files-and-partitioning][open-cost-drives-partitions] OK")
+```
+
+③ 解法 —— `coalesce` 不 shuffle、`repartition` 全 shuffle，断言押在计划文本：
+
+```python
+spark.conf.set("spark.sql.shuffle.partitions", 200)
+plan_coalesce = df.coalesce(8).explainString() if False else df.coalesce(8)._jdf.queryExecution().simpleString()
+plan_repart  = df.repartition(8)._jdf.queryExecution().simpleString()
+print(plan_coalesce); print(plan_repart)
+assert "Exchange" not in plan_coalesce, plan_coalesce          # coalesce 不引入 shuffle
+assert "Exchange" in plan_repart, plan_repart                   # repartition 一定走 shuffle
+print("WI90[02-small-files-and-partitioning][coalesce-not-shuffle] OK")
+```
+
+④ 量差异 —— 三种写法落盘的文件数与读回耗时（**耗时只打印**），断言只押"文件数下降、行数守恒、读回不慢于对照 2 倍"：
+
+```python
+few = f"{SCRATCH}/few"
+t0 = time.perf_counter(); df.coalesce(8).write.mode("overwrite").parquet(few); t_write = time.perf_counter() - t0
+few_files = glob.glob(f"{few}/part-*.parquet")
+t1 = time.perf_counter(); rows_many = spark.read.parquet(many).count(); t_read_many = time.perf_counter() - t1
+t2 = time.perf_counter(); rows_few  = spark.read.parquet(few).count();   t_read_few  = time.perf_counter() - t2
+print("many:", len(files), "文件 / 读回", round(t_read_many, 2), "s   few:", len(few_files), "文件 / 读回", round(t_read_few, 2), "s")
+assert len(few_files) == 8 and rows_many == rows_few == 200_000
+assert t_read_few <= t_read_many * 2, (t_read_few, t_read_many)   # 这条是护栏，不是结论：真结论是人眼看耗时
+print("WI90[02-small-files-and-partitioning][fewer-files-not-slower-read] OK")
+```
+
+⑤ 收尾（最后一个单元）：
+
+```python
+shutil.rmtree(SCRATCH, ignore_errors=True)
+assert not os.path.exists(SCRATCH), "scratch 没清干净 ⇒ 闸门每跑一次就在 /tmp 里留一份 parquet"
+spark.stop()
+```
+
+- [ ] **Step 3: 手测、跑闸门、校准**（同 Task 2 Step 3；把真实的文件数/大小/分区数/耗时写进⑤与提交信息；**若 `openCostInBytes` 那一对阈值在本机给不出方向差**，就改用能给出差的预算组合，并把实测两组数字写进注释 —— 不许把断言改成恒真）
+
+- [ ] **Step 4: 破坏性验证**：① 把 `repartition(2000)` 改成 `coalesce(2000)`（落盘文件数变少）⇒ `file-count-is-what-you-write` 必须红；② 把 `openCostInBytes` 那一段的两行删掉 ⇒ `open-cost-drives-partitions` 必须红；③ 删掉收尾的 `shutil.rmtree` ⇒ 那条 `assert not exists` 必须红，且**跑两次之后 /tmp 里出现残留**（把 ls 输出贴进报告，这条判据的价值就在这）；④ 还原 ⇒ `GATE_EXIT=0`。
+
+- [ ] **Step 5: markdown ②/⑤ 段**：分区键选高基数列会发生什么（目录数量 = 基数 × 每次写入的文件数，正是 `bd-pyspark-0005` 那道"目录爆炸"的量法）；增量覆盖写怎么避免小文件（`partitionOverwriteMode` 的口径 + 一次合并写的取舍）；题库指针 `bd-pyspark-0005`。
+
+- [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 3 —— 篇 2 小文件与物理设计（读侧合并用 getNumPartitions 量）`）
+
+---
+
+## Task 4：篇 3 `03-reading-the-plan-and-aqe`（计划解读与 AQE）
+
+**Files:**
+- Create: `content/notebooks/03-reading-the-plan-and-aqe.ipynb`
+- Modify: `server/test/notebooks/tutorial-claims.ts` → `['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-not-always-faster']`
+
+- [ ] **Step 1: 登记 slug**
+
+- [ ] **Step 2: 写 notebook**（要点与判据形状；**AQE 那两处的计划文本形状必须先手测**，本篇是四道判据里最容易"照猜写断言"的一篇）
+
+① 建一张会 shuffle 的表，`explain('formatted')` 逐节读（`Exchange` / `HashJoin` vs `BroadcastHashJoin` / `WholeStageCodegen` 被什么打断）。
+③ 三段 AQE 各管一件事：`coalescePartitions` / 动态 join 策略 / `skewJoin`。逐段量：
+
+```python
+spark.conf.set("spark.sql.adaptive.enabled", False)
+spark.conf.set("spark.sql.shuffle.partitions", 200)
+agg = big.groupBy("k").count()
+parts_planned = agg.rdd.getNumPartitions()
+assert parts_planned == 200, parts_planned     # 计划里那个数是配置说了算
+```
+
+AQE 打开后**触发一次执行**，再读 executedPlan 里那个被合并出来的分区数（形状要实测；下面是 3.5 上常见的写法，落地前用一次性脚本确认，别照抄）：
+
+```python
+spark.conf.set("spark.sql.adaptive.enabled", True)
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", True)
+import re
+_ = agg.count()                                  # AQE 只在 shuffle 物化之后才有统计可决策
+plan_txt = agg._jdf.executedPlan().toString()
+print("\n".join(ln for ln in plan_txt.splitlines() if "AQE" in ln or "ShufflePartitions" in ln))
+m = re.search(r"AQEShuffleRead\s*(?:coalesced|partitioning\s+([\w ]+))?\s*(?:\(\d+\)\s*)?(\d+)\s*partition", plan_txt)
+assert m, f"没从 executedPlan 里认出 AQEShuffleRead ⇒ 这台镜像的回话形状与假设不同，把上面打印的计划行读一遍再改解析，别放宽断言"
+coalesced = int(m.group(2))
+assert coalesced < parts_planned, (coalesced, parts_planned)
+print("WI90[03-reading-the-plan-and-aqe][aqe-coalesces-shuffle-read] OK")
+```
+
+`aqe-not-always-faster` 是这一篇最值钱也最容易被写成"调这个参数"的一条：小数据 + 额外 stage 边界 ⇒ AQE **可能更慢**。断言**不能**押耗时（Ruling(B1)），改成押一个确定的事实 —— 关掉 AQE 时那条 shuffle 读有 200 个分区，打开后被合并到更少，因此"更少分区"与"更快"是两件事，用同一份数据把两个数都打出来让人看见：
+
+```python
+def timed(action):
+    t = time.perf_counter(); out = action(); return round(time.perf_counter() - t, 3), out
+t_off, _ = timed(lambda: agg.count())
+spark.conf.set("spark.sql.adaptive.enabled", False)
+t_aqe_off, _ = timed(lambda: agg.count())
+spark.conf.set("spark.sql.adaptive.enabled", True)
+t_aqe_on, _ = timed(lambda: agg.count())
+print(f"合并到 {coalesced} 个分区（原 200）；耗时 AQE关={t_aqe_off}s AQE开={t_aqe_on}s")
+assert coalesced < parts_planned and t_aqe_on > 0
+print("WI90[03-reading-the-plan-and-aqe][aqe-not-always-faster] OK")
+```
+
+⚠ 这一条的 `assert` 故意只押确定量，结论那句"更少不等于更快"写在 markdown 里并**带上本篇实测的两个耗时**（数字来自当场跑，符合纪律四）。
+
+- [ ] **Step 3: 手测 + 闸门 + 校准**（同上。若 `AQEShuffleRead` 在本镜像的文本形状不同，改解析并**把实测原文贴进注释**，不许放宽断言）
+
+- [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② 把 `_ = agg.count()` 删掉（不触发执行就读 executedPlan）⇒ `aqe-coalesces-shuffle-read` 必须红在"认不出 AQEShuffleRead"（这条是"顺序依赖"的判据，最容易静默坏掉）；③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红。
+
+- [ ] **Step 5: markdown**：⑤ 追问链"怎么证明 broadcast 把 executor 撑爆了"（本机标未验证：`local[*]` 没有独立 executor 内存这条线，只能看 `BroadcastExchange` 的 size 估计）、"AQE 为什么看不到 CBO"；题库指针 `bd-pyspark-0002` 与 `bd-pyspark-0010`（非等值时间窗 join 换不了 BroadcastHashJoin，计划退化最典型）。
+
+- [ ] **Step 6: 宿主档 + Commit**（`feat(notebooks): WI-90 Task 4 —— 篇 3 计划解读与 AQE（"更少分区 ≠ 更快"押确定量）`）
+
+---
+
+## Task 5：三篇一起收口 —— 全量验证、数字校准、记忆与工作板
+
+**Files:** Modify `README.md`、`docs/ARCHITECTURE.md`、`HANDOVER.md`、`memo.md`
+
+- [ ] **Step 1: 全量三档**
+  ```bash
+  ./start.sh --verify > /tmp/wi90-t5-verify.log 2>&1; echo "CV_EXIT=$?"
+  npm run verify:fast > /tmp/wi90-t5-fast.log 2>&1; echo "FAST_EXIT=$?"
+  npm run e2e > /tmp/wi90-t5-e2e.log 2>&1; echo "E2E_EXIT=$?"
+  ```
+  核对（逐项贴实测）：`CV_EXIT=0`；新增那条阶段出现**恰好 1 次**、区域内 `skip` 计数 0（**判据用行/字节，先证明区间非空**）；`tutorials.test.ts` 的条数与 `3 passed/0 failed`（三篇 + 清单完整性 + 常驻组）；`kernel.test.ts` 仍 `30 passed`；`embed.test.ts` 条数不减；判题矩阵 `跳过 0`。
+  E2E 跑在 e2e 独立实例（宿主 `127.0.0.1:7798`），它**没有 token ⇒ 不起 jupyter**，所以那里能诚实判的只有"文件列表在 Jupyter 没起来时也要如实显示"——这一条若 WI-94 Task 6 已覆盖就写"已覆盖，见 `tests/e2e/notebook-page.spec.ts`"，**不要**为了凑绿伪造一次带 Jupyter 的 e2e 实例。
+- [ ] **Step 2: 真浏览器（如果 WI-94 已内嵌，这一步在真页面上看这三篇）**：`#/notebook` 左栏出现三个文件、点开其中一篇能进编辑器、console error 与 warning 都 0、故意停 ~60 秒再看服务还在。**任何一步做不到就如实报告并登记 WI，不许把"页面渲染出来了"当成"能跑"。**
+- [ ] **Step 3: 数字校准**：把三篇的真实执行用时写进 `README.md` 的 notebook 一节（"单篇实测 Xs，闸门预算 120s"），并核对每篇的⑤段里出现的每个数字都能在本篇跑一遍后看见（来源标注或当场量），**不留 outputs**。
+- [ ] **Step 4: 记忆与工作板**：`memo.md` 里程碑（做了什么/验证表带真实退出码/已知问题/教训 —— 教训至少含"耗时不能当结论层判据"与"`getNumPartitions()` 这类确定量能把教学结论钉死"两条）；`HANDOVER.md` WI-90 → COMPLETED 附验证命令与结果，并把后续批次（v2/v3 的 9 类主题）作为新 WI 或保留在规格的引用上写清。
+- [ ] **Step 5: Commit**（`docs+verify: WI-90 三篇教程收口 —— 实测用时 + 三档 + 记忆`）
+
+---
+
+## 完成判据
+
+1. `CV_EXIT=0` / `FAST_EXIT=0` /（如 WI-94 已交付）`E2E_EXIT=0`；容器档新增阶段出现恰好 1 次且区域内 `skip` 为 0；判题矩阵 `跳过 0`。
+2. 三篇各自被容器档真执行过，**每条注册结论都有 marker**，且 §Step 4 那三次破坏性验证各自实测红过（数字写在注释/报告里，不写推测）。
+3. 每篇都满足规格的 senior 口径：一个不了解这段代码的人能只靠⑤段速查表回答"先查哪三个数、两种根因怎么验证"；至少一条追问推到**机制层**。
+4. `content/notebooks/` 里每篇 `.ipynb`（`00-` 开头除外）都在注册表里；注册表里没有不存在的文件。
+5. 三篇都不含 outputs；`metadata.kernelspec.name == "arena-pyspark"`；scratch 目录跑完不残留。
+6. `package.json`（三处）一个字节都没变。
