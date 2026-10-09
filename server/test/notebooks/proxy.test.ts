@@ -943,6 +943,68 @@ describe('/jupyter 同源反代：websocket 隧道（第二条通道）', () => 
     }
     socket.destroy();
   });
+
+  /**
+   * WI-94 Task 4d：**优雅退出**这一条的闸门（宿主档）。症状本身在真容器里量（数字钉在 `proxy.ts`
+   * 上面那段表格里）：挂着一条活 ws 时 `docker compose stop -t 30 arena` 用满 **32 秒**、退出码 **137**，
+   * 于是 `index.ts` 的 `finally { await store.close(); process.exit(0) }` 与日志排空**一行都不执行** ——
+   * 而"活 ws 在场"是**常态**（浏览器打开 notebook 页面就长期挂着一条 `channels`）。
+   * 容器那一次**不做成常驻闸门**（它会停掉正在跑的服务，等于每次验证自己拔一次电源），
+   * 这里做的是它对应的可重复形状：**建立一条真 101 ⇒ `app.close()` 必须在几秒内返回**。
+   *
+   * ⚠ 三个夹具上的讲究，每一个都对应一次实测过的故障：
+   * ① 那个 `await` **必须带 cap**。没有 cap 时"修不好"的表现是**挂死**而不是红（本项目那条
+   *   "挂死的门禁比红更坏"），而挂死会连带把 `afterEach` 里对同一台 app 的 close 一起拖住。
+   * ② `destroy()` 之后这条 socket 的 `'error'` 必须**就地有人接**：`handshakeRequest` 里已经接了
+   *   （`sock.on('error', () => undefined)`），Task 4 §2.4 实测过"任何一条 socket 的 error 没人接住
+   *   ⇒ vitest worker 整片崩掉、一个结论都没有"。所以这里**不许**换成裸 `net.connect`。
+   * ③ 收尾（销毁 socket + 摘出 `opened`）**必须排在断言之前**：红的时候也要让 `afterEach` 收得干净，
+   *   而 `opened` 里留一台已经 close 过的 app 会让它被关第二次。
+   */
+  it('挂着一条**活的** ws 隧道连接时 app.close() 仍在几秒内返回（优雅退出这条路存在与否就判这一条）', async () => {
+    const up = await startWsEcho();
+    wsUpstreams.push(up);
+    const wsApp = await injectApp({ token: CANARY, upstreamPort: up.port });
+    const { socket, headBlock } = await handshakeRequest({
+      port: wsApp.port,
+      path: `${JUPYTER_BASE_URL}api/kernels/deadbeef/channels?session_id=1`,
+      secFetchSite: 'same-origin',
+    });
+    // 前置判据（本条自己的"判据对象存在吗"）：连接**确实活着**。少了这两行，"没有任何东西在拖 close"
+    // 也会看起来像成功 —— 那是假绿，正是本仓库"闸门一直是装饰"那一类。
+    expect(headBlock.toString('latin1').startsWith('HTTP/1.1 101'), '夹具没建起活隧道 ⇒ 本条没有判据对象（先修夹具）').toBe(true);
+    expect(socket.destroyed, '握手刚成 socket 就断了 ⇒ 本条没有判据对象').toBe(false);
+
+    const RETURN_WITHIN_MS = 5_000; // 明显小于"挂死"那一级：实测有记账时 close 是毫秒级，没记账时 15 秒都不返回
+    const HANG_CAP_MS = 15_000;
+    const started = Date.now();
+    // `close()` 这里只许调用**这一次**（再调一次是"关一个已经关掉的实例"）；它也必须有人接 reject。
+    const closing = (wsApp.app.close() as Promise<unknown>).catch(() => undefined);
+    let hangTimer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      closing.then(() => 'closed' as const),
+      new Promise<'hang'>((r) => {
+        hangTimer = setTimeout(() => r('hang'), HANG_CAP_MS);
+      }),
+    ]);
+    const elapsed = Date.now() - started;
+    if (hangTimer) clearTimeout(hangTimer);
+
+    // ── 收尾（两种结局都要走完，所以排在断言之前）──
+    socket.destroy();
+    // 实测过的那条最便宜的修法在这里**不管用**（`proxy.ts` 那张表的第三行：升级过的 socket 不在
+    // `closeAllConnections()` 的覆盖范围里）。这里仍然调它，是为了让"红"也能在几秒内把这台 app 收干净、
+    // 不让 afterEach 再挂一次 —— 真把 close 救回来的是上面 `socket.destroy()` 那一条（隧道的
+    // `socket.on('close', () => usocket.destroy())` 会顺着把上游那半也收掉）。
+    wsApp.app.server.closeAllConnections?.();
+    if (outcome === 'hang') await Promise.race([closing, new Promise((r) => setTimeout(r, 5_000))]);
+    opened = opened.filter((a) => a !== wsApp.app);
+
+    expect(outcome, `app.close() 在 ${HANG_CAP_MS}ms 内**根本没返回** ⇒ 关停被那条活 ws 拖住：` +
+      '把 `proxy.ts` 里那个 `liveTunnels` 记账（或它下面那条 `preClose` 钩子）摘掉就是这个症状，' +
+      '生产上它长成"docker compose stop 用满 grace period 后被 SIGKILL（退出码 137）"').toBe('closed');
+    expect(elapsed, `app.close() 返回了但用了 ${elapsed}ms（闸门是 ${RETURN_WITHIN_MS}ms）⇒ 关停仍在等某条没被收掉的 socket`).toBeLessThan(RETURN_WITHIN_MS);
+  });
 });
 
 describe('隧道自己的两个纯函数（Task 4 的 websocket 通道共用同一份）', () => {

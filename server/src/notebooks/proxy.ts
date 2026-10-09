@@ -169,7 +169,7 @@ function claimJupyterUpgrades(server: NarrowableServer): boolean {
 /**
  * 第二条通道：内核 ↔ 页面的 websocket（`/jupyter/api/kernels/<id>/channels`）。
  * `jupyter_server` 在这一条上跑的是**执行** —— 这一条不通，内嵌就是个只能看不能跑的截图。
- * 它有两个 HTTP 隧道没有的性质，每一个都决定了这里的一行：
+ * 它有三个 HTTP 隧道没有的性质，每一个都决定了这里的一行：
  * ① 浏览器给原生 WebSocket **加不了请求头** ⇒ 凭据只能走 `?token=`（`proxiedPath(…, true)`），
  *    而客户端自己塞的那一份**必须摘掉**（两份同时在场时 jupyter 读哪个是未定义行为）—— 复用 HTTP 那
  *    一份 `proxiedPath`，就是为了"摘"这件事只有的一处实现；
@@ -179,12 +179,70 @@ function claimJupyterUpgrades(server: NarrowableServer): boolean {
  *    `proxy.test.ts` 那条结构判据数的就是"每条通道各一次、全文件仅此两次"。
  * `head`（握手之后已经到了一截的字节）在隧道建好之后写进**对侧的 socket**，不写进 `upstreamReq`：
  * 那个请求没有 content-length，往它身上写字节会变成 chunked，把握手打成乱码。
+ *
+ * ## ③ 第三条性质（Task 4d）：**一条活着的 socket 会把优雅退出整个带走**，所以隧道必须自己记账
+ *
+ * `http.Server.close()` 要等**所有**连接结束。三条实测（宿主 Node 24.14.1 / fastify 5.6.1，2026-10-09，
+ * 探针跑的是真 app + 真 101；闸门是 `proxy.test.ts` 最后那一条）：
+ *
+ * | 量的是什么 | 结果 |
+ * | --- | --- |
+ * | 裸 Node：活 ws 在场，只 `srv.close()` | **6004ms 未返回**（cap 到点）；无活 ws 时同一台 **1ms** |
+ * | 裸 Node：先 `destroy()` **服务端**那条 socket 再 close | **0ms 返回** |
+ * | 裸 Node：先 `destroy()` **客户端**那条（浏览器/探针那侧）再 close | **6003ms 仍未返回** —— 服务端那条的 `destroyed` 还是 false ⇒ **对面断了不等于这边结束了** |
+ * | 裸 Node：`srv.closeAllConnections()` 再 close | **6014ms 仍未返回**，且调用之后**服务端**那条 `destroyed` 仍是 **false** |
+ * | fastify：默认构造 `app.close()` | **15003ms 仍未返回** |
+ * | fastify：`forceCloseConnections: true`（它在 onClose 里调 `closeAllConnections()`） | **15006ms 仍未返回** |
+ *
+ * ⇒ 第五、六两行把上一档那句申报**从推论变成实测**：`closeAllConnections()` 确实**不覆盖升级过的 socket**
+ * （上一档读的是夹具里 `srv.close()` 挂 60s，而 `srv.close()` ≠ `closeAllConnections()` —— 这次两把都量了），
+ * 所以"最便宜的那条修法"（给 app 加 `forceCloseConnections`）**不解决**问题。
+ * ⇒ 第三行决定了**必须 destroy 的是我们自己那一侧**（`upgrade` 事件给的 `socket`），
+ * 光等浏览器那侧断开是不够的 —— 而"浏览器那侧"恰恰是 notebook 页面长期挂着的那一条。
+ * ⇒ 生产后果：`compose.yml` 没设 `stop_grace_period` ⇒ 默认 10 秒，而修之前真容器实测是
+ * **用满 32 秒 + 退出码 137（SIGKILL）**（`docker compose stop -t 30 arena`，挂着一条活 ws；基线无活 ws 时 **1 秒 / 0**），
+ * `index.ts` 的 `finally { await store.close(); process.exit(0) }` 与日志排空**一行都不执行**。
+ * 而"活 ws 在场"是**常态**：浏览器打开 notebook 页面就长期挂着一条 `channels`。
+ *
+ * 所以责任落在这一层：**隧道自己拥有自己那些 socket 的生命周期**（下面的 `liveTunnels` + 那条钩子），
+ * `server/src/index.ts` 一行都不用改，也不暴露一个"要记得调用"的函数 —— 要记得调用的东西迟早被忘记
+ * （本仓库的既有教训）。**没选**给 compose 加 `stop_grace_period`：那只是把"被强杀"往后推。
  */
 export function attachNotebookUpgrade(
-  server: NarrowableServer,
+  app: FastifyInstance,
   deps: { upstream: NotebookUpstream; authority: string; gatewayAddresses?: string[] },
 ): void {
+  const server = app.server as unknown as NarrowableServer;
   const narrowing = claimJupyterUpgrades(server);
+  /**
+   * 隧道自己记账的那本账（上面 ③ 的落地）：凡是**我们决定要隧道**的 socket —— 我们这一侧那条（`upgrade`
+   * 事件给的 `socket`）、以及握手成了之后的上游那条 —— 都进这个 Set，`close` 时出去。关停时一次
+   * `destroy()` 把它们全清掉，于是 `http.Server.close()` 不再等一条永不自愈的 websocket。
+   * ⚠ 记账里**必须有我们这一侧那条**：上面第三行量到"只断对面那条"不够（服务端 socket 的 `destroyed`
+   * 会一直停在 false），所以"浏览器关了页面"这件事本身救不了关停。
+   * 为什么用 `once('close')` 摘而不是在别处：`destroy()` 之后 `close` 必然发一次，于是这本账不会长脏；
+   * 而两条方向都在账里（上游那条另有一道 `usocket.on('close', …)` 兜着，记账是第二道）。
+   */
+  const liveTunnels = new Set<Duplex>();
+  const trackTunnel = (socket: Duplex): void => {
+    liveTunnels.add(socket);
+    socket.once('close', () => liveTunnels.delete(socket));
+  };
+  // 钩子选 **`preClose`** 而不是派发里写的 `onClose` —— 这不是审美，是实测把 `onClose` 那一支否掉了：
+  // avvio 的 `onClose` 队列是 `_closeQ.unshift(...)`（`node_modules/avvio/index.js:311`），也就是**后注册先跑**，
+  // 而 fastify 自己那条"关 server"的 onClose 是在 `preReady`（= 第一次 `listen()`/`ready()`）时才注册的
+  // （`node_modules/fastify/fastify.js:385` 那个 `avvio.once('preReady', …)`），必然排在**我们之前**跑；
+  // 它一跑就是 `server.close()` —— 正好挂在我们要清的那条 socket 上 ⇒ boot 期注册的 `onClose` **永远排不到**。
+  // 实测（探针：app 上同时挂一条打点的 `preClose` 与一条打点的 `onClose`，再建一条真 101）：
+  //   `app.close()` 挂死 8004ms，期间只有 `preClose+270ms` 打了点，`onClose` **一次都没到**；
+  //   同一条探针把 `onClose` 换成"没有活 ws"的场景 ⇒ `onClose` 0ms 就到（钩子本身是可达的，只是排在等待之后）。
+  // `preClose` 跑在 fastify 自己那条 onClose **里面**、`server.close()` **之前**（同一个 `fastify.js:385` 那段
+  // `hookRunnerApplication('preClose', …)`），正是"在开始等之前把连接收掉"这个位置。
+  // 与派发那段"责任留在隧道里、`index.ts` 一行不改、不暴露要记得调用的函数"完全不冲突 —— 换的只是钩子名。
+  app.addHook('preClose', async () => {
+    for (const socket of liveTunnels) socket.destroy();
+    liveTunnels.clear();
+  });
   server.on('upgrade', (req, socket, head) => {
     // 每条 socket 的 'error' 都必须就地接住：这一层的对端随时可能被浏览器/上游半路砍断，
     // 而逃出去的 'error' 事件会**把整个进程带走**（本项目有过同类事故：一条 void 掉的 async 拒绝
@@ -213,6 +271,9 @@ export function attachNotebookUpgrade(
       ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }),
     });
     if (!verdict.ok) return rejectUpgrade(socket, verdict.status, { error: verdict.error, message: verdict.message });
+    // 守卫点头之后，这条 socket 就**归隧道所有**了 ⇒ 进账（否决的那一支由 `rejectUpgrade` 自己 destroy，不进账：
+    // 账本只装"我们打算长期持有"的连接，装进否决那条会让它变成一份永远摘不掉的脏账）。
+    trackTunnel(socket);
     const token = config.notebook.token;
     const upstreamReq = httpRequest({
       host: deps.upstream.host,
@@ -229,6 +290,7 @@ export function attachNotebookUpgrade(
     });
     upstreamReq.on('upgrade', (ures, usocket, uhead) => {
       usocket.on('error', () => socket.destroy()); // 同上：这一侧逃出去的 'error' 也会带走进程
+      trackTunnel(usocket); // 上游那一半同样进账（与上面那条是一对兜底：实测摘掉**任一条**仍绿、**两条都摘**才红 ⇒ 判据对象是这本账在不在，不是哪一格）
       socket.write(`HTTP/1.1 101 Switching Protocols\r\n${upgradeResponseLines(ures.headers).join('\r\n')}\r\n\r\n`);
       if (head && head.length) usocket.write(head);
       if (uhead && uhead.length) socket.write(uhead);
@@ -320,5 +382,7 @@ export function registerNotebookProxy(app: FastifyInstance, deps: { upstream?: N
   // 第二条通道（Task 4）：`/jupyter/api/kernels/<id>/channels` 那条 websocket。
   // 它**不在上面那棵树里**（`scope.route` 只管路由表），只能挂在 `app.server` 的 `upgrade` 事件上 ——
   // 于是守卫、凭据注入、逐跳头例外都要在那里重来一遍（判据本体仍然只有 `proxyGuard.ts` 那一份）。
-  attachNotebookUpgrade(app.server as unknown as NarrowableServer, { upstream, authority, ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }) });
+  // 传的是 **app** 而不是 `app.server`：那一层要自己挂 `onClose` 收掉它记账的那些 socket（上面 ③ 那段），
+  // 责任留在隧道里，关停路径（`index.ts`）一行都不必知道这件事。
+  attachNotebookUpgrade(app, { upstream, authority, ...(deps.gatewayAddresses === undefined ? {} : { gatewayAddresses: deps.gatewayAddresses }) });
 }
