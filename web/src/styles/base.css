@@ -2283,4 +2283,119 @@ tbody th {
   width: 60%;
 }
 
+/* ─────────────── WI-94 第五页：运行时卡的分组留白 + 两栏内嵌 ───────────────
+   ⚠ 这里只准用 tokens.css 里真的定义过的变量。brief 原稿写的 `--space-md` / `--hover` / `--muted`
+   在本仓库**一个都不存在**（间距阶梯是 --space-1…7，悬停底色走 --surface-2，弱文字是 --text-muted）：
+   未定义的 var 不会报错，它静默 fallback（带兜底值的那条属性直接生效成兜底值，没兜底的就成了"这条属性
+   压根没应用"），症状是"某个间距/颜色没生效但三档验证全绿" —— 正是这类"没人报错的没生效"最难查。
+   所以变量名改成了既有 token，**没有**顺手往 tokens.css 里加新 token（加一个只有这一处用的档位
+   等于给后面的改动留"其实存在两套间距体系"的坑）。 */
+
+/* 运行时卡内的分组：状态与操作 / 诊断横幅们 / 准备环境 / 示例那一堆，各成一组，组间留白。
+   以前这四堆是同层级一路排下来的，视觉上"这一张卡里全是话"，而它们的语气其实分四档。 */
+.nb-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.nb-group + .nb-group {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--line);
+}
+
+.nb-group-label {
+  color: var(--text-muted);
+}
+
+/* 两栏。宽度给 220px 是"文件名不折行"的经验值，窄屏直接改成上下堆叠 ——
+   内嵌的 iframe 永远不该把左栏挤没（320px 那次教训：Task 9 的第 5 个导航项把页头撞崩，
+   判据在 tests/e2e/responsive.spec.ts）。 */
+.nb-split {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .nb-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.nb-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 8px;
+  /* 笔记名可以很长（"01-skew-join-with-partition-by.ipynb"）：min-width:0 + 换行词边界
+     是这一栏不顶破 320px 视口的两道保险（responsive 那条闸门量的是 scrollWidth）。 */
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.nb-tree-head {
+  color: var(--text-muted);
+  padding: 0 8px 4px;
+}
+
+.nb-tree-item {
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.nb-tree-item:hover {
+  background: var(--surface-2);
+}
+
+.nb-tree-item.is-active {
+  font-weight: 600;
+  text-decoration: underline;
+  background: var(--surface-2);
+}
+
+.nb-tree-item:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* iframe 是这一页唯一"内容不由我们画"的东西：底色给白，避免 Jupyter 首帧之前的空白
+   在浅灰卡面上看起来像"加载坏了"。宽度必须 100% + 外层 minmax(0,1fr)，否则它的
+   intrinsic 宽度会把整个网格顶宽 ⇒ 整页横向滚动。 */
+.nb-frame {
+  width: 100%;
+  height: clamp(480px, 78vh, 1100px);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: #fff;
+  min-width: 0;
+}
+
+/* 边界卡折成一行（WI-94 Task 6）：summary 顶掉原来那个 .card-head 的标题位，
+   所以这里的间距按"标题行"给；箭头留着 —— 它是这一行唯一"点开还有话"的信号。 */
+.nb-boundary-details {
+  display: block;
+}
+
+.nb-boundary-details > summary {
+  cursor: pointer;
+  margin-bottom: var(--space-2);
+}
+
+.nb-boundary-details[open] > summary {
+  margin-bottom: var(--space-3);
+}
+
 

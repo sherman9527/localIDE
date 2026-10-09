@@ -39,6 +39,22 @@ import { expect, test, type Page } from '@playwright/test';
  * ③ console 的 error 与 warning **都为 0**（本项目那三个静默降级都是这么暴露的，只看 error 会漏）。
  * 另：这一态不许顺带说另外三态的假话 —— `notebook-nolink` / `notebook-spec-missing` /
  * `notebook-prepare` 都不出现（后两个给的是修不了当前故障的操作：venv 与 --rebuild 都救不了"没给 token"）。
+ *
+ * ## WI-94 Task 6 加进来的三件，以及"为什么只有这些能在这里诚实判"
+ * ④ **`running:false` 那一屏不许出现内嵌那一块**（`notebook-frame` / `notebook-tree` 各 count 0）。
+ *    这条在这个实例上是**能判的**：服务确实没在跑，而页面的门是按 `view.kind === 'open'` 关的；
+ *    把那一支改成"照旧渲染一个空 iframe"（派发词里要求的破坏性验证之一），这里当场红。
+ *    反过来，"内嵌的 iframe 真打开了一份笔记"这件事**不能**在这里断 —— 那需要 `running:true`，
+ *    等于要 e2e 拿到 token，拆掉 `notebook-compose.test.ts` 的 ⑥/③ 两条隔离判据。
+ *    所以浏览器层这一档钉的是**缺席**，真跑通 notebook 那一眼归 `./start.sh --verify` 的容器档与宿主实测。
+ * ⑤ **边界卡现在是折起来的 `<details>`**（用户批的第 4 件）。判据必须"先展开、再断可见"：
+ *    折叠着的 `<p>` 仍在 DOM 里，`textContent()` 与 `toHaveCount()` 都读得到它 ——
+ *    所以只数段落数的话，"忘了展开"与"展开后根本看不见"这两种故障**都不会红**。
+ *    真正有牙的是那句 `toBeVisible()`：删掉前面那次 `.click()` 它必红（本轮实测见 task-6-report.md）。
+ * ⑥ **空的分组壳不许留在页面上**（每个 `.nb-group` 自带一条 `border-top` + 一段留白）。这一条是
+ *    "真浏览器那一眼"（Step 3 第 8 条的两张截图）暴露的缺陷，两档自动化原本都照不出来：jsdom 没有
+ *    布局（空壳与有内容的壳在 `textContent` 判据下长得一样），而这里的实例是 `running:false` ——
+ *    诊断那一组本来就有话，只有「准备环境」那一组是空的。所以单元层数 DOM 形状、这里量真实盒子。
  */
 
 type Collected = { errors: string[]; warnings: string[] };
@@ -106,13 +122,46 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
   //    所以这个词在页面上是唯一的 ⇒ 删掉那一句它当场消失，换成"这里不构成安全边界"它不动。
   expect(pageText, '那句"判题用的是另一套解释器"没了 ⇒ 页面又把共用环境写成了一道保证').toContain('另一套解释器');
   expect(pageText, '那句"这不是安全边界"没了 ⇒ 参考答案的可读性被静默写成了保密性').toContain('安全边界');
+  // ⚠ WI-94 Task 6 之后这块折进了 `<details>`：**先展开再断**。
+  // 顺序是刻意的：`.click()` 排在任何边界判据之前，因为折叠状态下
+  // `toHaveCount(5)` 与 `textContent()` 都**照样成立**（折叠不删 DOM），于是"忘了展开"这一种
+  // 故障只能由下面那句 `toBeVisible()` 抓到 —— 而它必须在展开之后跑，否则它抓的是"没展开"这件事
+  // 本身，红得没有信息量。破坏性验证（本轮实测）：删掉这次 `.click()` ⇒ 本文件红的恰是可见性那句。
   const boundary = page.getByTestId('notebook-boundary');
   await expect(boundary).toBeVisible();
+  await page.getByText('这页跟判题有什么关系').click();
   await expect(boundary.locator('p'), '边界块少了一段 ⇒ 有人整句删掉了边界话（这一态共 5 段）').toHaveCount(5);
   await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' }), '那一块里没有提到回环地址的那句 ⇒ 三种说法之一被删了').toHaveCount(1);
+  // 展开之后这五段是真的**看得见**，不是只是挂在 DOM 上（折叠时它们对读者等于不存在）
+  await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' })).toBeVisible();
 
   // 示例清单与"在不在跑"无关：GET 顺手铺示例，所以 running:false 时也列得出那一份 smoke
   await expect(page.getByTestId('notebook-files')).toContainText('00-smoke-pyspark.ipynb');
+
+  // ⑥ **空的分组壳不许留在页面上**（真浏览器那一眼实测发现的缺陷，见 task-6-report.md）。
+  //    每个 `.nb-group` 带一条 `border-top` + 一段留白，所以"壳在而内容全是 null"的症状是
+  //    卡片里多出几条**没有话的空白带** —— 那是布局事实，jsdom 照不出来（单元层只能数 DOM 形状），
+  //    所以这一半判据必须在这里量真实盒子。这一态（running:false）里「准备环境」那一组正是空的。
+  const groupBoxes = await page.$$eval('.nb-group', (els) =>
+    els.map((e) => ({
+      children: e.childElementCount,
+      height: Math.round(e.getBoundingClientRect().height),
+      borderTop: getComputedStyle(e).borderTopWidth,
+    })),
+  );
+  expect(groupBoxes.length, '一张卡里一个壳都没有 ⇒ 分组结构整个没了（那上面挂着分隔线与留白）').toBeGreaterThan(0);
+  for (const g of groupBoxes) {
+    expect(g.children, '空的 .nb-group 还挂在页面上 ⇒ 多出一条没有话的空白带 + 一根分隔线').toBeGreaterThan(0);
+  }
+
+  // ④ WI-94 Task 6：`running:false` 这一屏不许出现内嵌那一块 —— 那棵子树在这个实例上结构上到不了，
+  //   摆一个空 iframe 就是谎（`web/src/pages/Notebook.tsx` 的门是 `view.kind === 'open'`）。
+  //   这一条与"这一页不 iframe 里真跑通了什么"无关，它判的是**缺席**。
+  //   注意 `notebook-files`（"这次铺了什么"）在上面照旧出现而 `notebook-tree`（"目录里现在有什么"）
+  //   必须不出现：两个 testid 一家一半，正是 Task 5 那条"两个语义不许合并成一个字段"的界面形状。
+  await expect(page.getByTestId('notebook-frame'), '服务没在跑却渲染 iframe ⇒ 读者对着一个空白框查一个不存在的服务').toHaveCount(0);
+  await expect(page.getByTestId('notebook-tree')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-embed')).toHaveCount(0);
 
   expectQuietConsole(seen);
 });
@@ -125,13 +174,26 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
  */
 test('按「刷新状态」重读之后：链接依旧不出现，面板不重复、不残留', async ({ page }) => {
   const seen = watchConsole(page);
+  // WI-94 Task 6：这一态连那次 readdir 都不必发。判的是**网络层**而不是 DOM ——
+  // 「按钮按下去多发一个请求」不会在任何 DOM 断言上留痕，而它的症状是控制台里一排 503。
+  const fileRequests: string[] = [];
+  page.on('request', (req) => {
+    if (req.url().includes('/api/notebook/files')) fileRequests.push(req.url());
+  });
   await page.goto('/#/notebook');
   await expect(page.getByTestId('notebook-status')).toContainText('没在运行');
   await expect(page.getByTestId('notebook-open')).toHaveCount(0);
+  // 内嵌那一块整片不在（首屏）
+  await expect(page.getByTestId('notebook-frame')).toHaveCount(0);
 
   await page.getByTestId('notebook-reload').click();
   await expect(page.getByTestId('notebook-status')).toContainText('没在运行');
   await expect(page.getByTestId('notebook-open')).toHaveCount(0);
+  // 「刷新状态」现在会同时重读左栏那份列表 —— 但 `running` 不是真值时那一支**不发请求**，
+  // 所以按完之后网络层还是零次 /api/notebook/files（单元层那条 `expect(files).not.toHaveBeenCalled()`
+  // 钉的是同一件事，两层的故障面不同：这里抓的是"真的打出去了"）。
+  await expect(page.getByTestId('notebook-frame')).toHaveCount(0);
+  expect(fileRequests, '服务没在跑却打了那次 readdir ⇒ 页面在按一个它已经知道不存在的接口').toEqual([]);
 
   // 一块面板一个实例：重复 key / 复用挂载在这里的表现就是"两个运行时块"或"按完钮多出一个是非不明的"
   await expect(page.getByTestId('notebook-status')).toHaveCount(1);
@@ -156,14 +218,20 @@ test('切走 #/ 再切回来：第五页不重复挂载，也不留残留', asyn
   const seen = watchConsole(page);
   await page.goto('/#/notebook');
   await expect(page.getByTestId('notebook-page')).toHaveCount(1);
+  // 内嵌那块是"这一页自己的"东西：切走再切回最容易留尸体的就是它（一个挂着 Jupyter 的 iframe
+  // 残在别的页面底下，症状是"我在做题，页面左边多出一个笔记本"）。
+  await expect(page.getByTestId('notebook-embed')).toHaveCount(0);
 
   await page.goto('/#/');
   await expect(page.getByTestId('notebook-page')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-frame')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-tree')).toHaveCount(0);
 
   await page.goto('/#/notebook');
   await expect(page.getByTestId('notebook-page')).toHaveCount(1);
   await expect(page.getByTestId('notebook-status')).toContainText('没在运行');
   await expect(page.getByTestId('notebook-open')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-frame')).toHaveCount(0);
 
   expectQuietConsole(seen);
 });

@@ -3,7 +3,7 @@ import './dom-shim';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 /**
  * 第五页（Jupyter notebook）。
@@ -18,20 +18,41 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  *    说成前者是谎（链接不存在），说成后者也是谎（服务确实在跑）。
  * 那几句边界话（共用环境 / 绝对路径拦不住 / CPU / 答案可读不是安全边界 / 只在本机打得开，
  * 逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
+ *
+ * ## WI-94 Task 6 加进来的那一维：notebook 现在**内嵌在这一页里**，不是"跳出去开一个标签页"
+ *
+ * 于是多了四件要钉的事，每件都对应一种会说谎的形状：
+ * ① iframe 的 `src` 是**同源相对路径**（`/jupyter/…`，由 `@arena/shared` 那三个常量派生）。
+ *    写死 `http://127.0.0.1:7789/…` 的话，用 `localhost` 打开页面的人就变成跨源，浏览器给这个
+ *    iframe 判 `cross-site` ⇒ 被 Jupyter 的 Host/Origin 守卫拒（症状是 iframe 里一片 403/登录页，
+ *    而我们这一页一切照绿）。断言里那句 `not.toContain('token')` 钉的是 WI-94 的**目的本身**：
+ *    凭据只在服务端注入，页面结构上拿不到它。
+ * ② `running:false` 时**不许**有 iframe、也**不许**打那次 `notebookFiles`。那棵子树在这个实例上
+ *    结构上到不了（e2e 那个实例永远是这一态，它的判据就建立在这条上）；摆一个空 iframe 是说谎。
+ * ③ 左栏那份列表的两种"空"各占一处：有 `error` ⇒「这一次读不到」；`files:[]` 且没有 `error` ⇒
+ *    「目录里就是没有」。**还没读到**则是第三种形状 —— 既不是说谎的时刻，也不许抢答"没有"
+ *    （下面那条 pending 的用例钉的就是它；`seedError` 那对用例是同一个纪律的先例）。
+ * ④ 换状态要真的换到 DOM 上：点左栏某份笔记 ⇒ **同一个 iframe 节点**换 `src`（换节点=每次点击都
+ *    重启一遍 Jupyter 页面，那是功能故障，不是审美问题）。
+ *
+ * 顺带一条被删掉的东西：内核徽章那一排（`notebook-kernels`）没了，但 `blocked`（「准备环境」）与
+ * `missingSpec`（该 `--rebuild`）两条诊断必须还在 —— 它们修的是两件不同的事。
  */
 
 const status = vi.fn();
 const prepare = vi.fn();
+const files = vi.fn();
 
 vi.mock('../src/api', () => ({
   api: {
     notebookStatus: () => status(),
     notebookPrepareEnv: () => prepare(),
+    notebookFiles: () => files(),
   },
 }));
 
 import Notebook from '../src/pages/Notebook';
-import { NOTEBOOK_TREE_PATH } from '@arena/shared';
+import { JUPYTER_BASE_URL, NOTEBOOK_TREE_PATH, notebookDocPath } from '@arena/shared';
 
 /**
  * 夹具里那份"后端给的链接"（WI-94 Task 1 之后它带 `/jupyter` 前缀）。
@@ -46,6 +67,15 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+/**
+ * 左栏那份列表**每个用到 open 态的用例都要有一份**：不给默认值的话，没设 mock 的用例里
+ * `api.notebookFiles()` 回的是 `undefined`，`useAsync` 会在 `undefined.then(...)` 上当场抛 ——
+ * 那种红说的是"这个用例忘了摆夹具"，不是"页面坏了"。单条用例再覆盖一次即可。
+ */
+beforeEach(() => {
+  files.mockResolvedValue({ files: [] });
+});
+
 const up = {
   running: true,
   url: `${TREE}?token=x`,
@@ -58,17 +88,60 @@ const up = {
 };
 
 describe('Notebook 第五页', () => {
-  it('服务在跑：给可点开的地址 + kernel 徽章', async () => {
+  it('服务在跑：给可点开的地址，且内核徽章那一排已经没了（WI-94 Task 6）', async () => {
     status.mockResolvedValue(up);
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
     // 链接就是那个 url 本身，不由前端二次拼（端口写死在页面里 = 第二处真相）
     expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe(`${TREE}?token=x`);
-    expect(screen.getByTestId('notebook-page').textContent).toContain('PySpark (arena)');
+    // 徽章那一排删了 ⇒ 那句 label 在 DOM 上再没有任何来源。留着这条断言不是为了"徽章没了"这口气，
+    // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpec 两块还靠它。
+    expect(screen.queryByTestId('notebook-kernels')).toBeNull();
+    expect(screen.getByTestId('notebook-page').textContent).not.toContain('PySpark (arena)');
     expect(screen.getByTestId('notebook-page').textContent).toContain('00-smoke-pyspark.ipynb');
     // 反向也要判：全都就绪时不许挂一个"准备环境"按钮（给了就是让人白点）
     expect(screen.queryByTestId('notebook-prepare')).toBeNull();
+  });
+
+  /**
+   * **状态卡里不许出现空的分组壳。** 这一条是 Step 3 第 8 条（真浏览器截图）暴露出来的缺陷，
+   * 不是审美：每个 `.nb-group` 带一条 `border-top` + 一段 `--space-4` 留白，于是"壳在而内容全是
+   * `null`"时页面上出现的是一条**没有任何话的空白带加一根分隔线** —— 而分隔线的意思是
+   * "上面那组说完了"，读者会去找那句并不存在的话。最常见的那一态（在跑、一切正常）本来挂两条。
+   *
+   * 为什么两档自动化原本都照不出来（也是这条为什么要配一个 e2e 兄弟判据）：
+   *  · jsdom 没有布局 —— 空壳与有内容的壳在 `textContent` 判据下长得一模一样，所以这里只能判
+   *    **DOM 形状**（壳的数量、每个壳有没有子节点）；
+   *  · e2e 那个实例永远是 `running:false`，诊断那一组本来就有话，只有「准备环境」那一组是空的
+   *    ⇒ "空壳真的占 17px 高并画出线"由 `tests/e2e/notebook-page.spec.ts` 量真实高度钉住。
+   *
+   * 两态各数一次，是为了让"2"不是被写死的巧合：有话说的那一组必须**出现**，没话说的那一组必须
+   * **不存在**（只判"没有空壳"的话，把壳全删掉也能绿）。
+   */
+  it('状态卡里不许出现空的分组壳：分隔线后面必须真有一句话（真浏览器实测发现的缺陷）', async () => {
+    status.mockResolvedValue(up);
+    files.mockResolvedValue({ files: ['01-a.ipynb'] });
+    const first = render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
+    const openGroups = [...document.querySelectorAll('.nb-group')];
+    expect(
+      openGroups.length,
+      '在跑且一切正常时多出来的分组壳 ⇒ 页面上是空白带 + 分隔线（诊断组与准备环境组此刻都没有话说）',
+    ).toBe(2);
+    for (const g of openGroups) expect(g.childElementCount, '空的 .nb-group 还挂在 DOM 上').toBeGreaterThan(0);
+    first.unmount();
+
+    // 换一态：这一态诊断组有话要说（那句"做题不受影响"），它必须出现 —— 于是总共三组
+    status.mockResolvedValue({ running: false, reason: '这个实例没有被给予 ARENA_JUPYTER_TOKEN …', kernels: [], notebooks: [] });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-down')).toBeTruthy());
+    const downGroups = [...document.querySelectorAll('.nb-group')];
+    expect(
+      downGroups.length,
+      '诊断那一组此刻有内容，壳必须存在（把它一起删掉=把"没在跑"那句话说没了）；而「准备环境」那一组仍然没有话，不许出现',
+    ).toBe(3);
+    for (const g of downGroups) expect(g.childElementCount, '空的 .nb-group 还挂在 DOM 上').toBeGreaterThan(0);
   });
 
   /**
@@ -91,6 +164,193 @@ describe('Notebook 第五页', () => {
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.queryByTestId('notebook-tokenless'), '两句话同时出现 ⇒ 读者分不清自己是不是本机').toBeNull();
+  });
+
+  /* ─────────── WI-94 Task 6：这一页现在**内嵌** notebook（左树 + 右 iframe） ─────────── */
+
+  /**
+   * 内嵌这条路的第一判据是 **src 的形状**：同源相对路径 + 默认落在"文件管理" + **不带 token**。
+   * 三条各拦一件具体的事：
+   *  - 绝对地址（把 `127.0.0.1:7789` 写进页面）在"用 localhost 打开"那次变成跨源 ⇒ iframe 被判
+   *    `cross-site`、被 Jupyter 的守卫拒；而页面自己一切照绿，坏只在 iframe 里那片 403。
+   *  - 默认落 `notebookDocPath(...)` 会假设目录里至少有一份示例（Task 6 派发词里那句"计划原稿自相矛盾"
+   *    的裁定：默认是"文件管理"）。
+   *  - URL 里出现 token 就把 WI-94 的目的本身抵消掉了（凭据只在服务端注入）。
+   * 最后一条钉的是"逃生链接照旧是后端给的那个带 token 的绝对地址" —— 内嵌与跳出不共用一条 URL，
+   * 谁也不许替谁说话。
+   */
+  it('running:true 时页面渲染同源 iframe，默认落在"文件管理"，src 是 `/jupyter/` 且**不含 token**', async () => {
+    status.mockResolvedValue({ ...up, url: `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}?token=x`, kernels: [], notebooks: [] });
+    files.mockResolvedValue({ files: ['01-skew.ipynb'] });
+    render(<Notebook />);
+    const frame = await screen.findByTestId('notebook-frame');
+    expect(frame.getAttribute('src')).toBe(JUPYTER_BASE_URL);
+    expect(frame.getAttribute('src'), '凭据不进页面（这一条是整个 WI-94 的目的）').not.toContain('token');
+    expect(frame.getAttribute('src'), '绝对地址 ⇒ localhost / 127.0.0.1 两种打开方式之一必跨源').not.toMatch(/^https?:/);
+    expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe(`http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}?token=x`);
+  });
+
+  /**
+   * 「换一次状态再看 DOM」这一档的单元层版本：只看首屏等于没测。
+   * `toBe(frame)` 那条是**节点身份**判据：给 iframe 挂 `key={selected}` 或用两个不同的 iframe 分支
+   * 都会让它红 —— 而那两种写法的症状不是报错，是"每点一次左栏就把 Jupyter 页面重启一遍"。
+   */
+  it('左栏点一份笔记 ⇒ iframe 的 src 换过去（换一次状态再看 DOM，不看首屏就算白测）', async () => {
+    status.mockResolvedValue({ ...up, url: `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}`, kernels: [], notebooks: [] });
+    files.mockResolvedValue({ files: ['01-skew.ipynb', '02-partitions.ipynb'] });
+    render(<Notebook />);
+    const frame = await screen.findByTestId('notebook-frame');
+    expect(frame.getAttribute('src')).toBe(`${JUPYTER_BASE_URL}`); // 默认落在文件管理
+    // ⚠ `findAllByTestId` 而不是 `getAllByTestId`：iframe 只等 status，左栏要等**第二次**读
+    //   （listing 的 effect 在 data.running 翻真之后才发），两者不是同一次微任务。
+    //   本轮 verify:fast 实测：单文件跑 `getAll` 绿、整片并行跑红在"找不到 notebook-tree-item" ——
+    //   那种红说的是"这一档负载下 listing 还没回来"，不是"页面坏了"。
+    const items = await screen.findAllByTestId('notebook-tree-item');
+    expect(items).toHaveLength(2);
+    // `!` 不是敷衍：上一条刚数过 2，这里越界只可能是有人在数与点之间改了夹具
+    fireEvent.click(items[1]!);
+    expect(screen.getByTestId('notebook-frame').getAttribute('src')).toBe(notebookDocPath('02-partitions.ipynb'));
+    expect(screen.getByTestId('notebook-frame')).toBe(frame); // 同一个 iframe 节点换 src，不重挂（重挂=每次点击都重启 jupyter 页面）
+    fireEvent.click(screen.getByTestId('notebook-manage'));
+    expect(screen.getByTestId('notebook-frame').getAttribute('src')).toBe(`${JUPYTER_BASE_URL}`);
+  });
+
+  /**
+   * 派发词里那条硬规矩的最小版本：`/jupyter` 这个字面量在 `web/` 里不许自己长第二份。
+   * 判的是 iframe 的 src **等于 shared 派生值**（`JUPYTER_BASE_URL` / `notebookDocPath`），
+   * 与上一条合起来 = "页面只消费派生值"。前缀分家时的症状是"iframe 里每个资源都 404"，
+   * 而三档验证全绿 —— 见 `server/test/regression/notebook-contract.test.ts` 里同一条纪律的先例。
+   */
+  it('文件名里带空格 / 中文时 src 走逐段 encode，不是把整串塞进路径', async () => {
+    status.mockResolvedValue(up);
+    files.mockResolvedValue({ files: ['我的 笔记#1.ipynb'] });
+    render(<Notebook />);
+    const frame = await screen.findByTestId('notebook-frame');
+    // 同上：等的是**左栏那一次读**，不是 iframe 那一次
+    fireEvent.click(await screen.findByTestId('notebook-tree-item'));
+    // 期望值是**字面量**：写成 notebookDocPath(...) 就退化成自证（shared/test/notebook-path.test.ts 的理由）
+    expect(frame.getAttribute('src')).toBe('/jupyter/notebooks/%E6%88%91%E7%9A%84%20%E7%AC%94%E8%AE%B0%231.ipynb');
+  });
+
+  /**
+   * `seedError` 那条纪律的孪生：两种"空"各占一处。
+   * `notebookFiles` 的语义（Task 5 已钉死）：`files:[]` **且没有** `error` = 目录里就是没有；
+   * 有 `error` = 这一次读不到。把后者说成前者就是本仓库最恨的静默降级 ——
+   * 读者会去翻一个本来有文件的目录，而该查的是权限/挂载。
+   */
+  it('文件列表读不到时补一句"读不到"，不把空列表说成"没有笔记"（seedError 那条纪律的孪生）', async () => {
+    status.mockResolvedValue({ ...up, kernels: [], notebooks: [] });
+    files.mockResolvedValue({ files: [], error: '读不到 notebook 工作目录（EPERM）：permission denied' });
+    render(<Notebook />);
+    // ⚠ 这里不用 brief 原稿的 toHaveTextContent / toBeInTheDocument：本仓库没有装 @testing-library/jest-dom
+    //   （全仓 grep 无一处使用），而这一档的规矩是不引新依赖 —— 判据逐条翻成本文件既有的写法。
+    const line = await screen.findByTestId('notebook-tree-error');
+    expect(line.textContent).toContain('读不到 notebook 工作目录');
+    expect(line.textContent).toContain('EPERM');
+    expect(screen.queryByTestId('notebook-tree-empty'), '读不到时说"目录里没有"就是第二条谎').toBeNull();
+  });
+
+  /**
+   * 第三种形状：**还没读到**。brief 原稿那段代码是 `(listing?.files ?? []).length === 0` 就报"没有"，
+   * 于是首屏一定会闪一句"目录里现在没有笔记"——而这一次读还没回来。这一页对同一个纪律已经有先例
+   * （`notebook-files-empty` 判的是 `data &&` 读过之后），所以这里补一条把它钉住：
+   * pending 的那一会儿两种话都不许说。
+   * 破坏性验证（本轮实测，见 task-6-report.md）：去掉 `listing &&` 守卫 ⇒ 本条红。
+   */
+  it('列表还没读回来时不许抢答"目录里现在没有笔记"，也不许报"读不到"', async () => {
+    status.mockResolvedValue(up);
+    files.mockReturnValue(new Promise(() => {})); // 永远 pending：只可能出现的形状就是"还没读到"
+    render(<Notebook />);
+    await screen.findByTestId('notebook-frame');
+    expect(screen.queryByTestId('notebook-tree-empty'), '没读到就说"没有"，是与 seedError 同型的谎').toBeNull();
+    expect(screen.queryByTestId('notebook-tree-error')).toBeNull();
+  });
+
+  /**
+   * 内嵌这一态在 `running:false` 时必须整块不出现（派发词第②条）。
+   * 为什么这条不能只靠 e2e：e2e 那个实例结构上只有这一态，"不该有 iframe"在那里是**默认成立**的
+   * ——页面压根没渲染过那块，谁都不知道它是因为判据还是因为没接线。这一条在单元层把两半都钉住：
+   * 不渲染子树 + 连那次 readdir 都不必发（服务没起时打它只会多一条 503 的噪声）。
+   */
+  it('running:false 时**没有** iframe、没有树 —— 那棵子树结构上到不了，写一个空 iframe 就是谎', async () => {
+    status.mockResolvedValue({ running: false, reason: '这个实例没有被给予 ARENA_JUPYTER_TOKEN …', kernels: [], notebooks: [] });
+    render(<Notebook />);
+    expect(await screen.findByTestId('notebook-down')).toBeTruthy();
+    expect(screen.queryByTestId('notebook-frame')).toBeNull();
+    expect(screen.queryByTestId('notebook-tree')).toBeNull();
+    expect(files).not.toHaveBeenCalled(); // 服务没起时连那次 readdir 都不必发
+  });
+
+  /**
+   * 「在跑但链接给不出来」（nolink）这一态同样不许出现 iframe：iframe 要的是**路径**，
+   * 而这一态坏掉的正是"拼不出可点开的地址"那半 —— 但同源前缀其实还在，所以这不是理所当然的，
+   * 它是 `view.kind === 'open'` 这一个门。用例只钉一件事：nolink 时没有 iframe。
+   */
+  it('在跑但 publicUrl 配坏时也不许出现 iframe（那一态的门与"没在跑"共用一个 kind）', async () => {
+    status.mockResolvedValue({
+      running: true,
+      reason: 'Jupyter 在跑，但 ARENA_NOTEBOOK_PUBLIC_URL="not a url" 不是合法 URL',
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      notebooks: [],
+    });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-nolink')).toBeTruthy());
+    expect(screen.queryByTestId('notebook-frame')).toBeNull();
+  });
+
+  /**
+   * 删掉的只有徽章那一排。`blocked`（venv 没建 ⇒ 「准备环境」修得了）与 `missingSpec`
+   * （表里没有 arena-pyspark ⇒ 镜像级注册，得 `--rebuild`）是两件不同的事，
+   * 删错任何一个就是删掉一条真实的诊断路径。
+   */
+  it('内核徽章那一排没了，但「准备环境」与「spec 没注册」两条还在（前者修 venv，后者修镜像）', async () => {
+    status.mockResolvedValue({
+      running: true,
+      url: TREE,
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      notebooks: [],
+    });
+    const first = render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-prepare')).toBeTruthy());
+    expect(screen.queryByTestId('notebook-kernels')).toBeNull();
+    first.unmount();
+
+    status.mockResolvedValue({ running: true, url: TREE, kernels: [], notebooks: [] });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
+    expect(screen.queryByTestId('notebook-kernels')).toBeNull();
+  });
+
+  /**
+   * 「刷新状态」重读的是**这一页的全部真相**，不是只有运行时那一半。
+   * 只重读 status 的话，用户在 Jupyter 里新建了一份笔记、回到这一页按刷新，左栏还是旧的那两份 ——
+   * 那是"拿旧真相冒充新真相"（本项目在桥 token 上付过同一次学费）。
+   */
+  it('按「刷新状态」也会重读左栏那份列表', async () => {
+    status.mockResolvedValue(up);
+    files.mockResolvedValue({ files: ['01-skew.ipynb'] });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getAllByTestId('notebook-tree-item')).toHaveLength(1));
+    expect(files).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByTestId('notebook-reload'));
+    await waitFor(() => expect(files).toHaveBeenCalledTimes(2));
+  });
+
+  /**
+   * 边界卡折成 `<details>`（用户批的第 4 件：措辞一字不动，只是收成一行）。
+   * 这里判两件事：折叠结构真的存在（有人顺手把 `<details>` 拆回常开会红），
+   * 而**默认是折着的**（默认展开就等于没折叠）。DOM 上五段话还在 —— jsdom 里折叠不影响
+   * `textContent`，所以上面那组 `boundarySentences` 用例照旧全过；"看不见"那一半归 e2e，
+   * 由 `tests/e2e/notebook-page.spec.ts` 里"先展开再断可见"那条钉。
+   */
+  it('边界卡是折起来的 `<details>`，但五段话逐字仍在 DOM 上', async () => {
+    status.mockResolvedValue(up);
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-boundary')).toBeTruthy());
+    const details = screen.getByTestId('notebook-boundary').querySelector('details');
+    expect(details, '边界卡不是 <details> ⇒ 用户批的"压成一行/折叠"这件没做').not.toBeNull();
+    expect(details!.hasAttribute('open'), '默认展开 ⇒ 折叠这一态根本没生效').toBe(false);
+    expect(screen.getByTestId('notebook-boundary').querySelectorAll('p')).toHaveLength(5);
   });
 
   it('没在运行：说清"做题不受影响"，并且不给死链接', async () => {
