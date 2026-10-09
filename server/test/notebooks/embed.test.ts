@@ -10,7 +10,8 @@ import { guardNotebookProxy } from '../../src/notebooks/proxyGuard.js';
 import { localGatewayAddresses } from '../../src/notebooks/status.js';
 
 /**
- * WI-94 Task 3 容器档：`/jupyter/*` 同源反代打在**真 Jupyter** 上。
+ * WI-94 **Task 3 与 Task 4 的容器档**：`/jupyter/*` 同源反代（HTTP 隧道 + websocket 隧道）打在**真 Jupyter** 上。
+ * （Task 4b 那两条"穿过隧道真跑一行代码 / cross-site 的 ws 握手"也在本文件里，不在别处。）
  *
  * ## 为什么这里打的是"已经跑着的那个 7788"，而不是自己 `buildApp` 一个
  *
@@ -327,7 +328,6 @@ interface JupyterEnvelopeLite {
   parentMsgId: string;
   contentStatus: string;
   textHas42: boolean;
-  executionState: string;
 }
 
 function toEnvelopeLite(raw: string): JupyterEnvelopeLite {
@@ -335,7 +335,7 @@ function toEnvelopeLite(raw: string): JupyterEnvelopeLite {
   try {
     m = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    return { msgType: '', channel: '', parentMsgId: '', contentStatus: '', textHas42: false, executionState: '' };
+    return { msgType: '', channel: '', parentMsgId: '', contentStatus: '', textHas42: false };
   }
   const header = (m.header ?? {}) as Record<string, unknown>;
   const parent = (m.parent_header ?? {}) as Record<string, unknown>;
@@ -346,7 +346,6 @@ function toEnvelopeLite(raw: string): JupyterEnvelopeLite {
     parentMsgId: String(parent.msg_id ?? ''), // 实测：扁平，不是 parent_header.header.msg_id
     contentStatus: String(content.status ?? ''),
     textHas42: String(content.text ?? '').includes('42'),
-    executionState: String(content.execution_state ?? ''),
   };
 }
 
@@ -354,7 +353,6 @@ interface FrameDrain {
   envelopes: JupyterEnvelopeLite[];
   nonTextOpcodes: number[];
   timedOut: boolean;
-  closed: boolean;
   /** 搬运的字节里出现过凭据 —— 只回布尔，值永不在场。 */
   leakedToken: boolean;
 }
@@ -400,7 +398,7 @@ async function drainFrames(conn: WsConn, opts: { deadlineMs: number; stopWhen: (
   conn.socket.removeListener('data', onData);
   conn.socket.removeListener('close', onClose);
   conn.socket.removeListener('end', onClose);
-  return { envelopes, nonTextOpcodes, timedOut, closed, leakedToken };
+  return { envelopes, nonTextOpcodes, timedOut, leakedToken };
 }
 
 // ──────────────────── 常驻：探针这条 plumbing 本身（宿主就能红） ────────────────────
