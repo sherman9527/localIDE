@@ -1102,7 +1102,11 @@ export function listNotebookFiles(dir: string = config.notebook.workDir): Notebo
     return { files };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { files: [] };
+    // ⚠ 只豁免 ENOENT（Task 5 实测订正）。计划原稿在这里把 ENOTDIR 一起豁免了，
+    // 而同一档第四条测试正是要判"workDir 指向一个普通文件 ⇒ 必须有 error"—— 两条不可能同时成立
+    // （本机实测 readdir 一个普通文件给的就是 ENOTDIR）。实现者按"测试是契约"收窄成仅 ENOENT：
+    // ENOENT = 那个目录本来就还没建（"没有"，不是故障）；ENOTDIR = 配置指错了地方，必须有自己的一句话。
+    if (code === 'ENOENT') return { files: [] };
     return { files: [], error: `读不到 notebook 工作目录（${code ?? '未知原因'}）：${(err as Error).message}` };
   }
 }
