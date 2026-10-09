@@ -62,7 +62,12 @@ if [ "$NB_SERVICE" = "1" ]; then
   # `describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)` 门控，所以这里排除它、由下面那条专门阶段认领。
   # 排除的理由与 kernel.test.ts 不同但更硬：那一档真跑 Spark（贵），这一档每条都打真 7788 + 真 jupyter，
   # 在"单元测试"阶段扫目录时会**与专门阶段各跑一遍**，其中第 5 条会往 data/notebooks 建一份再删一份笔记。
-  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts --exclude server/test/notebooks/embed.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+  # WI-90 Task 1：`tutorials.test.ts`（教程可运行闸门）**走的就是上面这同一条路** —— 门控也是那个合取，
+  # 所以这里同样排除它、由下面那条「教程 notebook 可运行」阶段认领。不排除的后果与 embed 一样是"跑两遍"，
+  # 而且这一档每一篇教程都要真起一次 Spark（`kernel.test.ts` 那条注释写的 40–90s 是同一件事）。
+  # 它常驻那一组（清单完整性 / 注册表形状 / 参数形状 / 门控本身）不会因此没人跑：
+  # 专门那条阶段点名的是**整个文件**，宿主档则走 else 分支照常扫这个目录。
+  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts --exclude server/test/notebooks/embed.test.ts --exclude server/test/notebooks/tutorials.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 else
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 fi
@@ -86,8 +91,17 @@ if [ "$NB_SERVICE" = "1" ]; then
   # WI-94 Task 3：`embed.test.ts`（反代 + 真 Jupyter）由这一条认领 —— 两个变量都得设上，
   # 否则 verify-coverage 那条"env 门控的闸门必须被'设了那个变量'的阶段认领"会红（实测过它先红后绿）。
   run "Notebook 运行时（kernel 真跑）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/kernel.test.ts server/test/notebooks/embed.test.ts
+  # WI-90 Task 1：教程 notebook 的**可运行性**闸门（两层：执行层 = 无 cell 异常 + kernel 是 arena-pyspark；
+  # 结论层 = `server/test/notebooks/tutorial-claims.ts` 那份注册表里每条方向性结论都要打出 marker，
+  # 且打出的标记集合与注册表**双向相等** —— 只看"没报错"抓不到"有人把 assert 删了"，
+  # 只核注册表抓不到"有人把注册表里那条 slug 删掉让已经红的结论变绿"）。
+  # 它排在上面那条**之后**不是随意：那条的 beforeAll 会把 IDE venv 建出来（全新卷上 venv 还不存在时，
+  # 这一档会红在"前置条件不成立"那句上，而毛病是环境没准备 —— 顺序让正常路径少一次冤红）。
+  # 两个变量都得在命令行上：`verify-coverage.test.ts` 那条"env 门控的闸门必须被'设了那个变量'的阶段认领"
+  # 读的是**阶段命令文本**（容器环境里已有的那份它看不见），这与 kernel / embed 那两处是同一课。
+  run "教程 notebook 可运行（结论层）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts
 else
-  printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\033[0m\n'
+  printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\n（WI-90 Task 1 同一条路上一起跳过的还有「教程 notebook 可运行（结论层）」：宿主档只跑它那一组常驻判据（清单完整性 / 注册表形状 / nbconvert 参数形状 / 门控本身），真执行那两层要等容器档）\033[0m\n'
 fi
 
 if [ "${SKIP_JUDGE:-0}" != "1" ]; then
