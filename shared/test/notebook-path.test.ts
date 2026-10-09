@@ -8,7 +8,10 @@ import { notebookDocPath } from '../src/notebook.js';
  * `expect(frame.getAttribute('src')).toBe(notebookDocPath('02-partitions.ipynb'))` ——
  * 期望值与被测物同源，于是"逐段 encode"这个行为**永不可证伪**：把函数体改成整串
  * `encodeURIComponent(file)`，Task 6 那条照样绿，而症状是"文件名里带空格 / 中文 / `#` 的那份笔记
- * 在 iframe 里 404"，`content/notebooks` 目前唯一那份（`00-smoke-pyspark.ipynb`）名字安全、继续绿。
+ * 在 iframe 里 404"，而 `content/notebooks` 里那份 `00-smoke-pyspark.ipynb` 名字安全 ⇒ 继续绿。
+ * （复审 m9 记一句实况：当年这里写的是"目前**唯一**那份"，WI-90 的 `01-`/`02-` 教程落地后已经不作数了。
+ * **结论一个字没动** —— 目录里现在这几份的文件名仍然只含 `[0-9a-z.-]`，一个需要 encode 的字符都没有，
+ * 所以这个故障在它们身上照样是哑的，这一档的判据对象只能是下面那些**手写的**多段/空格/中文名字。）
  * 这是本仓库在 `kernels` / `kernelspecs` fixture 上付过学费的同一种形状（见
  * `server/test/regression/notebook-contract.test.ts` 里那段"键名当年与实现同源写错"）。
  *
