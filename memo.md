@@ -3520,3 +3520,75 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 **已知问题 → 工作板**：`WI-97`（`report_notebook` 冷启动竞态）、`WI-98`（逃生链接改指同源 ⇒ 凭据彻底不进 URL，属设计级）、
 `WI-99`（`flushLogs()` 不在优雅退出路径里）、`WI-93` 追加"每份打开过的笔记各留一个活内核、没配 `cull_idle_timeout`"、
 `WI-95`（现在判题池之外是**两个** JVM：pyspark kernel + 未来 Scala kernel）、`WI-96`（`needsVenv` 按 id 猜，A2 会挖开）。
+
+---
+
+## 里程碑 BE：WI-90 三篇 senior PySpark 教程 + 一道"在容器里真执行"的闸门（2026-10-09 ~ 10-10）
+
+### 做了什么
+
+- 三篇教程进 `content/notebooks/`（都不带 outputs）：`01-skew-and-hot-keys`、`02-small-files-and-partitioning`、
+  `03-reading-the-plan-and-aqe`。每篇的结构是同一张表：标题格先写破"本机能演示到哪一层"→ ① 现象 → ② 取证（量成确定量）
+  → ③ 解法各治哪一半 → ④ 量差异 → ⑤ 速查表 + 追问链 + 本篇没验的东西 → 题库指针（具体题 id）→ `spark.stop()`。
+- 闸门 `server/test/notebooks/tutorials.test.ts` + 结论注册表 `tutorial-claims.ts`（**故意住在被测文件外面**：
+  期望值若由被测文件自己声明，"删一条结论"就同时删掉了判据）。分两层 + 三条牙：
+  执行层（零 cell 异常、`kernelspec.name === arena-pyspark`）／结论层（14 条 `WI90[篇][slug] OK` 与注册表**双向相等**）／
+  打 marker 那个 cell 必须有**语句级** `assert`／末 cell 必须 `spark.stop()`／`00-` 前缀是封闭集合。
+- 接线：`scripts/verify.sh` 新增容器阶段，且接进 `assert-ran.mjs --require-no-skips`（"整片 skip 也算失败"那一族）。
+- 顺手修掉一个**公共件里的真 bug**（`nbconvertCrashEvidence` 读错 error 形状，见教训 4）。
+
+### 验证（全部看到通过输出才写在这里）
+
+| 档 | 命令 | 实测 |
+| --- | --- | --- |
+| 容器全量 | `./start.sh --verify` | 末行 `✓ verify 全部通过`；教程阶段出现**恰好 1 次**（日志第 738 行）；`教程 notebook：14 passed / 0 skipped / 14 total ✓`；kernel+embed `Tests 53 passed (53)`；矩阵 `代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道` |
+| 宿主 | `npm run verify:fast` | `✓ verify 全部通过`；`tutorials 14 tests \| 4 skipped`、`kernel 35 \| 11 skipped`、`embed 18` |
+| E2E | `npm run e2e` | `E2E_EXIT=0`，74 passed（e2e 实例没 token ⇒ 只能诚实判"Jupyter 没起来"那一态，没为它伪造） |
+| 真浏览器 | `#/notebook` 点开篇 1 连跑 cell | prompt `[1]:`、stdout 里 `WI90[…][hot-key-dominates] OK` + `[salting-halves-max-partition] OK`，**数字与容器档一字不差**；切到篇 3 后篇 1 的标题不再存在；停 ~75s 后服务仍在，但**活着两个 arena-pyspark 会话** ⇒ 经代理 `DELETE /jupyter/api/sessions/…` 两条 204、容器 `pgrep -c java` 归 0 |
+| console 按来源 | 同上 | 6 error / 71 warning **全部**在 `/jupyter/static/notebook/notebook_core.js`；我们自己的 bundle 0 条。⚠ 这次**没做 7789 直连对照组**（那要把带 token 的逃生链接打进上下文），分类依据是栈帧 URL —— 不许写成"与 WI-94 对照组一致" |
+| 用时 | per-test duration（`data/verify-tutorials.json`） | 26.31s / 56.31s / 18.98s，合计 ≈101.6s（目标 ≤90s/篇、硬预算 120s） |
+| 破坏性验证 | 三篇各 4 条 + 闸门自身 10 次变异 | 全部实测 `EXIT=1`，还原转绿 |
+
+### 教训（这一批最值钱的部分是"计划被实测推翻"的清单）
+
+1. **计划文本里的"推断"必须和"实测"分得开，而写计划的人最容易越界。** 我自己往计划里写了三处推断，全被实现者当场量否：
+   `spark.range(N, seed=7)`（**这个参数不存在**，`TypeError`）、`openCostInBytes=0 ⇒ 分区爬回文件数量级`
+   （**方向相反**：它是加在每个文件上的成本，调小 ⇒ 打包更狠 ⇒ 分区更少；实测 0→3 / 4MB→63 / 64MB→1000）、
+   `executedPlan().toString()` 里有 `AQEShuffleRead`（**实测 0 次**，那个算子只在 `explain("formatted")` 且不带分区数）。
+   ⇒ 判据写错不比少写一条便宜：它会红在无辜的地方，而红话把人引向"放宽断言"。
+2. **一个算子族量出来的数不许推广到另一个族。** 我从篇 1 的"200 个 shuffle 分区开 AQE 只落 2 个文件"（聚合族）
+   推出"篇 2 不关 AQE 就得不到 2000 个文件"，实测**显式 `repartition(N)` 两档都落 N** —— AQE 只合它自己推导的那一路。
+   同一族毛病还有一次：一次实验里同时改两个旋钮（`advisoryPartitionSizeInBytes` 与 `minPartitionSize`），
+   量出来的归因就是错的（实现者自查出来说"串档"）。
+3. **闸门自己也要被闸门判，包括它"报错时说的话"。** `nbconvertCrashEvidence` 读 `e.code` 当退出码，
+   而 `execFileSync` 的真 error 把退出码放在 **`e.status`**、`signal` 在非正常退出时是 **`null` 不是 `undefined`**
+   ⇒ 每一个"非 0 退出"的真实故障都落进"被信号终止 ⇒ 先想超时/预算"那一支，**真正会指路的那一支永远走不到**；
+   它的形状判据喂的是手搓 `{code:1}` 所以全绿。修法是让判据**自己 spawn**（`process.exit(3)` / 真 SIGTERM / 真 ENOENT /
+   真 maxBuffer 溢出），并且顺带量出两条我讲错的事实：`killed` 这个键在这条路上**根本不存在**；
+   字符串 `code` **不等于**"spawn 级失败"（`ETIMEDOUT`/`ENOBUFS` 也是字符串，但同一对象带 `signal:'SIGTERM'`，
+   进程起来过 —— 这时说"可执行文件不在"是谎话）。
+4. **"marker 不许宣称未被证明的事"这把尺子，先量到的是我自己写的计划。** 原计划两条 slug 押的是耗时
+   （`fewer-files-not-slower-read` 配 `t_read_few <= t_read_many * 2`、`aqe-not-always-faster` 配 `t_aqe_on > 0` 恒真），
+   而 Ruling(B1) 明写耗时只打印。改掉之后篇 3 量出来本机方向**相反**（AQE 开更快）⇒ 那句结论只能写成
+   "本机既没证明也没证伪"。**结论的名字必须与判它的那个量同域。**
+5. **修"冤红"不许引入更贵的坏法。** 我给篇 2 开的方子（先 `rmtree` 掉同前缀旧残留）会把**并发会话正在写的目录删掉**，
+   对面得到一堆 `FileNotFoundError` —— 实现者顶回并换成"记 `PRE_EXISTING` + 只回收 mtime>6h 的"，牙没变弱。
+   同理一条：`assert not leftover` 扫的是 `/tmp` 里所有同前缀目录 ⇒ 一次干净的跑也会被别人的残留撞红。
+6. **`docker compose exec` 进的是镜像里的 `server/`，而 `content/` 是 bind mount。** 这条区分本轮值两次绿：
+   篇 2 第一次容器档红在"注册表与目录不一致"（镜像里是旧 `tutorial-claims.ts`），而"改 notebook 要先 build"对
+   `content/**` 是恒等操作。反向的坑也量到了：**`docker compose cp` 往 `content/**` 塞东西会写穿宿主工作树**。
+7. **并行作业必须写清"容器是共享资源"。** 两个 Spark 并发会把单篇顶过 120s 预算 ⇒ 拿到一条与代码无关的红；
+   不带 pathspec 的 `git commit` 会把别人 staged 的东西写进自己的提交（真撞到一次）；pre-commit 跑的是**工作树**，
+   别人正在临时变异时我的提交会被挡（也真撞到一次）。派发现有的一条明写："报的是超时/预算/maxBuffer 那一类就先重跑一次再下结论"。
+8. **一条牙加下去，射程要写在代码里。** `assert-ran --require-no-skips` 拦得住"把 env 名字一起改错"（会真整片 skip），
+   **拦不住**"把标识符改成 camelCase 而 `process.env` 仍读对"（那一档照跑，本来就不该红）——
+   我派发时把这两种坏法混成一条，被实现者用实测否掉。判据的说明书比判据本身更容易被后人误读。
+
+### 已知问题 → 工作板
+
+`WI-91`（A2 Scala kernel，计划已写、Task 1 探针与基线已落地）、`WI-96`（`needsVenv` 按 id 猜，A2 会挖开）、
+`WI-95`（判题池之外的第二个 Spark JVM）、`WI-93`（每份打开过的笔记留一个活内核，没配 `cull_idle_timeout`）、
+`WI-97/98/99`（冷启动竞态 / 逃生链接的凭据 / `flushLogs()` 不在优雅退出路径）。
+本里程碑新登记三条：**manual 申报仍可为自己免检**（要堵得让"阶段集合"本身进判据）、
+**`--exclude` 被 `verify-coverage` 当成认领而不是排除**、**`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象**
+（与新的真-spawn 判据同源要动那个文件）。v2/v3 那 9 类主题**不在 WI-90 里**，要开新 WI。

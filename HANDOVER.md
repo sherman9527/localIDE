@@ -1296,18 +1296,40 @@
   **卡点**：剩余 3 家要用户点名 —— `content/knowledge/hot-interviews/` 目前只有 Airbnb / Apple 两家
   的公司向条目，新公司得先补知识库再出题（否则 N-11 的脱钩面积继续扩大）。
 
+- [x] WI-90 **企业级 PySpark 教程 notebook（子项目 B 第一轮 3 篇）**｜计划 `docs/superpowers/plans/2026-10-09-pyspark-tutorial-notebooks-wi90.md`，五档全部收口，2026-10-09～10-10
+  交付：`content/notebooks/01-skew-and-hot-keys.ipynb`（倾斜与热 key：加盐两阶段 + 广播绕开 join shuffle +
+  "为什么 skew hint 救不了聚合"推到机制层）、`02-small-files-and-partitioning.ipynb`（落盘文件数 = **非空 writer 数**、
+  读侧打包由 `maxPartitionBytes` 与**加性**的 `openCostInBytes` 决定、`coalesce` 不能提升并行度、
+  `partitionOverwriteMode` 的 static 一次清库）、`03-reading-the-plan-and-aqe.ipynb`（计划地图 +
+  "合并读侧的是 `coalescePartitions` 那一个子开关，不是 AQE 这个大开关"）。三篇都不带 outputs。
+  闸门：`server/test/notebooks/tutorials.test.ts` + 注册表 `tutorial-claims.ts`（住在被测文件**外面**）。
+  两层判据 + 三条牙：执行层（零 `output_type=error` 且 `metadata.kernelspec.name === arena-pyspark`，
+  写成 `python3` 照样跑得绿而那正是红线①的坏形状）、结论层（14 条 `WI90[篇][slug] OK` 与注册表**双向相等**）、
+  打 marker 那个 cell 必须有**语句级** `assert`（堵"删 assert 留 print"）、末 cell 必须 `spark.stop()`、
+  `00-` 前缀是封闭集合（新写一篇叫 `00-*` 会红）。
+  | 验证 | 命令 | 结果 |
+  | --- | --- | --- |
+  | 容器全量 | `./start.sh --verify` | 末行 `✓ verify 全部通过`；教程阶段出现**恰好 1 次**；`教程 notebook：14 passed / 0 skipped / 14 total ✓`；kernel+embed `Tests 53 passed (53)`；矩阵 `代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道` |
+  | 宿主 | `npm run verify:fast` | `✓ verify 全部通过`（`tutorials 14 tests \| 4 skipped`、`kernel 35 \| 11 skipped`、`embed 18`） |
+  | E2E | `npm run e2e` | `E2E_EXIT=0`，74 passed |
+  | 真浏览器 | `#/notebook` 里点开篇 1 并连跑 cell | prompt `[1]:`、stdout 出现 `WI90[…][hot-key-dominates] OK` 与 `[salting-halves-max-partition] OK`，**数字与容器档一字不差**（0.4754→0.175，降到 36.8%）⇒ "可运行"两条路（nbconvert / 页面经 Jupyter Server）都验过 |
+  | 实测用时 | vitest per-test duration（`data/verify-tutorials.json`） | 篇 1 26.31s / 篇 2 56.31s / 篇 3 18.98s，合计 ≈101.6s（目标 ≤90s/篇、硬预算 120s） |
+  | 破坏性验证 | 三篇各自 + 闸门自身 | 篇 1 四条、篇 2 四条、篇 3 四条、闸门十条形状变异，全部实测 `EXIT=1` 后还原转绿 |
+  还掉的债：教程闸门接进 `assert-ran.mjs --require-no-skips`（"整片 skip 也算失败"），`verify-gate: manual`
+  不再是免检金牌（必须独立成行且指着真实存在、确实认领本文件的阶段）。
+  **仍然敞着的口子（如实写）**：一条成立的 manual 申报仍可为自己免检（要堵得让"阶段集合"本身进判据）；
+  `--exclude` 的值被 `verify-coverage` 当成认领而不是排除（已记 A2）；`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象。
+  教训与全表见 `memo.md` 里程碑 BE。后续批次（v2/v3 那 9 类主题）**不在本 WI 里**，要开新 WI。
+
 ## TODO
 
-- [ ] WI-90 企业级 PySpark 教程 notebook（子项目 B，**排在 A1 之后**）：spec
-  `docs/superpowers/specs/2026-10-05-pyspark-enterprise-notebooks-design.md` 已批准。第一轮 3 篇打样
-  （`01-skew-and-hot-keys` / `02-small-files-and-partitioning` / `03-reading-the-plan-and-aqe`），难度 senior，
-  定位是"边查边学"：语法/调参/troubleshooting 三段式，每篇锚到现有题库的 `bd-pyspark-0001/0002/0005/0010`。
-  **交付档是硬的那一条**：每篇必须在容器里 `nbconvert --execute` 真跑过、且含**方向性 assert**（不是"跑不挂"，
-  是"调错参数必须看到变差"）才算绿 —— 这条要有闸门，不能靠人说跑过了。
-- [ ] WI-91 真交互式 Scala kernel（子项目 A2，**必需项，不是可选**）：用户明确否掉了"没有 Scala kernel 也行"。
+- [ ] WI-91 真交互式 Scala kernel（子项目 A2，**必需项，不是可选**）：**限时探索计划已写** `docs/superpowers/plans/2026-10-10-scala-jupyter-kernel-spike-wi91.md`（Task 1 探针与基线已落地 `0899573`）。
   三条路各给一个时间盒，按顺序试：**Almond → Toree（preview 那一档）→ 自己包一层 IMain kernel**。
   撞穿第一条就停下记账，不要在第二条上继续烧时间盒。注意与 WI-89 的两处耦合：kernel 的 `argv` 同样要落在
   IDE 那一侧的环境，且 Scala notebook 的 warehouse/Derby 也必须与判题侧分开（同 `arena-pyspark` 的做法）。
+  ⚠ Task 1 实测出的两条前置：`/opt/spark` 是**指向 pip 装的 pyspark 的符号链接**（挂它的 classpath = 挂判题侧那份安装，
+  每一档都要显式回答"有没有把新的可写面/新 jar 引进判题环境"）；探针必须**再跑一份摘掉定义格的夹具**
+  （nbconvert 线性执行一整本 ⇒ "整本一次性编译再切输出"的假 kernel 骗得过三条判据）。
 - [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
   两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
   "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
