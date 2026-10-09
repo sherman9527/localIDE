@@ -674,7 +674,24 @@ markdown 里那句要按纪律 2 收口：本机能量到的是"AQE 把读侧合
 
 - [ ] **Step 3: 手测 + 闸门 + 校准**（同上。若 `AQEShuffleRead` 在本镜像的文本形状不同，改解析并**把实测原文贴进注释**，不许放宽断言）
 
-- [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② 把 `_ = agg.count()` 删掉（不触发执行就读 executedPlan）⇒ `aqe-coalesces-shuffle-read` 必须红在"认不出 AQEShuffleRead"（这条是"顺序依赖"的判据，最容易静默坏掉）；③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红；④ 把 `coalescePartitions.enabled` 那行删掉（= 让它保持默认 true）⇒ `aqe-coalescing-is-one-switch` 必须红在"读侧被合并了"（这一条同时证明"这一篇真的在判那个开关"，而不是判 AQE 大开关）。
+- [ ] **Step 4: 破坏性验证**：① `autoBroadcastJoinThreshold` 两段调换顺序 ⇒ `broadcast-threshold-changes-join` 必须红；② **（2026-10-10 按实测改写：原来这条不成立）** 只删 `_ = agg.count()` 在本镜像**不会红** ——
+   `df.rdd` 自己就会 finalize 计划（什么都没跑时它给 1），所以"顺序依赖"要用**三条文本互不相同**来判：
+   执行前 / 只 `count()` 之后 / 读过 `rdd` 之后，各取一次计划文本互不相等；验证动作改成**同时删掉那两步物化**，
+   实测红在"`AQEShuffleRead` 认不出来"那一条（红话要说得出"是物化那两步没了，不是结论错了"）；
+   ③ 把 `shuffle.partitions` 从 200 改成 8 ⇒ `shuffle-partitions-is-a-plan-number` 必须红（实测红话里带出 `PLANNED=(8,8)`）；
+   ④ 把 `coalescePartitions.enabled` 那行删掉（= 让它保持默认 true）⇒ `aqe-coalescing-is-one-switch` 必须红在"读侧被合并了"
+   （这一条同时证明"这一篇真的在判那个开关"，而不是判 AQE 大开关；实测消息带出 `(200,1,1)`）。
+
+⚠ **Step 2 里那两段 executedPlan 的写法也被实测否掉了**（同一档实现者顶回，全部有据）：
+① **`executedPlan().toString()` 里根本没有 `AQEShuffleRead`**（实测 0 次，它仍打 `Exchange hashpartitioning(k#22L, 200)`），
+   那个算子只出现在 `explain("formatted")` 的文本里、**而且不带分区数** ⇒
+   判据必须拆成两半：formatted 文本里认算子 + **数字走 `df.rdd.getNumPartitions()`**（实测 1 vs 200）。
+② `ColumnarToRow` **不打断** `WholeStageCodegen`（实测 `*(1)` 同时罩住 HashAggregate / ColumnarToRow / FileScan）
+   ⇒ "计划地图"那句要改成"**只有 Exchange 打断**"。
+③ 广播阈值那格：`assert est[dim] < 10MB < est[big]` 在容器里当场红 —— `big` 的**编译期估计只有 3,200,000 B**，
+   远小于 10MB ⇒ 改成 `-1 / 512 / 4096` **三档把那个 600 B 夹住**，并新增篇 1 没量过的一维：`Exchange` 条数 `2→2→0`。
+④ "更少分区 ≠ 更快"本机量出来**方向相反**（AQE 开 0.05s 级、关 0.41~0.47s 级）⇒ 那句结论在 markdown 里
+   只能写"本机既没证明也没证伪"，**不进断言、不进 marker**（Ruling(B1) 与"marker 不许宣称未被证明的事"同一把尺子）。
 
 - [ ] **Step 5: markdown**：⑤ 追问链"怎么证明 broadcast 把 executor 撑爆了"（本机标未验证：kernel 是 `local[2]`，一个 JVM 里两个线程，没有独立 executor 内存这条线，只能看 `BroadcastExchange` 的 size 估计）、"AQE 为什么看不到 CBO"；题库指针 `bd-pyspark-0002` 与 `bd-pyspark-0010`（非等值时间窗 join 换不了 BroadcastHashJoin，计划退化最典型）。
 

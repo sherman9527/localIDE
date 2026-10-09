@@ -16,6 +16,10 @@
 - **镜像构建必须离线可复现**：任何新 jar 都要走 `docker-cache/` + 记录**来源 URL 与 sha256**；本仓库有过"脚本里写死一台机器的镜像源"的事故（`MIRROR_APT` 那条），所以**下载源必须显式、可覆盖、失败要说清**。
 - **Scala 版本锁死 2.12**：`/opt/spark/jars` 里是 `scala-library-2.12.18.jar`；任何 2.13/3.x 的 kernel 制品与 Spark 类路径混起来的症状是 `NoClassDefFoundError`/链接失败，而不是一个能读的报错。
 - **探针判据只有一个**（三条路径共用，别各造一套）：一个 `.scala` notebook，kernel 指定为待评的那条，`nbconvert --execute` 之后必须看到 ①`val` 定义**跨 cell 存活**（第二个 cell 用第一个 cell 绑的变量）②`println` 走 **stream** 通道回来 ③能拿到一个活的 `SparkSession`。三件缺一件就是"假交互"，不许用"编译一段跑一段"糊过去。
+  **外加一份夹具变体（2026-10-10 由 Task 1 实测补进计划）**：探针必须**再跑一次"摘掉 cell 1"的那本** —— 只留
+  `println(s"alive=$doubled")`。理由：nbconvert 线性执行一整本，一个"把整本一次性编译、再把输出按 cell 切开"的**假 kernel**
+  骗得过上面三条（它确实能让第二个 cell 拿到 42，也确实打 stream），但摘掉定义那一格之后它必然报错
+  —— 真交互在"引用一个从没绑定过的名字"这件事上没有退路。**两条都要跑，只跑第一条不算判据成立。**
 - **停止条件**（每条路径各自成立即停）：一次容器构建 + 一次探针之内要能给出"成 / 不成 / 成了但有 N 条不可接受的代价"。不许"再试一次就好了"滚第三次 —— 这是本条计划存在的原因（限时），也是它唯一的纪律。
 - **不许为了变绿去改判据**：WI-94 的 `embed.test.ts` / `kernel.test.ts` / `tutorials.test.ts`（若那时已落地）条数只能增不能减。
 - 不引 npm/pip 依赖去"绕过" jar 问题；`.env` 不读不打印；不占 7799；提交逐条 env 传 noreply 身份，不许 `--no-verify`/amend/push。
@@ -25,6 +29,9 @@
 
 - `/opt/scala/` = `scala-compiler.jar` + `scala-library.jar` + `scala-reflect.jar`（判题侧 Scala 题在用）。
 - `/opt/spark/jars` 里是 `scala-compiler-2.12.18` / `scala-library-2.12.18` / `scala-reflect-2.12.18` ⇒ Spark 3.5.5 由 Scala 2.12 构建。
+  ⚠ **`/opt/spark` 本身是一个符号链接**，指向 `dist-packages/pyspark`（pip 装的 pyspark 3.5.5；`du -sh /opt/spark` 不带斜杠给 `0`，
+  带斜杠才是 342M —— Task 1 实测）。⇒ **三条路径往 Scala classpath 挂 `/opt/spark/jars/*`，挂的是判题侧也在用的那份 Spark 安装**：
+  每一档都要显式回答一句"这条有没有把新的可写面 / 新的 jar 引进判题环境"（红线①），不许默认它无关。
 - `/opt/spark-jars/` 与 `/opt/spark/jars` 里 `zeromq|jeromq|zmq` **0 命中** ⇒ 三条路径的共同前提是"往镜像里加一个 jar"（Almond/Toree 连 ZMQ 一起带，自包路径只缺 ZMQ 一个）。
 - kernelspec 住在镜像级 `/usr/local/share/jupyter/kernels/arena-pyspark/`（`docker/jupyter/kernels/…`），`entrypoint.sh` 起 jupyter，`NOTEBOOK_KERNELS` 是 kernel id 的唯一真相，`status.ts` 的 allow-list 由它派生。
 - 内嵌与两条隧道已交付并验过（WI-94）：新增一个 kernelspec **不需要动前端** —— 用户在 iframe 里选 kernel，`/api/kernelspecs` 那份表会自动多一行（`missingSpec` 与 `needsVenv` 的按-id 陷阱见任务 5 那条裁定）。
