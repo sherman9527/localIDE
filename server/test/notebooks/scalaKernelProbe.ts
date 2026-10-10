@@ -139,36 +139,6 @@ function fixtureShapeProblem(notebookPath: string): string | null {
   return null;
 }
 
-/**
- * 把 node `execFileSync` **抛出来的那个 error 对象**翻译成 `nbconvertCrashEvidence()` 期望的形状。
- *
- * 为什么需要这一层（2026-10-10 在 `daily-arena` 容器里用 node v24.10.0 实测，不是推理）：
- * `execFileSync` 的 error 上**退出码在 `status`**，`code` 只在 spawn 级失败时才有值（`ETIMEDOUT`/`ENOBUFS`/`ENOENT`），
- * 而 `signal` 在"进程自己非 0 退出"那种情况下是 **`null`（存在但不是 undefined）**：
- *
- * | 真实故障 | node 给的字段 | 直接喂给公共件会读成 |
- * | --- | --- | --- |
- * | 普通非 0 退出（kernel 没注册、notebook 不合法…） | `{status:1, signal:null}`（`code`/`killed` 没有） | 「被 signal 终止 ⇒ 先想超时/预算」，并且明写"kernel 注册那些假设**不成立也不被判**" —— **把人从根因赶走** |
- * | `execFileSync` 到点 | `{code:'ETIMEDOUT', signal:'SIGTERM', status:null}` | 「以 code=ETIMEDOUT 非 0 退出」（枚举里还留着超时，勉强能读） |
- * | 撑破 `maxBuffer` | `{code:'ENOBUFS', signal:'SIGTERM', status:null}` | 又被读成"被 signal 终止" |
- *
- * 公共件那两条分支的**判据本身没错**，错的是它按"`code` = 退出码"读 —— 那是 `spawnSync` **结果对象**的约定，
- * 不是 `execFileSync` **error 对象**的约定。`tutorials.test.ts` 的形状判据喂的是手搓的 `{code: 1, …}`，
- * 所以那一支在**判据**里是通的、在**真故障**上是反的（本仓库记过无数次的那一类："闸门看着跑了其实没测到"）。
- * ⇒ 我在这里把字段映射对，**不改公共件**（`notebook-evidence.ts` 是两档共用的判据、且不在本档的允许改动面里）；
- *   这条已作为**待裁决**写进 `task-1-report.md`：要改的是那个模块本身（外加给它补一条"真 error 对象"的形状判据）。
- */
-function evidenceShapedExecError(err: unknown): unknown {
-  const e = err as { code?: string | number; status?: number | null; signal?: string | number | null; killed?: boolean; stdout?: unknown; stderr?: unknown };
-  // **只有"到点"这一类**归公共件的第一支（被外力终止 ⇒ 先想预算）。撑破 maxBuffer（`ENOBUFS`）不归这里：
-  // 公共件第二支的枚举里明写了"stdout 撑破了 maxBuffer"，那句才是给它的正确指路。
-  if (e.code === 'ETIMEDOUT' || e.killed === true) {
-    return { killed: true, signal: e.signal ?? 'SIGTERM', stdout: e.stdout, stderr: e.stderr };
-  }
-  // 其余一律按"进程自己非 0 退出"报告：退出码从 `status` 挪到公共件读的那个键 `code`。
-  // `e.status ?? e.code` 顺带把 spawn 级错误名（ENOENT / ENOBUFS）留在 code 上，两种坏法各说各话。
-  return { code: e.status ?? e.code ?? '(没有退出码)', signal: undefined, killed: false, stdout: e.stdout, stderr: e.stderr };
-}
 
 /**
  * nbconvert 的参数形状。与 `tutorials.test.ts` 的 `nbconvertArgv()` 同一套，只多一条 `kernel_name` 覆盖。
@@ -242,8 +212,13 @@ export async function probeScalaKernel(kernelName: string, notebookPath?: string
   try {
     raw = execFileSync('jupyter', nbconvertArgv(kernelName, nbPath, cellTimeoutS), { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
   } catch (err) {
-    // 先过一层字段映射（见 `evidenceShapedExecError`），否则公共件会把"kernel 没注册"报成"预算到点"。
-    crash = nbconvertCrashEvidence(evidenceShapedExecError(err), { execTimeoutMs: timeoutMs, cellTimeoutS });
+    // 直接把 `execFileSync` 抛出来的那个 error 递给公共件：`nbconvertCrashEvidence` 现在按**真形状**分支
+    // （退出码读 `status`、node 错误名读字符串 `code`、`signal` 为 `null` 不算"被信号终止" —— 提交 584c249），
+    // Task 1 这里那层 `evidenceShapedExecError` 字段映射因此变成冗余的，已删。
+    // 留着它的代价不是行数而是**判据的归属**：它替公共件决定了"哪一种坏法说哪一句话"，
+    // 而那句话的正确性由 kernel.test.ts 的「吃真 error 的四支判读」负责钉 —— 两边各决定一次，
+    // 漂移的时候读报告的人分不清是哪一侧错了。
+    crash = nbconvertCrashEvidence(err, { execTimeoutMs: timeoutMs, cellTimeoutS });
   }
 
   const errors: string[] = [];
