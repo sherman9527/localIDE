@@ -1334,8 +1334,11 @@
   ③ `language_info.version` 报 2.12.15 而实载 2.12.18；④ `spark.stop()` 收尾炸一条 `Shutdown hooks cannot be modified during shutdown`。
   产物处置：A/B 的镜像改动**存 patch + 未跟踪文件归档**在 `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-{A-almond,B-toree}/`，
   工作树已还原到 HEAD（**没有 `git clean -fdx`**）；探针与两份夹具**保留**，它们是 WI-91b 的起点而不是死代码。
-  ⚠ **一条未完成的收尾**：跑着的镜像此刻仍是 B 的形状（2.58GB、`arena-scala-toree` 已注册），而工作树不含它
-  ⇒ 下一次 `--build`/`--verify` 会把它拉回 HEAD，在那之前"跑着的 = HEAD"这句话**不成立**，别拿这台机器当交付状态的证据。
+  ⚠ **一条已完成的收尾（2026-10-10 合并后）**：还原工作树**不等于**还原镜像 —— B 的产物一度还烤在跑着的
+  `daily-arena:0.1`（2.58GB、`arena-scala-toree` 已注册）里。已 `docker compose up -d --build arena` 拉回 HEAD 并核过：
+  镜像回到 **2.55GB**、`jupyter kernelspec list` 只剩 `arena-pyspark` + `python3`、
+  `/app/server/test/notebooks/tutorial-claims.ts` 的 md5 与工作树逐字相同，并复跑 notebook 三条阶段
+  `kernel + embed + tutorials` ⇒ **67 passed / 0 skipped（104s）**。⇒ "跑着的 = HEAD" 现在是成立的。
   教训与完整读数见 `memo.md` 里程碑 BF 与两份 `task-2-report.md` / `task-3-report.md`（§3-§6 是控制端本人量的）。
 
 ## TODO
