@@ -12,6 +12,7 @@ import { registerOptionalRunners } from './judge/runners/index.js';
 import { sweepStaleWorkspaces } from './judge/workspace.js';
 import { resolveProviders } from './llm/provider.js';
 import { createGrader } from './llm/rubric.js';
+import { installGracefulExit } from './shutdown.js';
 
 /**
  * 组合根：题库 / 判题 / 评分 / 游戏各子系统在这里相遇（rule.md C4）。
@@ -73,17 +74,13 @@ async function main(): Promise<void> {
   }
   app.log.info(`题库目录 ${config.bankDir}；数据目录 ${config.dataDir}`);
 
-  const shutdown = async (signal: string): Promise<void> => {
-    app.log.info(`${signal}，正在关闭`);
-    try {
-      await app.close();
-    } finally {
-      await store.close();
-      process.exit(0);
-    }
-  };
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // 退出的顺序（关服务 → 关库 → 排空日志 → `process.exit`）在 `shutdown.ts` 里，判据也在那里：
+  // 组合根 import 就会 listen，那段序列因此不可测；把它接出去之后这里只剩"接哪两个信号"。
+  installGracefulExit({
+    log: (message) => app.log.info(message),
+    closeApp: () => app.close(),
+    closeStore: () => store.close(),
+  });
 }
 
 main().catch(async (err) => {
