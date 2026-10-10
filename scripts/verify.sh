@@ -45,19 +45,21 @@ if [ "${ARENA_NOTEBOOK_SERVICE:-0}" = "1" ]; then NB_SERVICE=1; else NB_SERVICE=
 # 评审 I-1（去重）：容器里这条"单元测试"阶段扫的是整个 `server/test/notebooks/`，而下面那条专门阶段
 # 又点名 `kernel.test.ts` ⇒ 同一个真 Spark 会话被起**两次**（一次 40–90s）。更糟的是它坏的时候先红在
 # 「单元测试」这个标签下、整轮就地终止，人本该读的那句「Notebook 运行时（kernel 真跑）」根本不会出现。
-# 修法只在**这一侧**（另一侧都错：删掉专门阶段会撞 verify-coverage 那条认领判据；
+# 修法只在**这一侧**（另一侧都错：删掉专门阶段会撞 verify-coverage 那条认领判据 —— 这句在 WI-103 之前
+# 是假话，因为 `--exclude` 的取值被当成认领；现在它是真话了：被排除的文件必须有**另一条不同名的**阶段接住，
+# 专门阶段一删就红；
 # 把目录从「单元测试（shared + exec + regression + notebooks + server 根级）」那条阶段的清单里去掉
 # 会静默搬走 18 条宿主档常驻断言（阶段名是真相，行号会漂 —— 这句原先写的是 `:35`，那条早就挪窝了）。
 # 宿主走 else，行为与今天逐字节一致。
 if [ "$NB_SERVICE" = "1" ]; then
-  # `--exclude` 的值**不要**写成 `"${ARR[@]}"`：verify-coverage.test.ts 收集认领路径时丢掉以 `-` 开头的
-  # token（所以那个 flag 本身不会被当成路径），但以引号开头的 `"${ARR[@]}"` 会被记成一条**假路径**。
-  # ⚠ 已知弱点（**登记给 A2，本轮不修**）：`--exclude` 的**值**本身会被 verify-coverage.test.ts 的
-  # 认领路径收集当成一条"这条阶段跑了 kernel.test.ts"的模式（它只丢以 `-` 开头的 token，不丢 `--exclude`
-  # 后面那个路径）⇒ 被排除的文件看起来仍被这一阶段认领。今天它不构成误判（kernel.test.ts 那条
-  # `env 门控`判据现在要求"设了全部变量的阶段"，专门阶段满足、这一条不满足），但"A 阶段说排除、
-  # 守卫却按认领算"这个方向是错的：将来若有人靠 `--exclude` 把某个门控文件挪出目录扫描，
-  # verify-coverage 会以为它还在跑。修法是解析时把 `--exclude` 的值记成**排除**而不是认领。
+  # ⚠ `--exclude` 的**值要原样点名写出来**，两条原因都落在 verify-coverage.test.ts 的解析器上：
+  # ① 别写成 `"${ARR[@]}"` 那种展开 —— 静态解析看不见它展开成什么，现在它会**直接被丢掉**（等于没有认领），
+  #    于是那条「被 --exclude 摘出去的文件必须有另一条阶段认领」会红；旧行为是把 `"${ARR[@]}"` 记成一条
+  #    **假认领**，而假认领比漏认领贵：它什么都追不到，看起来还是绿的。
+  # ② 别把 `--exclude` 换成表外的带值选项（`--exclude=X` 这种 `=` 写法可以，它是一个 token）——
+  #    那条「解析器认得 --exclude」会数脚本里的 token 与 stages() 解析出的条数，两边不一致就红。
+  # （WI-103 之前这里是**反的**：`--exclude X` 的取值被当成"这条阶段跑了 X"，于是下面三条排除看起来
+  #   自己就把 kernel / embed / tutorials 认领住了，删掉专门阶段什么都不会红。）
   # WI-94 Task 3：`embed.test.ts`（反代打在真 Jupyter 上）走的是**同一条被登记的路**——它同样用
   # `describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)` 门控，所以这里排除它、由下面那条专门阶段认领。
   # 排除的理由与 kernel.test.ts 不同但更硬：那一档真跑 Spark（贵），这一档每条都打真 7788 + 真 jupyter，

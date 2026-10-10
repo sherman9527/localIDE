@@ -7,6 +7,10 @@ import { config } from '../../src/config.js';
  * 门禁自己的守卫：verify.sh 的每个阶段是**按路径清单**跑测试的，
  * 所以"新加的测试文件没进任何一条清单"会让它永远不被执行，而流水线照样全绿
  * （实测抓到两例：server/test/log.test.ts 与 config.test.ts 躺在那里没人跑）。
+ *
+ * 它判的全是"认领"，所以**认领的反义词也归它判**（WI-103）：一条阶段说 `--exclude X` 的时候，
+ * 守卫必须听得见"排除"这半句 —— 把它当成"这条阶段跑了 X"就等于让守卫替坏人说谎。
+ * 下面每条判据都走 `stageClaims`（路径命中 **且** 没被这条阶段自己排除），不留旁路。
  */
 
 const ROOT = config.repoRoot;
@@ -15,6 +19,57 @@ interface Stage {
   label: string;
   vars: string[];
   patterns: string[];
+  /**
+   * 这条阶段用 `--exclude` 明确**不跑**的那些路径（WI-103）。
+   * 它们绝不能进 `patterns`：`--exclude X` 说的是"这一档不跑 X"，把它记成一条认领就是替它说了反话，
+   * 而反话的方向恰好是最贵的那种（见 `stageClaims`）。
+   */
+  excludes: string[];
+}
+
+/**
+ * vitest 里"取值单独占一个 token"的选项（`--exclude <glob>` 这种两 token 形状）。
+ * 为什么必须有这张表（WI-103 的本体）：`patterns` 的老判据是"以 `-` 开头的 token 丢掉"，
+ * 于是**紧跟在选项后面的那个值**被留下来并算作一条认领 —— 而 `--exclude X` 说的恰好是反面。
+ * 真撞过的后果：`verify.sh` 的容器分支用三条 `--exclude` 把 kernel / embed / tutorials 摘出去（评审 I-1 的去重），
+ * `stages()` 却把它们记成"这条阶段跑了它们" ⇒ 把下面那条专门阶段整条删掉，孤儿判据一个字都不会红
+ * （`testFiles()` 那条 `!claimed(...)` 为假）。
+ * 表只列脚本里可能用到的那些；`--flag=value` 那种写法天然是一个 token 且以 `-` 开头，已经被丢掉。
+ * ⚠ 表里**漏一条**未知带值选项，代价是"把它的值误当认领"（漏红）而不是多红 —— 所以下面那条
+ * 「解析器认得 --exclude」把表与脚本的一致性单独判住，不许这张表 quietly 过期。
+ */
+const VALUE_OPTS = new Set(['--exclude', '--reporter', '--outputfile', '--output-file', '--project', '--dir', '--config', '--shard', '--wait', '--retry']);
+
+const normalize = (token: string): string => token.replace(/^\.\//, '').replaceAll('\\', '/');
+
+/** 把 `npx vitest run` 后面那串 token 拆成"认领的路径"与"被排除的路径"两堆。 */
+function splitArgs(tokens: string[]): { patterns: string[]; excludes: string[] } {
+  const patterns: string[] = [];
+  const excludes: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i]!;
+    if (tok === '') continue;
+    if (!tok.startsWith('-')) {
+      /**
+       * 引号 / `$` 开头的是 **shell 展开**（`"${ARR[@]}"` 那种）：静态解析看不见它展开成什么 ⇒ 不许当成认领。
+       * 旧注释教作者"别这么写，否则记成一条假路径"；现在改成"这么写就等于没有认领"——
+       * **假认领比漏认领贵得多**：漏的那一半有孤儿判据去追，假的那一半什么都追不到（它看起来是绿的）。
+       * 后果是作者必须把路径点名写出来，而点名写出来的路径才能被这条守卫判住。
+       */
+      if (/^["'`$]/.test(tok)) continue;
+      patterns.push(normalize(tok));
+      continue;
+    }
+    const eq = tok.indexOf('=');
+    const name = (eq === -1 ? tok : tok.slice(0, eq)).toLowerCase();
+    if (eq !== -1) continue; // `--flag=value`：取值在同一个 token 里，整条一起丢掉
+    if (VALUE_OPTS.has(name)) {
+      const value = tokens[i + 1];
+      i += 1; // 带值选项的**取值**属于这个选项，不是位置参数（WI-103 修的就是这一行）
+      if (value && name === '--exclude') excludes.push(normalize(value));
+    }
+  }
+  return { patterns, excludes };
 }
 
 /** 解析 verify.sh 里的 vitest 阶段：`run "名字" env A=1 npx vitest run <路径...>`。 */
@@ -30,15 +85,12 @@ function stages(): Stage[] {
     out.push({
       label: m[1],
       vars: [...body.matchAll(/\b([A-Z][A-Z0-9_]{2,})=[^\s]+/g)].map((v) => v[1]!),
-      patterns: vitest[1]
-        .trim()
-        .split(/\s+/)
-        .filter((a) => a && !a.startsWith('-'))
-        .map((a) => a.replace(/^\.\//, '').replaceAll('\\', '/')),
+      ...splitArgs(vitest[1].trim().split(/\s+/)),
     });
   }
   return out;
 }
+
 
 function testFiles(): string[] {
   const out: string[] = [];
@@ -69,6 +121,16 @@ function claimed(file: string, patterns: string[]): boolean {
     }
     return file === p || file.startsWith(`${p}/`);
   });
+}
+
+/**
+ * 一条阶段"认领"某个文件 = 它的路径清单命中这个文件，**并且它自己没有把这个文件 `--exclude` 掉**。
+ * 后半是 WI-103 加的：少了它，`--exclude X` 会被读成"这条阶段跑了 X"（同一个 token 既被当成认领又被当成
+ * 排除，而守卫只听见前半句）⇒ 被排除掉一整片的目录看起来仍有人跑，"专门阶段被删了"这件事在孤儿判据上
+ * 一个字都不会红。下面每条判据都走这里，不留 `claimed(file, patterns)` 的旁路。
+ */
+function stageClaims(stage: Stage, file: string): boolean {
+  return claimed(file, stage.patterns) && !claimed(file, stage.excludes);
 }
 
 /**
@@ -129,7 +191,7 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
   const manualGateOk = (file: string): boolean => {
     const { declared, label } = manualGate(file);
     if (!declared || !label) return false;
-    return all.some((s) => s.label === label && claimed(file, s.patterns));
+    return all.some((s) => s.label === label && stageClaims(s, file));
   };
 
   it('脚本里确实有 vitest 阶段（防止改名把守卫一起废掉）', () => {
@@ -137,8 +199,76 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
   });
 
   it('没有"谁都不跑"的孤儿测试文件', () => {
-    const orphans = testFiles().filter((f) => !claimed(f, patterns));
-    expect(orphans, `这些测试文件不在 verify.sh 任何阶段的路径清单里：${orphans.join(', ')}`).toEqual([]);
+    // 走 stageClaims 而不是"把所有阶段的 patterns 摊平"：摊平之后 A 阶段的 `--exclude X`
+    // 会被 B 阶段的目录认领盖住，而**排除与认领本来就是每条阶段自己的事**（WI-103）。
+    const orphans = testFiles().filter((f) => !all.some((s) => stageClaims(s, f)));
+    expect(orphans, `这些测试文件不在 verify.sh 任何阶段的路径清单里（或被那条阶段自己 --exclude 掉了）：${orphans.join(', ')}`).toEqual([]);
+  });
+
+  /**
+   * **WI-103 的第二半：排除必须有接住它的那一边。**
+   * `--exclude` 的语义是"这一档不跑它，交给别处跑"（`verify.sh` 里那三条是为了评审 I-1 的去重：
+   * 容器分支扫整个 `server/test/notebooks/`，而下面两条专门阶段又点名同样的文件 ⇒ 真 Spark 起两次）。
+   * 只把取值从"认领"里摘掉还不够 —— 那只是不再撒谎；这句话才是有牙的那一半：
+   * **被摘出去的文件必须由另一条阶段认领**，否则它就是被排除到了没人跑的地方。
+   * ⚠ "另一条"要**换个阶段名**：`verify.sh` 里「单元测试…」那两条是同一个阶段的 if/else 两个分支
+   *（容器那一条排除、宿主那一条扫目录）。让"同名的另一分支"算认领就等于什么都没判 ——
+   * 真跑的那一支不会因为另一支的存在而多跑一个文件。
+   * 于是"删掉那条专门阶段"这一串会红在这里（今天它不红 —— 那正是 WI-103 登记的形状）。
+   */
+  it('被 --exclude 摘出去的文件必须由**另一条不同名**的阶段认领（排除不是新的家）', () => {
+    const seen = new Set<string>();
+    const homeless: string[] = [];
+    for (const stage of all) {
+      for (const ex of stage.excludes) {
+        for (const file of testFiles()) {
+          if (!claimed(file, [ex])) continue;
+          const elsewhere = all.some((s) => s.label !== stage.label && stageClaims(s, file));
+          // 去重：if/else 的两个分支各报一次同一件事是两条噪音，不是一条新判据
+          const line = `${stage.label}：--exclude ${ex} 把 ${file} 摘了出去，而没有任何**别的名字**的阶段认领它`;
+          if (!elsewhere && !seen.has(line)) {
+            seen.add(line);
+            homeless.push(line);
+          }
+        }
+      }
+    }
+    expect(
+      homeless,
+      `这些文件被 --exclude 摘出去之后没有人接：\n${homeless.join('\n')}\n` +
+        '⇒ 两种坏法之一：①那条**专门阶段**（点名跑它的那一条）被删了或改了名 —— 排除的前提"交给别处跑"当场不成立，' +
+        '这个文件在容器档里一行都不会执行；\n' +
+        '②`--exclude` 写错了路径（打空的排除不会被执行，而"打空"在 vitest 里不报错）。' +
+        '**把 --exclude 删掉不是修法**：那会让同一个文件被两条阶段各跑一遍（评审 I-1 记的那笔 40-90s 的账）',
+    ).toEqual([]);
+  });
+
+  /**
+   * **解析器与脚本的一致性单独判一次**（`.qoder/rules/dev_verify_workflow.md` 第 3 条：装饰性判据要被抓出来）。
+   * 上面那条只在 `stages()` 真解析出 excludes 时才有对象；而"解析器悄悄不认识 `--exclude` 了"
+   * （有人重排 `VALUE_OPTS` 表、或脚本换成 `"${ARR[@]}"` 那种展开）会让它**退化成空判** —— 空判比红更坏，
+   * 因为它看起来是绿的。⇒ 这条数的是脚本里的 `--exclude` token，与 `VALUE_OPTS` 那张表**无关**，
+   * 所以两边任一侧漂了都会红在这里（脚本那侧的计数是独立写的，不复用 splitArgs）。
+   * ⚠ `written > 0` 也是判据的一部分：`verify.sh` 今天靠 `--exclude` 去重（评审 I-1），
+   * 那条设计若被撤掉，这条判据要**跟着改并在 memo 里记账**，不许让它静默变成"两边都是 0，所以相等"。
+   */
+  it('解析器认得 --exclude：脚本里写了几条排除，stages() 就必须解析出几条（否则上面那条是空判）', () => {
+    const script = readFileSync(join(ROOT, 'scripts', 'verify.sh'), 'utf8');
+    let written = 0;
+    for (const line of script.split(/\r?\n/)) {
+      const vitest = /^run\s+"[^"]*"\s+.*npx vitest run (.+)$/.exec(line.trim())?.[1];
+      if (!vitest) continue;
+      const tokens = vitest.trim().split(/\s+/);
+      for (let i = 0; i < tokens.length; i += 1) {
+        if (tokens[i] === '--exclude') {
+          written += 1;
+          i += 1;
+        }
+      }
+    }
+    const parsed = all.reduce((n, s) => n + s.excludes.length, 0);
+    expect(written, 'verify.sh 的 vitest 阶段里一条 `--exclude` 都没有 ⇒ 这条判据没有对象。今天那三条是评审 I-1 的去重（容器分支扫目录 + 两条专门阶段点名），' + '要撤它得连带把专门阶段与这段判据一起改掉并在 memo.md 记账，不是让它静默变成 0 == 0').toBeGreaterThan(0);
+    expect(parsed, `脚本里写了 ${written} 条 --exclude，而 stages() 只解析出 ${parsed} 条 ⇒ 解析器与脚本已经不一致：漏掉的那些排除会被当成"认领"（WI-103 的形状），被排除的文件于是看起来还在跑。` + '改的是 stages() 里那张 VALUE_OPTS 表（或 splitArgs 的分支），不是脚本').toBe(written);
   });
 
   it('env 门控的闸门必须被"设了那个变量"的阶段认领', () => {
@@ -156,7 +286,7 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
       // `server/test/notebooks/` ⇒ kernel.test.ts 永远不算搁浅。实测（本轮终审的破坏性验证）：
       // 把 `ARENA_NOTEBOOK_SERVICE=1` 从 kernel 那条阶段里摘掉，`s.vars.every` 那一版仍 3 passed，
       // 而下面这一版当场红。`some` 的老问题是同一条的反面（只设一个变量就算数），两版都不是"全设了"。
-      .filter((x) => !all.some((s) => claimed(x.file, s.patterns) && x.vars.every((v) => s.vars.includes(v))));
+      .filter((x) => !all.some((s) => stageClaims(s, x.file) && x.vars.every((v) => s.vars.includes(v))));
     expect(
       stranded,
       `这些测试用 skipIf 门控，但没有任何"设了对应变量"的阶段认领它们：${stranded
@@ -190,8 +320,10 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
         continue;
       }
       const stage = all.find((s) => s.label === label)!;
-      if (!claimed(file, stage.patterns)) {
-        bad.push(`${file}：申报的「${label}」确实存在，但它的路径清单不认领这个文件 ⇒ 记错了账本`);
+      // 用 stageClaims 而不是 `claimed(file, patterns)`：申报说的"那条阶段按目录认领我"在**排除掉我的那一支**里不成立。
+      // 同名两条是 if/else 的两个分支，所以取"任一支真的认领"才算数（与 manualGateOk 同一个判据，不许两处各写一份）。
+      if (!all.some((s) => s.label === label && stageClaims(s, file))) {
+        bad.push(`${file}：申报的「${stage.label}」确实存在，但它的路径清单不认领这个文件（或被那条阶段自己 --exclude 掉了）⇒ 记错了账本`);
       }
     }
     expect(
