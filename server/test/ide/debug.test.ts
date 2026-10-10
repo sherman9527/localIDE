@@ -1,8 +1,9 @@
-import { readdir, readFile } from 'node:fs/promises';
-import { IDE_SESSION_LIMITS } from '@arena/shared';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { readdir, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { IDE_SESSION_LIMITS, type DebugStartResponse } from '@arena/shared';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
-import type { BackendEvent } from '../../src/ide/debug-backend.js';
+import type { BackendEvent, LaunchResult } from '../../src/ide/debug-backend.js';
 import { pythonBackend } from '../../src/ide/debug-python.js';
 import { IDE_LANGUAGES, findLanguage } from '../../src/ide/languages.js';
 import { ideAvailability } from '../../src/ide/runner.js';
@@ -28,12 +29,41 @@ import {
  *
  * 与 REPL 同一套纪律：宿主机没有 python3 的用例 skip，全绿要在容器里看；
  * 每条用例自己关会话（会话就是活进程，漏关等于攒孤儿占名额）。
+ *
+ * **WI-92 定下的形状**："会话没起来"必须报成一句说清**哪一步**没起来的话。
+ * 旧写法把 `started.session`（起不来时就是 `null`）交给 `finally { stopDebug(started.session!.id) }`，
+ * 于是断言里那句真话（status / message / 输出）被 `TypeError: Cannot read properties of null` 顶掉 ——
+ * 红就变成"无法判定的红"：分不清是产品缺功能还是测试自己崩了，而本仓库整套 TDD 靠的就是这个判断。
+ * 所以要活会话一律走 `startLiveSession` / `withDebug`：它们带**有界**重试（花的还是调用方本来
+ * 就声明了的那份启动预算，不是新加的秒数），并把每一次尝试的原文留在最终消息里。
+ * 同一族还有第二条：`两个并发的 start` 与 `afterEach` 都比的是"**沙箱会不会回到基线**"
+ * （`waitForSandboxesBackTo`，有界收敛），而不是"第 5 秒那一刻它在不在" —— Windows 的
+ * delete-pending 在负载下能让一次正常收尾超过 5s，而"当场比一次"会把这件事说成一次泄漏。
  */
 
 const available = await ideAvailability();
 const guarded = (id: string) => (available[id] === true ? it : it.skip);
 
 const lines = (...ls: string[]): string => ls.join('\n');
+
+/**
+ * 这一份文件的调试沙箱放进**自己进程**的子目录（`data/judge/test-pid-<pid>`）。
+ *
+ * 为什么（WI-92 本轮实测撞出来的第三条）：`data/judge` 是宿主与容器共享的挂载点，
+ * 而这里的断言形态是"数目录个数"（"调试期间沙箱要比基线多一个"、"收尾要回到基线"），
+ * 可调试沙箱的名字是 `debug-` + mkdtemp 的随机后缀 —— **认不出谁家**。
+ * 于是同机另一个 `verify:fast`（或 E2E、或浏览器里正开着的一段调试）建一个沙箱，
+ * 就能把我这一条弄红：本轮实测到两次，一次 `调试期间沙箱要在：expected 2 to be 1`，
+ * 一次 `停在断点上 31 秒` 的 afterEach 等满超时。那不是判题器坏了，是两条门禁在互相误伤，
+ * 而 pre-commit 撞上它只能重跑 —— 正是本仓库记过的"会偶发冤红的闸门比没有闸门更坏"。
+ * 判题那侧早就遇到过同一件事，办法是"只认自家前缀"（`java-junit` / `spark-scala` / `pyspark`），
+ * 这里既然认不出前缀，就按进程分目录。
+ * `config` 是 `as const`（编译期只读、运行时没冻结），这一处是**有意的**改道，只影响本 worker，
+ * 且只改沙箱根：日志、库、IDE 环境都还在原来那份 `data/` 下。
+ */
+const SHARED_JUDGE_ROOT = config.judgeWorkDir;
+const OWNED_JUDGE_ROOT = join(SHARED_JUDGE_ROOT, `test-pid-${process.pid}`);
+(config as { judgeWorkDir: string }).judgeWorkDir = OWNED_JUDGE_ROOT;
 
 /** 调试沙箱与判题沙箱落在同一个目录下，按 tag 前缀认（收尾必须清干净）。 */
 async function debugSandboxes(): Promise<string[]> {
@@ -47,17 +77,36 @@ async function debugSandboxes(): Promise<string[]> {
  * 两条都不顺手：① 收尾是异步的（管理器不为删目录卡住响应），所以要比"没有新的"而不是"没了"；
  * ② 不能断言"目录为空" —— 同一份 data/judge 可能正被另一个进程的用调试会话占着
  * （浏览器里开着一段调试就会留一个目录），那与本次测试无关，拿它当基线就是自己给自己造 flaky。
+ *
+ * **判据是收敛，不是时钟读数**（WI-92 这轮实测撞出来的）：负载下 `rm` 要跟 libuv 线程池
+ * （默认 4 条）排队，而产品侧 `workspace.cleanup()` 只重试 ~0.4s、各家 `dispose()` 又都写成
+ * `.catch(() => undefined)` —— 删除失败是**静默**的。于是"N 秒还没回到基线"混着两种完全不同的事实：
+ * "再等 200ms 就没了"与"永远不会没"。旧写法把两者都写成一句 `调试沙箱没收干净`，
+ * 等于把一次排队说成一次泄漏（与本仓库那条"冤红教人重跑"是同一族）。
+ * ⇒ 上限放宽到 30s **不是**把红藏深：真漏掉的目录（产品删失败）不会自己消失，那条照样撞红，
+ * 而且消息里带上"等了多久、是哪几个"，以及为什么这一次不是排队。
  */
-async function waitForSandboxesBackTo(baseline: string[], timeoutMs = 5_000): Promise<void> {
+async function waitForSandboxesBackTo(
+  baseline: string[],
+  opts: { timeoutMs?: number; why?: string } = {},
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
   const seen = new Set(baseline);
-  const deadline = Date.now() + timeoutMs;
+  const beganAt = Date.now();
+  const deadline = beganAt + timeoutMs;
   for (;;) {
     const now = await debugSandboxes();
-    if (now.every((n) => seen.has(n))) return;
+    const extras = now.filter((n) => !seen.has(n));
+    if (extras.length === 0) return;
     if (Date.now() > deadline) {
-      throw new Error(`调试沙箱没收干净：${now.filter((n) => !seen.has(n)).join(', ')}`);
+      throw new Error(
+        `${opts.why ?? '调试沙箱收尾'}：等了 ${Date.now() - beganAt}ms 仍没回到基线：${extras.join(', ')}\n` +
+          '    —— 30s 还不消失就不是"删除在排队"：产品侧删除失败是静默的' +
+          '（workspace.cleanup 只重试 ~0.4s，各家 dispose 都 .catch(() => undefined)），' +
+          '这一条要往"攒孤儿目录"那边查，不是往测试自己这边查。',
+      );
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
 }
 
@@ -74,6 +123,14 @@ afterEach(async () => {
   await waitForSandboxesBackTo(sandboxBaseline);
 });
 
+afterAll(async () => {
+  // 收掉本进程那份沙箱根（afterEach 已经把里面的会话清掉了）。路径由上面的 join 生成，
+  // 只可能是 `data/judge/test-pid-<pid>`，删不到共享沙箱根本身。
+  // 真删不掉（Windows 上刚杀完的句柄还没放）就留给服务启动那一次清扫：
+  // `sweepStaleWorkspaces` 会把超过一小时的直接子目录收掉，所以这里不判红、也不会静默攒垃圾。
+  await rm(OWNED_JUDGE_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => undefined);
+});
+
 async function withDebug(
   code: string,
   breakpoints: number[],
@@ -81,13 +138,86 @@ async function withDebug(
   timeoutMs?: number,
   language = 'python',
 ): Promise<void> {
-  const started = await startDebug(language, code, breakpoints, timeoutMs);
-  if (started.session === null) throw new Error(`起不来：${started.message}`);
+  const { id } = await startLiveSession(language, code, breakpoints, timeoutMs);
   try {
-    await body(started.session.id);
+    await body(id);
   } finally {
-    await stopDebug(started.session.id);
+    await stopDebug(id);
   }
+}
+
+/**
+ * 一次 `startDebug` 里"哪一步没起来"的摘要，按排查顺序排：状态 → 管理器给的话 → 会话名额 → 子进程的字。
+ * 输出只留**头部 200 字**：出错时最有用的是那句报错本体（SyntaxError / 找不到 java 都在最前面），
+ * 而尾部通常是 node 自己的堆栈 —— 整段灌进失败消息只会把真正那两句挤出人眼。
+ */
+function startDetail(r: DebugStartResponse): string {
+  const out = (r.output ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  return `status=${r.status}｜message=${r.message ?? '（无）'}｜会话数=${r.sessions}/${r.maxSessions}${out ? `｜输出头部=${out}` : ''}`;
+}
+
+function launchDetail(result: Extract<LaunchResult, { ok: false }>): string {
+  const { event } = result;
+  const text = 'text' in event ? (event.text ?? '').replace(/\s+/g, ' ').slice(0, 200) : event.type;
+  const message = 'message' in event ? (event.message ?? '（无）') : '（无）';
+  return `event=${event.type}｜message=${message}｜text=${text}`;
+}
+
+/**
+ * "等到它真起来"的形状：**有界**重试，每次尝试的原文都留在最终消息里。
+ *
+ * 为什么重试不是把红藏起来（WI-92）：这条等的是**产品契约里本来就允许慢**的那一段
+ * （`startDebug` 的第一个停点预算、后端那句"再按一次调试即可"说的就是同一件事）。
+ * 三道界一条都不能少：
+ * ① 总耐心 = 调用方**本来就声明了**的那份预算，不是新加的秒数（把超时调大才是藏）；
+ * ② 尝试次数上限，避免"立刻失败"变成空转；
+ * ③ 用完还不行 ⇒ 抛的是**一句说清哪一步没起来**的失败（列出每一次尝试），
+ *    所以"永远起不来"的真回归照样红，而且比原来更响。
+ * 反过来说，一次都没起来时**绝不用 `session!` 去撞一个 `TypeError`** ——
+ * 那是本仓库最贵的一种红：它把真故障盖成测试自身的崩溃，于是"红是因为缺功能还是因为测试自己坏了"
+ * 无法判定，而整套 TDD 都靠这句判据。
+ */
+async function untilReady<T>(
+  label: string,
+  patienceMs: number,
+  maxAttempts: number,
+  attempt: () => Promise<{ ok: boolean; value?: T; detail: string }>,
+): Promise<T> {
+  const beganAt = Date.now();
+  const details: string[] = [];
+  for (let n = 1; n <= maxAttempts; n += 1) {
+    const result = await attempt();
+    if (result.ok && result.value !== undefined) return result.value;
+    details.push(`第 ${n} 次（+${Date.now() - beganAt}ms）：${result.detail}`);
+    if (Date.now() - beganAt >= patienceMs) break;
+  }
+  throw new Error(
+    `${label}：${details.length} 次尝试用完 ${patienceMs}ms 耐心仍没起来\n` +
+      details.map((d) => `    ${d}`).join('\n') +
+      `\n    —— 这是"起不来"，不是断言失败：按上面每一步的 status/event 定位是 spawn、调试端口还是第一个停点。`,
+  );
+}
+
+/** 起一个**必须真起来**的会话：拿到的一定是活会话的 id，`finally` 里的收尾因此不可能踩到 null。 */
+async function startLiveSession(
+  language: string,
+  code: string,
+  breakpoints: number[],
+  timeoutMs?: number,
+): Promise<{ id: string; started: DebugStartResponse }> {
+  const budget = timeoutMs && timeoutMs > 0 ? timeoutMs : IDE_SESSION_LIMITS.debugStartTimeoutMs;
+  return untilReady(
+    `调试会话（${language}，断点 ${breakpoints.length ? breakpoints.join(',') : '无'}）`,
+    budget,
+    3,
+    async () => {
+      const started = await startDebug(language, code, breakpoints, timeoutMs);
+      const session = started.session;
+      return session
+        ? { ok: true, value: { id: session.id, started }, detail: '' }
+        : { ok: false, detail: startDetail(started) };
+    },
+  );
 }
 
 describe('调试注册表', () => {
@@ -127,7 +257,7 @@ describe('调试注册表', () => {
 describe('断点与单步', () => {
   guarded('python')('停在点的那一行，且那一行**还没执行**', async () => {
     const code = lines('x = 40', 'y = x + 2', 'print("tail")');
-    const started = await startDebug('python', code, [2]);
+    const { id, started } = await startLiveSession('python', code, [2]);
     try {
       expect(started.status).toBe('stopped');
       expect(started.line).toBe(2);
@@ -136,7 +266,7 @@ describe('断点与单步', () => {
       expect(names).toContain('x'); // 第 1 行跑完了
       expect(names).not.toContain('y'); // 第 2 行还没跑
     } finally {
-      await stopDebug(started.session!.id);
+      await stopDebug(id);
     }
   });
 
@@ -196,8 +326,7 @@ describe('断点与单步', () => {
 describe('停下来时能看到什么', () => {
   guarded('python')('print 的输出走独立事件：归到"下一次停"上，且不污染协议', async () => {
     const code = lines('print("before")', 'z = 1', 'print("after")');
-    const started = await startDebug('python', code, [2]);
-    const id = started.session!.id;
+    const { id, started } = await startLiveSession('python', code, [2]);
     try {
       // 停在第 2 行 = 第 2 行还没跑，所以第 1 行的 print 已经攒到了，第 3 行的还没有
       expect(started.status).toBe('stopped');
@@ -217,33 +346,32 @@ describe('停下来时能看到什么', () => {
   });
 
   guarded('python')('过长的值被截断并标明，而不是把整坨塞进响应', async () => {
-    const started = await startDebug('python', lines("s = 'x' * 5000", 't = 1'), [2]);
+    const { id, started } = await startLiveSession('python', lines("s = 'x' * 5000", 't = 1'), [2]);
     const s = started.locals?.find((v) => v.name === 's');
     expect(s, 's 在第 1 行就赋好值了，停在第 2 行时读得到').toBeTruthy();
     // 上限就是 shared 里那一个数。写 400 等于容许"驱动切 240、node 切 200"这种漂移存在
     expect(s!.repr.length).toBeLessThanOrEqual(IDE_SESSION_LIMITS.varReprChars);
     expect(s!.truncated).toBe(true);
     expect(s!.type).toBe('str');
-    await stopDebug(started.session!.id);
+    await stopDebug(id);
   });
 
   guarded('python')('局部变量里不许混进驱动脚本自己的名字', async () => {
     // 断点打在第三行：停在哪一行的**上一行**才算跑完，第 2 行的 ok 在第 2 行还没执行时读不到
-    const started = await startDebug('python', lines('__shadow = 1', 'ok = 2', 'done = 3'), [3]);
+    const { id, started } = await startLiveSession('python', lines('__shadow = 1', 'ok = 2', 'done = 3'), [3]);
     const names = (started.locals ?? []).map((v) => v.name);
     expect(names).toContain('ok');
     expect(names).not.toContain('__shadow');
     for (const name of names) expect(name.startsWith('__'), `${name} 是双下划线名`).toBe(false);
-    await stopDebug(started.session!.id);
+    await stopDebug(id);
   });
 });
 
 describe('失败路径', () => {
   guarded('python')('用户代码抛异常：报 error 并带 traceback，会话作废', async () => {
     const code = lines('x = 1', 'raise ValueError("boom")', 'x = 2');
-    const started = await startDebug('python', code, [1]);
+    const { id, started } = await startLiveSession('python', code, [1]);
     expect(started.line).toBe(1);
-    const id = started.session!.id;
     const res = await stepDebug(id, 'continue');
     expect(res.status).toBe('error');
     expect(res.output).toContain('ValueError');
@@ -290,27 +418,40 @@ describe('失败路径', () => {
       startDebug('java', JAVA_SOURCE, [10]),
     ]);
     const ok = [a, b].filter((r) => r.session !== null);
+    // **这一条必须与"两个都起来了"分开报**（WI-92）：这一族的红是"一个都没起来"（javac/ JVM 起太慢），
+    // 而旧写法只有一条 `toHaveLength(1)`，于是机器忙时的"起不来"会被读成"上限形同虚设"——
+    // 一句假话指向一段根本没坏的产品代码。
+    if (ok.length === 0) {
+      throw new Error(
+        `两个并发 start 一个会话都没起来（这不是名额问题，是起不来）：\n` +
+          `    A ${startDetail(a)}\n` +
+          `    B ${startDetail(b)}\n` +
+          `    —— 上面必须有且只有一路是 status=stopped；两路都是 error/rejected 就按各自的 message 定位。`,
+      );
+    }
     expect(ok, '两个都起来了：上限形同虚设').toHaveLength(1);
     expect(debugSessions()).toHaveLength(1);
     await stopAllDebug();
-    expect(await debugSandboxes(), '被拒的那一路不许留下沙箱').toEqual(sandboxBaseline);
+    // 这里原来是**当场** `expect(await debugSandboxes()).toEqual(sandboxBaseline)`：
+    // 刚被杀掉的会话在 Windows 上常处于"删除已受理、句柄还没释放"的 delete-pending 状态，
+    // 于是同一句断言会在负载下随机红 —— 而红的消息指向"被拒的那一路留了沙箱"这句根本没发生的事。
+    // 换成同一把收敛判据（有界等待）：真留下孤儿目录照样撞红，只是不再把排队说成泄漏。
+    await waitForSandboxesBackTo(sandboxBaseline, { why: '被拒的那一路不许留下沙箱' });
   });
 
 describe('名额与回收', () => {
   guarded('python')('同时只许一个调试会话（一个编辑器只调一个程序）', async () => {
-    const first = await startDebug('python', 'x = 1', [1]);
-    expect(first.session).not.toBeNull();
+    const { id: firstId } = await startLiveSession('python', 'x = 1', [1]);
     const second = await startDebug('python', 'y = 1', [1]);
     expect(second.session).toBeNull();
     expect(second.message).toContain('上限');
     expect(debugSessions()).toHaveLength(1);
-    await stopDebug(first.session!.id);
+    await stopDebug(firstId);
     expect(debugSessions()).toHaveLength(0);
   });
 
   guarded('python')('没到点的杀不掉，过点的杀掉（两条分开断，否则阈值改成 0 也全绿）', async () => {
-    const started = await startDebug('python', 'x = 1', [1]);
-    const id = started.session!.id;
+    const { id } = await startLiveSession('python', 'x = 1', [1]);
     expect(await sweepIdleDebugSessions(Date.now(), DEBUG_IDLE_MS)).toEqual([]);
     expect(debugSessions().find((s) => s.id === id)).toBeTruthy();
 
@@ -320,8 +461,7 @@ describe('名额与回收', () => {
 
   guarded('python')('正在等单步结果的那条不许被回收杀掉', async () => {
     // 停在第 2 行 → continue 会跑那段 sleep：这几秒里会话既"空闲超时"又"正在忙"
-    const started = await startDebug('python', lines('import time', 'time.sleep(2)', 'y = 1'), [2]);
-    const id = started.session!.id;
+    const { id } = await startLiveSession('python', lines('import time', 'time.sleep(2)', 'y = 1'), [2]);
     const pending = stepDebug(id, 'continue');
     expect(await sweepIdleDebugSessions(Date.now() + DEBUG_IDLE_MS * 2, DEBUG_IDLE_MS)).toEqual([]);
     expect(debugSessions().find((s) => s.id === id)).toBeTruthy();
@@ -334,8 +474,7 @@ describe('名额与回收', () => {
     // 少了队列里那句"死了就当场回答"，它会去等一个永不到来的停点，
     // 而它的超时结算又被 `finish` 的 dead 守卫挡掉 ⇒ 这条 promise 永不落地，
     // 队列是 Promise 链，后面每一条一起卡死（界面上就是"永远转圈"）。
-    const started = await startDebug('python', lines('a = 1', 'b = 2'), [1]);
-    const id = started.session!.id;
+    const { id, started } = await startLiveSession('python', lines('a = 1', 'b = 2'), [1]);
     expect(started.line).toBe(1);
     const at = Date.now();
     const [first, second] = await Promise.all([stepDebug(id, 'continue'), stepDebug(id, 'continue')]);
@@ -347,8 +486,8 @@ describe('名额与回收', () => {
   });
 
   guarded('python')('stopAll 把活着的会话收干净（服务收尾不许留孤儿进程）', async () => {
-    const started = await startDebug('python', 'x = 1', [1]);
-    expect(debugSessions().map((s) => s.id)).toEqual([started.session!.id]);
+    const { id } = await startLiveSession('python', 'x = 1', [1]);
+    expect(debugSessions().map((s) => s.id)).toEqual([id]);
     await stopAllDebug();
     expect(debugSessions()).toEqual([]);
   });
@@ -362,30 +501,43 @@ describe('后端接缝本身', () => {
    * ⇒ 崩的是整个服务，不是这一个请求。这条用例直接对着后端打，绕过管理器的守卫。
    */
   guarded('python')('写进一个刚退出的调试进程：要变成一条 error 事件，不是把服务崩掉', async () => {
-    const events: BackendEvent[] = [];
-    const launched = await pythonBackend.launch({
-      code: lines('x = 1'),
-      breakpoints: [],
-      startupBudgetMs: IDE_SESSION_LIMITS.debugStartTimeoutMs,
-      emit: (event) => {
-        events.push(event);
+    let events: BackendEvent[] = [];
+    // 这一条绕开管理器直接打后端，所以"后端起不来"在这里同样是真的会发生的（容器档实测过一次），
+    // 而旧写法抛的是一句 `后端起不来，这条用例没有意义` —— 它既没说是哪一步起不来，
+    // 也没把后端自己给的那句话带出来，读的人只能重跑碰运气。现在走同一条"有界重试 + 原文上报"。
+    const handle = await untilReady(
+      'python 调试后端（直接 launch，不经管理器）',
+      IDE_SESSION_LIMITS.debugStartTimeoutMs,
+      3,
+      async () => {
+        events = [];
+        const result = await pythonBackend.launch({
+          code: lines('x = 1'),
+          breakpoints: [],
+          startupBudgetMs: IDE_SESSION_LIMITS.debugStartTimeoutMs,
+          emit: (event) => {
+            events.push(event);
+          },
+        });
+        return result.ok
+          ? { ok: true, value: result.handle, detail: '' }
+          : { ok: false, detail: launchDetail(result) };
       },
-    });
-    if (!launched.ok) throw new Error('后端起不来，这条用例没有意义');
+    );
     // 没有断点 ⇒ 驱动跑完就自己结束。等一下让它真的没了（这条测的是"写进死管道"）
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(events.some((e) => e.type === 'exited')).toBe(true);
 
     // 关掉会话时会给 stdin 收尾（`end()`）—— **那之后再写**就是 `ERR_STREAM_WRITE_AFTER_END` 的现场。
     // 管理器那条"死了就当场回答"只挡住排到队尾的命令，挡不住判定与 write 之间那几微秒的竞态。
-    launched.handle.requestExit();
-    expect(() => launched.handle.send('next')).not.toThrow();
+    handle.requestExit();
+    expect(() => handle.send('next')).not.toThrow();
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(
       events.some((e) => e.type === 'error'),
       '写失败必须变成一条可结算的事件，否则调用方只能等满超时（界面上就是永远转圈）',
     ).toBe(true);
-    await launched.handle.dispose();
+    await handle.dispose();
   });
 });
 
@@ -407,7 +559,7 @@ const JS_SOURCE = lines(
 
 describe('JavaScript 行断点（CDP）', () => {
   guarded('javascript')('停在第 7 行：第 6 行的 total 读得到，第 7 行的 answer 还没有', async () => {
-    const started = await startDebug('javascript', JS_SOURCE, [7], 30_000);
+    const { id, started } = await startLiveSession('javascript', JS_SOURCE, [7], 30_000);
     try {
       expect(started.status, started.output ?? started.message).toBe('stopped');
       expect(started.line).toBe(7);
@@ -423,7 +575,7 @@ describe('JavaScript 行断点（CDP）', () => {
       expect(answer?.repr).toBe('<声明了，还没赋值>');
       expect(answer?.type).toBe('uninitialized');
     } finally {
-      await stopDebug(started.session!.id);
+      await stopDebug(id);
     }
   });
 
@@ -431,14 +583,19 @@ describe('JavaScript 行断点（CDP）', () => {
     // 启动时那个"Break on start"暂停不能无条件丢掉：断点在第一行时，
     // V8 把用户断点与启动暂停合并成 reason 'ambiguous' + hitBreakpoints，
     // 直接 resume 就等于这一行永远不停（python / jdb 都会停，三家行为必须一致）
-    const started = await startDebug('javascript', lines('const first = 1;', 'console.log(first);'), [1], 30_000);
+    const { id, started } = await startLiveSession(
+      'javascript',
+      lines('const first = 1;', 'console.log(first);'),
+      [1],
+      30_000,
+    );
     try {
       expect(started.status, started.output ?? started.message).toBe('stopped');
       expect(started.line).toBe(1);
       expect(started.reason).toBe('breakpoint');
       expect(started.locals?.find((v) => v.name === 'first')?.repr).toBe('<声明了，还没赋值>');
     } finally {
-      await stopDebug(started.session!.id);
+      await stopDebug(id);
     }
   });
 
@@ -498,9 +655,8 @@ describe('JavaScript 行断点（CDP）', () => {
   guarded('javascript')(
     '停在断点上 31 秒不按任何键：服务不许被一条没人接的拒绝带走（泵那一等过去是 30s）',
     async () => {
-      const started = await startDebug('javascript', JS_SOURCE, [6], 30_000);
+      const { id, started } = await startLiveSession('javascript', JS_SOURCE, [6], 30_000);
       expect(started.status, started.output ?? started.message).toBe('stopped');
-      const id = started.session!.id;
       await new Promise((resolve) => setTimeout(resolve, 31_000));
       const next = await stepDebug(id, 'next');
       expect(next.status, `空闲 31s 之后单步已经问不到了（${next.message ?? next.status}）—— 泵被一条超时带走`).toBe('stopped');
@@ -529,9 +685,9 @@ describe('JavaScript 行断点（CDP）', () => {
 
   guarded('javascript')('未捕获异常：报 error 并带异常名', async () => {
     const code = lines('const ready = 1;', 'throw new RangeError("nope");');
-    const started = await startDebug('javascript', code, [1], 30_000);
+    const { id, started } = await startLiveSession('javascript', code, [1], 30_000);
     expect(started.status).toBe('stopped');
-    const res = await stepDebug(started.session!.id, 'continue');
+    const res = await stepDebug(id, 'continue');
     expect(res.status, res.output ?? res.message).toBe('error');
     expect(res.output).toContain('RangeError');
     expect(debugSessions()).toEqual([]);
@@ -568,7 +724,7 @@ const JAVA_SOURCE = lines(
 
 describe('Java 行断点（jdb）', () => {
   guarded('java')('停在第 9 行：第 8 行的 x 读得到，第 9 行的 y 还没有', async () => {
-    const started = await startDebug('java', JAVA_SOURCE, [9]);
+    const { id, started } = await startLiveSession('java', JAVA_SOURCE, [9]);
     try {
       expect(started.status, started.output ?? started.message).toBe('stopped');
       expect(started.line).toBe(9);
@@ -580,7 +736,7 @@ describe('Java 行断点（jdb）', () => {
       // 方法参数也在 locals 里，名字必须完整（错位时会剩个 's'）
       expect(names).toContain('args');
     } finally {
-      await stopDebug(started.session!.id);
+      await stopDebug(id);
     }
   });
 
@@ -656,22 +812,22 @@ describe('Java 行断点（jdb）', () => {
       '    }',
       '}',
     );
-    const started = await startDebug('java', code, [3]);
+    const { id, started } = await startLiveSession('java', code, [3]);
     expect(started.status).toBe('stopped');
-    const res = await stepDebug(started.session!.id, 'continue');
+    const res = await stepDebug(id, 'continue');
     expect(res.status, res.output ?? res.message).toBe('error');
     expect(res.output).toContain('IllegalStateException');
     expect(debugSessions()).toEqual([]);
   });
 
   guarded('java')('会话结束必须把沙箱目录收掉（每次调试都留一份 .class 是攒垃圾）', async () => {
-    const started = await startDebug('java', JAVA_SOURCE, [9]);
+    const { id, started } = await startLiveSession('java', JAVA_SOURCE, [9]);
     expect(started.status).toBe('stopped');
     expect(
       (await debugSandboxes()).length,
       '调试期间沙箱要在（.class 与源码都放那儿）',
     ).toBe(sandboxBaseline.length + 1);
-    await stopDebug(started.session!.id);
+    await stopDebug(id);
     await waitForSandboxesBackTo(sandboxBaseline);
   });
 });
