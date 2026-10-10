@@ -25,6 +25,11 @@ interface Stage {
    * 而反话的方向恰好是最贵的那种（见 `stageClaims`）。
    */
   excludes: string[];
+  /**
+   * 这条阶段用 `--reporter=json --outputFile=<路径>` 写出的那份报告（WI-102 的配对判据要用）。
+   * 它是"这一档会留下一份可以拿去断言'真的跑过了'的证据"这句话的唯一写法。
+   */
+  outputs: string[];
 }
 
 /**
@@ -40,12 +45,24 @@ interface Stage {
  */
 const VALUE_OPTS = new Set(['--exclude', '--reporter', '--outputfile', '--output-file', '--project', '--dir', '--config', '--shard', '--wait', '--retry']);
 
+/** 取值要单独记一笔的选项：排除（excludes）与产出的 json 报告（outputs）。 */
+const OPTION_SINKS: Record<string, 'excludes' | 'outputs'> = {
+  '--exclude': 'excludes',
+  '--outputfile': 'outputs',
+  '--output-file': 'outputs',
+};
+
 const normalize = (token: string): string => token.replace(/^\.\//, '').replaceAll('\\', '/');
 
-/** 把 `npx vitest run` 后面那串 token 拆成"认领的路径"与"被排除的路径"两堆。 */
-function splitArgs(tokens: string[]): { patterns: string[]; excludes: string[] } {
+/** 把 `npx vitest run` 后面那串 token 拆成"认领的路径 / 被排除的路径 / 产出的报告"三堆。 */
+function splitArgs(tokens: string[]): { patterns: string[]; excludes: string[]; outputs: string[] } {
   const patterns: string[] = [];
   const excludes: string[] = [];
+  const outputs: string[] = [];
+  const push = (sink: 'excludes' | 'outputs', value: string) => {
+    if (sink === 'excludes') excludes.push(normalize(value));
+    else outputs.push(normalize(value));
+  };
   for (let i = 0; i < tokens.length; i += 1) {
     const tok = tokens[i]!;
     if (tok === '') continue;
@@ -62,19 +79,27 @@ function splitArgs(tokens: string[]): { patterns: string[]; excludes: string[] }
     }
     const eq = tok.indexOf('=');
     const name = (eq === -1 ? tok : tok.slice(0, eq)).toLowerCase();
-    if (eq !== -1) continue; // `--flag=value`：取值在同一个 token 里，整条一起丢掉
+    if (eq !== -1) {
+      // `--flag=value`：取值在同一个 token 里，整条不是路径参数 —— 但 outputFile 那一份要记进 outputs。
+      const sink = OPTION_SINKS[name];
+      if (sink) push(sink, tok.slice(eq + 1));
+      continue;
+    }
     if (VALUE_OPTS.has(name)) {
       const value = tokens[i + 1];
       i += 1; // 带值选项的**取值**属于这个选项，不是位置参数（WI-103 修的就是这一行）
-      if (value && name === '--exclude') excludes.push(normalize(value));
+      const sink = OPTION_SINKS[name];
+      if (sink && value) push(sink, value);
     }
   }
-  return { patterns, excludes };
+  return { patterns, excludes, outputs };
 }
+
+const verifyScript = (): string => readFileSync(join(ROOT, 'scripts', 'verify.sh'), 'utf8');
 
 /** 解析 verify.sh 里的 vitest 阶段：`run "名字" env A=1 npx vitest run <路径...>`。 */
 function stages(): Stage[] {
-  const script = readFileSync(join(ROOT, 'scripts', 'verify.sh'), 'utf8');
+  const script = verifyScript();
   const out: Stage[] = [];
   for (const line of script.split(/\r?\n/)) {
     const m = /^run\s+"([^"]*)"\s+(.*)$/.exec(line.trim());
@@ -91,6 +116,28 @@ function stages(): Stage[] {
   return out;
 }
 
+/** `run "名字" … node scripts/assert-ran.mjs <那份 json> …` 的那些阶段（WI-102 的配对判据要用）。 */
+interface AssertRanCall {
+  label: string;
+  report: string;
+}
+
+/**
+ * 解析 assert-ran 那几条阶段引用了哪个报告文件。
+ * 为什么要单独解析：assert-ran 判的是"这一档真的执行过用例"，而它读的是**上一条 vitest 阶段写出的那份 json**。
+ * 那条 vitest 阶段整条消失时，`data/*.json` 是 bind mount 上的**上一次留下的旧文件**，assert-ran 拿着旧报告
+ * 照样报绿 —— 于是"专门阶段被删了"既不红在 vitest（没跑就是没跑，没人问它），也不红在 assert-ran。
+ * 这正是 WI-102 点名的"assert-ran 那一半也救不了"，下面那条配对判据堵的就是它。
+ */
+function assertRanStages(): AssertRanCall[] {
+  const out: AssertRanCall[] = [];
+  for (const line of verifyScript().split(/\r?\n/)) {
+    const m = /^run\s+"([^"]*)"\s+.*scripts\/assert-ran\.mjs\s+(\S+)/.exec(line.trim());
+    if (!m?.[1] || !m[2]) continue;
+    out.push({ label: m[1], report: normalize(m[2]) });
+  }
+  return out;
+}
 
 function testFiles(): string[] {
   const out: string[] = [];
@@ -253,7 +300,7 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
    * 那条设计若被撤掉，这条判据要**跟着改并在 memo 里记账**，不许让它静默变成"两边都是 0，所以相等"。
    */
   it('解析器认得 --exclude：脚本里写了几条排除，stages() 就必须解析出几条（否则上面那条是空判）', () => {
-    const script = readFileSync(join(ROOT, 'scripts', 'verify.sh'), 'utf8');
+    const script = verifyScript();
     let written = 0;
     for (const line of script.split(/\r?\n/)) {
       const vitest = /^run\s+"[^"]*"\s+.*npx vitest run (.+)$/.exec(line.trim())?.[1];
@@ -296,6 +343,70 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
   });
 
   /**
+   * **WI-102：一条成立的申报不许替"被交接出去的那一档"免检。**
+   * 上面那条 env 判据有个出口：作者写 `verify-gate: manual` 就是认账"这一档我手动跑"。
+   * 那条申报的形状已经被判住（真实存在 + 确实认领本文件），但形状成立 ≠ 语义成立：
+   * 「写一条指着**目录阶段**的申报 + 把那条**专门阶段**删掉」这一串里，申报指的是真话（目录阶段确实认领它、
+   * 确实不设变量），而环境判据因此把这个文件摘出去 —— 专门阶段消失后没有人跑容器那一组，
+   * 而 `assert-ran` 那一半也救不了（它自己的阶段引用那份 json，见下面那条配对判据）。
+   * ⇒ **判据不许回指文件自己写的注释**，要回指脚本已经说过的那句话：脚本里有一条 `--exclude 这个文件`，
+   *   说的就是"这一档不跑它，**交给接得住它的那一条**"。所以被排除（且原本落在同一条阶段的目录清单里）的
+   *   门控文件，必须有一条**设了它全部门控变量**的阶段认领它。申报在这里**不豁免** ——
+   *   作者不能一边让脚本说"交给别处"，一边让注释说"我自己手动跑"。
+   * ⚠ 这条只覆盖"被 --exclude 交接出去"的那批（今天 = kernel / embed / tutorials）。
+   *   为什么不给**每一个**门控变量都钉一条"必须存在设了它的阶段"：`server/test/llm/real.test.ts` 那条
+   *   `ARENA_LLM_REAL` 是**真手动档**（没有任何阶段设过它，申报指的是真话），照字面写那条 WI 的修法
+   *   会在它身上误红 —— 而那恰好会教下一个人"给申报加个豁免"，豁免一加，本条要堵的那一串又回来了。
+   *   判据的对象因此挂在**脚本的排除**上，而不是挂在"有没有阶段设过这个变量"上。
+   */
+  it('被 --exclude 交接出去的门控文件：必须有一条**设了它全部变量**的阶段认领（申报在这里不豁免）', () => {
+    const stranded: string[] = [];
+    for (const file of testFiles()) {
+      const vars = gateVars(file);
+      if (vars.length === 0) continue;
+      // "交接出去"= 同一条阶段既按路径清单命中它、又自己把它排除掉（打空的排除不算交接，那是另一条判据管的）
+      const handedOff = all.some((s) => claimed(file, s.patterns) && claimed(file, s.excludes));
+      if (!handedOff) continue;
+      const caught = all.some((s) => stageClaims(s, file) && vars.every((v) => s.vars.includes(v)));
+      if (!caught) {
+        stranded.push(`${file}（门控变量：${vars.join(',')}）被目录阶段的 --exclude 交接出去，而没有任何"设齐这些变量"的阶段认领它`);
+      }
+    }
+    expect(
+      stranded,
+      `这些文件被交接出去之后没有人接住：\n${stranded.join('\n')}\n` +
+        '⇒ 那条**专门阶段**（在命令行上 `env` 里设了这些变量的那一条）被删了、改名了，或被摘掉了 env 前缀。' +
+        '写一条 `verify-gate: manual` 的申报**修不了这一条**：申报豁免的是上面那条 env 判据，而这里判的是脚本' +
+        '自己已经说过的"交给别处跑"。要么把专门阶段加回来，要么真的撤掉这个门控（连带删掉那些容器档用例），' +
+        '而不是留一条注释替它免检',
+    ).toEqual([]);
+  });
+
+  /**
+   * **WI-102 的第二半：`assert-ran` 引用的那份报告必须有活着的生产者。**
+   * `assert-ran.mjs` 的判据是"这一档真的执行过用例 / 一条都不许跳"，但它读的是**磁盘上那份 json**。
+   * `data/` 是 bind mount：上一条 vitest 阶段整条被删掉之后，旧的 `data/verify-tutorials.json` 还留在那里，
+   * 于是 assert-ran 拿着**上一次的报告**报绿 —— 这正是 WI-102 里那句"专门阶段消失 ⇒ 连'整片 skip'都不会被观测到"。
+   * ⇒ 配对判住：每条 assert-ran 阶段引用的报告路径，必须由某条 vitest 阶段的 `--outputFile=<同一路径>` 生产。
+   * 这条同样**与申报无关**（它判的是阶段集合的结构，一行注释都影响不了它）。
+   */
+  it('每条 assert-ran 引用的报告，必须由某条 vitest 阶段的 --outputFile 生产（不许读上一次留下的旧 json）', () => {
+    const calls = assertRanStages();
+    const produced = new Set(all.flatMap((s) => s.outputs));
+    // 判据对象的守卫要数 **assert-ran 阶段本身**有几条 —— 不是数 orphans：orphans 为空既可能是"全都有生产者"
+    // （好），也可能是"一条都没解析出来"（判据空转）。把两者混在一个数上，空转就长得像通过。
+    expect(calls.length, 'verify.sh 里一条 assert-ran 阶段都没解析出来 ⇒ 这条判据没有对象（解析器或脚本漂了）。' + '今天有两条（判题矩阵、教程闸门）；真要撤 assert-ran 那套，连带把这条判据改掉并在 memo 记账').toBeGreaterThan(0);
+    const orphans = calls.filter((c) => !produced.has(c.report));
+    expect(
+      orphans,
+      `这些 assert-ran 阶段引用了没人生产的报告：${orphans.map((c) => `${c.label} → ${c.report}`).join(', ')}\n` +
+        '⇒ 写那份 json 的那条 vitest 阶段（`--reporter=json --outputFile=` 那一条）被删了或改了路径。' +
+        '现在 assert-ran 会读**上一次留下的旧报告**并报绿 —— 那比没有这条闸门更坏，因为它让人相信"跑过了"。' +
+        '改的是脚本（把生产那份报告的阶段加回来），不是把 assert-ran 删掉',
+    ).toEqual([]);
+  });
+
+  /**
    * **申报口自己的判据**（WI-90 Task 5，评审绕过口 2）。上面那条 env 判据有一个"作者主动认账"的出口
    * （`verify-gate: manual`），而出口若不核内容就等于没有：旧判据只 `includes('verify-gate: manual')`，
    * 于是任意一行注释就能把一个文件从整条 env 判据里摘出去，配不上任何真实阶段。
@@ -334,6 +445,40 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
         (labels[0] ?? '某阶段') +
         '」按目录认领，但那里从不设门控变量，所以它是手动档`。' +
         '**把这条判据删掉不是修法**：删掉它 = 任何一行注释都能让一个 env 门控的闸门从执行层彻底消失',
+    ).toEqual([]);
+  });
+
+  /**
+   * **WI-102 的第三半：申报那句"但那里从不设门控变量"必须是真话。**
+   * 现存的每一句申报写的都是同一个格式（"由「某阶段」按目录认领，但那里从不设门控变量，所以它是手动档"）。
+   * 上面那条形状判据核了**前半句**（阶段存在 + 确实认领本文件），后半句今天一个字都没判 ⇒
+   * 一条指着"其实设了变量的那条阶段"的申报，可以把文件从 env 判据里摘出去而永远不红 ——
+   * 那是"判据回指作者自己写的注释"这种形状的死角，也是"交接出去"那条覆盖不到的另一半
+   * （没有被任何 `--exclude` 提到的文件走的就是这条路）。
+   * ⚠ 判"任一同名分支设了该文件的门控变量就算谎"：if/else 的两个分支是同一个阶段的两副面孔，
+   *   只要有一支在命令行上设过，那句"从不设"就不成立。
+   * 今天这条判据是绿的：唯一的申报在 `server/test/llm/real.test.ts`，它指的「游戏后端与前端测试」不设任何变量。
+   */
+  it('申报说"那里从不设门控变量" ⇒ 被指的那条阶段（任一同名分支）都不许设本文件的门控变量（申报不许说谎）', () => {
+    const lying: string[] = [];
+    for (const file of testFiles()) {
+      const { declared, label } = manualGate(file);
+      if (!declared || !label) continue;
+      const vars = gateVars(file);
+      if (vars.length === 0) continue;
+      for (const s of all) {
+        if (s.label !== label) continue;
+        const set = s.vars.filter((v) => vars.includes(v));
+        if (set.length > 0) {
+          lying.push(`${file}：申报说「${label}」从不设门控变量，而它的命令行确实设了 ${set.join(',')} ⇒ 既然那条阶段满足 env 判据，这条申报除了把文件从判据里摘出去之外什么都不做`);
+        }
+      }
+    }
+    expect(
+      lying,
+      `申报的语义与脚本不符：\n${lying.join('\n')}\n` +
+        '⇒ 改法是**删掉那行申报**（那条阶段设了变量，env 判据本来就过，不需要作者认账），' +
+        '**不是**把变量从阶段命令行上摘掉 —— 后者会让这一档真的不再跑',
     ).toEqual([]);
   });
 });
