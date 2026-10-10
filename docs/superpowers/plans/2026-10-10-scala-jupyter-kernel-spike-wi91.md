@@ -197,6 +197,8 @@ Commit：`spike(notebooks): WI-91 Task 2 —— Almond 实测（结论：成/不
 
 ## Task 4：路径 C —— 自包 `IMain`（编译器已在镜像里，只缺 ZMQ）
 
+- [ ] **Step 0: 先把镜像还原成 HEAD 的形状**（与 Task 3 同一条：上一档若留了烤进镜像的东西没还原，
+  这一档的体积增量就会算到别人头上）。核 `docker images` 与 `jupyter kernelspec list` 再往下走。
 - [ ] **Step 1: 只加一个 jeromq jar**（纯 Java ZMQ 绑定，无本地库、无 Python）—— 来源、版本、sha256 同 Task 2 的纪律。
   先跑一次最小连通性验证：`java -cp jeromq.jar` 起一个 REP socket，`python3 -c "import zmq; …"` 连上去发一帧
   （**这一步只回答"这个 jar 在这台 JVM 上能不能用"**，与 kernel 协议无关；不行就直接否掉路径 C，省掉后面全部工作）。
@@ -204,8 +206,20 @@ Commit：`spike(notebooks): WI-91 Task 2 —— Almond 实测（结论：成/不
   ZMTP 的 identity + ROUTER/REP/PUB 三件套；`hmac` 签名那一层照 `jupyter_server` 的 `SignatureTransformer` 实现）。
   **范围钉死**：不做 `complete_request`（Tab 补全）、不做 `inspect_request`、不做中断（`sigint`）—— 那三件是"能用"之外的东西，
   写进来会让这一档从"探索"变成"维护一个自研 kernel"。探索期就把它们标为未支持，页面/文档不许把它们说成有。
-- [ ] **Step 3: 探针 + 代价**：与 A/B 同一组数字，另加一行**代码量**（`wc -l`）与"我们自己要维护什么"的一句话清单。
-- [ ] **Step 4: 结论与提交**。
+
+  ⚠ **路径 A 的教训在这一档变成一条硬要求：`error` 消息必须带 `traceback`。**
+  A 死就死在它发的那条 iopub `error` 缺这个键 ⇒ `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 无兜底下标就 `KeyError`
+  （`allow_errors=True` **绕不过**），而真界面上 Jupyter 前端自己报 `Kernel message validation error: Missing property 'traceback'`
+  ⇒ 用户写坏代码看不到报错。⇒ 这一档的 `error` 消息必须至少含 **`ename` / `evalue` / `traceback`（字符串数组）** 三件，
+  `stream` 消息必须含 **`name`（"stdout"|"stderr"）与 `text`**；少任一件就是"我们重犯 A 的错，而且这次是我们自己的代码"。
+  **这条是我们唯一的结构性优势**：A/B 的 error 通道是别人的代码，改不动；C 的发什么字段我们说了算。
+  写进决策表时别只算"多写多少行"，要算"只有这一条路能把编译错误报给用户"。
+- [ ] **Step 2b: 负例先跑**（Task 2/3 定下的顺序，理由：**负例秒级、正例要起 Spark，而 A 恰恰是"正例全绿、负例跑不了"**）。
+  先跑 `99-probe-scala-no-def.ipynb`（摘掉定义格 ⇒ 必然编译错）：它必须**能被 nbconvert 执行完**且落成 `output_type=error`，
+  而 `alive=42` **不许**出现。跑不通就地定案，别去跑正例。
+- [ ] **Step 3: 探针 + 代价**：与 A/B 同一组数字（三条判据 / 体积 / 构建时长 / 启动墙钟 / 新增可写状态 / 运行时是否联网），
+  另加两行：**代码量**（`wc -l`）与"我们自己要维护什么"的一句话清单（协议版本漂、Scala 版本升级、Jupyter 消息规范变更都在我们这边）。
+- [ ] **Step 4: 结论与提交**。收尾同 Task 3：**不接入就存 patch 归档 + 还原工作树**，并写清"跑着的镜像 = HEAD 与否"。
 
 ---
 
