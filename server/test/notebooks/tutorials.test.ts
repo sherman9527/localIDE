@@ -402,40 +402,79 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
     expect(IT_TIMEOUT_MS, `vitest 那一层的预算（${IT_TIMEOUT_MS}）必须大于 execFileSync 的（${EXEC_TIMEOUT_MS}），否则先打死的是 vitest，报出来的是 "Test timed out"（说不到那句"先想超时"）`).toBeGreaterThan(EXEC_TIMEOUT_MS);
   });
 
+  /** 本档的预算：两处共用一个对象，"报错说的秒数"与"实际发出去的秒数"才是一个数（评审 M2）。 */
+  const CRASH_BUDGET = { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S };
+
   /**
-   * **M2（评审）：`nbconvertCrashEvidence()` 自己的形状判据。**
+   * **M2（评审）+ WI-104：`nbconvertCrashEvidence()` 自己的形状判据 —— 喂的是**真 spawn 出来的 error**。**
    * 它过去只在崩溃路径执行 —— **绿跑永远碰不到它**，所以"它说的那句话对不对"这件事本身没人判过；
-   * 抽成两档共用的公共件之后，一次漂移的爆炸半径翻倍（评审 M2）。判三件事：
-   * ① **有界**：喂 10000 字节的 stderr（Spark 的真实日志实践上没有上界），消息不许跟着长；
-   * ② **说得出超时**：消息里必须出现"预算"与 timeout/超时 —— 这是这条函数存在的意义，
-   *    少了它，被 SIGTERM 杀掉的那种红就只剩"这一档跑不起来"三条不相干的猜测；
-   * ③ **不许拿着别人的数字说话**：带 budget 的那次必须点出**本档**的 135s/120s、且**不出现** 180
-   *    （180 是 `kernel.test.ts` 的预算；逐字搬运时它跟着搬进了公共件，于是教程超时会被报成隔壁文件的数字，
-   *    把人引去查一个没跑过的实例 —— 评审 M2 抓的就是这一条）；不带 budget 的那次不许出现**任何**裸秒数点名。
+   * 抽成两档共用的公共件之后，一次漂移的爆炸半径翻倍（评审 M2）。
+   *
+   * ⚠ **WI-104 换掉的是"判据的对象"，不是判据的条数**：这一组原来喂的是手搓的 `{code: 1, …}` 与
+   * `{killed: true, signal: 'SIGTERM'}`，而 node 的 `execFileSync` 真抛出来那一份**长得不一样** ——
+   * 退出码在 `status` 上、`signal` 在非正常退出时是 `null`（不是 `undefined`）、`killed` 压根不存在。
+   * 公共件里那个 bug（读 `e.code` 当退出码）在手搓形状下**永远点头**，于是"每一条真实故障都走错支"这件
+   * 事在绿色断言下面活了三档。`kernel.test.ts` 常驻那组早在提交 `584c249` 就改成真 spawn ——
+   * **同一个公共件只有一边有牙**，改公共件时另一边不会喊，这就是 WI-104 的形状。
+   * ⇒ 下面每一条都真的起一个子进程（同一个 `process.execPath`，同一套造法），原样喂进去。
+   * 每条仍然判三件事：① **有界**（真 40KB stderr 进去，消息不许跟着长）；② **说得出超时**
+   * （预算 / timeout / 超时）；③ **不许拿着别人的数字说话**：带 budget 的那次必须点名**本档**的
+   * 135s/120s 且**不出现** 180（180 是 `kernel.test.ts` 的预算，逐字搬运时它跟着搬进了公共件，
+   * 于是教程超时会被报成隔壁文件的数字 —— 评审 M2 抓的就是这一条）；不带 budget 的那次不许出现任何裸秒数点名。
+   * ⚠ 每条用例都**先钉住真 error 自己的形状**再喂：少了那一段，"造真 error"这件事坏掉时
+   * （node 换了字段、execFileSync 不抛了）判据只是安静地喂进别的东西 —— 那正是本轮要根掉的病。
    */
-  it('nbconvertCrashEvidence 的形状：消息有界、枚举里必须有超时、预算由调用方给而不是写死', () => {
-    const huge = 'x'.repeat(10_000);
-    // 被 SIGTERM 杀掉（execFileSync 超时的形状：没有 code，killed=true）
-    const killedMsg = nbconvertCrashEvidence({ killed: true, signal: 'SIGTERM', stdout: huge, stderr: huge }, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S });
-    expect(killedMsg.length, `崩溃消息必须**有界**（实际 ${killedMsg.length} 字符）⇒ stderr 的搬运要有上限`).toBeLessThan(2_000);
+  it('真 error ①：非 0 退出（status=3、signal=null、stderr 40KB）⇒ 报得出 code=3 与"非 0 退出"，且不许落到"被信号终止"那一支', () => {
+    const err = spawnFailingNode(noiseScript('process.exit(3)'));
+    // 形状钉子：这两行就是 584c249 那个 bug 的病灶本身（旧判读把 `null !== undefined` 读成"有 signal"）
+    expect(err.status, `node 把退出码放在 status 上（实际 ${JSON.stringify(err.status)}）⇒ 喂进去的已经不是"进程自己非 0 退出"那个形状，先重读 notebook-evidence.ts 里那张实测表`).toBe(3);
+    expect(err.signal, `非 0 退出时 signal 是 null（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是那个形状`).toBeNull();
+    expect(byteLen(err.stderr), `子进程写的 ${CRASH_NOISE} 字节 stderr 要挂在 error 上（实际 ${byteLen(err.stderr)} 字节）⇒ 下面那条"有界"就判不到真字节`).toBe(CRASH_NOISE);
+
+    const msg = nbconvertCrashEvidence(err, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S });
+    expect(msg, '非 0 退出那一支的枚举里不许丢掉超时/预算这一条（它是最常见的那一种）').toContain('预算');
+    expect(msg, '有退出码时才许说"非 0 退出"').toContain('非 0 退出');
+    expect(msg, `退出码要说得出是几（实际开头：${peek(msg)}）`).toContain('code=3');
+    expect(msg, '真 error 的退出码来自 `status` 键 ⇒ 消息必须说清这个数取自哪个键（读错键的那一次，就是把这句话抹掉的那一次）').toContain('`status` 键');
+    expect(msg, `真非 0 退出**不许**被报成"被信号终止 ⇒ 先想超时/预算"（这一条断言就是 584c249 那次修复的牙；实际开头：${peek(msg)}）`).not.toMatch(/被信号终止|被 signal=|先想超时/);
+    expect(msg.length, `崩溃消息必须**有界**（实际 ${msg.length} 字符，喂进去的 stderr 有 ${CRASH_NOISE} 字节）⇒ stderr 的搬运要有上限`).toBeLessThan(2_000);
+  });
+
+  it('真 error ②：execFileSync 的 timeout 真的到点（SIGTERM + ETIMEDOUT）⇒ 落"被信号终止"那一支并点名本档的 135s/120s；不传 budget 时不点名任何秒数', () => {
+    const err = spawnFailingNode(noiseScript('setTimeout(() => {}, 1_000_000_000)'), { timeoutMs: 300 });
+    expect(err.signal, `预算到点时 node 给的是 SIGTERM（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是"到点"那个形状`).toBe('SIGTERM');
+    expect(err.status, `被外力结束时没有退出码（实际 ${JSON.stringify(err.status)}）⇒ status 有数就说明这一次没被外力结束，喂进去的不是"到点"那个形状`).toBeNull();
+
+    const killedMsg = nbconvertCrashEvidence(err, CRASH_BUDGET);
+    expect(killedMsg.length, `崩溃消息必须**有界**（实际 ${killedMsg.length} 字符，stdout/stderr 各 ${CRASH_NOISE} 字节）⇒ stderr 的搬运要有上限`).toBeLessThan(2_000);
     expect(killedMsg, '超时那一支要说得出"预算"，否则读报告的人只剩三条不相干的猜测').toContain('预算');
     expect(killedMsg, '超时那一支要说得出 timeout/超时').toMatch(/timeout|超时/);
-    expect(killedMsg, 'killed=true 那一支不许照着"以 code=… 非 0 退出"那三条讲（那种情况下压根没有 exit code，照那段讲就是把人往 kernel 注册上赶）').not.toContain('以 code=');
+    expect(killedMsg, 'killed/外力那一支不许照着"以 code=… 非 0 退出"那三条讲（那种情况下压根没有 exit code，照那段讲就是把人往 kernel 注册上赶）').not.toContain('以 code=');
     expect(killedMsg, `带 budget 的那次要点名**本档**的 execFileSync 预算（${Math.round(EXEC_TIMEOUT_MS / 1000)}s）`).toContain(`${Math.round(EXEC_TIMEOUT_MS / 1000)}s`);
     expect(killedMsg, `带 budget 的那次要点名**本档**的 cell 级超时（${CELL_TIMEOUT_S}s）`).toContain(`${CELL_TIMEOUT_S}s`);
     // ③ 这条是 M2 的本体：公共件里不许留着隔壁文件的预算。
     expect(killedMsg, '消息里不许出现 180（那是 kernel.test.ts 的 execFileSync 预算，本档根本没用它）').not.toMatch(/\b180\b/);
 
     // 不带 budget 的那一支（`kernel.test.ts` 就是这种调用形状）：仍然要有"预算到点"这一条，只是不许点名秒数。
-    const unnamed = nbconvertCrashEvidence({ killed: true, signal: 'SIGTERM', stdout: huge, stderr: huge });
+    const unnamed = nbconvertCrashEvidence(err);
     expect(unnamed.length, `不点名那一支同样要有界（实际 ${unnamed.length} 字符）`).toBeLessThan(2_000);
     expect(unnamed, '不点名也要说得出"预算到点"这回事').toContain('预算');
     expect(unnamed, '公共件不许替调用方猜秒数（135/120 是本档的，180 是隔壁的，都不许写死在这里）').not.toMatch(/(135|120|180)s/);
+  });
 
-    // 真的非 0 退出（有 code）那一支：枚举里必须仍然留着超时这一条，否则一次"重构掉那句提醒"就把最可能的坏法删了。
-    const codeMsg = nbconvertCrashEvidence({ code: 1, stderr: huge }, { execTimeoutMs: EXEC_TIMEOUT_MS, cellTimeoutS: CELL_TIMEOUT_S });
+  /**
+   * **唯一留下的一条手搓形状**，它判的不是真 error 而是**调用方映射过的形状**：`exitEvidence` 里那个
+   * `from` 参数区分"数取自 status（真 error）"与"数取自 code（上层 shim 映射的）"，两条各要能说得出自己那一句。
+   * ⚠ 历史账：数字 `code` 那份形状由 `scalaKernelProbe.ts` 的 `evidenceShapedExecError` 产生，那层 shim
+   * 已在 WI-91 Task 2 被删（它替公共件决定"哪一种坏法说哪一句话"，两边各决定一次就是漂移的来源）。
+   * ⇒ 今天这一支**只有这条手搓用例在判**。它不许被顺手删掉：删掉它 = `from:'code'` 那一支静默无判据；
+   * 要不要把那一支本身收掉是另一个决定（见本轮报告"待裁决"）。
+   */
+  it('调用方映射过的形状（数字放在 code 上的那份 shim）⇒ 仍要说得出"非 0 退出"，并点名这个数取自 code 键', () => {
+    const codeMsg = nbconvertCrashEvidence({ code: 1, stderr: 'x'.repeat(10_000) }, CRASH_BUDGET);
     expect(codeMsg, '非 0 退出那一支的枚举里不许丢掉超时/预算这一条（它是最常见的那一种）').toContain('预算');
     expect(codeMsg, '有 code 时才许说"非 0 退出"').toContain('非 0 退出');
+    expect(codeMsg, '映射形状的退出码来自 code 键 ⇒ 与上面真 error 那条的 `status` 键相对，两次各说各的（合并成一句就会有一边替另一边撒谎）').toContain('`code` 键');
     expect(codeMsg.length, `非 0 退出那一支也要有界（实际 ${codeMsg.length} 字符）`).toBeLessThan(2_000);
   });
 
@@ -475,3 +514,44 @@ function hasNbconvert(): boolean {
     return false;
   }
 }
+
+// ──────── WI-104：给常驻那组造**真 error** 的三个小工具（造法与 `kernel.test.ts` 常驻那组同一套） ────────
+
+/**
+ * 子进程往 stdout/stderr 里写这么多字符。为什么要有这段噪声：`nbconvertCrashEvidence()` 的"消息有界"
+ * 那条判据在空 stderr 上是**空判** —— Spark 的真实日志实践上没有上界，判据必须在真字节上判一次，
+ * 否则"上限被删掉"这件事只在下一次真崩溃里暴露（而那次正好是最不该把报告写成日志转储的一次）。
+ * 40KB 足够撑破那段搬运的上限，又远小于 `maxBuffer`，不会自己变成另一种故障形状。
+ */
+const CRASH_NOISE = 40_000;
+
+/** 先写噪声、再按 `tail` 失败的那段子进程源码（`process.exit(n)` / 挂住不返回）。 */
+const noiseScript = (tail: string): string => `process.stdout.write('y'.repeat(${CRASH_NOISE})); process.stderr.write('x'.repeat(${CRASH_NOISE})); ${tail}`;
+
+/**
+ * 起一个**注定失败**的 node 子进程，把 `execFileSync` 抛的那个 error 原样交出去。
+ * ⚠ `stdio` 必须显式设成 pipe：默认那一种会把子进程的 stderr **转发到父进程 stderr**，
+ *   于是那 40KB 噪声会同时刷进测试报告 —— 而这一条用例存在的理由恰恰是"报告不许是日志转储"。
+ * ⚠ 没抛就是这一条**没有判据对象** ⇒ 当场红，不许退化成"那就喂一份手搓的"（那正是 WI-104 要根掉的病）。
+ */
+function spawnFailingNode(script: string, opts: { timeoutMs?: number } = {}): Record<string, unknown> {
+  const run = () =>
+    execFileSync(process.execPath, ['-e', script], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+    });
+  try {
+    run();
+  } catch (err) {
+    return err as Record<string, unknown>;
+  }
+  throw new Error('execFileSync 没有抛 ⇒ 这一条没有真 error 可喂（node 的行为变了，或者这里的命令写错了）。把"没抛"当成通过，就是又造一个绿下面的谎');
+}
+
+/** error 上那段 stderr/stdout 的字节数（`encoding: 'utf8'` 时是字符串，别的形状算 0）。 */
+const byteLen = (v: unknown): number => (typeof v === 'string' ? v.length : 0);
+
+/** 失败消息的截断预览：判据红时要把"它到底说了哪一支"印出来，但不能把 800 字节的 stderr 也印进报告。 */
+const peek = (msg: string): string => msg.slice(0, 200);
+
