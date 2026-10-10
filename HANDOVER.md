@@ -1351,6 +1351,11 @@
   ④ Scala smoke 走**独立容器档阶段**（不复用题闸门那三条 Python 形状的判据，尤其"末 cell 必须 `spark.stop()`"
   在 Toree 上会炸收尾）并接 `assert-ran --require-no-skips`；⑤ 页面说实话（第二个 JVM、`ename` 恒为 `Unknown Error`、
   `language_info.version` 报 2.12.15 而实载 2.12.18 ⇒ 不许显示这个 version、补全/悬浮/中断不支持）。
+  ⚠ **两条探索档明确"没证过"的东西，接入档必须单独量**（都写在归档 `kernel.json` 的 metadata 里）：
+  ① `interrupt_mode: signal` —— SIGINT 给 JVM 的默认结果是**整个进程下去**，Toree 为此提供 `--alternate-sigint`，
+  而三条判据都不碰中断 ⇒ 现在没有任何读数；界面上那个"停止"按钮按下去会怎样，未知。
+  ② Toree 启动时调 `System.setSecurityManager`（JDK 17 已打 terminally deprecated 警告）⇒ 对判题侧无影响（独立 JVM），
+  但它是"未来换 JDK 的到期日"。
 - [ ] WI-101 **条件账：自包 `IMain` kernel（路径 C）** —— **只有**当 WI-100 落地后 B 的
   `Unknown Error` / 空 `traceback` / 版本常量这三条里任何一条在真界面上变成产品问题才做。
   它唯一的结构性优势是"`error` 消息发什么字段我们说了算"（Almond 就是死在别人说了算的那一件上）；
@@ -1401,6 +1406,26 @@
   同档另外两条实测先记在这：优雅退出成没成功**只能判 `State.ExitCode`**（那条路径不打印新行），
   而 Task 4 之前一条活 ws 就能把它拖成 SIGKILL（32s/137 → 修后 1s/0）。
 
+- [ ] WI-102 **一条成立的 `verify-gate: manual` 申报仍然可以替自己免检**（WI-90 交付档补强之后剩下的那一半，2026-10-10）：
+  `verify-coverage.test.ts` 现在要求申报"独立成行 + 指着一条真实存在、且确实认领本文件的阶段"（`0bf2778` 加的形状判据），
+  但它**不保证那条阶段真设了门控变量**。⇒ "写一条指向目录阶段的申报 + 删掉那条专门阶段"这一串，
+  env 判据不红（申报的语义本来就是"作者认账我手动跑"），而 `assert-ran` 那一半也救不了 —— 专门阶段消失 ⇒ 没人跑容器那一组 ⇒
+  连"整片 skip"都不会被观测到。**要堵它得让"阶段集合"自己进判据**：钉住 `stages()` 里必须存在一条
+  为**每一个** env 门控变量设了值的阶段（现在只有"这个文件的变量被某个设了该变量的阶段认领"这种回指式判据，
+  阶段整体消失时它跟着消失）。
+- [ ] WI-103 **`--exclude` 的值被 `verify-coverage` 当成"认领"而不是"排除"**（控制端读码核实，2026-10-10）：
+  `stages()` 里 `patterns` 取的是 `npx vitest run` 之后的全部 token，只丢掉以 `-` 开头的那些 ⇒
+  `--exclude` 本身被丢，**它后面那个路径被留下并算作一条认领**。
+  ⇒ 后果正是 WI-92/WI-90 都撞过的那类："整片被排除的目录"看起来"被某个阶段认领着"，
+  于是**孤儿判据抓不到"专门阶段被删了"**（`testFiles()` 那条 `!claimed(...)` 为假）。
+  修法很小：解析时把"带值选项的取值"一起丢（维护一张 `--exclude/--reporter/--outputFile/--project` 之类的表），
+  并补一条**破坏性验证**：删掉一条专门阶段 ⇒ 必须红（今天它只红在 env 那一半，见 WI-102）。
+- [ ] WI-104 **`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象**（`584c249` 的教训没覆盖全，2026-10-10）：
+  `kernel.test.ts` 那组已经改成**真 spawn** 造 error（`process.exit(3)` / 真 SIGTERM / 真 ENOENT / 真 maxBuffer 溢出），
+  而题闸门里对同一个 `nbconvertCrashEvidence` 的形状判据还是手搓 `{code:1,…}` —— 那正是让 A 类 bug
+  （读 `e.code` 而真 error 的退出码在 `e.status`）在绿色断言下面活了三档的形状。
+  ⇒ 两条判据要同源（同一组真 error 喂两边），否则改公共件时只有一边有牙。
+
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
   于是它是 `exec/spark-pool.ts` 那套队列**之外**的第二个 JVM —— `docs/ARCHITECTURE.md:249` 写的
@@ -1416,7 +1441,12 @@
 - [ ] WI-96 "这条 kernel 要不要 IDE 那份 venv"是**按 id 猜**的，A2 会把 I-1 刚关掉的洞再挖开一次（收尾轮记账，2026-10-08，**本轮只记不做**）：
   `server/src/notebooks/status.ts` 里那句 `const needsVenv = id === NOTEBOOK_KERNELS.pyspark;` 是那个问题的**唯一**答案来源，
   而它判的是 id 相等 —— 于是 A2 新加的 `arena-scala` 一进来就恒为 `needsVenv: false` ⇒ `ready: true`、没有 `reason`、
-  不给「准备环境」按钮，**没有任何一道闸门会问一句"它要不要 venv"**（scala 的 argv 同样指向那个懒创建的 venv）。
+  不给「准备环境」按钮，**没有任何一道闸门会问一句"它要不要 venv"**。
+  ⚠ **2026-10-10 按 WI-91 的实测订正**：这条括号原来写的是"scala 的 argv 同样指向那个懒创建的 venv"，**那是错的** ——
+  A/B 两条探索 kernel 的 argv 都是绝对路径 `/usr/bin/java`（Toree 那份见归档的 `kernel.json`），**根本不碰 IDE venv**。
+  ⇒ 洞的性质不变（"要不要 venv"这件事没有判据、只有 id 相等在猜），但**猜错的方向是反的**：
+  真接入之后 scala 那条会拿到 `needsVenv:false`，而那**恰好是对的** —— 于是这个洞今天不咬人，
+  等下一条"确实需要某个懒创建环境"的 kernel 进来才咬。**别因为它暂时不咬就当它不存在。**。
   这与刚被终审 I-1 关掉的"ready 在生产里恒为 true"是**结构上同一个洞**：区别只是那次有人来看，这次没有人被强制来看。
   ｜修法归 A2：把"要哪一份环境"做成 `NOTEBOOK_KERNELS` 的字段（例如 `requiresEnv: 'ide-venv' | 'image'`），
   `status.ts` 按字段判 ⇒ 新增一条 kernel 时**漏掉这个字段就是类型错误**，问题在编译期被回答，而不是等下一轮评审发现。
