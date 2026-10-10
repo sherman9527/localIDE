@@ -1321,15 +1321,38 @@
   `--exclude` 的值被 `verify-coverage` 当成认领而不是排除（已记 A2）；`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象。
   教训与全表见 `memo.md` 里程碑 BE。后续批次（v2/v3 那 9 类主题）**不在本 WI 里**，要开新 WI。
 
+- [x] WI-91 **真交互式 Scala kernel —— 三条路径的限时探索（子项目 A2）**｜计划 `docs/superpowers/plans/2026-10-10-scala-jupyter-kernel-spike-wi91.md`，2026-10-10
+  交付的是**答案**不是 kernel：探针（`server/test/notebooks/scalaKernelProbe.ts` + 正例/负例两份夹具，`0899573`）+ 三条判据
+  （跨 cell 状态活 = stdout 出现 `alive=42`、`println` 走 stream、活的 SparkSession = `rows=6`）+ 基线数字 + **两条反面自测**。
+  | 路径 | 结论 | 一手依据 |
+  | --- | --- | --- |
+  | A · Almond 0.15.0 | **卡在排序规则①，不接入** | 正例三条全绿（10.5s、+70MB、断网复测 `EXIT=0`），但编译期错误那条 iopub `error` **缺 `traceback`** ⇒ `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 无兜底下标 ⇒ **负例夹具根本跑不了**（`allow_errors=True` 绕不过）；**真界面上 Jupyter 前端自己报** `Kernel message validation error: Missing property 'traceback'` ⇒ 用户写坏代码看不到报错 |
+  | **B · Toree 0.5.0-incubating** | **胜出** | 正例 `doubled=42`/`alive=42`/`rows=6` 全绿；负例 `EXIT=0` 且 `keys=[ename,evalue,output_type,traceback]` 三件齐；+30MB（2.55→2.58GB）；断网复测通过；跑完 `pgrep -c java` 归 0（无残留进程、无镜像外可写状态） |
+  | C · 自包 `IMain` | **不试**（Ruling(W4)） | B 已过 ①②③，C 只能赢 ④ 的体积，代价是"我们自研并长期维护一个 ZMQ kernel" ⇒ 正是本计划自己警告过的"从探索变成维护"。登记成条件账 **WI-101** |
+  B 的四条已知缺陷（**接入前必须知道，都写进了 WI-91b**）：① 两行解释器注册表打进 stdout ⇒ **混在 `nbconvert --stdout` 的 JSON 前面**，
+  我们现成的量具读不出（这是接入的第一件事，属工具侧改动，不是放宽判据）；② `ename` 恒为 `Unknown Error`、`traceback` 是空数组；
+  ③ `language_info.version` 报 2.12.15 而实载 2.12.18；④ `spark.stop()` 收尾炸一条 `Shutdown hooks cannot be modified during shutdown`。
+  产物处置：A/B 的镜像改动**存 patch + 未跟踪文件归档**在 `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-{A-almond,B-toree}/`，
+  工作树已还原到 HEAD（**没有 `git clean -fdx`**）；探针与两份夹具**保留**，它们是 WI-91b 的起点而不是死代码。
+  ⚠ **一条未完成的收尾**：跑着的镜像此刻仍是 B 的形状（2.58GB、`arena-scala-toree` 已注册），而工作树不含它
+  ⇒ 下一次 `--build`/`--verify` 会把它拉回 HEAD，在那之前"跑着的 = HEAD"这句话**不成立**，别拿这台机器当交付状态的证据。
+  教训与完整读数见 `memo.md` 里程碑 BF 与两份 `task-2-report.md` / `task-3-report.md`（§3-§6 是控制端本人量的）。
+
 ## TODO
 
-- [ ] WI-91 真交互式 Scala kernel（子项目 A2，**必需项，不是可选**）：**限时探索计划已写** `docs/superpowers/plans/2026-10-10-scala-jupyter-kernel-spike-wi91.md`（Task 1 探针与基线已落地 `0899573`）。
-  三条路各给一个时间盒，按顺序试：**Almond → Toree（preview 那一档）→ 自己包一层 IMain kernel**。
-  撞穿第一条就停下记账，不要在第二条上继续烧时间盒。注意与 WI-89 的两处耦合：kernel 的 `argv` 同样要落在
-  IDE 那一侧的环境，且 Scala notebook 的 warehouse/Derby 也必须与判题侧分开（同 `arena-pyspark` 的做法）。
-  ⚠ Task 1 实测出的两条前置：`/opt/spark` 是**指向 pip 装的 pyspark 的符号链接**（挂它的 classpath = 挂判题侧那份安装，
-  每一档都要显式回答"有没有把新的可写面/新 jar 引进判题环境"）；探针必须**再跑一份摘掉定义格的夹具**
-  （nbconvert 线性执行一整本 ⇒ "整本一次性编译再切输出"的假 kernel 骗得过三条判据）。
+- [ ] WI-100 **把 Toree 接成第五页可用的 Scala kernel**（= WI-91 探索的胜出路径，**接入是另一版计划**）：
+  `docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，五个任务：① **先改量具**
+  （Toree 把两行注册表打到 stdout，混在 `nbconvert --stdout` 的 JSON 前面 ⇒ 现成的 `JSON.parse(整个 stdout)` 会抛，
+  而抛出来与"kernel 坏了"无法区分）；② 镜像产物从 `.superpowers/sdd/…/path-B-toree/` 落回工作树并证离线可复现；
+  ③ kernel id 进 `NOTEBOOK_KERNELS` + **`ready` 判据改成按-kernel 带数据（还 WI-96 的账，不许加 `||` 分支）**；
+  ④ Scala smoke 走**独立容器档阶段**（不复用题闸门那三条 Python 形状的判据，尤其"末 cell 必须 `spark.stop()`"
+  在 Toree 上会炸收尾）并接 `assert-ran --require-no-skips`；⑤ 页面说实话（第二个 JVM、`ename` 恒为 `Unknown Error`、
+  `language_info.version` 报 2.12.15 而实载 2.12.18 ⇒ 不许显示这个 version、补全/悬浮/中断不支持）。
+- [ ] WI-101 **条件账：自包 `IMain` kernel（路径 C）** —— **只有**当 WI-100 落地后 B 的
+  `Unknown Error` / 空 `traceback` / 版本常量这三条里任何一条在真界面上变成产品问题才做。
+  它唯一的结构性优势是"`error` 消息发什么字段我们说了算"（Almond 就是死在别人说了算的那一件上）；
+  代价是我们自研并长期维护一个 ZMQ kernel（协议 + HMAC 签名 + ROUTER/DEALER/PUB 三件套）。
+  ⇒ 别因为"探索档说了要试三条"就去做它：B 已过排序规则①②③，C 只能赢④的体积，而那不值这个维护面。
 - [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
   两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
   "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
