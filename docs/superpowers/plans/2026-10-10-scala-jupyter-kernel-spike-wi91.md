@@ -150,13 +150,48 @@ Commit：`spike(notebooks): WI-91 Task 2 —— Almond 实测（结论：成/不
 
 同样**一次构建 + 一次探针**。
 
+### 先读路径 A 的结论（`task-2-report.md`，控制端本人量的）—— 它把这一档的"该先测什么"改了
+
+**A 的失败模式不是"起不来"，是"起来了但 error 通道不合 nbformat"。** 主夹具三条判据全绿
+（`doubled=42` / `alive=42` / `rows=6`，10.5s，+70MB，运行时不联网），但编译期错误那条 iopub `error` **缺 `traceback`** ⇒
+① `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 无兜底下标 ⇒ **负例夹具根本跑不了**（`allow_errors=True` 绕不过它）；
+② **真界面上 Jupyter 前端自己报** `Kernel message validation error: Missing property 'traceback'`
+⇒ 用户写坏一段 Scala 代码之后**看不到任何报错**。练习产品里这比"跑不起来"更坏。
+
+⇒ **这一档的测量顺序因此倒过来**（省一轮 15-20 分钟的镜像构建不是目的，目的是别让"看起来全绿"骗一次）：
+
+- [ ] **Step 0: 先把镜像还原成 HEAD 的样子**（现在跑着的 `daily-arena:0.1` 是 **2.62GB、里面烤着 A 那批 almond 改动**，
+  而工作树已经不含它们 —— A 的产物存在 `.superpowers/sdd/<本档>/path-A-almond/`）。
+  `docker compose up -d --build arena` 一次，核 `docker images` 回到 ≈2.55GB 再往下走。
+  **不还原就量，B 的体积增量会把 A 的 70MB 算到自己头上。**
 - [ ] **Step 1: 取件与版本匹配核对**：Toree 的公开制品是 Spark 3.1/3.2 时代的 Scala 2.12 构建 ——
   **先核对它与镜像里的 Spark 3.5.5 能不能同一条类路径跑**，核对方式就是一次 `--execute` 探针，
   不要靠读 release note 下结论（本仓库的规矩：结论要来自当场跑）。
+  ⚠ 沿用 A 量出来的两条 classpath 纪律：与 `/opt/spark/jars` 同名的 artifact **让 Spark 那份赢**
+  （Scala 三件套 / slf4j 绑定 / scala-xml 混版的后果是 `NoClassDefFoundError`，不是一个能读的报错），
+  并且给取件脚本加一条**漂移闸门**（那几个名字出现在 dest 里就直接失败）；
+  直接 `java` 起 JVM 必须自带那 13 条 `--add-opens`（JDK 17 上少它就撞 `IllegalAccessError: ... sun.nio.ch`，
+  内容与判题侧 `server/src/exec/spark-scala.ts` 的 `SPARK_JVM_FLAGS` 同源）。
 - [ ] **Step 2: kernelspec 与启动器**：Toree 走自己的 `toree-launcher`，`kernel.json` 的 `argv` 会指向一个 shell/java 启动脚本；
-  ⚠ 特别注意 `entrypoint.sh` 那条 **PATH 前置 IDE venv** 的既有形状（红线①延伸）：Toree 起的子进程继承谁的 PATH，要实测并写下来。
-- [ ] **Step 3: 探针 + 代价**（与路径 A 同一组数字：三条判据、体积、时长、可写目录）
-- [ ] **Step 4: 结论与提交**（同一形状的一句话 + 原始输出）
+  ⚠ 特别注意 `entrypoint.sh` 那条 **PATH 前置 IDE venv** 的既有形状（红线①延伸）：Toree 起的子进程继承谁的 PATH，要实测并写下来
+  （A 那条是绝对路径 `/usr/bin/java`、不经 shell ⇒ 不受影响；B 的 launcher 若是 shell 脚本就**必须实测**，
+  判法：`docker compose exec -T arena bash -lc 'cat /proc/<pid>/environ | tr "\0" "\n" | grep -E "^(PATH|PYTHONPATH|HOME)="'`）。
+- [ ] **Step 3: 探针 —— 先跑负例，再跑正例**
+  1. **负例先跑**（`99-probe-scala-no-def.ipynb`，一个编译错，秒级）：
+     `jupyter nbconvert --to notebook --execute --stdout --ExecutePreprocessor.kernel_name=<B 的 id> --ExecutePreprocessor.timeout=180 --ExecutePreprocessor.allow_errors=True server/test/notebooks/fixtures/99-probe-scala-no-def.ipynb`
+     - **对照必须一起做**：同一份夹具喂 `python3` 今天给 `EXIT=0` 且两个 cell 各自落成 `error`（A 档量过）⇒
+       只有 B 那条 `KeyError: 'traceback'` 才是 B 的错，两边都炸就是量具/夹具的错。
+     - 负例跑不通 ⇒ **这一档就可以定"卡在排序规则①"**，正例那一次 Spark 冷启动可以省掉（但省了要在报告里写明"没跑"而不是"会绿"）。
+  2. **正例**（`99-probe-scala.ipynb`）：三条判据的读法与 A 档一致（`alive=42` 在 stdout、stream 通道、`rows=6`）。
+  3. **界面上那条也要看**（A 的教训：量具绿不代表用户看得见报错）：浏览器 console 里出现
+     `Kernel message validation error` 就是同一种坏，**这一条控制端本人复核**。
+- [ ] **Step 4: 代价六项 + 结论与提交**（与 A 同一组字段，缺一项 Task 5 那张表就填不出来）：
+  三条判据（负例/正例分开写）/ 镜像体积增量（**Step 0 还原之后再量**）/ 构建时长 / kernel 启动墙钟 /
+  新增可写目录与残留进程（`find /app/data -maxdepth 1 -newermt '-1 hour'` + `pgrep -c java`，跑前跑后各一次）/
+  **运行时是否需要网络**（把 `/etc/resolv.conf` 打成 `nameserver 127.0.0.1` 再跑一次，跑完还原；不许用"jar 都在本地"代替实测）。
+  结论一句话 + 原始输出。Commit：`spike(notebooks): WI-91 Task 3 —— Toree 实测（结论：…，依据是 X）`
+  ⚠ **收尾必做**：这一档的镜像改动如果最终不接入，要**存 patch 归档 + 还原工作树**，
+  并且**下一次构建之前不要声称"跑着的 = HEAD"**（A 档就是这么把 2.62GB 的镜像留在机器上的）。
 
 ---
 
