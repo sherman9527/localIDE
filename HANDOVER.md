@@ -7,6 +7,50 @@
 
 ## COMPLETED
 
+- [x] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
+  两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
+  "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
+  失败消息是这条用例自己的 fail-closed 守卫 `后端起不来，这条用例没有意义`（`/tmp/cv14.log`，`CV_EXIT=1`；
+  单文件重跑 38 passed，`/tmp/dbg_rerun.log`；随后整轮 `/tmp/cv15.log` `CV_EXIT=0`）。
+  ｜**为什么它比烦人更糟**：`scripts/verify.sh` 是 `set -e` 顺序跑，那条阶段在 `:63` 而
+  「Notebook 运行时（kernel 真跑）」在 `:75` ⇒ 一次抖动红会**把整轮在 notebook 之前中止**，
+  于是"这一档唯一的容器证据"整片没有发生（`cv14` 实测就是这样，而它的 tail 看起来跟真的一样）。
+  ｜要修的是它的**启动竞态**（CDP 服务未就绪就发指令那一类），**不是** skip —— 冤红教人重跑，
+  重跑久了闸门就没了（仓库里"会偶发冤红的闸门比没有闸门更坏"记过一次）。
+  判据建议：把"重试到 ready 为止 + 一个上限"做成**可断言的行为**，而不是加 sleep。
+  验证：`npx vitest run server/test/ide/debug.test.ts` 连跑 3 次全绿（19 passed/19 skipped，38.9/38.4/38.3s），另 2 次与整轮 `verify:fast` 并发也绿；可控注入（把被测程序换成语法错误 ⇒ session 必为 null）前后对照 —— 修前 `TypeError: Cannot read properties of null (reading id)` 顶掉真消息，修后「3 次尝试用完 30000ms 仍没起来 + 每步 status/message/会话数」。**没有放宽任何断言、没有 it.skip、没有任何超时被调大**。⚠ 实现者自己声明且我保留：**没证明红的频率下降**（6 次没撞出随机红），本轮证据只支持「红的形状变可判定」；根因候选另开 **WI-105**。
+
+- [x] WI-99 `flushLogs()` 不在优雅退出路径里（WI-94 Task 4d 照亮，2026-10-10）：`index.ts` 在 `app.close()` 之后只调
+  `store.close()` + `process.exit(0)`，**不排空日志队列** ⇒ 崩溃之外的一次正常退出也可能丢掉尾部几行。
+  同档另外两条实测先记在这：优雅退出成没成功**只能判 `State.ExitCode`**（那条路径不打印新行），
+  而 Task 4 之前一条活 ws 就能把它拖成 SIGKILL（32s/137 → 修后 1s/0）。
+  验证：`server/test/graceful-exit.test.ts` 4 条判据；破坏性实测「摘掉 `flushLogs()` ⇒ 3 条全红」「把接线摘掉 ⇒ 只有第 4 条（接线判据）红」—— 第 4 条防的正是「组合根绕开这条序列照样全绿」那种装饰闸门。判「有没有排空」必须站在 `exit` 那一刻同步读盘（测试进程不会死，事后读永远绿），并配一条事后 `flushLogs()` 的反向对照。行为变化经控制端裁定接受：`closeStore()` 抛出时记 `store.close.failed` + 原文后仍 `exit(0)`（退出码是容器那边唯一看得见的门面；代价是这件事从此只能从日志读）。
+
+- [x] WI-102 **一条成立的 `verify-gate: manual` 申报仍然可以替自己免检**（WI-90 交付档补强之后剩下的那一半，2026-10-10）：
+  `verify-coverage.test.ts` 现在要求申报"独立成行 + 指着一条真实存在、且确实认领本文件的阶段"（`0bf2778` 加的形状判据），
+  但它**不保证那条阶段真设了门控变量**。⇒ "写一条指向目录阶段的申报 + 删掉那条专门阶段"这一串，
+  env 判据不红（申报的语义本来就是"作者认账我手动跑"），而 `assert-ran` 那一半也救不了 —— 专门阶段消失 ⇒ 没人跑容器那一组 ⇒
+  连"整片 skip"都不会被观测到。**要堵它得让"阶段集合"自己进判据**：钉住 `stages()` 里必须存在一条
+  为**每一个** env 门控变量设了值的阶段（现在只有"这个文件的变量被某个设了该变量的阶段认领"这种回指式判据，
+  阶段整体消失时它跟着消失）。
+  验证：坏法串 A（写一条成立的申报 + 删掉那条专门阶段）⇒ **红 3 条**，而**旧判据对同一份输入报绿**；串 B（申报指向存在但不认领本文件的阶段）⇒ 红。实现者**驳倒并改进了控制端给的修法**：字面写「每个 env 门控变量都必须有阶段设值」会误红 `real.test.ts` 的 `ARENA_LLM_REAL`（控制端核过：`scripts/verify.sh` 里搜不到这个变量 ⇒ 那条申报说的是真话）⇒ 改成把判据挂在 `--exclude`（= 正面承诺「交给别处跑」）上，申报在那里不许豁免。
+
+- [x] WI-103 **`--exclude` 的值被 `verify-coverage` 当成"认领"而不是"排除"**（控制端读码核实，2026-10-10）：
+  `stages()` 里 `patterns` 取的是 `npx vitest run` 之后的全部 token，只丢掉以 `-` 开头的那些 ⇒
+  `--exclude` 本身被丢，**它后面那个路径被留下并算作一条认领**。
+  ⇒ 后果正是 WI-92/WI-90 都撞过的那类："整片被排除的目录"看起来"被某个阶段认领着"，
+  于是**孤儿判据抓不到"专门阶段被删了"**（`testFiles()` 那条 `!claimed(...)` 为假）。
+  修法很小：解析时把"带值选项的取值"一起丢（维护一张 `--exclude/--reporter/--outputFile/--project` 之类的表），
+  并补一条**破坏性验证**：删掉一条专门阶段 ⇒ 必须红（今天它只红在 env 那一半，见 WI-102）。
+  验证：临时孤儿文件 + 三条 `--exclude` ⇒ **exit 1**（红话点名「被 --exclude 摘出去…必须有另一条不同名的阶段认领」），并排跑的旧解析对同一份输入报「旧孤儿判据：绿」；认领条数 25→22 正是三条 exclude 取值被正确重分类（控制端独立核过）。另加一张 `VALUE_OPTS` 表**并自判表与脚本的一致性**（防这张表悄悄过期）。一条超出派发的改进：shell 展开（`"${ARR[@]}"` 那一类）**不再被当成认领**，理由是「假认领比漏认领贵得多 —— 漏的那一半有孤儿判据去追，假的那一半什么都追不到」。
+
+- [x] WI-104 **`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象**（`584c249` 的教训没覆盖全，2026-10-10）：
+  `kernel.test.ts` 那组已经改成**真 spawn** 造 error（`process.exit(3)` / 真 SIGTERM / 真 ENOENT / 真 maxBuffer 溢出），
+  而题闸门里对同一个 `nbconvertCrashEvidence` 的形状判据还是手搓 `{code:1,…}` —— 那正是让 A 类 bug
+  （读 `e.code` 而真 error 的退出码在 `e.status`）在绿色断言下面活了三档的形状。
+  ⇒ 两条判据要同源（同一组真 error 喂两边），否则改公共件时只有一边有牙。
+  验证：把公共件改回「退出码只读 `code`」（就是当年那个 A 类 bug）⇒ `tutorials` 与 `kernel` **同时红**，而同一次运行里旧的那条手搓 `{code:1}` 判据**照样绿** —— 这条对照本身就是 WI-104 存在的理由。崩溃形状那 1 条拆成 3 条（常驻组 10→12 passed）。尾巴（真 spawn 的造法同源化、`from:code` 死支核实）另开 **WI-107**，正在做。
+
 - [x] WI-00 需求通读 + 环境勘察 + 实施计划（`docs/superpowers/plans/2026-09-19-daily-interview-arena.md`）
 - [x] WI-01 治理基线：git、`.npmrc`(npmmirror)、`rule.md`、`memo.md`、本工作板｜验证：`git log --oneline` 有 baseline commit
 - [x] WI-02 openspec 规格化 + 本地 handover skill｜验证：`openspec validate build-daily-interview-arena --strict` → valid；`openspec status` → 4/4 artifacts
@@ -1361,17 +1405,23 @@
   它唯一的结构性优势是"`error` 消息发什么字段我们说了算"（Almond 就是死在别人说了算的那一件上）；
   代价是我们自研并长期维护一个 ZMQ kernel（协议 + HMAC 签名 + ROUTER/DEALER/PUB 三件套）。
   ⇒ 别因为"探索档说了要试三条"就去做它：B 已过排序规则①②③，C 只能赢④的体积，而那不值这个维护面。
-- [ ] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
-  两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
-  "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
-  失败消息是这条用例自己的 fail-closed 守卫 `后端起不来，这条用例没有意义`（`/tmp/cv14.log`，`CV_EXIT=1`；
-  单文件重跑 38 passed，`/tmp/dbg_rerun.log`；随后整轮 `/tmp/cv15.log` `CV_EXIT=0`）。
-  ｜**为什么它比烦人更糟**：`scripts/verify.sh` 是 `set -e` 顺序跑，那条阶段在 `:63` 而
-  「Notebook 运行时（kernel 真跑）」在 `:75` ⇒ 一次抖动红会**把整轮在 notebook 之前中止**，
-  于是"这一档唯一的容器证据"整片没有发生（`cv14` 实测就是这样，而它的 tail 看起来跟真的一样）。
-  ｜要修的是它的**启动竞态**（CDP 服务未就绪就发指令那一类），**不是** skip —— 冤红教人重跑，
-  重跑久了闸门就没了（仓库里"会偶发冤红的闸门比没有闸门更坏"记过一次）。
-  判据建议：把"重试到 ready 为止 + 一个上限"做成**可断言的行为**，而不是加 sleep。
+- [ ] WI-105 **`debug-js.ts` 按 stderr chunk 解析 ws URL 的截断竞态**（生产代码，WI-92 那条随机红的根因候选；**进行中**）：
+  `WS_URL_RE = /Debugger listening on (ws:\/\/\S+)/` 在**每个 chunk** 上单独跑，而 chunk 边界由负载决定 ⇒ URL 被截断 ⇒
+  `openSocket` 连不上 ⇒ `launch` 回的那条 event **没有 `message`** ⇒ 管理器落到默认话术「没能开始调试」。
+  要修三件：跨 chunk 缓冲成行再匹配（含进程结束时的尾行 flush、不许无界缓冲）、那条 event 补上 `message`
+  （但**不许把带随机端口/uuid 的 ws URL 原样贴进消息** —— 按"凭据不进消息"那把尺子判）、
+  一条可控地喂"URL 中间断开"的两个 chunk 的测试 + 一条"整行单 chunk 行为不变"的对照。
+  ⚠ 别把逐 chunk 转发给前端的调试事件改成"整行才发"（调试面板实时性会退化）。
+- [ ] WI-106 **第五页简化：去掉「运行时」那张卡**（用户 2026-10-10 点名；**进行中**）：
+  删卡壳与"运行时"标题、删"这次铺了什么"那份示例清单，三个按钮（刷新状态 / 在新标签页打开 / 准备环境）合并进顶部工具条。
+  ⚠ **五种后端形状各自那句话一句都不许多、也不许合并**（它们修的是不同东西）—— 要删的是容器不是话；
+  `seedError` 横幅必须搬家留下（"铺不进去"= 磁盘/挂载/权限，与"没有示例"是两件事）；
+  `Group()` 那套"children 全空 ⇒ 整个不渲染"必须继续生效（空壳带分隔线是真浏览器里量出来的缺陷）。
+- [ ] WI-107 **WI-104 的尾巴：真 spawn 造 error 的造法同源化 + 死支核实**（**进行中**）：
+  造法现在在 `kernel.test.ts` 与 `tutorials.test.ts` 各一份（当时两文件互为禁改清单，实现者按"复制造法不复制造据"做）。
+  ⇒ 抽进 `notebook-evidence.ts` 两边 import，并证明"改坏公共件 ⇒ 两边同时红"；
+  另核实 `exitEvidence` 的 `from:'code'` 那一支是否还有生产者（`evidenceShapedExecError` 已删）——
+  **没有生产者就整支删掉**（本仓库不留向后兼容的壳子），并改掉公共件里那段提到 shim 的过期注释。
 - [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
   ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
   `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；
@@ -1400,31 +1450,6 @@
   ④ 日志（两条路都已收窄：`app.ts` 的 `onResponse` 与 Fastify 自带 pino 的 `incoming request`，都只剥查询串里 `token` 这一个键）。
   ｜改法：逃生链接换成同源相对路径 `/jupyter/tree` ⇒ 隧道守卫自己判"能不能放"，①② 这两处从此不存在，
   C-1 的"往 URL 塞 token"那一支也变多余 —— 那是**设计级改动**（要重开 C-1 那张合取表的验收），所以不在 WI-94 里顺手做。
-
-- [ ] WI-99 `flushLogs()` 不在优雅退出路径里（WI-94 Task 4d 照亮，2026-10-10）：`index.ts` 在 `app.close()` 之后只调
-  `store.close()` + `process.exit(0)`，**不排空日志队列** ⇒ 崩溃之外的一次正常退出也可能丢掉尾部几行。
-  同档另外两条实测先记在这：优雅退出成没成功**只能判 `State.ExitCode`**（那条路径不打印新行），
-  而 Task 4 之前一条活 ws 就能把它拖成 SIGKILL（32s/137 → 修后 1s/0）。
-
-- [ ] WI-102 **一条成立的 `verify-gate: manual` 申报仍然可以替自己免检**（WI-90 交付档补强之后剩下的那一半，2026-10-10）：
-  `verify-coverage.test.ts` 现在要求申报"独立成行 + 指着一条真实存在、且确实认领本文件的阶段"（`0bf2778` 加的形状判据），
-  但它**不保证那条阶段真设了门控变量**。⇒ "写一条指向目录阶段的申报 + 删掉那条专门阶段"这一串，
-  env 判据不红（申报的语义本来就是"作者认账我手动跑"），而 `assert-ran` 那一半也救不了 —— 专门阶段消失 ⇒ 没人跑容器那一组 ⇒
-  连"整片 skip"都不会被观测到。**要堵它得让"阶段集合"自己进判据**：钉住 `stages()` 里必须存在一条
-  为**每一个** env 门控变量设了值的阶段（现在只有"这个文件的变量被某个设了该变量的阶段认领"这种回指式判据，
-  阶段整体消失时它跟着消失）。
-- [ ] WI-103 **`--exclude` 的值被 `verify-coverage` 当成"认领"而不是"排除"**（控制端读码核实，2026-10-10）：
-  `stages()` 里 `patterns` 取的是 `npx vitest run` 之后的全部 token，只丢掉以 `-` 开头的那些 ⇒
-  `--exclude` 本身被丢，**它后面那个路径被留下并算作一条认领**。
-  ⇒ 后果正是 WI-92/WI-90 都撞过的那类："整片被排除的目录"看起来"被某个阶段认领着"，
-  于是**孤儿判据抓不到"专门阶段被删了"**（`testFiles()` 那条 `!claimed(...)` 为假）。
-  修法很小：解析时把"带值选项的取值"一起丢（维护一张 `--exclude/--reporter/--outputFile/--project` 之类的表），
-  并补一条**破坏性验证**：删掉一条专门阶段 ⇒ 必须红（今天它只红在 env 那一半，见 WI-102）。
-- [ ] WI-104 **`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象**（`584c249` 的教训没覆盖全，2026-10-10）：
-  `kernel.test.ts` 那组已经改成**真 spawn** 造 error（`process.exit(3)` / 真 SIGTERM / 真 ENOENT / 真 maxBuffer 溢出），
-  而题闸门里对同一个 `nbconvertCrashEvidence` 的形状判据还是手搓 `{code:1,…}` —— 那正是让 A 类 bug
-  （读 `e.code` 而真 error 的退出码在 `e.status`）在绿色断言下面活了三档的形状。
-  ⇒ 两条判据要同源（同一组真 error 喂两边），否则改公共件时只有一边有牙。
 
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
