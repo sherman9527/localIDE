@@ -471,7 +471,8 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
   it('容器 netns 里读得出默认网关 ⇒「对端 == 我自己的网关」那条判据有真路由表撑着', async () => {
     // 缝：`localGatewayAddresses()` 的缓存是模块级私有变量（gatewayOnce），没有导出的清理口子。
     // 与其为测试改生产代码的可见性，不如按本仓库既有的做法拿一份**新模块实例**
-    // （`status.test.ts` 处理 publicUrl 漂移用的是同一个缝），保证读进来的是这一趟真的 /proc/net/route。
+    // （`status.test.ts` 处理 env 注入用的同一个缝；WI-98 前那里钉的是 publicUrl 漂移，
+    // 现在钉的是 `ARENA_IDE_ENV_DIR` 那一组 —— 缝本身没变），保证读进来的是这一趟真的 /proc/net/route。
     vi.resetModules();
     const { localGatewayAddresses } = await import('../../src/notebooks/status.js');
     const gateways = localGatewayAddresses();

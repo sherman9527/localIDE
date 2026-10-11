@@ -15,7 +15,9 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  * 而是四件只有"挂上 HTTP 之后"才成立的事：
  * ① 路由真的存在（WI-87 的学费：一次编辑把 `app.post(...)` 并进注释，整条路由被吞掉，
  *    而"切片里 indexOf 路径字符串"的断言照样绿 ⇒ 判据必须是**行首**，不是包含）；
- * ② token 的释放判据是**合取**（终审 C-1）：内核给的 socket 对端地址 **且** Host 头是本机字面量。
+ * ② 合取（终审 C-1：内核给的 socket 对端地址 **且** Host 头是本机字面量）在路由档送到
+ *    `localPeer`。**WI-98 之后它不再决定链接里挂什么** —— `url` 恒为同源 `/jupyter/tree`，
+ *    整条响应序列化后都不许含 token；合取的结论只说实话"这条连接过不过守卫"。
  *    上一轮那句"不是客户端自报的 Host 头"反对的是 **Host 单独说话**（谁都写得得出
  *    `Host: 127.0.0.1:7788`），它今天仍然成立；补上第二半是因为 DNS rebinding 里对端**确实是**回环。
  *    含容器那一半：对端是这张网桥的**网关**时也算本机（评审 I-3a，靠 `gatewayAddresses` 那个 seam）。
@@ -24,8 +26,9 @@ import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures
  *             （顺带收掉先于本分支存在的那一半暴露面：这个 API 无鉴权，外来 Host 原本能读 `/api/bank`）；
  *      内层 = `notebookStatus()` 里那个合取（走不到路由的形状只能在这里判，因为外层已经把
  *             "对端本机 + Host 外来"这种组合挡在路由之前了）。摘掉任意一层都至少有一条红。
- * ③ `notebookStatus` 的第三种响应形状（Jupyter 在跑但 publicUrl 配坏 ⇒ running:true + reason + 没有 url）
- *    必须被路由**原样透传**，不许在路由里被抹平成"要么给链接、要么没在跑"两态（评审第二条裁定）；
+ * ③ （原第三条钉的是"publicUrl 配坏 ⇒ running:true + reason + 没有 url"的第三种形状 ——
+ *    WI-98 把链接改成编译期派生的同源路径后**这一态结构上不可能再发生**，随实现一起删除；
+ *    "路由原样透传后端结论"这件事现在由 `localPeer` 各条用例顺带判着。）
  * ④ 挂在同一个 GET 上的 `seedNotebooks()` 失败时不许把整个接口拖成 500（评审 I-1）：
  *    运行时那一半必须活着返回，坏掉的那一半单独占一个 `seedError` 字段。
  */
@@ -108,11 +111,13 @@ let logHandles: LogHandles[] = [];
  * （WI-40 的隔离纪律：可写状态不许落在"换了数据目录却只换一半"的那个位置）。
  */
 async function injectApp(
-  env: Partial<{ token: string; publicUrl: string }>,
+  env: Partial<{ token: string }>,
   opts: { gatewayAddresses?: string[] } = {},
 ): Promise<Injected> {
   const dataDir = await mkdtemp(join(process.cwd(), 'data', 'test-tmp', 'notebook-api-'));
   madeDirs.push(dataDir);
+  // WI-98：`ARENA_NOTEBOOK_PUBLIC_URL` 仍在摘除清单里 —— 链接虽不再读它，`missingTokenReason()`
+  // 那句诊断还读；宿主 env 里若恰好有这一行，"诊断文案含不含某个地址"就会随机器漂移。
   const keys = ['ARENA_DATA_DIR', 'ARENA_JUPYTER_TOKEN', 'ARENA_NOTEBOOK_PUBLIC_URL'] as const;
   const saved: Record<string, string | undefined> = {};
   for (const key of keys) {
@@ -121,7 +126,6 @@ async function injectApp(
   }
   process.env.ARENA_DATA_DIR = dataDir;
   if (env.token !== undefined) process.env.ARENA_JUPYTER_TOKEN = env.token;
-  if (env.publicUrl !== undefined) process.env.ARENA_NOTEBOOK_PUBLIC_URL = env.publicUrl;
   vi.resetModules();
   try {
     const cfg = (await import('../../src/config.js')).config;
@@ -234,7 +238,10 @@ describe('GET /api/notebook/status', () => {
     const body = res.json() as NotebookStatusResponse;
     // 运行时那一半必须活下来：Jupyter 在答话，卡片不许因为一个复制失败整体消失
     expect(body.running, 'seed 的失败不许被读成"Jupyter 没在跑"').toBe(true);
-    expect(body.url).toContain('token=');
+    // WI-98：这条路由的 url 恒为同源路径 —— 即使这是"本机连接"的那一态（remoteAddress 没给 ⇒
+    // 注入的是本机的假形状），token 也不许回到 URL（旧版这里断的是 `toContain('token=')`）。
+    expect(body.url, '链接不再是同源路径 ⇒ WI-98 的账白算').toBe(NOTEBOOK_TREE_PATH);
+    expect(JSON.stringify(body), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
     expect(body.kernels.map((k) => k.id)).toContain('arena-pyspark');
     expect(body.notebooks, '铺不出来就别报文件名（编造列表比空列表更坏）').toEqual([]);
     expect((body.seedError ?? '').trim(), '静默返回 [] ⇒ 读者以为"没有示例"，而事实是"铺不进去"').not.toBe('');
@@ -265,9 +272,9 @@ describe('GET /api/notebook/status', () => {
     expect(String(warn!.msg ?? ''), 'warn 记录里连 msg 都没有 ⇒ trace 无从下手（errorFields 没接上）').not.toBe('');
   });
 
-  it('伪造 Host: 127.0.0.1 的非本机对端拿不到 token（评审 M-1：Host 头是客户端写的）', async () => {
+  it('伪造 Host: 127.0.0.1 的非本机对端拿不到放行资格（评审 M-1：Host 头是客户端写的）', async () => {
     jupyterUp();
-    const { app, cfg } = await injectApp({ token: CANARY });
+    const { app } = await injectApp({ token: CANARY });
     const res = await app.inject({
       method: 'GET',
       url: '/api/notebook/status',
@@ -276,8 +283,11 @@ describe('GET /api/notebook/status', () => {
     });
     expect(res.statusCode).toBe(200);
     const body = res.json() as NotebookStatusResponse;
-    expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是 token 释放，不是探活').toBe(true);
-    expect(body.url, '链接照给（它本来就只在本机能打开），但里面不许有凭据').toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
+    expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是合取的结论，不是探活').toBe(true);
+    // WI-98：链接本来就是同源路径、从来没有凭据可扣 —— 这一态的新判据是 `localPeer:false`
+    //（前端据此说实话"点开会 403"），而不是"链接里没有 token"（那句对本机连接也成立了）。
+    expect(body.url, '链接恒为同源路径').toBe(NOTEBOOK_TREE_PATH);
+    expect(body.localPeer, '对端是局域网 ⇒ 守卫会拒这个连接，结论必须送出去').toBe(false);
     expect(JSON.stringify(body), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
   });
 
@@ -369,11 +379,15 @@ describe('GET /api/notebook/status', () => {
     ).toBe(true);
   });
 
-  /** 合取的另一半：两半都对才给。这一条同时是"别把守卫写成永远拒绝"的反向对照。 */
-  it('对端回环 + 本机形状的 Host ⇒ 给 token（合取的两半都成立）', async () => {
+  /**
+   * 合取的另一半：两半都对才给放行资格（`localPeer:true`）。这一条同时是"别把守卫写成永远拒绝"
+   * 的反向对照。**WI-98**：过去这条断的是"url 里真的带着 token"，现在断的是
+   * "`url` 恒为同源路径，且整条响应序列化后**不含** token" —— 本机连接也不再有凭据进 URL。
+   */
+  it('对端回环 + 本机形状的 Host ⇒ localPeer:true，而 url 仍是那条不含凭据的同源路径（合取的两半都成立）', async () => {
     jupyterUp();
     for (const host of ['127.0.0.1:7788', 'localhost:7788', '127.0.0.1', 'localhost:7789', '[::1]:7788']) {
-      const { app, cfg } = await injectApp({ token: CANARY });
+      const { app } = await injectApp({ token: CANARY });
       const res = await app.inject({
         method: 'GET',
         url: '/api/notebook/status',
@@ -382,9 +396,9 @@ describe('GET /api/notebook/status', () => {
       });
       expect(res.statusCode, `Host: ${host} 是本机形状，不该被 origin 那一层挡住`).toBe(200);
       const body = res.json() as NotebookStatusResponse;
-      expect(body.url, `Host: ${host} 是本机形状 + 回环对端 ⇒ 不给 token 就得让用户手贴（静默降级那一侧）`).toBe(
-        `${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=${CANARY}`,
-      );
+      expect(body.url, `Host: ${host} + 回环对端 ⇒ 链接却不再是同源路径，或凭据回到了 URL（WI-98 的红线）`).toBe(NOTEBOOK_TREE_PATH);
+      expect(body.localPeer, `Host: ${host} 是本机形状 + 回环对端 ⇒ 却判 false 就是对着本机用户喊"你会被 403"（静默降级那一侧）`).toBe(true);
+      expect(JSON.stringify(body), '本机连接也不例外：token 不许出现在响应的任何字段里').not.toContain(CANARY);
     }
   });
 
@@ -402,14 +416,15 @@ describe('GET /api/notebook/status', () => {
   /**
    * 评审 I-3a：网关那一半判据过去**只在 status.test.ts 层**被注入判过，路由这一层一次都没走过。
    * 那里注入的是 `notebookStatus({gatewayAddresses})` 这个参数；而路由有没有把它传下去，
-   * 是另一件事 —— 传漏了不会报错，只会让容器里那一页永远拿不到 token（点开撞 Jupyter 登录页，
-   * 界面一片绿，正是本仓库付过学费的静默降级）。
+   * 是另一件事 —— 传漏了不会报错，只会让容器里那一页恒被 `proxyGuard` 判成非本机
+   * （内嵌与逃生链接一起 403，界面一片绿，正是本仓库付过学费的静默降级；
+   * WI-98 之前那句症状是"拿不到 token ⇒ 点开撞登录页"，接线判据没变，变的只是坏法）。
    * 判据形状：真路由 + 网关形状的对端（`172.18.0.1`，compose 网桥那一类）。
    * 生产路径不靠这个口子：不传 `gatewayAddresses` 时它仍自己读 `/proc/net/route`（见 AppDeps 注释）。
    */
   it('对端是 docker 网桥网关 ⇒ 路由真的把它当本机（评审 I-3a：容器部署里这才是"本机"）', async () => {
     jupyterUp();
-    const { app, cfg } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
+    const { app } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
     // Host 用**容器部署里浏览器实际发的那一个**（用户打开的是宿主的 127.0.0.1:7788，docker-proxy
     // 原样转发字节）：C-1 之后合取的两半必须在这一条里都真的成立，否则它测的是"只有对端说话"。
     const res = await app.inject({
@@ -419,21 +434,21 @@ describe('GET /api/notebook/status', () => {
       headers: { host: '127.0.0.1:7788' },
     });
     expect(res.statusCode).toBe(200);
-    expect(
-      (res.json() as NotebookStatusResponse).url,
-      '路由没把网关判据接到 notebookStatus ⇒ 容器里的页面永远只能手贴 token',
-    ).toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=${CANARY}`);
+    const body = res.json() as NotebookStatusResponse;
+    expect(body.localPeer, '路由没把网关判据接到 notebookStatus ⇒ 容器里的页面恒被告知"你会被 403"').toBe(true);
+    expect(body.url, '链接恒为同源路径；路由漏了 localPeer 判据时这里也会露出形状问题').toBe(NOTEBOOK_TREE_PATH);
+    expect(JSON.stringify(body), 'token 出现在响应的**任何**字段里都算泄漏').not.toContain(CANARY);
   });
 
   /**
-   * C-1 的容器那一半：对端是网关（=本机）但 Host 是外来名字 ⇒ 拿不到 token。
+   * C-1 的容器那一半：对端是网关（=本机）但 Host 是外来名字 ⇒ 拿不到放行资格。
    * 今天它红在**origin 那一层**（403，请求根本走不到路由），与上面那条 rebinding 用例同形；
    * 而"走不到路由"恰恰是这一层要的效果 —— 容器部署里对端永远是网桥网关，
    * 少了这一层，网关 + 外来 Host 就是**容器里最容易达成**的那条攻击路径。
    * 内层合取在容器形状上的判据在 `status.test.ts` 那张表里（`peer: '172.18.0.1' + host: 'rebinding.example'`），
    * 那条不受这一层遮挡，因为它不打 HTTP。
    */
-  it('对端是网关 + 外来 Host ⇒ 不给 token（容器部署里这一条由 origin 白名单先拦住）', async () => {
+  it('对端是网关 + 外来 Host ⇒ 不给放行资格（容器部署里这一条由 origin 白名单先拦住）', async () => {
     jupyterUp();
     const { app } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
     const res = await app.inject({
@@ -446,33 +461,24 @@ describe('GET /api/notebook/status', () => {
     expect(JSON.stringify(res.json()), 'token 出现在任何字段里都算泄漏').not.toContain(CANARY);
   });
 
-  /** 反向：这一条判据不是"172.18 整段都算本机"。同网段的另一个地址（隔壁容器）拿不到凭据。 */
-  it('同网段但不是网关的对端（172.18.0.7）⇒ 不给 token', async () => {
+  /** 反向：这一条判据不是"172.18 整段都算本机"。同网段的另一个地址（隔壁容器）拿不到放行资格。 */
+  it('同网段但不是网关的对端（172.18.0.7）⇒ localPeer:false（链接照给，它本来就没有凭据）', async () => {
     jupyterUp();
-    const { app, cfg } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
+    const { app } = await injectApp({ token: CANARY }, { gatewayAddresses: ['172.18.0.1'] });
     const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '172.18.0.7' });
     const body = res.json() as NotebookStatusResponse;
-    expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是释放判据，不是探活').toBe(true);
-    expect(body.url).toBe(`${cfg.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
+    expect(body.running, '假 Jupyter 在答 ⇒ 这一条判的是合取的结论，不是探活').toBe(true);
+    expect(body.url).toBe(NOTEBOOK_TREE_PATH);
+    expect(body.localPeer, '同网段的隔壁容器不是网关 ⇒ 给 true 就是向守卫要放行资格').toBe(false);
     expect(JSON.stringify(body), 'token 出现在任何字段里都算泄漏').not.toContain(CANARY);
   });
 
   /**
-   * 第三种形状：`running:true` + `reason` + **没有 url**（publicUrl 被 env 配坏，链接拼不出来）。
-   * 路由必须在 spread 时把它原样带出去；把它抹平成"要么有链接、要么没在跑"就等于
-   * 让页面在"点开它"和"没在运行"之间二选一，而那两句都是假话（服务确实在跑，链接确实给不出）。
+   * **WI-98 删掉了本文件第三条"形状"用例**（publicUrl 配坏 ⇒ running:true + reason + 没有 url 的
+   * 路由透传判据）。删由不是放宽：那一态的成因（env 拼绝对地址）已随链接改成同源路径消失，
+   * 而 `localPeer` 两半各有一条真路由用例接着判（上面网关 I-3a 那条与 `172.18.0.7` 那条），
+   * 路由"原样透传后端结论"这件事由它们与下面的响应不含 token 判据共同撑着。
    */
-  it('publicUrl 配坏时仍透传"在跑但没有链接"这一态（既不降级成 500，也不假装没在跑）', async () => {
-    jupyterUp();
-    const { app } = await injectApp({ token: CANARY, publicUrl: 'not a url' });
-    const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '127.0.0.1' });
-    expect(res.statusCode, 'env 写错不是服务端崩，500 里读不到原因（正是本仓库最恨的静默）').toBe(200);
-    const body = res.json() as NotebookStatusResponse;
-    expect(body.running).toBe(true);
-    expect(body.url).toBeUndefined();
-    expect(body.reason).toMatch(/ARENA_NOTEBOOK_PUBLIC_URL/);
-    expect(body.kernels.map((k) => k.id)).toContain('arena-pyspark');
-  });
 
   /**
    * **终审 I-4 的 HTTP 那一半：Jupyter 自己列的 `Python 3 (ipykernel)` 不许到得了响应。**

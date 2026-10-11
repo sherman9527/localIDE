@@ -19,25 +19,31 @@ import { Loading } from '../components/AsyncState';
  * 那句）按用户批的范围删掉了，三把按钮并进顶部的 `page-head` 工具条。删没删由判据钉，不靠人眼：
  * `web/test/notebook.test.tsx` 与 `tests/e2e/notebook-page.spec.ts` 里各有一条"这几样必不出现"。
  *
- * 状态那一行是这里唯一由后端说话的地方，后端给得出的四种形状各一句，**不许合并**（后端已经按"修的是不同东西"分了 reason）：
- *   ① 在跑且给得出链接 → 「运行中」+ 工具条里一把能点开的地址；
+ * 状态那一行是这里唯一由后端说话的地方，后端给得出的三种形状 + 前端自己的两个读态各一句，**不许合并**
+ * （后端已经按"修的是不同东西"分了 reason）：
+ *   ① 在跑 → 「运行中」+ 工具条里一把**同源** `/jupyter/tree` 的链接（WI-98：链接里没有也**不该有**
+ *      任何凭据 —— 它和 iframe 走同一条服务端注入的反代，"这条连接过不过守卫"由 `localPeer` 说话）；
  *   ② 没在跑 → 「没在运行」+ 后端那句原因 + "做题不受影响"（判题不经过这个服务）；
  *   ③ kernel 没就绪 → 工具条里的「准备环境」按钮 —— 缺的是 IDE 那份 venv，不是用户的写法；
- *   ④ 在跑、但 publicUrl 被 env 配坏（`running:true` + `reason` + 没有 url）：这一态既不是
- *      "点开它"也不是"没在运行"，两句都是谎。它必须自己有一句，还要点名坏掉的那一行 env
- *      —— 症状（没有可用的链接）与"服务没起"一模一样，能区分它们的只有那句话。
- * 再加前端自己的两个读态「状态读不到」（unreachable）与「还没读到」（loading），一共五句话同住
+ *   ④ ~~在跑、但 publicUrl 被 env 配坏（`running:true` + `reason` + 没有 url）~~
+ *      **WI-98 整块删除**：这一态唯一的成因是"链接由 `new URL(env …)` 拼、env 可能被配坏"。
+ *      链接现在是编译期常量派生的同源路径，**没有任何 env 能让它坏** —— 留着分支就是一条永远不会红的
+ *      装饰判据（本仓库对装饰判据的态度见 WI-104/WI-109；`server/src/notebooks/status.ts` 里同一段理由）。
+ * 再加前端自己的两个读态「状态读不到」（unreachable）与「还没读到」（loading），一共四句话同住
  * `notebook-status` 那一处三元链 —— "任何两句同时出现"结构上不可能，总判据是
- * `web/test/notebook.test.tsx` 的「五态状态行两两互斥」。（这段理由原来写在状态卡的卡头注释里；
- * 卡壳删的时候**不许把它一起删**，它就是"为什么五态不许合并"的原件。）
+ * `web/test/notebook.test.tsx` 的「四态状态行两两互斥」。（这段理由原来写在状态卡的卡头注释里；
+ * 卡壳删的时候**不许把它一起删**，它就是"为什么各态不许合并"的原件。）
  *
  * ⑤ WI-94 Task 6 加进来的第五件事：**notebook 现在内嵌在这一页里**（左文件树 + 右 notebook），
- *    不再是"跳出去开一个独立标签页"。它带出一条与上面四态正交的规矩：
+ *    不再是"跳出去开一个独立标签页"。它带出一条与上面各态正交的规矩：
  *    **内嵌这一路不带凭据** —— src 只是同源路径（`/jupyter/…`），token 由服务端在反代里注入，
- *    守卫不过就在隧道里回 403/503，那个 JSON 会直接显示在 iframe 里。于是这一路**没有**
- *    "tokenless"那一态了（那一态说的是②③④那把**逃生链接**：在新标签页打开时要手贴一次 token），
- *    页面上也永远不该出现带 token 的 notebook URL（钉在 `web/test/notebook.test.tsx`）。
- *    ①②③④ 各态下 iframe 只有一态出现：`view.kind === 'open'`。`running:false` 时那棵子树结构上
+ *    守卫不过就在隧道里回 403/503，那个 JSON 会直接显示在 iframe 里。
+ *    **WI-98 把逃生链接并进了同一条纪律**：`notebook-open` 的 href 也是同源路径、也不带凭据，
+ *    于是过去那把"链接里有/没有 token"的尺子整个作废 —— 页面上永远不该出现带 token 的 notebook URL
+ *    （钉在 `web/test/notebook.test.tsx`，现在压的是**整页 DOM 文本**）。
+ *    后端判到的那一半结论改由 `localPeer` 字段送达：`false` ⇒ 这条连接过不了守卫，
+ *    这一页与那把链接点出去都是 403（`notebook-not-local` 那句横幅，见下）。
+ *    ①②③ 各态下 iframe 只有一态出现：`view.kind === 'open'`。`running:false` 时那棵子树结构上
  *    到不了，摆一个空 iframe 就是说谎（e2e 那个实例永远是 `running:false`，它的判据建立在这条上）。
  *    ⚠ 布局简化没有碰这一维：Jupyter 没起时右边那棵树**渲染不出来**，所以状态话与横幅区必须留着 ——
  *    把"少一块 UI"做成"把话也删掉"，页面就只剩一张边界卡，那正是 WI-94 修掉的"空白 iframe 就是说谎"。
@@ -72,14 +78,17 @@ import { Loading } from '../components/AsyncState';
  */
 
 /**
- * 后端那四种形状的判别：只看后端给的三个字段（running / url / reason），不在前端再造一套真相。
+ * 后端形状的判别：只看后端给的字段，不在前端再造一套真相。
  * `loading` / `unreachable` 是前端自己的两个读态（还没读到 / 这次读失败），不代表 Jupyter 的任何状态。
+ * **WI-98 删掉了 `nolink`**（旧第四态"在跑，但地址给不出来"）：它的成因是链接由 env 拼、可能被配坏，
+ * 而现在 `url` 是后端送出的编译期同源常量（`NOTEBOOK_TREE_PATH`），没有任何 env 能让它坏 ——
+ * `running:true` 恒带 `url`，这一态在契约与实现里都不可达，留着就是一条永远不会红的装饰分支
+ * （理由全文见 `server/src/notebooks/status.ts` 的链接一节与简报 WI-98 §1.2）。
  */
 type StatusView =
   | { kind: 'loading' }
   | { kind: 'unreachable' }
   | { kind: 'down'; reason: string }
-  | { kind: 'nolink'; reason: string }
   | { kind: 'open' };
 
 function viewOf(data: NotebookStatusResponse | null, error: string | null): StatusView {
@@ -89,7 +98,6 @@ function viewOf(data: NotebookStatusResponse | null, error: string | null): Stat
     return { kind: 'loading' };
   }
   if (!data.running) return { kind: 'down', reason: data.reason ?? '后端没给原因（契约要求 running:false 必填 reason）' };
-  if (!data.url) return { kind: 'nolink', reason: data.reason ?? '后端没给原因（契约要求这一态必须说清坏在哪一行）' };
   return { kind: 'open' };
 }
 
@@ -150,8 +158,15 @@ export default function Notebook() {
   const blocked = kernels.filter((k) => !k.ready);
   /** 探到的 kernel 表里压根没有那个 pyspark 档：镜像级注册没了，「准备环境」修不了它 ⇒ 得说清区别。 */
   const missingSpec = data?.running === true && !kernels.some((k) => k.id === NOTEBOOK_KERNELS.pyspark);
-  /** 链接里没有 token = 后端判过这个连接不是本机（判据在 socket 上，不在这里）。界面要提前说破。 */
-  const tokenless = view.kind === 'open' && !(data?.url ?? '').includes('token=');
+  /**
+   * WI-98：这一族从"链接里没有 token"（`!url.includes('token=')`）改成**读后端的 `localPeer`**。
+   * 旧判据在新形状下会把每一台本机连接都误报成"非本机"（链接里本来就从来没有 token）——
+   * 那句话改了含义才活着（"话不许静默消失"的纪律）：现在说实话的是"这条连接过不过服务端守卫"，
+   * 判据与 `proxyGuard.ts` 同源（对端 ∧ Host 的合取，算在后端）。
+   * ⚠ 判的是 `=== false` 而不是 `!data.localPeer`：字段缺席（旧后端 / 坏响应）时**不许**凭空喊
+   * "你会被 403" —— 那是另一种静默的谎。契约把它定为必填，正常路径永远带着 true/false 之一。
+   */
+  const guardRefused = view.kind === 'open' && data?.localPeer === false;
 
   const prepare = useCallback(async () => {
     setPreparing(true);
@@ -192,8 +207,10 @@ export default function Notebook() {
         {/* 三把按钮并进这条工具条（用户点名"按钮合并到下面"；档位全是既有 .btn 系，不引新样式类）。
             「在新标签页打开」只在 open 态渲染：给一条点开就是浏览器报错的死链比不给更坏（静默降级），
             「准备环境」只在 blocked.length > 0 时渲染：全都就绪、或"缺的是 token 不是 venv"那一态，
-            给按钮都是让人白点。两把的**缺席**各有判据（web/test 的 down/nolink/unreachable 三条 +
-            e2e 在这个真实缺失态里钉的 count 0）。 */}
+            给按钮都是让人白点。两把的**缺席**各有判据（web/test 的 down/unreachable 两条 +
+            e2e 在这个真实缺失态里钉的 count 0；原 nolink 那条缺席判据随态删除）。
+            href 就是后端给的 `url` 原样（WI-98 后是同源 `/jupyter/tree`，不含凭据）——
+            前端**不拼第二段**，那会造出路径的第二处真相。 */}
         <button type="button" className="btn btn-sm" onClick={reloadStatus} disabled={loading} data-testid="notebook-reload">
           {loading ? '读取中…' : '刷新状态'}
         </button>
@@ -217,47 +234,40 @@ export default function Notebook() {
         ) : null}
       </div>
 
-      {/* 一行状态：后端四种形状各一句 + 前端两个读态，一共五句，**不许合并** —— 各修什么、
+      {/* 一行状态：后端三种形状各一句 + 前端两个读态，一共四句，**不许合并** —— 各修什么、
           为什么合并就等于"有一态没人说话"，见文件顶注释（那段理由原来就住在被删掉的卡头里，
-          搬家搬的是它）。五句同住这一处三元链，互斥由结构保证；逐字与互斥的判据都在
-          `web/test/notebook.test.tsx`。 */}
+          搬家搬的是它）。四句同住这一处三元链，互斥由结构保证；逐字与互斥的判据都在
+          `web/test/notebook.test.tsx`。（原第五句「在跑，但地址给不出来」随 `nolink` 态删除，WI-98。） */}
       <div data-testid="notebook-status">
         {view.kind === 'loading' ? <Loading label="正在读 notebook 状态…" cards={1} /> : null}
         {view.kind === 'open' ? <p role="status">运行中 · Jupyter 在本机答话</p> : null}
         {view.kind === 'down' ? <p role="status">没在运行</p> : null}
-        {view.kind === 'nolink' ? <p role="status">在跑，但地址给不出来</p> : null}
         {view.kind === 'unreachable' ? <p role="status">状态读不到</p> : null}
       </div>
 
       {/* 横幅区：状态行之外所有"此刻还有话要说"的都堆在这一个壳里，空则整块不渲染（Group 的规矩）。
-          open 解释句 / tokenless / nolink / down / 两条 error / missingSpec / blocked 那句原因 /
-          prepareLog / seedError —— 每条各修一件不同的事，合并即"有一件事没人说"；逐句措辞由测试钉着。 */}
+          open 解释句 / guardRefused（原 tokenless，WI-98 改了含义没让话消失）/ down / 两条 error /
+          missingSpec / blocked 那句原因 / prepareLog / seedError —— 每条各修一件不同的事，
+          合并即"有一件事没人说"；逐句措辞由测试钉着。（原 `nolink` 那条随状态删除，见文件顶注释。） */}
       <Group>
         {/* 逃生链接的解释句：原来贴在按钮旁边，按钮上工具条后话留在原地（"这把/上面那把"指的就是
-            工具条里那一把 —— 它确实在这句话的上面）。 */}
+            工具条里那一把 —— 它确实在这句话的上面）。WI-98：这把链接现在与内嵌同纪律（同源、无凭据）。 */}
         {view.kind === 'open' ? (
           <p className="tiny faint">
             这一页右边已经内嵌了一份，左栏点文件名就切过去；这把是给"想要整个 Jupyter 界面"的人用的逃生链接。
           </p>
         ) : null}
 
-        {tokenless ? (
-          <p className="banner banner-warning" data-testid="notebook-tokenless">
-            这条链接里没有 token：后端判过这个连接不是本机（token 只发给本机那些连接）。
-            用上面那把「在新标签页打开」时会在 Jupyter 的登录页停一下，要手贴一次 token；这不是 Jupyter 坏了。
-            右边内嵌那一栏不走这条链接、也不带凭据：守卫不过它会直接在 iframe 里回一个 403。
-          </p>
-        ) : null}
-
-        {/* ④ 这一态单独一句：给不出链接 ≠ 没在跑。坏的是 ARENA_NOTEBOOK_PUBLIC_URL 那一行 env。
-            措辞刻意绕开"没在运行"那四个字 —— 它们是另一态的话，两句同时出现读者就分不清了。
-            role 用 status 不用 alert（评审 Fix-1 的 Minor）：这是"配置坏了"的诊断，不是"你刚才那次
-            操作失败了"；alert 会打断屏幕阅读器当前的朗读，而邻块（down / tokenless / spec-missing）
-            说的同一类事并没有各自升级成报警。 */}
-        {view.kind === 'nolink' ? (
-          <p className="banner banner-warning" data-testid="notebook-nolink" role="status">
-            <span>Jupyter 确实在答话，只是这个实例拼不出能点开的链接 ⇒ 别按"服务没起"去处理，重启它修不了这一态。</span>
-            <span className="tiny mono">{view.reason}</span>
+        {/* WI-98：这句从"链接里没有 token ⇒ 要手贴一次"改成"这条连接过不了守卫 ⇒ 点开会直接 403"。
+            含义搬家而不是删掉（"话不许静默消失"的纪律）；三句内容逐条由
+            `web/test/notebook.test.tsx`「localPeer:false」那条钉死：①被拒的是守卫不是服务、
+            ②这不是故障、③设计上只在宿主本机用（手机/iPad 不是漏配 —— 用户 2026-10-05 的决定）。
+            role 用 status 不用 alert：邻块（down / spec-missing）说的是同一类事，同一档语气。 */}
+        {guardRefused ? (
+          <p className="banner banner-warning" data-testid="notebook-not-local" role="status">
+            这一页与上面那把「在新标签页打开」的链接都要经服务端守卫：这一条连接不是本机形状 ⇒ 点出去会被直接拒（403）。
+            被拒的是守卫，不是 Jupyter 坏了，也不是链接坏了 —— 这不是故障。
+            这一页设计上只在宿主本机使用：手机 / iPad 明确不支持，那是决定，不是漏配。
           </p>
         ) : null}
 
@@ -386,14 +396,17 @@ export default function Notebook() {
             </div>
             {/*
               src 只能是**同源相对路径**（`/jupyter/…`，全部由 `@arena/shared` 那三个常量派生）。
-              为什么不是后端那把 `notebook-open` 的绝对地址：那串给的是 `http://127.0.0.1:7789/…`，
-              iframe 里的请求就会从"我们这条同源通道"变成"往另一台主机发跨源请求"。用户用
-              `http://localhost:7788` 打开页面时，浏览器给这些请求判 `cross-site` ⇒ Jupyter 的
-              Host/Origin 守卫（`--ServerApp.allow_remote_access=False`）直接拒，症状是 iframe 里
-              一片 403 / 登录页，而我们这一页、单测、E2E 全绿。相对路径让浏览器按当前文档的
-              origin 解析：`localhost` 与 `127.0.0.1` 两种打开方式各自都是同源，走的都是我们
-              那条反代（HTTP + websocket 两条通道都已就位）。
+              为什么必须同源：绝对地址（旧的 `http://127.0.0.1:7789/…`）会让 iframe 里的请求从
+              "我们这条同源通道"变成"往另一台主机发跨源请求"。用户用 `http://localhost:7788` 打开页面时，
+              浏览器给这些请求判 `cross-site` ⇒ Jupyter 的 Host/Origin 守卫
+              （`--ServerApp.allow_remote_access=False`）直接拒，症状是 iframe 里一片 403 / 登录页，
+              而我们这一页、单测、E2E 全绿。相对路径让浏览器按当前文档的 origin 解析：`localhost` 与
+              `127.0.0.1` 两种打开方式各自都是同源，走的都是我们那条反代（HTTP + websocket 两条通道都已就位）。
               URL 里也**不许**有 token：凭据只在服务端注入，守卫不过就在隧道里回 403/503。
+              ⚠ WI-98 之后逃生链接（`notebook-open` 的 href）与这一路**共用同一条纪律** —— 它也是
+              同源路径、也不带凭据；过去这把 iframe 是唯一不带凭据的、逃生链接是唯一的例外，现在例外没了。
+              两条仍然各由一处派生（这里 `JUPYTER_BASE_URL` / `notebookDocPath`，那里只渲染后端 `url`），
+              不因为形状相同就把两处折成一处 —— 默认落点（文件管理 vs tree）是两件事。
             */}
             <iframe
               className="nb-frame"

@@ -42,8 +42,22 @@ export interface NotebookFile {
  */
 export interface NotebookStatusResponse {
   running: boolean;
-  /** url 是本机地址；带不带 token 判的是**合取**（终审 C-1）：socket 对端 = 回环或本进程默认网关（compose 里宿主浏览器经网桥 NAT 进来，对端是网关而非回环）**且** Host 头是本机字面量（`localhost` / `127.x` / `[::1]`）⇒ 带；两半任缺其一（含 Host 头缺席）都不带，链接照给。为什么必须有第二半：DNS rebinding 里对端确实是回环。判据本体在 `server/src/net/localOrigin.ts`；网关那一半的安全性仍是派生的，前提是发布端口全绑 127.0.0.1（闸门 compose-ports.test.ts） */
+  /**
+   * WI-98：逃生链接变成**同源路径** —— 值恒为 `NOTEBOOK_TREE_PATH`（`/jupyter/tree`），由 shared 的
+   * 编译期常量派生，`running:true` 时必在场，**永远不含任何凭据**（没有任何 env 能往它上面挂 token；
+   * 旧形状 `new URL(config.notebook.publicUrl + …)` 连同它能被配坏而派生出 `running:true + reason +
+   * 没有 url` 的 `nolink` 态一起删了 —— 那条 env 路现在只剩诊断文案，见 `localPeer` 与本文件的 WI-98 注释）。
+   * 点开它走的是与内嵌 iframe 同一条同源反代，凭据在服务端注入（`server/src/notebooks/proxy.ts`）。
+   */
   url?: string;
+  /**
+   * WI-98：服务端对**这条连接**的守卫合取判出的结论 —— `isLocalPeer(socket 对端) ∧
+   * isLoopbackHostHeader(Host)`，与同源反代守卫（`server/src/notebooks/proxyGuard.ts`）**同一份判据**。
+   * 含义是"这条连接过不过守卫"，不再是"能不能拿 token"（链接里已经没有 token 可给了）。
+   * `false` ⇒ 这一页与逃生链接点出去都会被守卫直接 403 —— 被拒的是守卫，不是 Jupyter 坏了，
+   * 也不是链接坏了；这一页设计上只在宿主本机用（手机 / iPad 明确不支持，用户 2026-10-05 的决定）。
+   */
+  localPeer: boolean;
   /** running:false 时必填 */
   reason?: string;
   kernels: NotebookKernel[];
@@ -110,7 +124,11 @@ export const NOTEBOOK_PREFIX = '/jupyter' as const;
  */
 export const JUPYTER_BASE_URL = `${NOTEBOOK_PREFIX}/` as const;
 
-/** 文件列表页（7789 那把"逃生链接"与第五页 iframe 的默认落点）。 */
+/**
+ * 文件列表页。**WI-98 之后它同时是两把链接的唯一真相**：第五页 iframe 的默认落点，
+ * 与「在新标签页打开」那把逃生链接的 `href`（同源路径 ⇒ 凭据不进任何 URL，
+ * 两条路都经同源反代注入）。曾经它是"7789 绝对地址 + ?token="的一部分，那条 env 路已删。
+ */
 export const NOTEBOOK_TREE_PATH = `${NOTEBOOK_PREFIX}/tree` as const;
 
 /**

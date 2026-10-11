@@ -11,19 +11,27 @@ import { JUPYTER_BASE_URL, NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, type NotebookKe
 const ARENA_KERNEL_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS);
 
 /**
- * 「这个请求能不能拿到 token」—— 终审 C-1 之后它是**合取**，两半都要点头：
+ * 「这条连接过不过服务端守卫」—— 终审 C-1 定下它是**合取**，两半都要点头。
+ * WI-98 动的是它的**用途**，没动判据本身：过去它决定"要不要往链接里挂 token"，
+ * 现在链接（同源 `/jupyter/tree`）里根本没有 token 可挂，它只余两件事 ——
+ * ① 把结论经 `localPeer` 字段送出去，让第五页那句横幅说实话（非本机的连接会被守卫直接 403）；
+ * ② 被 `proxyGuard.ts` 原样复用，决定同源反代给不给注入凭据。
  *
  * 1. `isLocalPeer(对端地址)`：判据是**内核给的 socket 对端地址**，不是客户端自报的头（评审 M-1：
  *    任何人都能把 `Host:` 写成 `127.0.0.1:7788`，照着它发凭据等于把 token 发给局域网里任意一个请求）。
  * 2. `isLoopbackHostHeader(Host 头)`（`server/src/net/localOrigin.ts`）：**只有**第一半不够 ——
  *    DNS rebinding 里受害者浏览器把攻击者的域名改成 `127.0.0.1`，socket 对端**就是**回环，
- *    而响应与攻击页同源 ⇒ 页面上的 JS 读得到 `url` 里那个 token（一个能在容器里以 root 执行任意代码
- *    的服务的**长期**凭据：躺在 `.env`、重启不换）。这时还认得出"这个 Host 不是本机"的只剩头本身。
+ *    而响应与攻击页同源。WI-98 之前它偷走的是 `url` 里那个 token（一个能在容器里以 root 执行任意
+ *    代码的服务的**长期**凭据：躺在 `.env`、重启不换）；WI-98 之后 `url` 里没有凭据了，这一半却照旧
+ *    一票都不能省 —— 它现在拦的是 `proxyGuard.ts` 给不给注入凭据：缺了这一半，rebinding 页面就
+ *    能让守卫替它把 token 注进 `/jupyter/*` 的每一个请求，**借**同一把凭据执行代码，而不是抄走它。
+ *    这时还认得出"这个 Host 不是本机"的，仍然只剩头本身。
  *
  * **这不与上一轮那条裁决冲突**（会读成冲突，是因为那句话写成了"Host 头不参与判定"）：
  * 那一句反对的是 **Host 单独说话**，而合取严格强于任何一半 —— 伪造头的用例（LAN 对端 +
  * `Host: 127.0.0.1:7788`）与 `::1:7788` 那个非回环字面量今天**都还得红**，
- * `server/test/notebooks/status.test.ts` 的合取表把两个方向各钉了一次。
+ * `server/test/notebooks/status.test.ts` 的合取表把两个方向各钉了一次（WI-98 之后表钉的对象从
+ * "给不给链接挂 token"搬成"`localPeer` 给不给 true"，表的行一行没松）。
  *
  * 第一半为什么必须带"默认网关"那一支 —— 它决定这个功能在**唯一会启用它的部署**里生不生效，
  * 所以这条必须写在代码里，否则换判据的动作会把功能静默关掉：
@@ -31,11 +39,12 @@ const ARENA_KERNEL_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS);
  * - compose（`./start.sh`，也是唯一拿到 `ARENA_JUPYTER_TOKEN` 的实例）：浏览器 → 宿主的
  *   `127.0.0.1:7788` → docker-proxy / NAT 在**宿主那侧**拨容器的 eth0 ⇒ 容器里看到的对端是
  *   这张网桥的网关（`172.18.0.1` 那一类），**永远不会是 127.0.0.1**。
- * 只认回环的后果不是"更安全"，而是"这个功能在容器里从来拿不到 token"—— 点开链接撞
- * Jupyter 的登录页，而页面一片绿（Task 7 那份注释警告过的正是这种静默降级）。
+ * 只认回环的后果不是"更安全"，而是"这个功能在容器里恒被判成非本机"—— 内嵌与逃生链接一起被守卫
+ * 直接 403，而页面一片绿（WI-98 之前那句症状是"点开撞 Jupyter 登录页"，形状换了，账没换：
+ * Task 7 那份注释警告过的正是这种静默降级）。
  * 所以第二条判据是"对端 == 我自己的默认网关"：它成立说明报文是从宿主的那个网桥接口进来的，
  * 也就是那台跑着 Jupyter 的机器。而这在今天不会放大暴露面 —— compose 把每个发布端口都只绑在
- * 宿主的 127.0.0.1 上（闸门 `compose-ports.test.ts`），到不了这个服务的地址谈不上"被漏 token"，
+ * 宿主的 127.0.0.1 上（闸门 `compose-ports.test.ts`），到不了这个服务的地址谈不上"被漏放行"，
  * 想冒充网关得先能在我的 netns 里发包，那已经是宿主本地的权限了。
  * 代价也照实说：宿主直跑时"默认网关"通常是路由器，那一台会被当成本机。今天打不开任何东西，
  * 因为服务端从不加载 `.env`（只有 compose / start.sh 读它）⇒ dev 进程根本没有 token；
@@ -151,6 +160,10 @@ async function jupyterApi(subPath: string, token: string, doFetch: typeof fetch,
  * **WI-94：反代守卫（`notebooks/proxyGuard.ts`）复用这同一段话** —— '从没生成' 与 '按设计不给'
  * 修的是相反的东西，写两遍迟早只有一遍更新。导出是为了让"复用"这件事可判
  * （判据：`server/test/notebooks/proxyGuard.test.ts` 里那句「503 那句话用的就是 status.ts 那一份」）。
+ *
+ * 末句印的 `config.notebook.publicUrl`（`ARENA_NOTEBOOK_PUBLIC_URL`）是 WI-98 之后这一行 env 的
+ * **唯一读者**：它只出现在这句诊断文案里（"notebook 在正常启动的那个实例里（…）"），
+ * 不再参与拼任何给浏览器的链接 —— 链接如今是 `NOTEBOOK_TREE_PATH` 那条编译期派生的同源路径。
  */
 export function missingTokenReason(tokenKeyPresent: boolean): string {
   return tokenKeyPresent
@@ -234,7 +247,12 @@ export async function notebookStatus(input: {
   const doFetch = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? 1500;
   const token = input.tokenOverride ?? config.notebook.token;
-  const empty: NotebookStatusResponse = { running: false, kernels: [], notebooks: [] };
+  /**
+   * WI-98：合取在这里算**一次**，结论进 `localPeer` 字段（含义是"这条连接过不过守卫"，
+   * 与 `proxyGuard.ts` 用的是同一份判据）。它不再决定任何 URL 里挂不挂凭据 —— 凭据不进 URL 了。
+   */
+  const localPeer = isLocalPeer(input.peerAddress, input.gatewayAddresses) && isLoopbackHostHeader(input.hostHeader);
+  const empty: NotebookStatusResponse = { running: false, localPeer, kernels: [], notebooks: [] };
 
   if (!token) return { ...empty, reason: missingTokenReason(input.tokenKeyPresent ?? config.notebook.tokenKeyPresent) };
 
@@ -327,32 +345,19 @@ export async function notebookStatus(input: {
     return { ...empty, reason: isTimeoutish(text) ? 'Jupyter 无响应（探活超时）' : `Jupyter 未在监听：${detail || String(err)}` };
   }
 
-  // 链接是在**已经探到 Jupyter 在跑**之后拼的，所以这一步坏掉不许把结果说成"未在监听"，
-  // 更不许让 promise reject —— 这个函数就挂在 `GET /api/notebook/status` 上（`server/src/api/app.ts`
-  // 的 `// MARK: /api/notebook/status` 那一节，Task 8 早就落了），reject 出去就是 500，
-  // 而 500 没有 reason 可读（前端那句"kernel 就绪"会整块消失，读者看不到任何原因，正是本仓库最恨的静默）。
-  // 坏值来自 env（ARENA_NOTEBOOK_PUBLIC_URL），这里不写第二份默认值：那会造出端口的第五处真相，
-  // 而"给不出链接 + 说清是哪一行坏了"比"给一个可能是错的链接"更可行动。
-  let url: string;
-  try {
-    const u = new URL(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}`);
-    // **合取**（终审 C-1）：对端是本机 **且** Host 头是本机字面量，两半都要点头。
-    // 只有对端说话 ⇒ DNS rebinding 拿得到 token（对端确实是回环）；只有头说话 ⇒ 局域网里
-    // 伪造 `Host: 127.0.0.1:7788` 的那个拿得到（评审 M-1 的原始形状）。
-    // 非本机连接**照样给链接**，只是里面没有凭据 —— 不给链接才是静默降级。
-    if (isLocalPeer(input.peerAddress, input.gatewayAddresses) && isLoopbackHostHeader(input.hostHeader)) {
-      u.searchParams.set('token', token);
-    }
-    url = u.toString();
-  } catch {
-    return {
-      running: true,
-      kernels,
-      notebooks: [],
-      reason:
-        `Jupyter 在跑，但 ARENA_NOTEBOOK_PUBLIC_URL="${config.notebook.publicUrl}" 不是合法 URL ⇒ 给不出能点开的链接。` +
-        '这是那一行 env 坏了，不是 Jupyter 的故障',
-    };
-  }
-  return { running: true, url, kernels, notebooks: [] };
+  // WI-98：逃生链接变成**同源路径** —— 值就是 `NOTEBOOK_TREE_PATH`（`/jupyter/tree`，前缀由
+  // `@arena/shared` 的常量派生，这里不写第二处 `/jupyter/`，也不再经 `new URL` 拼 env 的绝对地址）。
+  // 于是 token 不出现在响应体、顶文档 HTML、任何 URL 里；点开它走的是与内嵌 iframe 同一条同源反代，
+  // 凭据只在服务端注入（`proxy.ts`），守卫不过照样在隧道里回 403/503 —— 链接形状与内嵌那一路的
+  // 老纪律（`web/src/pages/Notebook.tsx` iframe src 那段注释）从此是同一条，不再是两套真相。
+  //
+  // **`nolink` 态整块删除，为什么它结构上不可能再发生**（提交信息里同一句话）：
+  // 这一态（`running:true` + `reason` + 没有 `url`）过去存在的唯一原因是 `ARENA_NOTEBOOK_PUBLIC_URL`
+  // 是 env、可以被配坏 —— 一个坏值让 `new URL(...)` 抛，才需要"在跑但给不出链接"这第三形状（评审 M5）。
+  // 现在链接是编译期常量派生的同源路径，**没有任何 env 能让它坏**，那条 catch 分支永远走不到；
+  // 留着后端分支、前端渲染与钉它们的用例，就是一条永远不会红的装饰判据（本仓库对装饰判据的态度
+  // 见 WI-104/WI-109）。删一条判据要能说清判的对象为什么不存在了 —— 这里的答案就是上面那两句。
+  // 顺带：这一段以前还要解释"坏值来自 env，这里不写第二份默认值，否则造出端口的第五处真相"；
+  // WI-98 之后端口的那一真相只剩 `config.notebook.port`（探活/上游），`publicUrl` 退成纯诊断文案。
+  return { running: true, url: NOTEBOOK_TREE_PATH, localPeer, kernels, notebooks: [] };
 }

@@ -704,18 +704,19 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   // MARK: /api/notebook/status（第五页的唯一事实来源：服务在不在、kernel 就绪没有）
-  // token 的释放判据是**合取**（终审 C-1）：`request.raw.socket.remoteAddress`（内核给的，客户端改不动）
-  // **且** `request.headers.host` 是本机字面量。两个输入各拦一种坏法：
-  // 只看对端 ⇒ DNS rebinding（受害者浏览器把攻击域名改成 127.0.0.1，对端**就是**回环，而响应与攻击页
-  // 同源，页面上的 JS 读得到 url 里那个 token）；只看头 ⇒ 局域网里任何人写 `Host: 127.0.0.1:7788` 就能换到
-  // 凭据（评审 M-1 的原始形状）。合取严格强于任何一半，两个方向的用例都钉在
+  // WI-98：链接恒为同源 `/jupyter/tree`，**不含凭据**；这里的合取判据（终审 C-1，一个字没动）从
+  // "要不要往链接里挂 token"改成送 `localPeer` —— "这条连接过不过守卫"的结论。它读的两个输入各拦一种坏法：
+  // `request.raw.socket.remoteAddress`（内核给的，客户端改不动）单独说话拦不住 DNS rebinding
+  // （受害者浏览器把攻击域名改成 127.0.0.1，对端**就是**回环 —— 那一半现在借走的是守卫注入的凭据，
+  // 不再是抄走 `url` 里那份）；`request.headers.host` 单独说话拦不住局域网里伪造 `Host: 127.0.0.1:7788`
+  // 的人（评审 M-1 的原始形状）。合取严格强于任何一半，两个方向的用例都钉在
   // `server/test/notebooks/status.test.ts` 与 `server/test/api/notebook-api.test.ts`。
   // 这里不读 `request.ip`：那是 Fastify 在 `trustProxy` 打开后会改口的封装，而本服务没设过 trustProxy，
   // 用 raw socket 是"只有一个输入"的写法 —— 将来真上反向代理，也得在这儿显式决定信谁的转发头。
   app.get(`${api}/notebook/status`, async (request): Promise<NotebookStatusResponse> => {
     const base = await notebookStatus({
       peerAddress: request.raw.socket.remoteAddress ?? '',
-      // 头缺席（HTTP/1.0 或被人摘掉）传 undefined ⇒ `isLoopbackHostHeader` fail-closed ⇒ 不给 token
+      // 头缺席（HTTP/1.0 或被人摘掉）传 undefined ⇒ `isLoopbackHostHeader` fail-closed ⇒ `localPeer:false`
       hostHeader: asString(request.headers.host),
       // 不传 = 走 `localGatewayAddresses()`（生产路径）。见 AppDeps.notebookGatewayAddresses 的注释。
       gatewayAddresses: deps.notebookGatewayAddresses,

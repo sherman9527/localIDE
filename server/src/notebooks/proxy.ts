@@ -20,7 +20,8 @@ export interface NotebookUpstream {
  *
  * 放行判据**只有一处**：`verdictFor()` 里那一次 `guardNotebookProxy(...)` 调用。这里不许再写第二条
  * `isLocalPeer` / `isLoopbackHostHeader` —— 它们与 `notebooks/status.ts` 是**共用的判据、相反的动作**：
- * status 那边合取不成立时**照样给链接**、只是不附凭据（"不给链接才是静默降级"就是为那句写的），
+ * status 那边合取不成立时**照样给链接**（WI-98 后链接是同源 `/jupyter/tree`，本来就不含凭据，
+ * 合取的结论只是经 `localPeer` 说实话 —— "不给链接才是静默降级"就是为那句写的），
  * 守卫这里不成立时**否决整个请求**。把两边折成一个函数会把前一支变成 403。
  *
  * ## 否决消息的形状

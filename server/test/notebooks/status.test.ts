@@ -149,7 +149,8 @@ const refuses = (message: string) =>
 
 // 每条用例都显式给 tokenOverride：宿主上 config.notebook.token 是空的（compose 才设它），
 // 不显式覆盖的话第 1 条会在"没配 token 就 running:false"那条早退分支上红 —— 那是环境差，不是实现错。
-// hostHeader 同批发下去是 **C-1** 的结果：token 释放现在读的是**合取**（对端本机 **且** Host 是本机字面量），
+// hostHeader 同批发下去是 **C-1** 的结果：`localPeer` 判的是**合取**（对端本机 **且** Host 是本机字面量；
+// WI-98 之后这个合取送的是"过不过守卫"的结论，不再决定链接挂不挂 token —— 链接里从来没有 token）。
 // 这一份是"两半都对"的基准形状，各条用例只在要判某一半时单独改掉那一半。
 const TOK = { tokenOverride: 'test-token', hostHeader: '127.0.0.1:7788' };
 
@@ -170,13 +171,18 @@ const TOK = { tokenOverride: 'test-token', hostHeader: '127.0.0.1:7788' };
 const tokenKeyShape = (present: boolean) => ({ tokenKeyPresent: present });
 
 describe('notebookStatus', () => {
-  it('服务在跑：running + 带 token 的本机地址 + kernel 就绪', async () => {
+  /**
+   * WI-98：这条从"running + 带 token 的本机地址"改成"**url 恒为同源路径且不含 token** +
+   * `localPeer` 按合取给布尔"。期望值仍从 shared 常量派生（评审 M9 的纪律没搬家）：
+   * 写死 `http://127.0.0.1:7789` 那代的冤红教训仍然成立 —— 只是今天连端口都不该出现在链接里。
+   */
+  it('服务在跑：running + 同源链接（不含任何凭据）+ localPeer:true + kernel 就绪', async () => {
     const res = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
     expect(res.running).toBe(true);
-    // 期望值从 config 派生（评审 M9）：原来这里写死 `http://127.0.0.1:7789`，
-    // 于是"宿主端口换个号"会同时改掉 compose 与 config 而这条测试独自红 —— 那是冤红，
-    // 冤红教给下一个人的是"改测试里的数字"，而不是"看谁真的漂移了"。
-    expect(res.url).toBe(`${config.notebook.publicUrl}${NOTEBOOK_TREE_PATH}?token=test-token`);
+    expect(res.url, '链接不再是同源路径 ⇒ 它又回到"由 env 拼绝对地址"那一代（WI-98 要消掉的就是它）').toBe(NOTEBOOK_TREE_PATH);
+    expect(res.url, 'token 回到 URL 里了 —— 这正是 WI-98 要消掉的东西').not.toContain('token');
+    expect(res.localPeer, '两半都成立却不给 true ⇒ 前端那句守卫横幅就成了谎（用户明明在本机）').toBe(true);
+    expect(JSON.stringify(res), 'token 出现在响应的任何字段里都算泄漏').not.toContain('test-token');
     // 标签来自 `spec.display_name`（不是 id、不是顶层）。清单**只有 arena 自己那一条** ——
     // fixture 里的 python3 由 I-4 的 allow-list 滤掉，它下面单独有一条用例判（含反向对照）。
     // ⚠ **终审 I-1 之后 `ready` 不再能从这一条里写死**：arena-pyspark 的 ready 判的是盘上那份
@@ -237,10 +243,11 @@ describe('notebookStatus', () => {
     expect(res.kernels).toEqual([]);
   });
 
-  it('非本机对端拿不到 token（链接照给，token 不外泄）', async () => {
+  it('非本机对端：链接照给（同源路径本来就没有凭据可扣），localPeer:false 说实话', async () => {
     const res = await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), ...TOK });
-    expect(res.url).toBeDefined();
+    expect(res.url).toBe(NOTEBOOK_TREE_PATH);
     expect(res.url).not.toContain('token=');
+    expect(res.localPeer, '对端是局域网 ⇒ 守卫会拒（403），这个结论必须送出去让前端说破').toBe(false);
   });
 
   /**
@@ -248,38 +255,45 @@ describe('notebookStatus', () => {
    * ① 认法要覆盖 IPv6 的真形状 —— socket 给的是裸 `::1`，双栈监听时 IPv4 对端写成
    *    `::ffff:127.0.0.1`，`127.0.0.0/8` 整段都是本机（不止 .1）；
    * ② **旧判据的假阳性必须单独钉**：`::1:7788` 是一条合法 IPv6 地址（展开成 `0:0:0:0:0:0:1:7788`），
-   *    而旧那条 `...|::1)(:\d+)?$` 把它当"回环 + 端口"⇒ 一个非本机字面量换到了 token。
+   *    而旧那条 `...|::1)(:\d+)?$` 把它当"回环 + 端口"⇒ 一个非本机字面量换到了凭据资格。
    *    socket 地址永远不带端口，所以这里不给任何"尾巴上带冒号就当端口"的宽容。
    * ③ 同一条道理（评审 Fix-1 的 Minor）：`remoteAddress` 也**永远不是主机名**，所以 `'localhost'`
    *    这个字面量不该有本机资格 —— 旧正则里那个 `|localhost` 分支是从 Host 头时代抄过来的死代码，
    *    留着它等于给"哪天有人把某个自报字符串塞进对端地址"预留一条通到凭据的路。
-   * 方向也要各断一边：漏认本机 = 用户得手贴 token（那条静默降级）；多认外来者 = 泄漏。
+   * WI-98 之后这一族判的对象从"给不给 token"搬成"`localPeer` 给不给 true"（token 早就不在 URL 里了，
+   * 而**借**守卫注入凭据的资格仍然由这两半决定 —— 表一行没松）。
+   * 方向也要各断一边：漏认本机 = 页面谎称"你会被 403"（那条静默降级换了个方向还在）；
+   * 多认外来者 = 反代给外来连接注入凭据。
    */
   it('本机对端的认法覆盖 IPv6 两种写法，而 `::1:7788` / `localhost` 这类字面量不在其内', async () => {
     for (const peer of ['::1', '127.0.0.1', '127.0.0.42', '::ffff:127.0.0.1']) {
       const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
-      expect(res.url, `${peer} 是本机 ⇒ 不给 token 就得让用户手贴`).toContain('token=test-token');
+      expect(res.localPeer, `${peer} 是本机 ⇒ 判成 false 就是对着本机用户喊"你会被 403"`).toBe(true);
+      expect(res.url).toBe(NOTEBOOK_TREE_PATH);
     }
     for (const peer of ['192.168.1.20', '::ffff:192.168.1.20', '::1:7788', '10.0.0.1', '', '127', '127.0.0', 'localhost']) {
       const res = await notebookStatus({ peerAddress: peer, fetchImpl: fake(), ...TOK });
-      expect(res.url, `${peer} 不是本机 ⇒ token 不许出现在响应里`).not.toContain('token=');
+      expect(res.localPeer, `${peer} 不是本机 ⇒ 给 true 就是替外来连接向守卫要放行资格`).toBe(false);
+      expect(JSON.stringify(res), 'token 出现在任何字段里都算泄漏').not.toContain('test-token');
     }
   });
 
   /**
    * 容器那一半：`./start.sh` 起的 arena 里，宿主浏览器的请求经 docker-proxy / NAT 进来，
    * 对端是**这张网桥的网关**（172.18.0.1 那一类），永远不会是 127.0.0.1。
-   * 只认回环的判据不会报错，它会安静地让容器里的页面永远拿不到 token ⇒ 点开就是 Jupyter 登录页，
-   * 而界面一片绿 —— 正是本仓库付过学费的那类静默降级。
+   * 只认回环的判据不会报错，它会安静地把容器里这一页整页判成"非本机"（`localPeer:false`，
+   * 逃生链接与内嵌一起被守卫 403），而界面一片绿 —— 正是本仓库付过学费的那类静默降级
+   * （WI-98 之前那句症状是"拿不到 token ⇒ 点开撞登录页"，判据与代价的形状变了，账没变）。
    * 判据仍不是客户端给的：网关地址来自 `/proc/net/route`（内核告诉我谁是出口），测试走注入的那一份。
    */
-  it('对端是本容器自己的默认网关（docker 网桥）⇒ 视为本机，给 token', async () => {
+  it('对端是本容器自己的默认网关（docker 网桥）⇒ 视为本机（localPeer:true）', async () => {
     const gw = { gatewayAddresses: ['172.18.0.1'] };
     const via = await notebookStatus({ peerAddress: '172.18.0.1', fetchImpl: fake(), ...TOK, ...gw });
-    expect(via.url, '容器部署里这就是"本机点开"的唯一形状 ⇒ 不给 token 等于功能没上').toContain('token=test-token');
+    expect(via.localPeer, '容器部署里这就是"本机点开"的唯一形状 ⇒ 判成 false 等于功能没上').toBe(true);
     // 同一台机器上的另一个容器地址不是网关 ⇒ 不给（这条判据不是"172.x 都算本机"）
     const sibling = await notebookStatus({ peerAddress: '172.18.0.7', fetchImpl: fake(), ...TOK, ...gw });
-    expect(sibling.url).not.toContain('token=');
+    expect(sibling.localPeer, '同网段的隔壁容器不是网关 ⇒ 给 true 就是向守卫要放行资格').toBe(false);
+    expect(JSON.stringify(sibling)).not.toContain('test-token');
   });
 
   /**
@@ -288,20 +302,21 @@ describe('notebookStatus', () => {
    * 等于把 token 发给局域网里任意一个请求。那一条裁决今天**仍然成立**，被推翻的只有
    * 「Host 完全不参与判定」这半句。
    *
-   * 现在的判据是**合取**：`isLocalPeer(对端)` **且** Host 头的 hostname 是本机字面量。
+   * 判据是**合取**：`isLocalPeer(对端)` **且** Host 头的 hostname 是本机字面量。
    * 合取严格强于任何一半，所以两个方向都要有独立的红：
    * ① 只有 Host 对（局域网里伪造头的那个）⇒ 不给 —— 上面 `192.168.1.20` 那条与下面表里那一行判它；
    * ② 只有对端对（**DNS rebinding**：受害者浏览器把攻击域名的 A 记录改成 `127.0.0.1`，
-   *    socket 对端**就是**回环，而响应与攻击页同源 ⇒ 页面上的 JS 读得到 `url` 里那个 token，
-   *    拿到的是"能在容器里以 root 执行任意代码"的长期凭据：写在 `.env`、重启不换）⇒ 也不给。
-   * 只留 ① 的那一半判据时 ② 是绿的，这就是这一轮补的东西。
+   *    socket 对端**就是**回环，而响应与攻击页同源）。C-1 当时的账是"页面上的 JS 读得到 `url`
+   *    里那个 token"；WI-98 之后 `url` 里没有凭据，这一半拦的变成"攻击页的同源请求能不能让
+   *    `proxyGuard.ts` 替它注入凭据"（借用比抄走照样危险）⇒ 也不给。
+   * 只留 ① 的那一半判据时 ② 是绿的，这就是 C-1 补的东西；两半合起来今天送的是 `localPeer`。
    *
    * `Host: localhost:7789` 这一行是**故意钉住的决定**：`localhost` 是名字不是地址，
    * 但 rebinding 要的是"域名解析到我控制的 IP"，把 localhost 解析走等于让攻击者域名 = localhost，
    * 那种 DNS 任何正经解析器都不接受；而 `http://localhost:7788` 是用户真会敲的第二个写法
    * （`start.ps1` 的健康检查就用它）。放行它、并在这里钉住，比"松一半让某个写法进来"更好。
    */
-  it('token 释放是合取：对端本机 **且** Host 是本机字面量（C-1：DNS rebinding 拿不到 token）', async () => {
+  it('合取表（现在送 localPeer，不再决定链接挂什么）：对端本机 **且** Host 是本机字面量（C-1：DNS rebinding 拿不到放行资格）', async () => {
     const gw = { gatewayAddresses: ['172.18.0.1'] };
     const cases: Array<{ peer: string; host: string | undefined; want: boolean; why: string }> = [
       { peer: '127.0.0.1', host: '127.0.0.1:7788', want: true, why: '宿主直跑：两半都对' },
@@ -321,10 +336,12 @@ describe('notebookStatus', () => {
       // ⚠ `...TOK` 必须在**前面**：它带着基准那份 `hostHeader`，放后面会把用例自己那个 Host 顶掉
       // （第一版就是这么错的 —— 于是"外来 Host"那一行拿着本机 Host 跑，红在测试自己写的断言上）。
       const res = await notebookStatus({ ...TOK, ...gw, peerAddress: c.peer, hostHeader: c.host, fetchImpl: fake() });
+      // 无论哪一态，链接都是那条同源路径、都不含凭据（WI-98：这一维不再随合取变，变的只有 localPeer）
+      expect(res.url, `${c.why}：链接不再是同源路径`).toBe(NOTEBOOK_TREE_PATH);
       if (c.want) {
-        expect(res.url, `${c.why}：两半都成立却不给 token ⇒ 用户得手贴（静默降级那一侧）`).toContain('token=test-token');
+        expect(res.localPeer, `${c.why}：两半都成立却判 false ⇒ 对着本机用户喊"你会被守卫 403"（静默降级那一侧）`).toBe(true);
       } else {
-        expect(res.url, `${c.why}：这一半不成立却给了 token ⇒ 泄漏`).not.toContain('token=');
+        expect(res.localPeer, `${c.why}：这一半不成立却给了 true ⇒ 外来连接从守卫那里借到注入的凭据`).toBe(false);
         expect(JSON.stringify(res), `${c.why}：token 出现在任何字段里都算泄漏`).not.toContain('test-token');
       }
     }
@@ -334,10 +351,11 @@ describe('notebookStatus', () => {
    * 缺的那一半不许靠"调用方忘了传"蒙过去：`hostHeader` 是**必填**入参（类型层面就要求每个调用点
    * 表态），而 `undefined` 走的是 fail-closed 那一支。这条判的是接线的形状，不是文案。
    */
-  it('路由忘传 Host 头时不给 token（新增入参不许有"忘了也照样绿"的形状）', async () => {
+  it('路由忘传 Host 头时 localPeer 判 false（新增入参不许有"忘了也照样绿"的形状）', async () => {
     const noHost = await notebookStatus({ ...TOK, peerAddress: '127.0.0.1', hostHeader: undefined, fetchImpl: fake() });
     expect(noHost.running).toBe(true);
-    expect(noHost.url, '没给 Host 头 ⇒ 合取判不上 ⇒ 宁可不给（用户至多手贴一次 token）').not.toContain('token=');
+    expect(noHost.localPeer, '没给 Host 头 ⇒ 合取判不上 ⇒ 宁可不给（这一页会说实话"点开会 403"，而不是骗过守卫）').toBe(false);
+    expect(noHost.url, '链接照样给（同源路径），但里面从来没有凭据').toBe(NOTEBOOK_TREE_PATH);
   });
 
   it('超时与"没起"给的 reason 必须不同（同一个 reason 会让人去查错的地方）', async () => {
@@ -420,37 +438,32 @@ describe('notebookStatus', () => {
   });
 
   /**
-   * 评审 M5：`new URL(config.notebook.publicUrl + NOTEBOOK_TREE_PATH)`（WI-94 Task 1 之前那半是
-   * 字面量 `'/tree'`）原先在 try **外面**。
-   * publicUrl 是 env 可覆盖的（ARENA_NOTEBOOK_PUBLIC_URL），一个坏值会让整个函数 reject，
-   * 而 Task 8 把它挂在 GET 路由上 ⇒ 前端拿到 500，500 里没有 reason 可读，
-   * 那句"kernel 就绪"整块消失 —— 症状与"Jupyter 真坏了"一模一样。
-   * 这条判三点：不 reject、不把"在跑"改口成"没在跑"、链接缺失时点名坏掉的那一行 env。
+   * **WI-98 删掉了评审 M5 那条用例判的态**（`running:true` + `reason` + 没有 `url` 的 `nolink`），
+   * 这里把"为什么它结构上不可能再发生"写在原地，免得下一位再把它请回来：
+   * 那一态存在的唯一原因是 `new URL(config.notebook.publicUrl + …)` 读的是 **env**
+   * （`ARENA_NOTEBOOK_PUBLIC_URL`），一个坏值就能让链接"拼不出来"。现在 `url` 恒为
+   * `NOTEBOOK_TREE_PATH`（`@arena/shared` 里 `${NOTEBOOK_PREFIX}/tree` 的编译期常量），
+   * **没有任何 env、没有运行期输入能让它坏** —— 后端那条 catch 永远走不到，留着它（以及钉它的
+   * 后端用例、前端 `nolink` 分支、`notebook-nolink` 用例）就是一条永远不会红的装饰判据，
+   * 而本仓库对装饰判据的态度见 WI-104/WI-109。删判据必须说清判的对象为什么不存在了 —— 就是这段。
+   *
+   * 补回来的是派发词点名的那条**新判据**：url 里永远不许出现 `token=`（本机连接也不例外 ——
+   * 上面合取表逐行已经各判了一次"链接就是那条同源路径"，这条把"不含 token"钉成独立一句，
+   * 并且故意把真 token 喂进注入点：它一旦回到 URL，这里当场红）。
    */
-  it('publicUrl 是坏值时不许 reject：给不出链接，但要给得出原因', async () => {
-    const saved = process.env.ARENA_NOTEBOOK_PUBLIC_URL;
-    process.env.ARENA_NOTEBOOK_PUBLIC_URL = 'not a url';
-    vi.resetModules();
-    let res: NotebookStatusResponse;
-    try {
-      const mod = await import('../../src/notebooks/status.js');
-      res = await mod.notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
-    } finally {
-      if (saved === undefined) delete process.env.ARENA_NOTEBOOK_PUBLIC_URL;
-      else process.env.ARENA_NOTEBOOK_PUBLIC_URL = saved;
-      vi.resetModules();
+  it('url 恒为同源路径且不许出现 token=（本机连接也不例外；nolink 态已随 M5 的 env 形状一起删除）', async () => {
+    const local = await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), ...TOK });
+    const foreign = await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), ...TOK });
+    for (const res of [local, foreign]) {
+      expect(res.running).toBe(true);
+      expect(res.url, '链接不再是同源路径 ⇒ 它又回到"由 env 拼绝对地址"那一代').toBe(NOTEBOOK_TREE_PATH);
+      expect(res.url, 'token= 回到 URL 里 = WI-98 要消掉的东西复活了').not.toContain('token=');
+      expect(res.url, '链接里没有 token 不代表连接是本机（那一维搬去 localPeer 了）').not.toContain('test-token');
     }
-    expect(res.running, '链接拼不出来 ≠ Jupyter 没在跑 ⇒ 这里必须仍是 true').toBe(true);
-    // 「链接坏了不许把 kernel 表一起吞掉」判的是这一态里 kernels 还活着、还是我们那一条。
-    // ⚠ 期望值过去是从 `KERNELSPECS_BODY.kernelspecs` 的**键数**派生的（="Jupyter 列了几条"），
-    // 而 I-4 之后响应里只剩 allow-list 那几条 ⇒ 继续从那边派生等于让断言跟着被测物一起漂移，
-    // 正好把这条用例想判的东西抹掉。改成直接点名"还剩哪几条"。
-    expect(res.kernels.map((k) => k.id)).toEqual([NOTEBOOK_KERNELS.pyspark]);
-    expect(res.url).toBeUndefined();
-    expect(res.reason).toMatch(/ARENA_NOTEBOOK_PUBLIC_URL/);
+    expect([local.localPeer, foreign.localPeer], '两半各判一次：本机 true / 外来 false').toEqual([true, false]);
   });
 
-  it('token 不进日志（它出现在本机 URL 里是点开用的，进日志就留痕了）', async () => {
+  it('token 不进日志（WI-98 之后它连 URL 都不进；日志是唯一还可能把它带出来的地方，更要判）', async () => {
     const CANARY = 'canary-4f2e9b71';
     const consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
       vi.spyOn(console, m).mockImplementation(() => {}),
@@ -461,11 +474,11 @@ describe('notebookStatus', () => {
         ...consoleSpies.flatMap((s) => s.mock.calls.map((c) => argsText(c as unknown[]))),
       ].join('\n');
     try {
-      // 三条分支各走一遍：成功（url 里就躺着 token）、非本机且非网关（url 给但不带 token）、失败（reason 可能拼进 url）
+      // 三条分支各走一遍：成功（url 是同源路径、探活却真的带着 token 打上游）、非本机且非网关、失败（reason 可能拼进细节）
       await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
       await notebookStatus({ peerAddress: '192.168.1.20', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
       await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: refuses('connect ECONNREFUSED'), tokenOverride: CANARY, hostHeader: '127.0.0.1:7788' });
-      // C-1 的第四趟：本机对端 + 外来 Host（url 里躺着 token 的那一态被否掉的那一态）也要过一遍收集器
+      // C-1 的第四趟：本机对端 + 外来 Host（合取判 false 的那一态）也要过一遍收集器
       await notebookStatus({ peerAddress: '127.0.0.1', fetchImpl: fake(), tokenOverride: CANARY, hostHeader: 'evil.example.com:7788' });
       const seen = collect();
       expect(seen, `有日志调用把 token 打印出来了 ⇒ 它会留在 data/logs 里，删不掉历史：\n${seen}`).not.toContain(CANARY);

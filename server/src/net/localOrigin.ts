@@ -2,8 +2,10 @@
  * 「这个请求是不是**从这台机器上的本机地址**发来的」里与 **Host 头**有关的那一半（终审 C-1）。
  *
  * 为什么单独成一个模块，而不是写在 `notebooks/status.ts` 里：它有**两个**调用方，而两个调用方
- * 各自都在别处（`notebooks/status.ts` 决定要不要往链接里附凭据；`api/app.ts` 决定整个 API 要不要
- * 认这次请求）。判据若住在任意一侧，另一侧就得反向 import 它 —— 于是"什么算本机字面量"这份真相
+ * 各自都在别处（`notebooks/status.ts` 算 `localPeer` —— WI-98 后它不再决定链接挂不挂凭据，只把
+ * "这条连接过不过守卫"的结论送上前端；`api/app.ts` 决定整个 API 要不要认这次请求；
+ * `notebooks/proxyGuard.ts` 用它决定同源反代给不给注入凭据）。判据若住在任意一侧，另一侧就得
+ * 反向 import 它 —— 于是"什么算本机字面量"这份真相
  * 会在两个目录里各长一遍，而这类"两处各写一遍"正是本仓库反复付过学费的形状（WI-86 的桥 token、
  * `notebook-image.test.ts` 里那条第四处字面量）。
  *
@@ -13,9 +15,11 @@
  * 那句反对的是 **Host 单独说话**：任何人都能把头写成 `127.0.0.1:7788`，照着它发凭据等于把 token
  * 发给局域网里任意一个请求。那一条今天**没有被推翻**。
  * C-1 补的是另一头：**DNS rebinding** —— 受害者浏览器先把攻击者的域名解析到攻击者服务器、读完
- * 之后再改成 `127.0.0.1`，于是 socket 对端**确实**是回环（`isLocalPeer` 会点头），而响应与攻击页同源，
- * 页面上的 JS 就读得到 `url` 里那个 token（一个能在容器里以 root 执行任意代码的服务的长期凭据：
- * 躺在 `.env`、重启不换）。这时唯一还认得出"这个 Host 不是本机"的信息就是 Host 头本身。
+ * 之后再改成 `127.0.0.1`，于是 socket 对端**确实**是回环（`isLocalPeer` 会点头），而响应与攻击页同源。
+ * C-1 当时的账是"页面上的 JS 读得到 `url` 里那个 token"（长期凭据被抄走：躺在 `.env`、重启不换）；
+ * WI-98 之后 `url` 是同源路径、里面没有凭据，这一半拦的东西随之变成"攻击页的同源请求能不能让
+ * `proxyGuard.ts` 替它注入凭据"（凭据被**借用**去执行代码）—— 判据一字未动，只是账换了形状。
+ * 这时唯一还认得出"这个 Host 不是本机"的信息就是 Host 头本身。
  * ⇒ 判据 = `isLocalPeer(对端)` **且** `isLoopbackHostHeader(Host)`。合取严格强于任何一半：
  * 伪造头（对端不是本机）与 rebinding（头不是本机）各自都还得红 —— 两侧的用例都在
  * `server/test/notebooks/status.test.ts` 与 `server/test/api/notebook-api.test.ts` 里钉着。
@@ -97,7 +101,9 @@ export function isLoopbackAddressLiteral(literal: string): boolean {
  * 坏值（空、多冒号、只有端口、端口不是数字），以及 inet_aton 的 IPv4 短写法（`127.1`）——
  * 短写法在系统解析里确实到本机，但这里两半都要求四段齐全：**同一个字面量在对端与 Host 上必须有
  * 同一个答案**，而 `isLocalPeer` 那一半本来就不收短写法（`status.test.ts` 钉着 `127` / `127.0.0` 不给）。
- * 判它不通过的代价是"这一次点开要手贴一次 token"，判它通过的代价是"两半各解释一遍"。
+ * 判它不通过的代价，WI-98 之前是"这一次点开要手贴一次 token"，之后是"这条连接被整页与逃生链接
+ * 一起判 403"（origin 白名单本来就在更外层这么判，这里只是让 `localPeer` 说实话）；
+ * 判它通过的代价是"两半各解释一遍"。
  */
 export function isLoopbackHostHeader(value: string | undefined | null): boolean {
   const host = hostHeaderHostname(value);

@@ -17,28 +17,32 @@ import { expect, test, type Page } from '@playwright/test';
  *
  * ## 为什么这里没有 brief 原稿那条"非回环 ⇒ 不出现 notebook-open"
  *
- * 那不是一条会成立的条件：无 token 但服务在跑时页面**照样**渲染那个链接（钉住它的是
- * `web/test/notebook.test.tsx` 里「链接里没有 token」那条用例，它要求的是"当场说破要贴一次 token"而不是把链接藏掉）。
+ * 那不是一条会成立的条件：非本机的连接页面**照样**渲染那把链接（钉住它的是
+ * `web/test/notebook.test.tsx` 里「localPeer:false」那条用例，它要求的是"当场说破会被守卫 403"
+ * 而不是把链接藏掉 —— WI-98 之前那句话是"要手贴一次 token"，话换了，纪律没换）。
  * 照原稿写成断言它只会红，而最省事的"修法"是给非本机用户隐藏链接 —— 那正是本项目单测守着不许发生的
- * **静默降级**。所以这一条不写。（容器里非回环的那个对端正是**拿得到 token** 的那一支，判据在
- * `server/src/notebooks/status.ts` 的 `isLocalPeer`：回环或本进程默认网关。）
+ * **静默降级**。所以这一条不写。（容器部署里宿主浏览器的对端正是 `isLocalPeer` 点头的那一支 ——
+ * 回环或本进程默认网关，判据在 `server/src/notebooks/status.ts`。）
  *
- * ## 为什么 `ARENA_NOTEBOOK_PUBLIC_URL` 配坏那一态不在这里断言
+ * ## 为什么 `ARENA_NOTEBOOK_PUBLIC_URL` 配坏那一态整块删除（WI-98，不再是"不在这里断言"）
  *
- * 它的前置条件是 `running:true`（`web/src/pages/Notebook.tsx` 的 `viewOf`：`!running` 先返回 `down`），
- * 而这个实例结构上到不了 `running:true` —— 要它就得给 e2e 透传 token，等于拆掉上面 ⑥/③ 两条隔离判据。
- * 这里**不**用 `page.route` 伪造一份"在跑"的回话去凑那条断言：伪造载荷下"链接不存在"是 fixture 自己
- * 保证的，产品行为一分没测到，而真 Jupyter 的任何东西都没被碰。那一态由
- * `web/test/notebook.test.tsx` 的「在跑但 publicUrl 配坏」用例在单元层钉住；浏览器这一层能诚实钉的是**反着的那半** ——
- * 服务确实没在跑时，那句「Jupyter 确实在答话」（`notebook-nolink`）不许出现，出现就是谎。
+ * 那一态（`running:true` + `reason` + 没有 `url`，前端 `notebook-nolink` 横幅）的成因是
+ * "链接由 env 拼绝对地址、env 可能被配坏"。现在逃生链接是编译期派生的同源路径 `/jupyter/tree`，
+ * 没有任何 env 能让它坏 ⇒ **判的对象结构上不存在了**，原来钉它的正反两句（单元层两条用例 +
+ * 这里那句"『Jupyter 确实在答话』不许出现"的反向判据）随实现一起删。留一句 `toHaveCount(0)`
+ * 去判一个已不存在的 testid 的"缺席"，就是一条永远不会红的装饰判据（本仓库对装饰判据的态度
+ * 见 WI-104/WI-109）。浏览器这一层换了一条**能红**的来顶：整页 DOM 文本里不许出现 `token=`
+ * （`web/test/notebook.test.tsx` 同款判据的真浏览器层重钉一次 —— 派发词 §3 那条新增）。
  *
  * ## 这个文件断的三件（+ 顺手钉住的谎）
  * ① 打开 `#/notebook` 看得到 `notebook-status` 那句状态（懒加载那一片 JS 在 Edge 里真挂上了、路由答了）；
  * ② `notebook-open` 在这个真实的缺失态里 count 0，并且**换一次状态再看**：按「刷新状态」重读之后、
  *    切走 `#/` 再切回来之后，它都不出现，也没有第二个残留面板（WI-81 那一类 key 复用故障）；
  * ③ console 的 error 与 warning **都为 0**（本项目那三个静默降级都是这么暴露的，只看 error 会漏）。
- * 另：这一态不许顺带说另外三态的假话 —— `notebook-nolink` / `notebook-spec-missing` /
- * `notebook-prepare` 都不出现（后两个给的是修不了当前故障的操作：venv 与 --rebuild 都救不了"没给 token"）。
+ * 另：这一态不许顺带说别的态的假话 —— `notebook-spec-missing` / `notebook-prepare` 都不出现
+ * （它们给的是修不了当前故障的操作：venv 与 --rebuild 都救不了"没给 token"）；
+ * **且整页 DOM 文本里不许出现 `token=`**（WI-98：这一页从头到尾没有任何一处把凭据写进 URL，
+ * 真浏览器层再钉一次单元层的同一条 —— 原 `notebook-nolink` 那句反向判据随块删除，理由见上一节）。
  *
  * ## WI-94 Task 6 加进来的三件，以及"为什么只有这些能在这里诚实判"
  * ④ **`running:false` 那一屏不许出现内嵌那一块**（`notebook-frame` / `notebook-tree` 各 count 0）。
@@ -105,6 +109,12 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
   const pageText = (await page.getByTestId('notebook-page').textContent()) ?? '';
   expect(pageText).toContain('ARENA_JUPYTER_TOKEN');
   expect(pageText, '这句是"按设计不跑"的诊断，不是故障 ⇒ 不许把它读成要你修的东西').toContain('不是需要你修的故障');
+  // **WI-98 新增（真浏览器层）**：这一页的 DOM 文本里不许出现 `token=` —— 单元层
+  // （`web/test/notebook.test.tsx`「服务在跑」那条整页判据）钉的是渲染形状，这里钉的是
+  // **真后端 + 真浏览器**这一路：响应体经页面渲染后仍然没有任何凭据进 DOM。
+  // 点名 `token=` 而不是裸 `token`：那句 missing-token 诊断**必须**提 `ARENA_JUPYTER_TOKEN`
+  // 这个键名（读者据此才知道去查哪一行 env），判"整个词不许出现"会撞自己的诊断话。
+  expect(pageText, 'DOM 文本里出现 token= ⇒ 凭据又回到 URL 形状了（WI-98 消掉的就是它）').not.toContain('token=');
 
   // 三句边界话在这一态也得常驻（用户最该看见它们的时刻正是状态最难看的时候）。
   // 但**逐字的文案契约只该有一份**：那份在单元层 —— `web/test/notebook.test.tsx` 里的
@@ -216,8 +226,8 @@ test('按「刷新状态」重读之后：链接依旧不出现，面板不重�
   // （原来这里还有一条 `notebook-status-card` 的 count 1 —— 卡壳按 2026-10-10 用户点名的简化删了，
   // "面板唯一"现在由上面那句判；卡壳自己的判据搬成第一例里的 count 0 缺席判据，不许再长回来。）
 
-  // 这一态不许说另外三态的假话
-  await expect(page.getByTestId('notebook-nolink'), '服务没在跑，那句"Jupyter 确实在答话"就是谎').toHaveCount(0);
+  // 这一态不许说别的态的假话。（原来这里还有一句 `notebook-nolink` 的 count 0 —— WI-98 随
+  // `nolink` 态整块删除：testid 没了，留一句"判一个不存在的 testid 的缺席"就是装饰判据。）
   await expect(page.getByTestId('notebook-spec-missing'), '这里没人探过 kernel 表，那句"跑一次 ./start.sh --rebuild"是指错方向').toHaveCount(0);
   await expect(page.getByTestId('notebook-prepare'), '缺的是 token，不是 venv ⇒ 给按钮就是让人白点').toHaveCount(0);
   // 读成功的时候不许挂"这次没读到"

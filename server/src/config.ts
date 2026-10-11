@@ -118,7 +118,12 @@ export const config = {
    */
   notebook: {
     port: Number(process.env.ARENA_JUPYTER_PORT ?? 8888),
-    // 宿主机上的地址：compose 把 8888 发布到 127.0.0.1:7789，前端拿它拼链接
+    // 宿主机上 Jupyter 的直连地址：compose 把 8888 发布到 127.0.0.1:7789。
+    // **WI-98 之后它只用于诊断文案**：唯一的代码读者是 `missingTokenReason()` 里那句
+    // "notebook 在正常启动的那个实例里（…）"。它不再参与拼任何给浏览器的链接 ——
+    // 第五页的逃生链接是同源 `/jupyter/tree`（`NOTEBOOK_TREE_PATH` 派生），env 坏不掉它。
+    // start.sh / start.ps1 探测与横幅里印的是各自脚本内的字面量 7789（同一形状，两个实现，
+    // 由 notebook-contract.test.ts 钉同步），也不读这一行。
     publicUrl: process.env.ARENA_NOTEBOOK_PUBLIC_URL ?? 'http://127.0.0.1:7789',
     // ⚠ 这里是**唯一**允许读这份凭据的地方，而且读的是 `consumeJupyterToken()` 的返回值、
     // **不是 `process.env`**：那一行会先把键从 process.env 摘掉（见上面 I-2 那段），

@@ -129,22 +129,11 @@ function fakeUp(seenUrls: string[] = []) {
 }
 
 /**
- * `publicUrl` 自带的 base path，**去掉尾斜杠**后的样子：默认 env（`http://127.0.0.1:7789`）是空串，
- * 同源反代挂在子路径上的部署（`…/arena`）是 `/arena`。
- * 为什么判 pathname 必须把它算进期望值（评审 I-1 实测）：`new URL('http://127.0.0.1:7789').pathname`
- * 给的是 `'/'` 而不是空串，所以既不能直接拼、也不能拿字面量 `${NOTEBOOK_TREE_PATH}` 比 ——
- * 后者在 `ARENA_NOTEBOOK_PUBLIC_URL` 带 base path 时**冤红**（实际链接是 `/arena/jupyter/tree`，
- * 前缀好好在那儿），而冤红教给下一个人的是"改测试里的数字"。
+ * WI-98 删掉了 `publicUrlBasePath()` / `linkPathname()` 这两个夹具与它们的 base-path 用例：
+ * 它们判的是"链接 = publicUrl + 前缀"那代形状（`new URL(env + …)`）—— 链接现在是编译期
+ * 派生的同源常量，"publicUrl 带 base path 时前缀接在它后面"这句话**没有对象了**。
+ * "env 不参与链接"这件事不是没人判，是换了判法：见下面那条注入 env 的用例。
  */
-function publicUrlBasePath(publicUrl: string): string {
-  return new URL(publicUrl).pathname.replace(/\/$/, '');
-}
-
-/** 链接的 pathname；`url` 缺席时把"为什么没给"当成值报出来（红得有信息，而不是让 `new URL('')` 抛 TypeError）。 */
-function linkPathname(res: { url?: string; reason?: string }): string {
-  if (!res.url) return `（没有 url${res.reason ? `：${res.reason}` : ''}）`;
-  return new URL(res.url).pathname;
-}
 
 /** 注入 env 重新 import `notebookStatus`（`loadConfigWith` 的同一条路子，只是这一次要的是 status 那一层）。 */
 async function loadStatusWith(env: Record<string, string | undefined>) {
@@ -166,7 +155,10 @@ async function loadStatusWith(env: Record<string, string | undefined>) {
 
 describe('notebook 契约与配置', () => {
   it('config.notebook 各字段都在 dataDir 下，且不碰判题沙箱目录', () => {
-    expect(config.notebook.publicUrl).toBe('http://127.0.0.1:7789');
+    // WI-98：`publicUrl` 仍在配置里，但它**不再参与拼任何给浏览器的链接**（链接是同源常量）。
+    // 它现在唯一的读者是 `missingTokenReason()` 的诊断文案。这一行取值的判据留着是因为：
+    // compose 把 8888 发布到宿主的 7789 —— 诊断里印的那个地址必须仍是"真能打开 Jupyter 的那个"。
+    expect(config.notebook.publicUrl, 'publicUrl 变了 ⇒ compose 的发布端口与诊断文案对不上（不是链接的账，链接是同源常量）').toBe('http://127.0.0.1:7789');
     expect(config.notebook.port).toBe(8888);
     // 路径比较用 join() 而不是模板里的 `/`：config 那边是 join 出来的（Windows 宿主上是 `\`），
     // 写死分隔符的期望值在 verify:fast 真正跑的那台机器（宿主）上必然冤红。
@@ -434,41 +426,34 @@ describe('notebook 契约与配置', () => {
   });
 
   /**
-   * 钉的是**链接的前缀**与**两次探活的 URL 前缀**，两维各一条断言。
+   * WI-98 改掉了这一条判的**链接那一半**，探活那一半原样。两维现在各判一件事：
    *
-   * 为什么链接那一条只看 pathname（评审 I-1，本轮订正；那两条证据是评审 2026-10-09 实测的）：
-   * 上一版在这里写的是"整串相等（含 `?token=x`）"，然后**另加**一句 pathname 判据，注释声称它提供
-   * 独立保护 —— 两句都不成立：① 默认 env 下第一句一旦成立第二句必然成立，而第一句一失败 vitest
-   * 就在第一个 `expect` 抛出、第二句根本不被执行（上一轮报告自己就记了这条实测）；
-   * ② `ARENA_NOTEBOOK_PUBLIC_URL` 带 base path 时第一句仍然成立而第二句**冤红**
-   * （评审实测 `expected '/arena/jupyter/tree' to be '/jupyter/tree'`，指责的却是一个不存在的硬编码）。
-   * 现在把这一条的对象收窄成**前缀本身**（pathname），token 那一维不在这里判 —— 它由
-   * `server/test/notebooks/status.test.ts` 的合取表钉（那条从一开始就是整串相等、含 token）。
+   * ① 链接：**恒等于同源常量 `NOTEBOOK_TREE_PATH`**（`/jupyter/tree`）。上一版判的是
+   *    "pathname == publicUrl 的 base path + 前缀 + tree"（`new URL(config.notebook.publicUrl
+   *    + NOTEBOOK_TREE_PATH)`），那一维随链接改成同源路径一起没了对象 —— 现在若有人把链接
+   *    退回 `'/tree'`（丢掉前缀）或退回拼 env 的绝对地址（`http://…/jupyter/tree`），这一句都红。
+   * ② 探活（两次 `jupyterApi`）：**前缀仍然只加在 `jupyterApi()` 一处**，`seenUrls` 逐字判。
+   *    这一半与链接无关，是反代/entrypoint 的 base_url 对不上时的假阳性来源（历史见下面 ② 的实测）。
    *
-   * 破坏性验证（2026-10-09 三次各改坏一次，跑本文件，退出码单独 echo；基线 `Tests 16 passed (16)`）：
-   * ① `status.ts` 拼链接那处退回字面量 `/tree` ⇒ `DV_I1_EXIT=1`、`Tests 2 failed | 14 passed (16)`：
-   *    本条的第一句 + 下面那条 base path 用例各翻一次脸（同一个故障在两维上）——
-   *    `链接的 pathname 是 "/tree" 而派生值是 "/jupyter/tree" …: expected '/tree' to be '/jupyter/tree'`
-   *    `带 base path 的部署下，前缀必须接在 "http://127.0.0.1:7789/arena" 之后: expected '/arena/tree' to be '/arena/jupyter/tree'`
-   *    ⇒ 这一句红得不冤枉：那两条判的确实都是"前缀在不在链接里"；
-   * ② 摘掉 `jupyterApi()` 里的 `${JUPYTER_BASE_URL}` ⇒ `DV_I3_EXIT=1`、**只有本条红**
-   *    （`Tests 1 failed | 15 passed (16)`），红在第二句，received 是
+   * 为什么链接不再走 `publicUrl`（终审记录）：把长期凭据经由 env 拼进任何 URL 都是 WI-98 要消掉的
+   * 形状，同源路径既消掉了凭据，也顺手消掉了"publicUrl 配坏 ⇒ 给不出链接"这一整态（它结构上
+   * 不可能再发生，见 `server/src/notebooks/status.ts` 的 nolink 删除注释）。
+   *
+   * 历史破坏性验证（2026-10-09，针对**当时**的"链接 pathname + 探活前缀"两维；探活那一维的结论今天照抄）：
+   * ① 当年拼链接处退回 `/tree` ⇒ 本条第一句红（`expected '/tree' to be '/jupyter/tree'`）；
+   *    WI-98 之后这一句换成 `toBe(NOTEBOOK_TREE_PATH)`，同一处退回 `/tree` 仍红在这里，判据没变松。
+   * ② 摘掉 `jupyterApi()` 里的 `${JUPYTER_BASE_URL}` ⇒ **只有本条红**，红在第二句，received 是
    *    `["http://127.0.0.1:8888api/status","http://127.0.0.1:8888api/kernelspecs"]`（端口后面直接粘上
-   *    `api/…`，前缀没了）⇒ **这就是评审 I-3 要的那次"宿主档必须红"**：评审对改之前的同一个变异
-   *    实测过"宿主档 14 条契约判据与整条 `verify:fast` 都照绿"（`.includes('/api/kernelspecs')`
-   *    分流不看前缀），会红的只有容器档那条不打 mock 的闸门；
-   * ③ `ARENA_NOTEBOOK_PUBLIC_URL='http://127.0.0.1:7789/arena'` 整文件跑 ⇒ `ENV_PUB_URL_EXIT=1`、
-   *    `Tests 1 failed | 15 passed (16)`，红的**只有**第 1 条用例那句"默认 publicUrl 就是这个"的取值判据
-   *    （`expected 'http://127.0.0.1:7789/arena' to be 'http://127.0.0.1:7789'` —— env 敏感的本来之判，
-   *    不在本轮六条里，评审也没把它列成 finding）；单独点本条 ⇒ `ENV_PUB_GATE2_EXIT=0`、
-   *    `Tests 1 passed | 15 skipped (16)` ⇒ I-1 的那个冤红不复存在。
+   *    `api/…`，前缀没了）⇒ 这是评审 I-3 要的那次"宿主档必须红"：`.includes('/api/kernelspecs')`
+   *    分流不看前缀，会红的只有这条不打 mock 形状差异的判据 + 容器档那条真 Jupyter 闸门。
+   * ③ `ARENA_NOTEBOOK_PUBLIC_URL='http://127.0.0.1:7789/arena'`：当年"base path 用例"红；**WI-98 之后
+   *    链接对 env 免疫**，所以那条冤红形状整个删掉，由下面那条"注入 env 也不改链接"的用取代。
    */
-  it('给页面的链接与探活都带前缀：config.notebook.publicUrl + JUPYTER_BASE_URL 派生，不许写死 /tree', async () => {
+  it('给页面的链接恒为同源常量 NOTEBOOK_TREE_PATH；探活仍只在一处带前缀（不许写死 /tree）', async () => {
     const seenUrls: string[] = [];
     const res = await notebookStatus({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(seenUrls), gatewayAddresses: [] });
-    const actualPath = linkPathname(res);
-    const expectPath = `${publicUrlBasePath(config.notebook.publicUrl)}${NOTEBOOK_TREE_PATH}`;
-    expect(actualPath, `链接的 pathname 是 "${actualPath}" 而派生值是 "${expectPath}" ⇒ 拼链接那一处没跟着前缀的真相走（与 token 无关）`).toBe(expectPath);
+    expect(res.url, `链接不是同源常量 NOTEBOOK_TREE_PATH（收到的是 ${JSON.stringify(res.url)}）⇒ 拼链接那一处要么丢了前缀、要么退回了拼 env 的绝对地址`).toBe(NOTEBOOK_TREE_PATH);
+    expect(res.url, '链接里不该出现 scheme ⇒ 它又变成了一条绝对地址（凭据迟早顺着这条回来）').not.toMatch(/^https?:/);
     expect(
       seenUrls,
       '两次探活打的是 ' + JSON.stringify(seenUrls) + ` ⇒ \`jupyterApi\` 里没拼 JUPYTER_BASE_URL（status.ts 那句"前缀在这里加、只在这里加"是假的）。` +
@@ -481,17 +466,24 @@ describe('notebook 契约与配置', () => {
   });
 
   /**
-   * 评审 I-1 的那个冤红形状，钉成常驻判据：`ARENA_NOTEBOOK_PUBLIC_URL` 带 base path
-   * （同源反代挂在子路径上，正是 WI-94 后面几档要支持的部署形状）时，前缀必须**挂在 base path 之后**
-   * 而不是把它挤掉，也不许有条判据因为它而翻脸。期望值是**字面量**，不由被测实现派生。
+   * **WI-98 把"base path 冤红形状"换成了它的反面**：链接必须对 `ARENA_NOTEBOOK_PUBLIC_URL` 免疫。
+   * 上面那条是"env 盲"的（同一进程同一 env），所以这一条注入一个带 base path 的 env 重新 import
+   * `notebookStatus`，判两件事：
+   * ① 链接仍是同源常量 —— env 再怎么改都不许它变成绝对地址或丢掉 `/jupyter` 前缀；
+   * ② `publicUrl` 这行 env 现在**唯一**还读得到它的地方是没配 token 的失败诊断文案
+   *    （"notebook 在正常启动的那个实例里（…）"）—— 判住它判的仍是"配坏它不会影响链接、只影响这一句实话"。
+   * 期望值是字面量（`/jupyter/tree`），不由被测实现派生 —— 派生的期望值会跟着坏实现一起漂。
    */
-  it('ARENA_NOTEBOOK_PUBLIC_URL 带 base path 时前缀仍然接在它后面（I-1 的冤红形状不留原位）', async () => {
+  it('注入 ARENA_NOTEBOOK_PUBLIC_URL 也改不动链接（同源常量对 env 免疫；那行 env 只剩诊断文案一个读者）', async () => {
     const BASE = 'http://127.0.0.1:7789/arena';
     const statusWithBase = await loadStatusWith({ ARENA_NOTEBOOK_PUBLIC_URL: BASE });
     const res = await statusWithBase({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: 'x', fetchImpl: fakeUp(), gatewayAddresses: [] });
-    // 空转防护：注入没生效时下面这条会退化成上一条的复读
-    expect(res.url, `注入的 publicUrl 没进链接 ⇒ env 那一层没生效（本条就在空转）：${JSON.stringify(res)}`).toContain(BASE);
-    expect(linkPathname(res), `带 base path 的部署下，前缀必须接在 "${BASE}" 之后`).toBe('/arena/jupyter/tree');
+    // 空转防护：若注入根本没生效（config 读不到这行 env），下面这条会与上一条同义复读；
+    // 但诊断文案那一半**能证明注入生效**（它印的就是这份 env），所以两条断言互相把对方的空转判住。
+    expect(res.url, `链接被 env 改动了 ⇒ 同源路径那一半没做到对 publicUrl 免疫：${JSON.stringify(res.url)}`).toBe('/jupyter/tree');
+    const noTok = await statusWithBase({ peerAddress: '127.0.0.1', hostHeader: '127.0.0.1:7788', tokenOverride: '', fetchImpl: fakeUp(), gatewayAddresses: [] });
+    expect(noTok.running).toBe(false);
+    expect(noTok.reason, '没配 token 的诊断不再点名 publicUrl ⇒ 那行 env 已无读者（那它早该整条删，不留壳子）').toContain(BASE);
   });
 
   /**

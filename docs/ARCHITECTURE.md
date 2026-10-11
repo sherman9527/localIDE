@@ -88,7 +88,7 @@ TypeScript 5.7 strict，`tsc -b` 三栈引用构建（`shared → server → web
 | POST | `/ide/run` | 网页 IDE 执行一次（与判题共用沙箱、白名单与并发闸，但不写 attempt） |
 | GET·POST | `/ide/repl*`、`/ide/debug*` | 两类**跨请求存活的子进程**：逐句求值（WI-77）与行断点单步（WI-81）。都是一问一答（每条命令都有天然的结束点），端点形状见下面两段 |
 | GET·POST | `/ide/env`、`/ide/env/command`、`/ide/env/reset` | 依赖环境（WI-87）：清单（GET，含占用字节）、命令窗口（POST，SSE 逐行回显）、回到镜像默认（POST reset）。落点在命名卷，**判题看不到**（见 `docs/JUDGING.md`） |
-| GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + 拼给宿主的链接。token 按**合取**释放：`isLocalPeer`（内核给的 socket 对端：回环或本进程默认网关）**且** `isLoopbackHostHeader`（`Host` 头是本机字面量，判据在 `server/src/net/localOrigin.ts`）—— 只看对端拦不住 DNS rebinding（那种攻击里对端真是 `127.0.0.1`），只看头拦不住局域网里伪造头的人，所以两个都不是可以省掉的那个。非本机对端照样给链接、只是里面没有凭据。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
+| GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + **同源**逃生链接（`/jupyter/tree`，WI-98：不含任何凭据）。`localPeer` 按**合取**给布尔：`isLocalPeer`（内核给的 socket 对端：回环或本进程默认网关）**且** `isLoopbackHostHeader`（`Host` 头是本机字面量，判据在 `server/src/net/localOrigin.ts`）—— 只看对端拦不住 DNS rebinding（那种攻击里对端真是 `127.0.0.1`），只看头拦不住局域网里伪造头的人，所以两个都不是可以省掉的那个；它是 `proxyGuard.ts` **同一份判据**，含义是"这条连接过不过守卫"（false ⇒ 这一页与链接点出去都 403）。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
 | POST | `/notebook/prepare-env` | 显式建 IDE 那个 venv（`arena-pyspark` kernel 的 argv 指着它）。成功只有 `{ok:true}`，失败是 `200 + {ok:false, reason}`。**铺示例不在这条路上** —— 那是上面那个 GET 顺带做的，两件事坏的是不同的东西 |
 | GET | `/notebook/files` | 第五页**左栏那棵树**（WI-94 Task 5）：只读目录、不读内容，与"这次铺了什么"（上面那个 GET 的 `notebooks` 字段）是两件事，所以分两个口子。Jupyter 没起来也照答；读不到是 `error` 字段，不是空数组 |
 | ALL | `/jupyter/*` | 同源反代（WI-94 Task 3/4）：HTTP 与 **websocket** 两条通道都隧道到**同一个容器里的** Jupyter。上游写死在组合根（`127.0.0.1:config.notebook.port`，默认 8888；那个注入口子只为测试开 —— 上游可配等于给一个没有鉴权的服务加一条 SSRF）。jupyter 自己带 `--ServerApp.base_url=/jupyter/`，所以回话里的绝对路径生来就在 `/jupyter/` 下面。token 由服务端注入、客户端塞的那一份**先摘掉**；放行判据只有 `proxyGuard.ts` 那一处，不过就 403/503 |
@@ -285,37 +285,46 @@ A1 档（设计：`docs/superpowers/specs/2026-10-05-jupyter-notebook-runtime-de
 WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`）。
 `server/src/notebooks/` 五个文件：
 `seed.ts`（`content/notebooks/*.ipynb` → `data/notebooks/`，**缺失才复制**，绝不覆盖用户改过的那份）、
-`status.ts`（探活 + 解 `/api/kernelspecs` + 拼给宿主的**逃生链接** + `isLocalPeer`）、
+`status.ts`（探活 + 解 `/api/kernelspecs` + 同源**逃生链接**（不含凭据，WI-98）+ `isLocalPeer` → `localPeer`）、
 `files.ts`（左栏那棵树：只读目录名，Jupyter 没起来也照答，读不到给 `error` 而不是空数组）、
 `proxy.ts`（`/jupyter/*` 的两条通道：HTTP 与内核 ↔ 页面的 websocket，逐跳头摘掉、客户端塞的 token 先摘再注入我们那份）与
-`proxyGuard.ts`（**唯一的放行判据**：对端 + `Host` 的合取，不过就 403/503）。
-前端 `web/src/pages/Notebook.tsx`：一行状态（后端四种形状各一句，不许合并）+ 工具条三把
+`proxyGuard.ts`（**唯一的放行判据**：对端 + `Host` 的合取，外加 `Sec-Fetch-Site ∈ {same-origin, none, 缺席}`，
+不过就 403/503）。
+前端 `web/src/pages/Notebook.tsx`：一行状态（后端两种形状 + 前端两个读态，一共四句，不许合并；
+原第五句「在跑，但地址给不出来」随 `nolink` 态删除 —— WI-98 后链接是同源常量，env 坏不了它）
++ 工具条三把
 （刷新状态 / 在新标签页打开 / 准备环境，后两把各按状态出现）+ 横幅区（空则整块不渲染；
 `seedError` 那句诊断住在里面）+ 五段常驻边界话（默认折进 `<details>`）+ 左栏树 + 右栏 iframe。
 2026-10-10 用户点名的简化删的是**容器不是话**：「运行时」卡壳与"这次铺了什么"示例清单
 （`notebook-files`）整块没了，五态那句逐字未动，删没删由缺席判据钉（单元层 + e2e 各一条）。
-**内嵌那一路不带凭据**：iframe 的 src 只是同源路径，token 在服务端注入；
+**内嵌与逃生链接两路都不带凭据**（WI-98 把最后一处补齐：iframe 的 src 与 `notebook-open` 的 href 都是
+同源路径，token 只在服务端注入；过去"页面永远不许出现带 token 的 notebook URL"对逃生链接是例外，现在没有例外了）；
 `running:false` 时那棵子树结构上到不了（摆一个空白 iframe 就是说谎 —— e2e 那个实例永远是这一态，
 它的判据就建在这条上：`tests/e2e/notebook-page.spec.ts` 钉 `notebook-frame` / `notebook-tree` 计数为 0，
 同时钉那块已删的示例清单（`notebook-files`）计数为 0 —— 用户点名删的东西也要有判据）。
 
 四条边界，每条都有闸门，不是约定：
 
-- **token 按"对端是本机 **且** Host 头是本机字面量"释放（合取）**。第一半：对端 = 回环（`::1` / `127.0.0.0/8`，双栈先剥 `::ffff:`）
+- **连接过不过守卫，判的是"对端是本机 **且** Host 头是本机字面量"（合取；WI-98 前这句话写的是
+  "token 按合取释放"——判据一字未动，动的只是它的用途：链接里不再有 token 可释放，合取的结论改经
+  `localPeer` 字段送上前端）**。第一半：对端 = 回环（`::1` / `127.0.0.0/8`，双栈先剥 `::ffff:`）
   或 = 本进程的默认网关（读 `/proc/net/route`，不是猜网段 +1）。为什么必须有网关那一支：compose 部署里
   宿主浏览器的流量经 docker-proxy/NAT 进来，容器看到的对端**永远是网桥网关而不是回环** —— 只认回环不报错，
-  它让这个功能在唯一启用它的部署里静默失效（点开撞 Jupyter 登录页而界面全绿）。网关那一支的安全性是
+  它让这个功能在唯一启用它的部署里静默失效（内嵌与逃生链接一起被守卫 403 而界面全绿；WI-98 前那句症状是
+  "点开撞 Jupyter 登录页"，形状换了，账没换）。网关那一支的安全性是
   **派生的**：派生自"每条发布端口都只绑宿主 `127.0.0.1`"（闸门 `compose-ports.test.ts`）。
   第二半（终审 C-1 补的）：`Host` 头的 hostname 必须是 `localhost` 或一个回环地址字面量
   （判据 `server/src/net/localOrigin.ts`）。只有第一半时 DNS rebinding 是通的 —— 受害者浏览器把攻击域名
-  改成 `127.0.0.1`，对端**就是**回环，而响应与攻击页同源，页面上的 JS 直接读走 `url` 里那个 token。
+  改成 `127.0.0.1`，对端**就是**回环，而响应与攻击页同源。C-1 当时的账是"页面上的 JS 直接读走 `url`
+  里那个 token"；WI-98 之后 `url` 里没有凭据，这一半拦的变成"攻击页的同源请求能不能让 `proxyGuard.ts`
+  **替它注入**凭据"（借用去执行代码，照样危险）—— 所以这一半照旧一票都不能省。
   两半各拦一种坏法，所以两个方向的用例都必须红：伪造 `Host: 127.0.0.1:7788` 的局域网对端（拦在第一半）、
   真回环对端 + 外来 Host（拦在第二半）。这一条与"上一轮说 Host 头不参与判定"不冲突 —— 那句反对的是
   **Host 单独说话**，合取严格强于任何一半。
   **同一个 `Host` 判据还做成了整个 origin 的白名单**（`app.ts` 里第一个 `onRequest` hook，外来 Host ⇒ 403，
-  与 jupyter 那一侧同码）：只把它用在 token 路径上，等于承认 rebinding 照样读得到 `/api/bank`（含被隐藏的题）、
+  与 jupyter 那一侧同码）：只把它用在 notebook 这一族路径上，等于承认 rebinding 照样读得到 `/api/bank`（含被隐藏的题）、
   `/api/attempts` 与 `/api/progress` —— 那半边暴露面**先于 notebook 这个功能就存在**，因为这个 API 一直没有
-  鉴权，靠的是"只绑宿主回环"。这一层不替代 token 那一半（合取仍要在 `notebookStatus()` 内部判：外层挡在前面，
+  鉴权，靠的是"只绑宿主回环"。这一层不替代合取的内层（`notebookStatus()` 里仍要判：外层挡在前面，
   走到路由的请求 Host 必然已过检，路由档造不出"对端本机 + Host 外来"的组合）。**它也不替代绑回环**：
   Host 是客户端写的，局域网里直连 `192.168.x.x:7788` 并把 Host 改成 `localhost` 就能过这一层 ——
   那条路是靠 `compose-ports.test.ts` 关的。闸门：`server/test/api/notebook-api.test.ts`（外层，含
@@ -661,7 +670,7 @@ localLearning/
 │  ├─ exec/             真跑东西的那一层：guards（红线白名单）/ mysql / redis / spark-pool / spark-queue / spark-scala
 │  ├─ net/              localOrigin（`Host` 头是不是本机字面量 —— 合取判据的第二半在这里）
 │  ├─ ide/              runner / languages / 执行内核（与做题共用一个容器，边界由 boundary.test.ts 把住）
-│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + 逃生链接的 token 按"对端 ∧ Host 头"合取释放）
+│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + 同源逃生链接；"对端 ∧ Host 头"的合取送 `localPeer`，WI-98 后不再往任何 URL 挂凭据）
 │  │                    / files（左栏那棵树）/ proxy（`/jupyter/*` 的 HTTP + websocket 两条隧道）
 │  │                    / proxyGuard（唯一的放行判据）
 │  ├─ llm/              rubric / provider / providers/*(4) / cli / settings

@@ -8,7 +8,7 @@ import net, { type AddressInfo, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
-import { JUPYTER_BASE_URL, NOTEBOOK_PREFIX } from '@arena/shared';
+import { JUPYTER_BASE_URL, NOTEBOOK_PREFIX, NOTEBOOK_TREE_PATH } from '@arena/shared';
 import type { GradePort, JudgePort } from '../../src/ports.js';
 import { FakeBank, FakeStore, fixedClock, seedQuestions } from '../game/fixtures.js';
 
@@ -641,6 +641,55 @@ describe('/jupyter 同源反代：请求方向', () => {
     expect(((await res.json()) as { error?: string }).error).toBe('notebook_cross_site');
     // 这条是本任务的"硬前提"判据：否决发生在注入之前 —— 守卫挪到 httpRequest 之后就是这里红。
     expect(seen.length).toBe(before);
+  });
+
+  /**
+   * **WI-98 §4.1 实测（顶层导航形状）**：逃生链接改成 `<a href="/jupyter/tree" target="_blank">` 之后，
+   * 从同源页面点出去的那一发是 top-level navigation，浏览器给的 `Sec-Fetch-Site` 是 `same-origin`
+   * （"从我们自己的页面发起"就是 same-origin 的定义，`target=_blank` 不改这一点）——
+   * 派发词要求**量出来**而不是按记忆写：这一条用构造请求打真隧道（真 socket、真守卫、真上游）。
+   * ⚠ 证据不能拿 `seen` 表 —— 假上游对含 `/jupyter/tree` 的请求走的是**专门的 HTML 分支**
+   *   （`startEcho` 顶部那一条，不进 seen），所以这里钉的是"这份回话来自上游的树页分支、
+   *   而不是 SPA 兜底的 index.html"（本项目在"200 却与反代无关"上付过学费 —— 见网关那条的注释），
+   *   外加隧道补的那条 `frame-ancestors 'self'`（SPA 兜底不会补它）。注入 `Authorization`
+   *   这一半不在这里重复判（上面第一条已在 `/jupyter/` 上钉过"过守卫 ⇒ 注入"）。
+   *   读数（本轮实测）：**200**，body 是上游树页分支，CSP 由隧道补齐 ⇒ **同源点出去这条路通**，
+   *   §1.1 的链接形状成立。
+   * 不许把这条与上面那条读成重复：上面判"cross-site 被拒"，这条判"same-origin 被放"，
+   * 缺任何一条，"守卫在位且没把好路也关掉"这句话都只说了一半。
+   */
+  it('WI-98 实测：同源页面点出去的顶层导航（GET /jupyter/tree + Sec-Fetch-Site: same-origin）过守卫、真从上游拿到树页', async () => {
+    const res = await fetch(`http://127.0.0.1:${appPort}${NOTEBOOK_TREE_PATH}`, { headers: { 'sec-fetch-site': 'same-origin' } });
+    expect(res.status, '顶层导航被守卫拒 ⇒ WI-98 的链接形状是错的（这不是放宽守卫的理由，是停下报告的信号）').toBe(200);
+    const body = await res.text();
+    expect(body, '200 但回的不是上游树页分支 ⇒ 是 SPA 兜底，不是反代').toContain('tree');
+    expect(body, '回话里出现 SPA 外壳 ⇒ 那个 200 与反代无关').not.toContain('<div id="root">');
+    expect(res.headers.get('content-security-policy') ?? '', '隧道没补 frame-ancestors ⇒ 这也不像是经反代搬运的回话').toContain("frame-ancestors 'self'");
+  });
+
+  /**
+   * **WI-98 §4.2 实测（拷贝粘贴 / 手敲地址那条路）**：把 URL 复制进新标签页、或手敲，
+   * 浏览器给的 `Sec-Fetch-Site` 是 `none`（用户主动导航），curl/探针则是**不带这个头** ——
+   * 守卫对这两种的允许集合本来就是 `{same-origin, none}` + 缺席放行（`proxyGuard.ts`），
+   * 这一条把"手动粘贴这条路在逃生链接变同源之后仍然通"量成真读数。
+   * ⚠ 这条读数只许写进文案与测试，**不许**变成代码假设（派发词：它判的是"头值 = none 会不会被拒"，
+   * 而浏览器在哪些用户手势下发哪个值不归本服务管）。
+   */
+  it('WI-98 实测：手动粘贴/新标签页打开（Sec-Fetch-Site: none 与缺席两种形状）都过守卫', async () => {
+    const pasted = await fetch(`http://127.0.0.1:${appPort}${NOTEBOOK_TREE_PATH}`, { headers: { 'sec-fetch-site': 'none' } });
+    expect(pasted.status, '粘贴打开被拒 ⇒ README 那句"复制到新标签页也打得开"就是谎').toBe(200);
+    const pastedBody = await pasted.text();
+    expect(pastedBody, '200 但回的不是上游树页分支 ⇒ 是 SPA 兜底，不是反代（证据形状见上一条的注释：tree 分支不进 seen）').toContain('tree');
+    // 缺席形状（curl / 健康探针）：不带 sec-fetch-site 头。
+    const absent = await rawRequest({
+      connectHost: '127.0.0.1',
+      port: appPort,
+      path: NOTEBOOK_TREE_PATH,
+      headers: { host: `127.0.0.1:${appPort}` },
+    });
+    expect(absent.status, '不带 Sec-Fetch-Site 的探针被打死 ⇒ 宿主上 curl 与容器健康检查全灭（守卫那条"缺席放行"是它的对偶）').toBe(200);
+    expect(absent.body, '200 但回的不是上游树页分支 ⇒ 是 SPA 兜底，不是反代').toContain('tree');
+    expect(absent.body, '回话里出现 SPA 外壳 ⇒ 那个 200 与反代无关').not.toContain('<div id="root">');
   });
 
   it('这台实例没有 token ⇒ 503 + notebook_not_configured（不是 403：那句"你不许"是谎）', async () => {

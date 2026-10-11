@@ -8,14 +8,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 /**
  * 第五页（Jupyter notebook）。
  *
- * 这里判的不是"好不好看"，而是**界面不许说假话**——三态各说什么、什么时候不许说：
- * ① 在跑且给得出链接 ⇒ 一个能点开的地址（本机才有 token；非本机时链接照样在，只是要手贴）；
+ * 这里判的不是"好不好看"，而是**界面不许说假话**——各态各说什么、什么时候不许说：
+ * ① 在跑 ⇒ 一个点得开的**同源**链接 `/jupyter/tree`（WI-98：链接里从来没有凭据；
+ *    "这条连接过不过守卫"由后端的 `localPeer` 说话，false ⇒ 点开会被 403，横幅必须说破）；
  * ② 没在跑 ⇒ 必须说清"做题不受影响"，并且**不许渲染那个链接**（给一条点开就是浏览器报错的死链，
  *    比不给链接更坏 —— 本项目管这叫静默降级）；
  * ③ kernel 没就绪 ⇒ 给「准备环境」按钮，而不是让人对着 kernel 启动失败猜自己的写法；
- * ④ 评审第二条裁定的**第三种形状**：`running:true` + `reason` + **没有 url**
- *    （publicUrl 被 env 配坏）。它既不是"点开它"也不是"没在运行"，必须单独一态：
- *    说成前者是谎（链接不存在），说成后者也是谎（服务确实在跑）。
+ * ④ ~~`running:true` + `reason` + 没有 url（publicUrl 被 env 配坏的 `nolink` 态）~~
+ *    **WI-98 整块删除**：链接是编译期派生的同源路径，没有任何 env 能让它坏 ⇒ 这一态结构上
+ *    不可能再发生，留着分支与用例就是装饰判据（"删判据必须说清判的对象为什么不存在了"—— 这就是说明；
+ *    实现与后端用例里的同一段理由见 `server/src/notebooks/status.ts` 与 `status.test.ts`）。
  * 那几句边界话（共用环境 / 绝对路径拦不住 / CPU / 答案可读不是安全边界 / 只在本机打得开，
  * 逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
  *
@@ -27,6 +29,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *    iframe 判 `cross-site` ⇒ 被 Jupyter 的 Host/Origin 守卫拒（症状是 iframe 里一片 403/登录页，
  *    而我们这一页一切照绿）。断言里那句 `not.toContain('token')` 钉的是 WI-94 的**目的本身**：
  *    凭据只在服务端注入，页面结构上拿不到它。
+ *    **WI-98 之后逃生链接与 iframe 共用这条纪律** —— 它也不含 token 也不是绝对地址，
+ *    所以"页面永远不许出现带 token 的 notebook URL"从"iframe 那一半 + 链接那一半两套判据"
+ *    收成一条：**整页 DOM 文本里不许出现 `token=`**（下面「服务在跑」那条判的就是整页）。
  * ② `running:false` 时**不许**有 iframe、也**不许**打那次 `notebookFiles`。那棵子树在这个实例上
  *    结构上到不了（e2e 那个实例永远是这一态，它的判据就建立在这条上）；摆一个空 iframe 是说谎。
  * ③ 左栏那份列表的两种"空"各占一处：有 `error` ⇒「这一次读不到」；`files:[]` 且没有 `error` ⇒
@@ -49,9 +54,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * 随块消失的判据只有两条：open 态列得出 `00-smoke-pyspark.ipynb`、对照态必现 `notebook-files-empty`
  * —— 它们判的对象已经不在这页上了。补回来的是三条：① 卡壳/标题/那块在 open 与 down **两态**都必不出现
  * （"用户点名删的东西，删没删要能被判住，而不是靠人眼"；down 态是那块清单以前**必出现**的一态，
- * 只测 open 态分不清"删掉了"与"恰好没数据"）；② 五句状态话两两互斥的**总判据**（原来散在各条用例的
- * 点名式 toBeNull，加第五、第六句时没人回头补得起来，这条一次顶满）；③ seedError 横幅换家到横幅区
- * 后仍必现 —— 它是话，不是容器。状态行的五句逐字未动，边界五段逐字未动（`boundarySentences` 契约原样）。
+ * 只测 open 态分不清"删掉了"与"恰好没数据"）；② 状态句两两互斥的**总判据**（原来散在各条用例的
+ * 点名式 toBeNull，加第五、第六句时没人回头补得起来，这条一次顶满；WI-98 把 `nolink` 删掉后
+ * 它从五句收成四句 —— 串与用例**同时**删，只删一边它自己就会红，那是设计如此）；
+ * ③ seedError 横幅换家到横幅区后仍必现 —— 它是话，不是容器。状态行的话逐字未动，边界五段逐字未动
+ * （`boundarySentences` 契约原样）。
  */
 
 const status = vi.fn();
@@ -70,12 +77,13 @@ import Notebook from '../src/pages/Notebook';
 import { JUPYTER_BASE_URL, NOTEBOOK_TREE_PATH, notebookDocPath } from '@arena/shared';
 
 /**
- * 夹具里那份"后端给的链接"（WI-94 Task 1 之后它带 `/jupyter` 前缀）。
- * 路径从 `@arena/shared` 派生而不是在本文件再长一遍字面量：这一页**只渲染 `res.url`**、
- * 从不自己拼路径（`notebook-open` 那条断言钉的就是这件事），所以夹具里的串应当与后端
- * 真的会给的那个形状同源 —— 抄一份写死的字面量，判的就只是"我抄得对不对"。
+ * 夹具里那份"后端给的链接"。**WI-98 之后它就是同源常量 `NOTEBOOK_TREE_PATH`** ——
+ * 这一页只渲染 `res.url`、从不自己拼路径（`notebook-open` 那条断言钉的就是这件事），
+ * 所以夹具直接用 `@arena/shared` 的常量，而不是抄一份 `http://127.0.0.1:7789/…?token=x`：
+ * 抄旧形状的字面量会把"链接曾经是绝对地址 + 长期凭据"伪装成今天仍然成立的形状，
+ * 而"页面不许出现带 token 的 notebook URL"这条总判据（下面逐条判）会先被夹具自己喂绿。
  */
-const TREE = `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}`;
+const TREE = NOTEBOOK_TREE_PATH;
 
 afterEach(() => {
   cleanup();
@@ -107,7 +115,9 @@ const treeLinesSpeaking = (): string[] =>
 
 const up = {
   running: true,
-  url: `${TREE}?token=x`,
+  url: TREE,
+  /** WI-98：后端把合取的结论（这条连接过不过守卫）随响应送出；基准夹具是"本机连接"那一半。 */
+  localPeer: true,
   // ⚠ 清单里**只有 arena 自己注册的那几条**（终审 I-4）：后端会把 Jupyter 列出的
   // `Python 3 (ipykernel)` 滤掉，所以"服务端回了 python3"这种形状在这一档里是不存在的。
   // 下面那几条 `ready:false` 的夹具因此也都写成 arena-pyspark —— 夹具写成不可能的形状，
@@ -117,13 +127,18 @@ const up = {
 };
 
 describe('Notebook 第五页', () => {
-  it('服务在跑：给可点开的地址，且内核徽章那一排已经没了（WI-94 Task 6）', async () => {
+  it('服务在跑：给可点开的地址（同源），且内核徽章那一排已经没了（WI-94 Task 6）', async () => {
     status.mockResolvedValue(up);
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
-    // 链接就是那个 url 本身，不由前端二次拼（端口写死在页面里 = 第二处真相）
-    expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe(`${TREE}?token=x`);
+    // 链接就是那个同源 url 本身，不由前端二次拼（第二处真相）；它既不含 scheme 也不含 token
+    const href = screen.getByTestId('notebook-open').getAttribute('href');
+    expect(href).toBe(NOTEBOOK_TREE_PATH);
+    expect(href, '逃生链接变成绝对地址 ⇒ localhost / 127.0.0.1 两种打开方式之一必跨源，与 iframe 那条同判据').not.toMatch(/^https?:/);
+    expect(href, '凭据不进 URL —— WI-98 的目的本身（旧版这里断的是 `?token=x` 原样透传，形状整个反了）').not.toContain('token');
+    // 整页 DOM 文本都不许出现 token 串（真浏览器层另有一条同判据，e2e）
+    expect(screen.getByTestId('notebook-page').textContent ?? '', '页面上任何一处出现 token 串都算泄漏（含内嵌、链接、横幅回显）').not.toContain('token');
     // 徽章那一排删了 ⇒ 那句 label 在 DOM 上再没有任何来源。留着这条断言不是为了"徽章没了"这口气，
     // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpec 两块还靠它。
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
@@ -218,41 +233,54 @@ describe('Notebook 第五页', () => {
   });
 
   /**
-   * 后端只在"这个连接是本机"时往链接里放 token（判据是 socket 对端，见 Task 8）。
-   * 于是非本机连接的形状是：**有链接、没有 token** —— 点开会在 Jupyter 的登录页停一下。
-   * 界面不许把这口气咽掉：不说的话，读者只会以为"这个服务坏了"，而事实是他不是本机。
+   * **WI-98 把这一族从"链接里没有 token"改成"这条连接过不过守卫"（`localPeer`）**，
+   * 理由写在 `server/src/notebooks/status.ts` 与简报 §1.4：链接是同源路径，**本机连接也没有 token**，
+   * 旧判据 `!url.includes('token=')` 会把每一台本机用户都误报成"非本机" —— 那句话改了含义才活着，
+   * 删掉它才是静默降级（"话不许静默消失"的纪律）。三句内容逐条判：
+   * ①会被拒的是守卫不是服务（"403"+"守卫"）；②这不是故障（"不是 Jupyter 坏了"）；
+   * ③这一页设计上只在宿主本机用（"只在宿主本机"+"不是漏配" —— 手机/iPad 是 2026-10-05 的决定）。
+   * 派发词那条"顺手加一条"：`localPeer:false` 时页面上**仍然没有** token 串 —— 说实话的横幅
+   * 不许顺手把凭据印出来安慰读者。
    */
-  it('链接里没有 token ⇒ 当场说破"要贴一次 token"，并说明这不是故障', async () => {
-    status.mockResolvedValue({ ...up, url: TREE });
+  it('localPeer:false（非本机连接）⇒ 当场说破"会被守卫直接 403"，说明这不是故障，且页面上仍然没有 token 串', async () => {
+    status.mockResolvedValue({ ...up, localPeer: false });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
-    const hint = screen.getByTestId('notebook-tokenless');
-    expect(hint.textContent).toContain('token');
-    expect(hint.textContent).toContain('不是 Jupyter 坏了');
+    const hint = screen.getByTestId('notebook-not-local');
+    expect(hint.textContent, '①被拒的必须是守卫，不是"服务坏了/链接坏了"').toContain('403');
+    expect(hint.textContent).toContain('守卫');
+    expect(hint.textContent, '②这不是故障 —— 读者照旧不许被引导去重启一个正在好好干的服务').toContain('不是 Jupyter 坏了');
+    expect(hint.textContent, '③设计上只在宿主本机用（手机/iPad 不是漏配）').toContain('只在宿主本机');
+    expect(hint.textContent).toContain('不是漏配');
+    expect(screen.getByTestId('notebook-page').textContent ?? '', '横幅说实话不许顺带印凭据').not.toContain('token');
   });
 
   /** 对照的那一态单独一个 it：同一次 render 里换 mock 值换不掉已经挂上去的那句话。 */
-  it('链接里带 token（本机连接）⇒ 那句"要贴 token"不许出现', async () => {
+  it('localPeer:true（本机连接）⇒ 那句"会被 403"不许出现（旧判据按 url 里没有 token 推，会把这一态误报 —— 这正是含义搬家后必须单独钉的一行）', async () => {
     status.mockResolvedValue(up);
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
-    expect(screen.queryByTestId('notebook-tokenless'), '两句话同时出现 ⇒ 读者分不清自己是不是本机').toBeNull();
+    expect(screen.queryByTestId('notebook-not-local'), '两句话同时出现 ⇒ 读者分不清自己是不是本机；按旧形状推更是人人误报').toBeNull();
   });
 
   /**
-   * 五句状态话的**总判据**（派发词那条"任何两句不许同时出现"）：每一态渲染一次，
+   * 四句状态话的**总判据**（派发词那条"任何两句不许同时出现"）：每一态渲染一次，
    * `notebook-status` 里出现的句子**恰好一个**，且必须等于该态那句。
    * 为什么已有的点名式 `queryByTestId(...).toBeNull()` 不算这条：它们只从某一态的视角手点另几态，
    * 加第五、第六句时没人回头补对点（`notebook-tree-*` 那族就漏过一回，见 `treeLinesSpeaking` 的注释）——
-   * 这条一视同仁地扫全部五句。布局简化之后五句同住一处三元链（`web/src/pages/Notebook.tsx`），
+   * 这条一视同仁地扫全部句子。几句同住一处三元链（`web/src/pages/Notebook.tsx`），
    * 这条只会更好判，**不许放宽成"至少一个"或"至多一个"**：toEqual([expected]) 同时钉住"说了"与"只说了这句"。
+   * ⚠ **WI-98：从五句收成四句** —— '在跑，但地址给不出来'（`nolink`）与它的渲染分支**同时**删除，
+   * 串留着而分支没了 ⇒ 本条红，分支留着而串没了 ⇒ 那条 mock 到不了任何句子（toEqual 落空）同样红。
+   * 这条总判据是 2026-10-11 补的，它就是设计来在"只改一边"时红的 —— 那一红是路标，不是回归。
    */
-  const statusSentences = ['运行中 · Jupyter 在本机答话', '没在运行', '在跑，但地址给不出来', '状态读不到', '正在读 notebook 状态'];
-  it('五态状态行两两互斥：每一态恰好说一句，任何两句不同时出现（总判据）', async () => {
+  const statusSentences = ['运行中 · Jupyter 在本机答话', '没在运行', '状态读不到', '正在读 notebook 状态'];
+  it('四态状态行两两互斥：每一态恰好说一句，任何两句不同时出现（总判据；nolink 随 WI-98 删除）', async () => {
     const cases: Array<[string, () => void, string]> = [
       ['在跑', () => status.mockResolvedValue(up), '运行中 · Jupyter 在本机答话'],
       ['没在跑', () => status.mockResolvedValue({ running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }), '没在运行'],
-      ['在跑但链接坏', () => status.mockResolvedValue({ running: true, reason: 'ARENA_NOTEBOOK_PUBLIC_URL 不是合法 URL', kernels: [], notebooks: [] }), '在跑，但地址给不出来'],
+      // （原第三条「在跑但链接坏」随 nolink 态整块删除 —— 它的成因是"env 能把链接拼坏"，
+      //  而 WI-98 之后链接是同源常量，`running:true` + 没有 `url` 在契约与实现里都不再可达。）
       ['这次读不到', () => status.mockRejectedValue(new Error('连不上本地服务')), '状态读不到'],
       ['还没读到', () => status.mockReturnValue(new Promise(() => {})), '正在读 notebook 状态'],
     ];
@@ -277,18 +305,24 @@ describe('Notebook 第五页', () => {
    *  - 默认落 `notebookDocPath(...)` 会假设目录里至少有一份示例（Task 6 派发词里那句"计划原稿自相矛盾"
    *    的裁定：默认是"文件管理"）。
    *  - URL 里出现 token 就把 WI-94 的目的本身抵消掉了（凭据只在服务端注入）。
-   * 最后一条钉的是"逃生链接照旧是后端给的那个带 token 的绝对地址" —— 内嵌与跳出不共用一条 URL，
-   * 谁也不许替谁说话。
+   * 最后一条**在 WI-98 反着钉了一次**：旧版这里断的是"逃生链接照旧是后端给的那个带 token 的绝对
+   * 地址"（内嵌与跳出两套形状）；现在两条路共用同一条纪律 —— 链接也必须是同源、不含凭据。
+   * 注意页面仍然只是**渲染后端给的那条 `url`**（不在前端二次拼，这条没变），所以"同源"这一半
+   * 真正判的是后端契约（`server` 那侧的 `toBe(NOTEBOOK_TREE_PATH)`），这里判的是"页面不改写它、
+   * 也不另拼一条" —— 一把尺子现在量得到两条路，是因为两条路本来就是同一条。
    */
   it('running:true 时页面渲染同源 iframe，默认落在"文件管理"，src 是 `/jupyter/` 且**不含 token**', async () => {
-    status.mockResolvedValue({ ...up, url: `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}?token=x`, kernels: [], notebooks: [] });
+    status.mockResolvedValue({ ...up, kernels: [], notebooks: [] });
     files.mockResolvedValue({ files: ['01-skew.ipynb'] });
     render(<Notebook />);
     const frame = await screen.findByTestId('notebook-frame');
     expect(frame.getAttribute('src')).toBe(JUPYTER_BASE_URL);
     expect(frame.getAttribute('src'), '凭据不进页面（这一条是整个 WI-94 的目的）').not.toContain('token');
     expect(frame.getAttribute('src'), '绝对地址 ⇒ localhost / 127.0.0.1 两种打开方式之一必跨源').not.toMatch(/^https?:/);
-    expect(screen.getByTestId('notebook-open').getAttribute('href')).toBe(`http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}?token=x`);
+    const href = screen.getByTestId('notebook-open').getAttribute('href');
+    expect(href, '逃生链接不再是后端给的那条同源路径 ⇒ 前端在二次拼链接（第二处真相）').toBe(NOTEBOOK_TREE_PATH);
+    expect(href, 'WI-98：页面永远不许出现带 token 的 notebook URL —— iframe 与链接现在共用这一条').not.toContain('token');
+    expect(href).not.toMatch(/^https?:/);
   });
 
   /**
@@ -297,7 +331,7 @@ describe('Notebook 第五页', () => {
    * 都会让它红 —— 而那两种写法的症状不是报错，是"每点一次左栏就把 Jupyter 页面重启一遍"。
    */
   it('左栏点一份笔记 ⇒ iframe 的 src 换过去（换一次状态再看 DOM，不看首屏就算白测）', async () => {
-    status.mockResolvedValue({ ...up, url: `http://127.0.0.1:7789${NOTEBOOK_TREE_PATH}`, kernels: [], notebooks: [] });
+    status.mockResolvedValue({ ...up, kernels: [], notebooks: [] });
     files.mockResolvedValue({ files: ['01-skew.ipynb', '02-partitions.ipynb'] });
     render(<Notebook />);
     const frame = await screen.findByTestId('notebook-frame');
@@ -444,22 +478,13 @@ describe('Notebook 第五页', () => {
     expect(files).not.toHaveBeenCalled(); // 服务没起时连那次 readdir 都不必发
   });
 
-  /**
-   * 「在跑但链接给不出来」（nolink）这一态同样不许出现 iframe：iframe 要的是**路径**，
-   * 而这一态坏掉的正是"拼不出可点开的地址"那半 —— 但同源前缀其实还在，所以这不是理所当然的，
-   * 它是 `view.kind === 'open'` 这一个门。用例只钉一件事：nolink 时没有 iframe。
-   */
-  it('在跑但 publicUrl 配坏时也不许出现 iframe（那一态的门与"没在跑"共用一个 kind）', async () => {
-    status.mockResolvedValue({
-      running: true,
-      reason: 'Jupyter 在跑，但 ARENA_NOTEBOOK_PUBLIC_URL="not a url" 不是合法 URL',
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
-      notebooks: [],
-    });
-    render(<Notebook />);
-    await waitFor(() => expect(screen.getByTestId('notebook-nolink')).toBeTruthy());
-    expect(screen.queryByTestId('notebook-frame')).toBeNull();
-  });
+  // WI-98：原来钉在这里的两条 `nolink` 用例（"在跑但 publicUrl 配坏时也不许出现 iframe" 与
+  // "在跑但 publicUrl 配坏：既不说『点开它』，也不说『没在运行』"）**整块删除**，判的对象没了：
+  // 它们钉的是 `running:true` + `reason` + 没有 `url` 这一态，而它唯一的成因是
+  // "链接由 `new URL(ARENA_NOTEBOOK_PUBLIC_URL + …)` 拼、env 能被配坏"。现在链接是编译期派生的
+  // 同源常量，`running:true` 恒带 `url` ⇒ 这一态在契约与实现里都不可达，继续摆一个 `running:true`
+  // 却没有 `url` 的 mock 只会**伪造**一态然后判前端接得住一个不存在的输入（本仓库明确要的反面）。
+  // 同源纪律的另一半（"running:false 不许有 iframe"）由上面那条守着，一行没松。
 
   /**
    * 删掉的只有徽章那一排。`blocked`（venv 没建 ⇒ 「准备环境」修得了）与 `missingSpec`
@@ -470,6 +495,7 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
+      localPeer: true,
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
     });
@@ -478,7 +504,7 @@ describe('Notebook 第五页', () => {
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
     first.unmount();
 
-    status.mockResolvedValue({ running: true, url: TREE, kernels: [], notebooks: [] });
+    status.mockResolvedValue({ running: true, url: TREE, localPeer: true, kernels: [], notebooks: [] });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
@@ -530,6 +556,7 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
+      localPeer: true,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -539,29 +566,8 @@ describe('Notebook 第五页', () => {
     expect(screen.getByTestId('notebook-page').textContent).toContain('解释器不存在');
   });
 
-  /**
-   * 评审第二条裁定：第三个响应形状（在跑，但链接拼不出来）必须是独立一态。
-   * 判三件事：不渲染"点开它"、不渲染"没在运行"、把 env 那一行的名字显示出来。
-   */
-  it('在跑但 publicUrl 配坏：既不说"点开它"，也不说"没在运行"', async () => {
-    status.mockResolvedValue({
-      running: true,
-      reason: 'Jupyter 在跑，但 ARENA_NOTEBOOK_PUBLIC_URL="not a url" 不是合法 URL ⇒ 给不出能点开的链接。这是那一行 env 坏了，不是 Jupyter 的故障',
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
-      notebooks: [],
-    });
-    render(<Notebook />);
-    await waitFor(() => expect(screen.getByTestId('notebook-nolink')).toBeTruthy());
-    expect(screen.queryByTestId('notebook-open'), '链接根本不存在 ⇒ 给一个就是死链').toBeNull();
-    const text = screen.getByTestId('notebook-page').textContent ?? '';
-    expect(text).not.toContain('没在运行');
-    expect(screen.getByTestId('notebook-status').textContent).toContain('地址给不出来');
-    expect(text, '坏的是哪一行 env 必须点名，否则读者只会去重启一个正在好好干的服务').toContain('ARENA_NOTEBOOK_PUBLIC_URL');
-    // 评审 Fix-1 的 Minor：这一态是"配置坏了"的诊断，不是"某个操作失败了"。
-    // `role="alert"` 会让屏幕阅读器**打断**当前朗读来播报它 —— 邻块（down / tokenless / spec-missing）
-    // 说的是同一类事，用的是同一档语气，不该只有这一块被升级成报警。
-    expect(screen.getByTestId('notebook-nolink').getAttribute('role')).toBe('status');
-  });
+  // （原「在跑但 publicUrl 配坏：既不说"点开它"，也不说"没在运行"」用例随 `nolink` 态一起整块删除，
+  //  理由见上面那段 WI-98 注释：链接不再是 env 能拼坏的绝对地址，这一态结构上不可达。）
 
   /**
    * 「准备环境」不能是个摆设：点下去要真的打那个 POST（venv 只在显式动作里建），
@@ -571,6 +577,7 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
+      localPeer: true,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -588,6 +595,7 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
+      localPeer: true,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -608,6 +616,7 @@ describe('Notebook 第五页', () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
+      localPeer: true,
       // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
       notebooks: [],
@@ -637,7 +646,8 @@ describe('Notebook 第五页', () => {
   it('示例铺不进去：单独说一句原因，且不许把状态行带跑', async () => {
     status.mockResolvedValue({
       running: true,
-      url: `${TREE}?token=x`,
+      url: TREE,
+      localPeer: true,
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
       notebooks: [],
       seedError: '示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：EEXIST: file already exists, mkdir',
@@ -658,7 +668,8 @@ describe('Notebook 第五页', () => {
   it('没有 seedError 时不许报"铺不进去"（对照态：没有失败却不点名，才是假警报）', async () => {
     status.mockResolvedValue({
       running: true,
-      url: `${TREE}?token=x`,
+      url: TREE,
+      localPeer: true,
       kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
       notebooks: [],
     });
@@ -692,7 +703,10 @@ describe('Notebook 第五页', () => {
   const boundaryCases: Array<[string, unknown]> = [
     ['在跑', up],
     ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
-    ['在跑但没链接', { running: true, reason: 'ARENA_NOTEBOOK_PUBLIC_URL 不是合法 URL', kernels: [], notebooks: [] }],
+    // 第三态原来是「在跑但没链接」（nolink，env 配坏）—— WI-98 删掉了那一态（见上面那段说明）；
+    // 换成本档今天真实存在的第三形状：**在跑但这条连接过不了守卫**。边界话在它上面同样必须常驻
+    // （"只在浏览器本机打开"那一句与 localPeer 说的正是同一件事，缺席就是最响的谎）。
+    ['非本机连接', { running: true, url: TREE, localPeer: false, kernels: [], notebooks: [] }],
   ];
   for (const [label, value] of boundaryCases) {
     it(`三句边界话在「${label}」这一态都常驻`, async () => {
@@ -712,7 +726,7 @@ describe('Notebook 第五页', () => {
    * 混在一起的症状是用户对着「准备环境」点了半天，而缺的那一层根本不在 venv 里 —— 界面必须说破区别。
    */
   it('kernel 表里没有 arena-pyspark：说清"准备环境修不了它"，并且不给那个按钮', async () => {
-    status.mockResolvedValue({ running: true, url: TREE, kernels: [], notebooks: [] });
+    status.mockResolvedValue({ running: true, url: TREE, localPeer: true, kernels: [], notebooks: [] });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
     expect(screen.getByTestId('notebook-spec-missing').textContent).toContain('./start.sh --rebuild');
