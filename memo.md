@@ -3711,3 +3711,60 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 新增 **WI-105**（`debug-js.ts` ws URL 按 chunk 截断，生产代码根因候选）、**WI-106**（第五页去掉"运行时"卡，用户点名）、
 **WI-107**（真 spawn 造法同源化 + `from:code` 死支核实）。三条都**进行中**。
 容器档欠一次：`./start.sh --verify` + `npm run e2e` + 真浏览器（Docker 回来后统一还，在那之前别说"三档全绿"）。
+
+
+## 里程碑 BH：三条被会话挂起杀死的分支接管落地 + 两本 K8s 专题的分工 + 文档/门禁第一批清扫（2026-10-11）
+
+### 做了什么
+
+1. **接管三条"孤儿分支"**。上一轮派出的 #87/#88/#89 三个实现者随会话挂起被杀，且**永远不会回通知**
+   （症状：报告停在 10-10 16:15/17:04、工作树 23 小时无写入）。接管后各自落地：
+   WI-105 `e65a384`（stderr 攒行 + 堵凭据泄漏）、WI-107 `41e248d`（真 spawn 造法同源化）、
+   WI-106 `40715d4`（第五页去卡壳）。
+   ⚠ 接管时撞到的真问题：**#87 死在自己的破坏性验证里**，那句
+   `return { status: 3, signal: null } // TEMP-DESTRUCTIVE-BREAK` 还留在 `notebook-evidence.ts`，
+   `npm run verify:fast` 直接红在 typecheck（`unknown` 不能赋给 `Record<string, unknown>`）。
+   还原之后把"子进程正常退出说明造法坏了 ⇒ 宁可抛"写进注释，而不是留个能编译的谎。
+2. **WI-108：用户给的两本 K8s 专题怎么收**。先做"是不是有效例子"的判断而不是直接写：
+   两本（67 页 / 216 页）章形与我们三篇教程同构，第 8 章逐句对过我们的实测**没有一句假话**（也没有一个数字），
+   而且每章自己写着"Docker/kind 集成实测尚未完成"。但本机**没有观测面**（见下面的读数），
+   所以批准的路径是**分工**：本机可量的一半进 notebook（篇 4），K8s 本体进口径语料。
+   篇 4 `3f2ab56`、语料 `9662972`。
+3. **WI-109：文档与门禁的第一批清扫**（`f9fdd36` 文档、`1cfd5f6` 门禁+死件），用户点名"尤其历史文档"。
+
+### 验证表（本轮真实读数）
+
+| 项 | 结果 |
+| --- | --- |
+| `npm run verify:fast` | EXIT=0 × 3（两次 pre-commit + 一次手跑），耗时 **≈2 分半**（旧文档写"约 45s"已订正） |
+| `./start.sh --verify`（权威档，按 HEAD 重建） | **EXIT=0**；判题 `代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道`，六栈全 true；教程 `17 passed / 0 skipped / 17 total`；矩阵 `533 passed / 7 skipped` |
+| 那 7 条 skip 是什么 | 6 条 `env-write-atomicity`（PowerShell，容器里按设计不跑）+ `publish-identity` 主用例（镜像内无 `.git`）—— 全是设计内 |
+| `npm run e2e` | **74 passed**（含 notebook-page 三例：count 0 那批搬家判据） |
+| 真浏览器 1440 / 新布局 | 状态行一句、唯一 `.nb-group` 19px 有内容、空壳 0、卡壳与那块计数 0、点篇 1 ⇒ iframe = `/jupyter/notebooks/01-…ipynb` 同源无 token、切走再回 pages/frames/trees 全 1、停顿 75s 后 `/api/health` 200 且直连 7789 仍 403；console 我们这份 bundle **error/warning 0**（3/71 全来自 `/jupyter/static/notebook/*.js`） |
+| 篇 4 前置读数（两轮探针） | `master=local[2]`、`maxMemory=536870912`、`availableProcessors=16`、`defaultParallelism=2` 而 `getConf` 里没这个键、`cgroup memory.max="max"`×3、`oom_kill 0`、`pandas 2.3.3 / numpy 2.2.6 / pyarrow MISSING`、toPandas 2M 行净 16,000,128 B 而 VmHWM 涨 563,640 kB |
+| 门禁收紧后仍全绿 | 6 个 runner 测试文件剥注释后 pass/fail 各 4~19 处；`npx vitest run` 次数 8 == 解析出的阶段数 8；`publish-identity` 报告变 "3 tests，其中 1 skipped" |
+
+### 已知问题 / 欠账
+
+- **WI-110（新记）**：`data/` 里约 120 个历史 scratch 没清（本轮只删掉自己造的 `wi91-ui-error-probe.ipynb`，
+  它会出现在第五页左树里冒充用户笔记）；K8s 那四行的 **llm-rubric 主观题还没出**；
+  历史文档第二批（09-19 计划与 A1/WI-94 两份）没逐条标注；`rule.md` 的"红线"命名统一是用户决定。
+- **篇 4 没进 `## 语料文件` 的那批新术语之外**：教程里 `pyarrow` 缺失这件事只写进导语的"本机边界"，
+  没给 slug —— 它不是方向性结论，是"为什么这篇不用 pandas_udf"的前置事实。
+- K8s 版本基线只核到"支持中 1.37/1.36/1.35；1.35.9 与 1.34.12 均为 2026-09-15"，**各站点口径不一致**，
+  WebFetch 配额本轮仍然不可用 ⇒ 语料里标了"出裸题前再核"。
+- WI-105 那句"把端口留在错误消息里"由实现者给理由、控制端**不背书**，仍挂在 L3 评审范围表里等判。
+
+### 教训（进记忆的那三条）
+
+1. **"grep 命中 0"不等于"没有生产者"**。审计说 `server start` / `shared test` / `web preview` 是死脚本，
+   查下去 `README.md:177` 正在教 `npm run start`、`shared/test/` 真有四个测试文件；文档与人的日常动作都是生产者。
+   同一条审计还说 `llm/cli.ts` 的 HINTS 指向不存在的键，而 `settings.ts:63` 正是
+   `config.llm as LlmConfigWithArgs` 再读 `.qoderArgs` —— 那是故意的兼容读取。**删之前要证明的是"没人需要它"，不是"没人引用它"**。
+2. **动态拼出来的 class/选择器是指针的盲区**：`ide-repl-in|out` 看起来 0 引用，其实由
+   `ReplPanel.tsx:175` 的 `ide-repl-${entry.kind}`（`kind: 'in' | 'out'`）产生；`.q-title` 死了而 `.q-titles` 活着。
+   机械 grep 判"死 CSS"必须再看一遍模板字符串，否则删掉的是样式而没人红。
+3. **押运气的判据要在闸门里翻面，就在测试里翻面**。篇 4 实现前我先要求"只读数不断言"的探针，
+   结果推翻了我简报里的三处（slug 大小写过不了形状判据、`==N*8` 与我自己抄的读数矛盾、
+   "`del` 后 VmRSS 会降"六次里有一次是涨）；而 `repl-panel` 那条同步 `getByRole` 也在整树验证下翻了一次面
+   （单跑 4/4 绿）。同一条纪律现在两处都在用：**等它该等的东西，别等一个恰好总是先到的信号**。

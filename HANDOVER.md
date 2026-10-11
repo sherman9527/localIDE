@@ -7,6 +7,91 @@
 
 ## COMPLETED
 
+- [x] WI-109 **文档/脚本清扫 + 死代码与装饰用例清理（第一批）**（用户 2026-10-11 点名"完善所有文档和脚本，尤其历史文档；清理无效 code/dead file/测试用例"）：
+  ｜**改掉的"今天仍在说谎"的句子**（`f9fdd36` + `9662972`，每条都先查证再改）：ARCHITECTURE §12 目录树缺
+  `exec/`、`net/`、`shutdown.ts`、`docker/jupyter/` 且把 `guards` 挂在 `judge/` 下（那个文件在 `exec/`）；
+  token 放行判据三处写"只按 socket 对端"，与 `status.ts:340` 的 `isLocalPeer && isLoopbackHostHeader` 相反；
+  `questions(252 题)`/`components(13)`/`shared 1080 行` 三个计数全漂移 ⇒ 改成"以 git 基线为准/量级"，不再留会烂的精确数；
+  JUDGING 的 `judge/guards.ts` 路径、redis"1-15"（判题 1–14，15 归 IDE）、`ARCHITECTURE.md:249`（今天是空行）；
+  ADD_QUESTIONS 把"只有 alibaba 落地"的 `gen.py --check/--sync` 写成"每家都有"（照着敲直接 command not found，
+  其余五家的正规出口是通用件 `drafts/sync_one.py`）；`settings['plan:<date>']` 实为 `daily:plan:<date>`；
+  教程用时/条数、首屏与十个懒 chunk 的体积清单、镜像 2.55GB、`verify:fast` 约 2 分半（旧写"45s"）都换成本轮实测。
+  三份历史 spec/plan 加"这段已过期"的旁注而不重写历史；`rule.md` 给"红线"一词建了解歧指针（"红线 Cn"=自检清单，
+  "红线①/一"= IDE spec §2 那三条）。
+  ｜**门禁上牙的三条**（`1cfd5f6`）：`runner-coverage` 的双向判据原先匹配**含注释的整份源码**且备选中文字面串 ⇒
+  删掉错解 assert、留一句注释照样绿；现在剥注释、只认比较调用本身（实测 6 个 runner 文件收紧后仍全满足）。
+  `verify-coverage` 的"有 vitest 阶段"原为 `>3` 而今天 20 多条 ⇒ 换成自洽判据（脚本里 `npx vitest run` 的次数
+  必须等于解析出的阶段数，今天 8==8）。`publish-identity` 的 `if (tracked !== null) return;` 换成 `it.skipIf`，
+  报告从"3 passed"变 `3 tests | 1 skipped`（"拿不到东西的那条 it 报 passed"是本仓库明令禁止的形状）。
+  ｜**删掉的死件**（每条先证明无生产者）：`stopAllRepl`（全仓命中只有定义；收尾另有 `process.once('exit')`）、
+  `judgePostResponse`、`base.css` 12 条无引用规则 82 行。**两处差点误删**：`ide-repl-in|out` 由
+  `ReplPanel.tsx:175` 动态拼出、`.q-titles` 在 `Question.tsx:215` 在用（死的只有单数那个）。
+  ｜**驳回两条审计结论**：npm 脚本 `start/test/preview` "无人调用可删" —— `README.md:177` 正在教 `npm run start`，
+  `shared/test/` 真有测试文件；`llm/cli.ts` 的 HINTS 指向不存在的键 —— `settings.ts:63` 是故意的兼容读取。
+  ｜顺带修一条测试自己的竞态：`repl-panel.test.tsx` 用同步 `getByRole` 等一颗由 `sessionId` 决定的按钮，
+  整树验证下翻过一次面（单跑 4/4 绿），改 `findByRole`。
+  ｜验证：`npm run verify:fast` EXIT=0 × 3（两次 pre-commit + 一次手跑）；容器档 `./start.sh --verify` EXIT=0
+  （判题 158/158 可判、栈跳过 0；教程 `17 passed / 0 skipped`；矩阵 `533 passed / 7 skipped` = 6 条 PowerShell
+  + 镜像内无 `.git` 那一条，按设计跳过）。破坏性：合成样本"只有散文的不通过"在收紧后的判据下给 `fail=false`。
+  ｜**未完的部分**登记在下面 WI-110。
+
+- [x] WI-108 **两本 K8s 专题的收法：分工 —— 本机可量的一半进教程，K8s 本体进语料**（用户 2026-10-11 提供
+  `spark-on-kubernetes.pdf` 67 页 / `kubernetes.pdf` 216 页并问"是不是有效例子、能不能补 notebook"）：
+  ｜**评估结论**：素材有效（senior/principal 口径，章形与我们三篇教程同构），但它 90% 的判据对象在本机不存在 ——
+  实测容器里 `kubectl/kind/k3s/docker/helm` 全无、无 docker.sock、cgroup v2 `memory.max="max"`（连读三次稳定）、
+  `memory.events oom_kill 0` ⇒ `OOMKilled` 那一族不复现。两份专题自己也逐章标注"代码已提供，Docker/kind
+  集成实测尚未完成" ⇒ 与我们的纪律同源，但也就意味着**不能把它的结论当已验证**。第 8 章逐句对了我们的实测，
+  没有一句假话（也没有一个数字）。**PDF 原文不进仓库**（版权不在我们手上，同 `data/` 那 42 处不入库的理由）。
+  ｜**篇 4 `content/notebooks/04-memory-accounts-and-the-boot-time-ceiling.ipynb`**（`3f2ab56`）：五条 slug ——
+  `heap-ceiling-is-boot-time`（`maxMemory()` 恰 512 MiB，`conf.set` 抛 `CANNOT_MODIFY_CONFIG` 且抛后不变）、
+  `conf-default-is-type-checked`（双参 `get` 给**默认值**过该键类型校验：int 键抛、bool 键回 `'false'` 不抛、
+  字符串键 raw 有值时你的 default 被忽略、非 SQL 键一个校验都不走）、`local-mode-has-no-executor-account`、
+  `topandas-peaks-above-its-result`（2M 行 int64 净 16,000,128 B 而进程高水位涨 ≈35 倍；`ru_maxrss`/`VmHWM`
+  是高水位、`del` 之后不掉）、`container-limit-is-absent-here`。
+  ｜**控制端简报被实测推翻三处**（都按"读数优先"处置并记进提交）：我写的 slug `toPandas-…` 过不了形状判据
+  （`/^[a-z0-9][a-z0-9-]{2,60}$/`）；`memory_usage(deep).sum()==N*8` 与我自己抄的读数矛盾（差 RangeIndex 128 B）；
+  我要求断言"`del` 后 VmRSS 会降"—— 六次实测 `+3020/+1696/+1712/+732/+700/−324 kB`，容器档真因此红过一次 ⇒
+  撤掉，换成"同一瞬间 `VmHWM−VmRSS≥100MB` + 高水位单调不减"（把押运气的判据换成押定义的）。
+  ｜**语料**（`9662972`）：`content/knowledge/big-data/spark-on-kubernetes-deployment.md`（173 行：五本资源账互不换算、
+  四种失效四种诊断、cluster 下 driver 是申请方与最小 RBAC 的推导、`local:///` 与远端分发、三档 shuffle 解法、
+  tmpfs 花的是内存、动态分配与 PDB 各管什么、Operator/CRD/GitOps、多租户没有 YARN queue 时公平性从哪来、
+  §10 "本机验到哪一层"、§11 12 条追问）+ 考点矩阵 4 行 + `## 语料文件` 登记。
+  ｜顺手修掉一条会误导出题的旧约束：那句"pyspark 题必须能在 `local[*]` 跑通"是错的 —— pyspark 判题是
+  `spark_worker.py:66` 的 `local[2]`，只有 spark-scala 的 `ArenaScalaHarness.scala:29` 是 `local[*]`。
+  ｜**没做的部分**：`llm-rubric` 主观题（语料已就位，题目是下一步）；`local[*]` 之外的 K8s 版本基线我核到
+  "支持中 1.37/1.36/1.35，1.35.9 与 1.34.12 均为 2026-09-15 的补丁"，各站点口径不一致，已在文内标"出裸题前再核"。
+  ｜验证：宿主常驻档 `tutorials.test.ts` `12 passed | 5 skipped`（16→17 条）；容器档
+  `./start.sh --verify` EXIT=0，阶段原文 `教程 notebook：17 passed / 0 skipped / 17 total ✓`，
+  四篇各真起一次 session（27.82 / 59.76 / 20.96 / 16.22s）；`server/test/bank` 52 passed（README 收录判据）；
+  破坏性：删掉 marker 那格的语句级 assert ⇒ 红在"marker 所在 cell 没有 assert"，改错 `maxMemory()` 期望 ⇒
+  红在执行层并点名哪一篇哪一格。
+
+- [x] WI-105 `debug-js.ts` 按 stderr chunk 解析 ws URL 的截断竞态（`e65a384`，WI-92 那条随机红的根因）：
+  改成跨 chunk 攒行再匹配（`INSPECTOR_MARKERS` 由攒行与噪声过滤**共用**，尾行 flush，`STDERR_HOLD_CAP=8000` 封顶不许无界缓冲）。
+  ｜顺带堵住同一刀切出来的**凭据泄漏**：截断的 URL 尾巴不匹配噪声前缀 ⇒ 过去会把 CDP 会话标识当用户输出贴进转录，
+  现在 `redactSessionId()` 把 uuid 换成占位串。⚠ "把端口留在消息里"这个决定由实现者给理由，控制端**不背书**，
+  已写进 `.superpowers/sdd/l3-review-scope.md` 单独判。
+  ｜验证：新增 `server/test/ide/debug-js-stderr.test.ts`（被 `verify-coverage` 认领）+ `npm run verify:fast` EXIT=0 +
+  容器档 EXIT=0；调试事件仍逐条实时（没改成"整行才发"）。
+
+- [x] WI-106 第五页去掉「运行时」卡壳（用户点名；`40715d4`）：卡壳/标题/"这次铺了什么"那块整片删，三把按钮并入 page-head 工具条，
+  **删的是容器不是话** —— 五态那句逐字未动、五段边界话未动、`seedError` 搬家进横幅区。
+  判据搬家而非放宽：`notebook-status-card`/`notebook-files` 由"必现"改成 open/down **两态各查一次**的缺席判据，
+  新加五态状态行两两互斥的**总判据**（`toEqual([那一句])` 同时钉"说了"与"只说了这句"），加 loading 态"空则整块不渲染"。
+  ｜验证：`verify:fast` EXIT=0；`npm run e2e` **74 passed**（含 notebook-page 三例，count 0 那批）；
+  真浏览器（1440）逐项目测：工具条两把钮 y=76、状态行一句 y=130、唯一那个 `.nb-group` 19px 有内容（empty=0）、
+  `notebook-status-card`/`notebook-files` 计数 0、点篇 1 ⇒ iframe src = `/jupyter/notebooks/01-skew-and-hot-keys.ipynb`（同源无 token），
+  切走 `#/` 再回来 pages/frames/trees/status 全为 1，停顿 75s 后 `/api/health` 200、直连 7789 仍 403（守卫在位），
+  console **我们这份 bundle error/warning 为 0**（3 error/71 warning 全部来自 `/jupyter/static/notebook/*.js`）。
+
+- [x] WI-107 WI-104 的尾巴：真 spawn 造 error 的造法同源化 + 死支核实（`41e248d`）：`realExecError` 抽进
+  `notebook-evidence.ts`，`kernel.test.ts`（8 处）与 `tutorials.test.ts`（7 处）吃同一组真对象；
+  `from:'code'` 那一支**保留**（`tutorials.test.ts` 仍是生产者）。Linux 侧的答案也回来了：容器档
+  `真 error ①/②` 两条全绿 ⇒ `status`/`signal:null`/`killed` 不存在那张表在 Linux 上同样成立。
+  ｜接管插曲：派出去的实现者随会话挂起被杀，**死在自己的破坏性验证里** —— `TEMP-DESTRUCTIVE-BREAK` 那句
+  `return {status:3, signal:null}` 还留在文件里，typecheck 当场红（`unknown` 不能赋给 `Record<string, unknown>`）。
+  还原 + 把"子进程正常退出 = 造法坏了，宁可抛"写进注释。
+
 - [x] WI-92 `server/test/ide/debug.test.ts` 的 CDP 用例会随机红（BA 记下的那条，**A1 收尾时升级为"会打断交付档"**）：
   两种红都见过 —— ① pre-commit / `verify:fast` 里"JavaScript 行断点（CDP）stepIn/stepOut"报
   "起不来：没能开始调试"；② `c208524` 那轮**容器档**红在 `后端接缝本身 > 写进一个刚退出的调试进程`，
@@ -49,7 +134,7 @@
   而题闸门里对同一个 `nbconvertCrashEvidence` 的形状判据还是手搓 `{code:1,…}` —— 那正是让 A 类 bug
   （读 `e.code` 而真 error 的退出码在 `e.status`）在绿色断言下面活了三档的形状。
   ⇒ 两条判据要同源（同一组真 error 喂两边），否则改公共件时只有一边有牙。
-  验证：把公共件改回「退出码只读 `code`」（就是当年那个 A 类 bug）⇒ `tutorials` 与 `kernel` **同时红**，而同一次运行里旧的那条手搓 `{code:1}` 判据**照样绿** —— 这条对照本身就是 WI-104 存在的理由。崩溃形状那 1 条拆成 3 条（常驻组 10→12 passed）。尾巴（真 spawn 的造法同源化、`from:code` 死支核实）另开 **WI-107**，正在做。
+  验证：把公共件改回「退出码只读 `code`」（就是当年那个 A 类 bug）⇒ `tutorials` 与 `kernel` **同时红**，而同一次运行里旧的那条手搓 `{code:1}` 判据**照样绿** —— 这条对照本身就是 WI-104 存在的理由。崩溃形状那 1 条拆成 3 条（常驻组 10→12 passed）。尾巴（真 spawn 的造法同源化、`from:code` 死支核实）另开 **WI-107**（已交付 `41e248d`，Linux 侧的形状也在那一轮验过）。
 
 - [x] WI-00 需求通读 + 环境勘察 + 实施计划（`docs/superpowers/plans/2026-09-19-daily-interview-arena.md`）
 - [x] WI-01 治理基线：git、`.npmrc`(npmmirror)、`rule.md`、`memo.md`、本工作板｜验证：`git log --oneline` 有 baseline commit
@@ -1405,23 +1490,24 @@
   它唯一的结构性优势是"`error` 消息发什么字段我们说了算"（Almond 就是死在别人说了算的那一件上）；
   代价是我们自研并长期维护一个 ZMQ kernel（协议 + HMAC 签名 + ROUTER/DEALER/PUB 三件套）。
   ⇒ 别因为"探索档说了要试三条"就去做它：B 已过排序规则①②③，C 只能赢④的体积，而那不值这个维护面。
-- [ ] WI-105 **`debug-js.ts` 按 stderr chunk 解析 ws URL 的截断竞态**（生产代码，WI-92 那条随机红的根因候选；**进行中**）：
-  `WS_URL_RE = /Debugger listening on (ws:\/\/\S+)/` 在**每个 chunk** 上单独跑，而 chunk 边界由负载决定 ⇒ URL 被截断 ⇒
-  `openSocket` 连不上 ⇒ `launch` 回的那条 event **没有 `message`** ⇒ 管理器落到默认话术「没能开始调试」。
-  要修三件：跨 chunk 缓冲成行再匹配（含进程结束时的尾行 flush、不许无界缓冲）、那条 event 补上 `message`
-  （但**不许把带随机端口/uuid 的 ws URL 原样贴进消息** —— 按"凭据不进消息"那把尺子判）、
-  一条可控地喂"URL 中间断开"的两个 chunk 的测试 + 一条"整行单 chunk 行为不变"的对照。
-  ⚠ 别把逐 chunk 转发给前端的调试事件改成"整行才发"（调试面板实时性会退化）。
-- [ ] WI-106 **第五页简化：去掉「运行时」那张卡**（用户 2026-10-10 点名；**进行中**）：
-  删卡壳与"运行时"标题、删"这次铺了什么"那份示例清单，三个按钮（刷新状态 / 在新标签页打开 / 准备环境）合并进顶部工具条。
-  ⚠ **五种后端形状各自那句话一句都不许多、也不许合并**（它们修的是不同东西）—— 要删的是容器不是话；
-  `seedError` 横幅必须搬家留下（"铺不进去"= 磁盘/挂载/权限，与"没有示例"是两件事）；
-  `Group()` 那套"children 全空 ⇒ 整个不渲染"必须继续生效（空壳带分隔线是真浏览器里量出来的缺陷）。
-- [ ] WI-107 **WI-104 的尾巴：真 spawn 造 error 的造法同源化 + 死支核实**（**进行中**）：
-  造法现在在 `kernel.test.ts` 与 `tutorials.test.ts` 各一份（当时两文件互为禁改清单，实现者按"复制造法不复制造据"做）。
-  ⇒ 抽进 `notebook-evidence.ts` 两边 import，并证明"改坏公共件 ⇒ 两边同时红"；
-  另核实 `exitEvidence` 的 `from:'code'` 那一支是否还有生产者（`evidenceShapedExecError` 已删）——
-  **没有生产者就整支删掉**（本仓库不留向后兼容的壳子），并改掉公共件里那段提到 shim 的过期注释。
+- [ ] WI-110 **清扫的剩余部分**（WI-109 是第一批，这条是还没做完的那一半）：
+  ① **`data/` 目录里有 ~120 个历史 scratch**（`msg*.txt` 提交草稿、`dump*.txt`、`patch*.py`、
+  `shot3.mjs`、`wi94-t3-probe*.cjs/.js`、`prov_*.txt`、`verify-fast-1..14.log`、`rebuild*.log`、
+  `f-*.log`、`kb-txt`、`wi91-tmp`、`test-tmp`、`playwright-artifacts`、`playwright-report` …）。
+  ⚠ **动手前必须先证明没有判据读它们**：`data/verify-tutorials.json` 与 `data/verify-judge.json` 由
+  `assert-ran.mjs` 读、`data/drafts-*` 由生成器与 `check_provenance.py` 读写、`data/ide-env`、
+  `data/notebooks`、`data/judge`、`data/logs`、`data/e2e`、两个 warehouse 都是活的工作区 —— 这几类**都不是垃圾**。
+  本轮只删了自己这一批造的探针（`data/notebooks/wi91-ui-error-probe.ipynb` —— 它是 WI-91 在真界面上
+  敲坏代码留下的夹具，会出现在第五页左树里冒充用户的笔记）。剩下的按"先移到 `data/archive/` 再确认一轮"处理，
+  不要 `rm -rf`（红线：`data/` 里同时住着数据库与日志）。
+  ② **llm-rubric 主观题**：WI-108 的语料已就位（`spark-on-kubernetes-deployment.md` + 矩阵 4 行），
+  题还没出。出之前要按 `docs/ADD_QUESTIONS.md` 的四件套形状补 `probe_naive.py`/`precheck.py` 那一族
+  （rubric 类只需要 `points` + 判分点，不需要 runner），并先核实 K8s 版本基线（各站点口径不一致）。
+  ③ **历史文档第二批**：`docs/superpowers/plans/2026-09-19-daily-interview-arena.md` 与 A1/WI-94 两份计划里
+  还剩"当时预期、后来改主意"的句子没逐条标注；性能/体积类数字里唯一还需要新读数是
+  README:149-150 与 ARCHITECTURE:348 的教程用时（本轮已更新成四篇，下次容器档要再对一次）。
+  ④ **`rule.md` 的"红线"编号**已加解歧指针（`f9fdd36`），但 C 清单与 `## 红线` 那节的**命名统一**仍是
+  一次用户决定（改文档口径 or 把 C 清单升格），不是修复。
 - [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
   ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
   `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；
