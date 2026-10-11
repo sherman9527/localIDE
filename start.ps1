@@ -331,24 +331,39 @@ function Report-Notebook {
     Write-Host '[arena] Notebook 未就绪：.env 里没有 ARENA_JUPYTER_TOKEN（.\start.ps1 首启会生成）' -ForegroundColor Yellow
     return
   }
-  $code = 0
-  try {
-    # 路径带 `/jupyter/` 前缀（WI-94 Task 1）：jupyter 自己挂在 base_url=/jupyter/ 下，
-    # 根路径上的 /login 从此给的是 **404**（实测，2026-10-09：`…8888/login` → 404、`…/jupyter/login` → 200；
-    # 000 只在"没人监听"时才出现）。旧写法不会说"未就绪"，而是走下面的成功分支、打印"已应答 HTTP 404"
-    # 再附一个打不开的链接 —— 探活形同虚设（假阳性，比假阴性更难发现）。
-    # 与 start.sh 的 report_notebook 是同一套判据的两个实现，改一边必须改另一边；
-    # 前缀的真相在 shared/src/notebook.ts，闸门是 server/test/regression/notebook-contract.test.ts。
-    $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:7789/jupyter/login' -TimeoutSec 2 -UseBasicParsing
-    $code = [int]$resp.StatusCode
-  } catch {
-    # 非 2xx 也算"有进程应答"（与 start.sh 那边 curl 只看 http_code 同判据）；完全没有连接才是没起来。
-    $r = $_.Exception.Response
-    if ($r) { $code = [int]$r.StatusCode }
+  # WI-97：有界重试，与 start.sh 的 report_notebook 同一套判据的两个实现（改一边必须改另一边）。
+  # 只探一次会撒一种假话：实测 `--verify` 那次横幅说"7789 上没有 HTTP 应答"，两分钟后同一条路径是 200
+  # —— 000 判的是"还没人监听"，与"jupyter 正在起"在横幅里分不开。A1 的裁定 R4 当初故意不加 retry
+  # 是对的（"重试到成功为止"会把"起不来"与"起得慢"压成同一句话），所以这里做成**有界**：
+  # 上限 6 发 × 2 秒 ≈ 10 秒，并且第 k>1 次才通要**另说一句话**，6 发全空才说"起不来"并印出等过的次数。
+  $probe = 0
+  $tries = 6
+  while ($probe -lt $tries) {
+    $probe++
+    $code = 0
+    try {
+      # 路径带 `/jupyter/` 前缀（WI-94 Task 1）：jupyter 自己挂在 base_url=/jupyter/ 下，
+      # 根路径上的 /login 从此给的是 **404**（实测，2026-10-09：`…8888/login` → 404、`…/jupyter/login` → 200；
+      # 000 只在"没人监听"时才出现）。旧写法不会说"未就绪"，而是走下面的成功分支、打印"已应答 HTTP 404"
+      # 再附一个打不开的链接 —— 探活形同虚设（假阳性，比假阴性更难发现）。
+      # 与 start.sh 的 report_notebook 是同一套判据的两个实现，改一边必须改另一边；
+      # 前缀的真相在 shared/src/notebook.ts，闸门是 server/test/regression/notebook-contract.test.ts。
+      $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:7789/jupyter/login' -TimeoutSec 2 -UseBasicParsing
+      $code = [int]$resp.StatusCode
+    } catch {
+      # 非 2xx 也算"有进程应答"（与 start.sh 那边 curl 只看 http_code 同判据）；完全没有连接才是没起来。
+      $r = $_.Exception.Response
+      if ($r) { $code = [int]$r.StatusCode }
+    }
+    if ($code -ne 0) { break }
+    if ($probe -lt $tries) { Start-Sleep -Seconds 2 }
   }
   if ($code -eq 0) {
-    Write-Host '[arena] Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 .\start.ps1（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
+    Write-Host "[arena] Notebook 未就绪：连探 $tries 次（约 $($tries * 2) 秒，每次都判 000）7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（跑 .\start.ps1 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，脚本不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 .\start.ps1（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 .\start.ps1 -Rebuild（10-20 分钟的冷构建）。先跑 .\start.ps1 -Logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）' -ForegroundColor Yellow
     return
+  }
+  if ($probe -gt 1) {
+    Write-Host "[arena] Notebook 冷启动：第 $probe/$tries 次探测才答话（前 $($probe - 1) 次是 000 = 还没人监听）—— 那是 jupyter 正在起，不是故障，不用照上面那条去修" -ForegroundColor Yellow
   }
   Write-Host "[arena] Notebook -> http://127.0.0.1:7789/jupyter/tree（7789 已应答 HTTP $code；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）只打印一次，且不含 token" -ForegroundColor Cyan
 }

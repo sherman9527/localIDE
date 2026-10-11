@@ -365,10 +365,34 @@ report_notebook() {
   # 前缀的真相在 shared/src/notebook.ts，shell 带不回常量 ⇒ 这里写字面量，
   # 由闸门 server/test/regression/notebook-contract.test.ts 按派生值查这两个脚本的文本。
   # start.ps1 是同一套判据的另一个实现，改一边必须改另一边。
-  code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/jupyter/login" 2>/dev/null || true)"
+  # WI-97（2026-10-11）：这一发以前**只探一次**，于是有一个假话形状 —— 实测撞过：
+  # `./start.sh --verify` 那次横幅打印"7789 上没有 HTTP 应答"，而两分钟后同一条路径探 `…/jupyter/login` 是 **200**。
+  # 判据是 000（没人监听），与"jupyter 还在启动"无关，可这两件事在横幅里长得分不开。
+  # A1 的裁定 R4 当时**故意不加 retry**，理由是对的："重试到成功为止"会把"起不来"与"起得慢"
+  # 压成同一句话，读者就再也不知道该修什么。所以这里不是去掉那个约束，是把它做成**有界**的：
+  # 上限 6 发 × 2 秒 ≈ 10 秒，并且**两句不同的话** —— 第 k>1 次才答话就明说"前 k-1 次的 000 是冷启动，
+  # 不是故障，别照着下面那条去修"；6 发全空才说"起不来"，并把等过的次数印出来（"连探 6 次"这条信息
+  # 本身就是判据：它说的不是"我们没试"）。下面那句横幅一字未动（它的判据见 notebook-contract.test.ts 评审 I-2）。
+  local probe code tries
+  probe=0
+  tries=6
+  code=""
+  while [ "$probe" -lt "$tries" ]; do
+    probe=$((probe + 1))
+    code="$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:7789/jupyter/login" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then
+      break
+    fi
+    if [ "$probe" -lt "$tries" ]; then
+      sleep 2
+    fi
+  done
   if [ -z "$code" ] || [ "$code" = "000" ]; then
-    say "Notebook 未就绪：7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（按 ./start.sh 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，start.sh 不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 ./start.sh（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 ./start.sh --rebuild（10-20 分钟的冷构建）。先跑 ./start.sh --logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
+    say "Notebook 未就绪：连探 ${tries} 次（约 $((tries * 2)) 秒，每次都判 000）7789 上没有 HTTP 应答 ⇒ 容器里的 jupyter 没起来（缺 token / 镜像还是没带 Jupyter 的旧版 / 进程跑过但后来掉了），或 jupyter 监听在容器 loopback 上（发布端口打不到：DNAT 的目标是容器的 eth0 地址，不是它的 127.0.0.1）。修法是起一个新容器：docker compose up -d --force-recreate arena（按 ./start.sh 修不了这一种：镜像没变时 compose 报 0 行 Recreate，那个掉掉的 jupyter 不会被起回来 —— 2026-10-08 实测）；--force-recreate 会带走正在跑的 IDE 调试会话与判题任务，所以这条由你决定何时执行，start.sh 不代你做。但这一条只对**镜像里已经带上监听地址修复**的情况有效：镜像若早于 --ServerApp.ip=0.0.0.0 那一次改动，--force-recreate 是按现有镜像换容器，修完还是 000 —— 那种先跑 ./start.sh（它先构建再 up -d，镜像一变 compose 自然按新镜像重建容器），再谈那条 --force-recreate。只有怀疑镜像本身没带 Jupyter 时才值得 ./start.sh --rebuild（10-20 分钟的冷构建）。先跑 ./start.sh --logs 看 entrypoint 那几行分辨是哪一种；容器档那条闸门在 server/test/notebooks/kernel.test.ts（「发布端口的 DNAT 目标上也必须有人在听」）"
     return 0
+  fi
+  if [ "$probe" -gt 1 ]; then
+    say "Notebook 冷启动：第 ${probe}/${tries} 次探测才答话（前 $((probe - 1)) 次是 000 = 还没人监听）—— 那是 jupyter 正在起，不是故障，不用照上面那条去修"
   fi
   say "Notebook：http://127.0.0.1:7789/jupyter/tree（7789 已应答 HTTP ${code}；token 在 .env 的 ARENA_JUPYTER_TOKEN，页面第五项 Notebook 也能拿到）—— 只打印一次，且不含 token"
 }
