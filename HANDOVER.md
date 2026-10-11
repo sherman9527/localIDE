@@ -1582,15 +1582,17 @@
   代价是我们自研并长期维护一个 ZMQ kernel（协议 + HMAC 签名 + ROUTER/DEALER/PUB 三件套）。
   ⇒ 别因为"探索档说了要试三条"就去做它：B 已过排序规则①②③，C 只能赢④的体积，而那不值这个维护面。
 - [ ] WI-110 **清扫的剩余部分**（WI-109 是第一批，这条是还没做完的那一半）：
-  ① **`data/` 目录里有 ~120 个历史 scratch**（`msg*.txt` 提交草稿、`dump*.txt`、`patch*.py`、
-  `shot3.mjs`、`wi94-t3-probe*.cjs/.js`、`prov_*.txt`、`verify-fast-1..14.log`、`rebuild*.log`、
-  `f-*.log`、`kb-txt`、`wi91-tmp`、`test-tmp`、`playwright-artifacts`、`playwright-report` …）。
-  ⚠ **动手前必须先证明没有判据读它们**：`data/verify-tutorials.json` 与 `data/verify-judge.json` 由
-  `assert-ran.mjs` 读、`data/drafts-*` 由生成器与 `check_provenance.py` 读写、`data/ide-env`、
-  `data/notebooks`、`data/judge`、`data/logs`、`data/e2e`、两个 warehouse 都是活的工作区 —— 这几类**都不是垃圾**。
-  本轮只删了自己这一批造的探针（`data/notebooks/wi91-ui-error-probe.ipynb` —— 它是 WI-91 在真界面上
-  敲坏代码留下的夹具，会出现在第五页左树里冒充用户的笔记）。剩下的按"先移到 `data/archive/` 再确认一轮"处理，
-  不要 `rm -rf`（红线：`data/` 里同时住着数据库与日志）。
+  ① **`data/` 的 scratch 已归档完成（2026-10-11 深夜）** —— 82 项一次性文件/目录移进
+  `data/archive/scratch-2026-10-11/`（**没有删任何东西**，恢复方法写在那个目录的 README 里）。
+  准入判据是两条同时成立：`git --no-pager grep -F -l "<名字>"` 在任何被跟踪文件里**命中 0**，
+  且 mtime 早于 24 小时。留下的 19 项各有实名的读者（八家 `drafts-*` 归生成器与出处审计、
+  `notebook-server.log` 归 `docker/entrypoint.sh`、`playwright-*` 是 e2e 现场、
+  `verify-*.json` 归 `assert-ran.mjs`、`wi94-t3-probe*` 整族留下是因为它的**输出**被
+  `embed.test.ts` 当读数引用 —— 不把生产者与证据分开放）。移动后 `npm run verify:fast` EXIT=0，
+  且确认代码里没有 `scratch-` 这种动态拼出来的前缀（`git grep` 命中 0），所以那三个 `scratch-*`
+  目录不是"改名了就找不到"的活工作区。**顺带查出来的一件事**：那 19 项里有 6 项之所以"被引用"，
+  引用处是 `HANDOVER.md` 本身（工作板提到过这个文件名）⇒ 工作板正在变成垃圾的存留理由，
+  这本身就是 WI-109 那条"历史文档要标过期"的账，不是这些文件的理由。
   ② **llm-rubric 主观题**：WI-108 的语料已就位（`spark-on-kubernetes-deployment.md` + 矩阵 4 行），
   题还没出。出之前要按 `docs/ADD_QUESTIONS.md` 的四件套形状补 `probe_naive.py`/`precheck.py` 那一族
   （rubric 类只需要 `points` + 判分点，不需要 runner），并先核实 K8s 版本基线（各站点口径不一致）。
