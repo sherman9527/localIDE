@@ -1,5 +1,15 @@
 # Daily Interview Arena（本地每日刷题系统）Implementation Plan
 
+> **⚠ 状态（2026-10-12 文档清扫第二批）：这是本系统的建库计划，已执行完毕；下面 98 个 `- [ ]` 是历史勾选状态，
+> 不是待办**（`git log` 的第一条就是 `15fd5ab` 交付它的那次提交；后续演进记在 `memo.md` 的里程碑 A~BI）。
+> 不把它打成 `[x]` 的理由：这份计划之后系统**长出了它完全没有的三个子系统** ——
+> 网页 IDE（含执行内核、REPL、行断点）、IDE 依赖环境（WI-87）、notebook 运行时与教程（WI-88~94 / WI-90 / WI-108）。
+> 实测本文件里 `Jupyter` / `notebook` / `网页 IDE` 一次都没出现过，所以它连"待办"都算不上，是**另一段时间的图纸**。
+>
+> **今天要知道系统长什么样，读这几处，不要读这里**：
+> `docs/ARCHITECTURE.md`（分层、路由表、判题底座、目录结构）、`docs/JUDGING.md`（判题与红线）、
+> `.qoder/rules/dev_verify_workflow.md`（改完要跑什么验证）、`HANDOVER.md`（工作板：做了什么 / 还欠什么）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `localLearning/` 单目录内交付一个 Docker 启动的、leetcode + 多邻国体验的 senior/principal 级每日刷题系统（7 个技术栈类别、真跑测题 + LLM 主观题评分、可只增不减刷新的题库）。

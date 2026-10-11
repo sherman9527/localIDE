@@ -1,5 +1,17 @@
 # WI-94：把 Jupyter notebook 内嵌进第五页 —— 实施计划
 
+> **⚠ 状态（2026-10-12 文档清扫第二批）：这份计划已执行完毕（交付见 `HANDOVER.md` 的 WI-94 条目），
+> 下面的 `- [ ]` 是历史勾选状态，不是待办。** 之后这一页又被改了两次，本文件看不到：
+> **WI-106**（`40715d4`）删掉「运行时」卡壳与"这次铺了什么"那块、三把按钮并入工具条；
+> **WI-98**（`db14d5e`）把逃生链接也改成同源，`status` 响应里从此没有 token。
+> 所以本文件里凡是按"卡壳 / 状态卡 / 逃生链接带不带 token"描述界面的段落，判的对象已经变了 ——
+> 那些删除与搬家各自都有缺席判据钉着（单元层 + e2e），不是悄悄改掉的。
+>
+> ⚠ 上面 Architecture 那句 `Sec-Fetch-Site ∈ {same-origin, 缺席}` 少列了一格：守卫的允许集合实测是
+> **`{same-origin, none, 缺席}`**（`none` = 用户手动粘贴/手敲地址那一发）——
+> 2026-10-11 用真请求量过三种形状，判据本体见 `server/src/notebooks/proxyGuard.ts`
+> 与 `server/test/notebooks/proxy.test.ts` 里那两条 WI-98 实测用例。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 第五页不再"跳出去开 7789 的独立 Jupyter 标签页"，而是在**同源**的 `/jupyter/*` 反代里内嵌 notebook（左文件树 + 右 notebook），并且这棵子树自带 fail-closed 守卫。

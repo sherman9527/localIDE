@@ -1,5 +1,22 @@
 # 子项目 A2（WI-91）：镜像里一个**真能交互执行**的 Scala kernel —— 可行性探索计划
 
+> **⚠ 状态（2026-10-12 文档清扫第二批）：这份探索已经给出答案，下面的 `- [ ]` 是历史勾选状态，不是待办。**
+> 它的交付物是**结论**不是代码（`HANDOVER.md` 的 WI-91 条目、`memo.md` 里程碑 BF）：
+> **A（Almond 0.15.0）被判否**，证据是硬的 —— 编译错的 iopub 消息缺 `traceback` 字段，
+> `nbformat/v4/nbbase.py:112` 直接 `KeyError`，`allow_errors=True` 绕不过，而真界面上 Jupyter 前端自己打
+> `Kernel message validation error: Missing property 'traceback'` ⇒ **用户敲坏代码看到的是什么都没有**。
+> **B（Toree）胜出**：三条判据全过（`doubled=42` / `alive=42` / `rows=6`）、负例回话带齐
+> `ename/evalue/output_type/traceback`、+30MB、断网照跑、不新增可写目录。
+> **C（自包 `IMain`）按排序规则没做**（它只能赢体积那一档，不值那个长期维护面）—— 这条记账在 WI-101。
+>
+> 两条**探索过程中量出来、下一版必须带上**的事实也写在这里，因为它们不在正文原稿里：
+> ① Toree 会往 stdout 打自己的装配日志，而 Task 1 那把尺子是拿 `nbconvert --stdout` 的 stdout 当 notebook JSON 读
+> ⇒ **接入计划的第一件事是修量具**（已落进 `2026-10-10-scala-kernel-integration-wi91b.md` 的 Task 1）；
+> ② Toree 的 `language_info.version` 报的是它自己编译期的 2.12.15，真正加载的是 2.12.18（不是混版，
+> 但页面上任何按版本号做的判断都会读到假数）。
+> A/B 两条路径的探针产物已归档在 `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/`
+> （`path-A-almond/`、`path-B-toree/`），**工作树里没有留半件未收口的 kernel 实验**。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development 或 superpowers:executing-plans 逐任务执行本计划。步骤用 checkbox（`- [ ]`）跟踪。
 
 **Goal:** 给第五页的 notebook 加一个**真交互**的 Scala kernel（今天只有 `arena-pyspark`：Scala 代码只能靠 `handleOutput` 那种"编译一段跑一段"的替代形状，没有活的 REPL 会话、没有多 cell 之间共享的状态）。

@@ -1,5 +1,17 @@
 # WI-91b：把 Toree 接成第五页可用的 Scala kernel —— 实施计划
 
+> **⚠ 状态（2026-10-12）：这是 `docs/superpowers/plans/` 下唯一一份还没开工的计划**（对应 `HANDOVER.md` 的 WI-100）。
+> 其余各份都已执行完毕，勾选状态是历史；**本文件的 `- [ ]` 是真的待办**，别跟着上面那股"已过期"的味道一起跳过它。
+>
+> 计划写完之后外部条件变了三处，开工前先读这三条：
+> ① **前置的 WI-98 已落地**（`db14d5e`）：逃生链接改成同源 `/jupyter/tree`，`status` 响应里不再有 token。
+>    本计划原本把"Task 3 要动 `status.ts` 那处 URL 拼装"记成与 WI-98 冲突、必须排队 —— **那个冲突现在不存在了**，
+>    但 `status.ts` 现在多了一个 `localPeer` 字段，新增 Scala kernel 时它照样要被带上（别按 id 猜，见 WI-96）。
+> ② **第五页的界面形状变了**（WI-106 `40715d4`）：没有「运行时」卡壳了，三把按钮在 page-head 工具条，
+>    本计划 Task 4 那句"页面边界说实话"要往新的横幅区（唯一剩下的 `<Group>`）里放，不是往卡壳里放。
+> ③ **教程已经有第四篇**（WI-108 `3f2ab56`）：`tutorials.test.ts` 现在 `17 passed / 0 skipped`，
+>    本计划 Task 3 往里加 Scala smoke 时的基线数是 17，不是 14。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development 或 superpowers:executing-plans 逐任务执行本计划。步骤用 checkbox（`- [ ]`）跟踪。
 
 **Goal:** 把探索档量出来的 `arena-scala-toree` 接成**页面上选得到、跑得动、闸门判得住**的 Scala kernel（今天只有 `arena-pyspark`）。

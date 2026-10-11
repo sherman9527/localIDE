@@ -1,5 +1,16 @@
 # 子项目 B（WI-90）：三篇 senior PySpark 教程 notebook 实施计划
 
+> **⚠ 状态（2026-10-12 文档清扫第二批）：这份计划已执行完毕（三篇教程 + 那道容器档闸门都交付了，
+> 证据在 `HANDOVER.md` 的 WI-90 条目与 `memo.md` 里程碑 BE），下面的 `- [ ]` 是历史勾选状态，不是待办。**
+> 它**没被打成 `[x]`** 的理由在这里尤其成立：本计划执行过程中被实测推翻的判据不少（正文与提交里都留痕），
+> 打勾会把它读成"照原稿做完了"。已知被推翻的几处：`spark.range(N, seed=7)` 这个参数不存在、
+> `openCostInBytes` 的方向与流传口径相反、`executedPlan().toString()` 里根本没有 `AQEShuffleRead`、
+> 以及"删掉 `_ = agg.count()` 就会红"这条破坏性验证不成立（`df.rdd` 自己就会 finalize）。
+>
+> **今天再读它要知道的第二件事**：教程已经有**第四篇**（`04-memory-accounts-and-the-boot-time-ceiling`，
+> WI-108，2026-10-11），它不在本计划的范围内，走的是同一道闸门（`tutorials.test.ts` 现在
+> `17 passed / 0 skipped`，注册表在 `server/test/notebooks/tutorial-claims.ts`）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 交付 3 篇能**当场量出差异**的 senior 级 PySpark 教程 notebook，并把"可运行"变成一道**容器里真执行的闸门**（结论反了闸门就红，不是"没报错就算过"）。

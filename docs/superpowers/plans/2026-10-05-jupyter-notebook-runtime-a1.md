@@ -1,5 +1,18 @@
 # Jupyter Notebook 运行时（A1）实施计划
 
+> **⚠ 状态（2026-10-12 文档清扫第二批）：这份计划已经执行完毕，下面的 `- [ ]` 是历史勾选状态，不是待办。**
+> 交付证据在 `HANDOVER.md` 的 COMPLETED 段（WI-88 ~ WI-94 那一批）与 `memo.md` 的里程碑；今天四档验证都跑过。
+> **为什么不把勾选改成 `[x]`**：其中不少步骤后来被实测改过形状（例如 Task 10 的监听地址、Task 1 的内核注册），
+> 打勾等于宣称"照原稿做完了"，而那恰好是假话 —— 原稿被推翻的地方都在正文里以"更正"标注了。
+>
+> **本文件今天仍然成立、但读者会踩空的三处**：
+> ① 上面 Architecture 那句"`Notebook.tsx` 只做入口不嵌 iframe"**已被 WI-94 推翻**（第五页是两栏内嵌，
+>    经同源反代 `/jupyter/*`），全文见 `docs/ARCHITECTURE.md` §3 与 `2026-10-09-jupyter-notebook-embed-wi94.md`；
+> ② 那份 spec 顶部已加四处"已被后面推翻"的旁注（含 token 的**合取**判据）；
+> ③ **2026-10-11/12 又动了两次**，本文件看不到：WI-106 删掉了第五页那张「运行时」卡壳与"这次铺了什么"那块，
+>    WI-98 把逃生链接从"`7789` 绝对地址 + `?token=`"改成**同源 `/jupyter/tree`** ⇒
+>    本文件里凡是"链接里带不带 token"的段落，判的对象已经不在了。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在现有单镜像里加一个常驻 Jupyter Notebook 服务 + 一个复用 IDE venv 的 PySpark kernel，并在前端新开第五页作为入口。
