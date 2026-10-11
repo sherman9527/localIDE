@@ -10,7 +10,7 @@ import { config } from '../../src/config.js';
 import { ensureIdeEnv, venvPythonPath } from '../../src/ide/env.js';
 import { findLanguage } from '../../src/ide/languages.js';
 import { notebookStatus } from '../../src/notebooks/status.js';
-import { executedNotebookEvidence, nbconvertCrashEvidence } from './notebook-evidence.js';
+import { executedNotebookEvidence, nbconvertCrashEvidence, realExecError } from './notebook-evidence.js';
 
 /**
  * Task 10：容器档「真跑」。
@@ -1036,6 +1036,8 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
  * 全绿下面一句静默错的话 —— 本仓库为这个形状付过两次学费（桥 token、`kernels` vs `kernelspecs`）。
  * ⇒ 这里每一条都**真的 spawn 一个子进程**去拿 node 抛的那个 error，原样喂进去，不碰手搓对象。
  * 用 `process.execPath` 起 node 自己：宿主档就能跑（本文件常驻那一组的规矩：不等容器）。
+ * 造法本身（起什么进程、怎么钉"没抛就红"）住在 `./notebook-evidence.js` 的 `realExecError`，
+ * 与 `tutorials.test.ts` 用的是**同一份**（WI-107：两份造法各自漂的时候，两边都绿而喂的不是同一个对象）。
  *
  * 每条都有两段，两段都是判据：
  * ① **先钉住真 error 的形状**（`status`/`signal`/`code` 各是什么）。少了这一段，"造真 error"这件事自己坏掉
@@ -1054,24 +1056,20 @@ describe('容器档的门控本身（常驻，宿主也跑）', () => {
 const CRASH_BUDGET = { execTimeoutMs: 41_000, cellTimeoutS: 37 };
 
 /**
- * 跑一次**注定失败**的 `execFileSync`，把 node 抛的那个 error 原样交出去。
- * 没抛就是这一条没有判据对象 ⇒ 当场红（不许退化成"那就喂一份手搓的"，那正是本轮的病根）。
+ * 造真 error 的造法住在 `./notebook-evidence.js` 的 `realExecError`（WI-107）。
+ * 本文件原来有一份同名的本地实现（`realExecError(run)`，收一个 thunk），`tutorials.test.ts` 另有第二份
+ * （`spawnFailingNode(script, opts)`，带 40KB 噪声与显式 `stdio`）—— 两份各自漂的表现不是"少判"，
+ * 而是"两边都绿但喂的不是同一个对象"，所以坏掉时**没有一条红会来通知**（实测：把本地那份换成手搓的
+ * `{status:3, signal:null}`，本文件真 error ①照样绿、`tutorials.test.ts` 整档 exit 0）。
+ * ⇒ 现在两边 import 同一份：改坏公共件里的造法，两个文件会同时红（WI-107 的破坏性验证就是这条）。
  */
-function realExecError(run: () => unknown): Record<string, unknown> {
-  try {
-    run();
-  } catch (err) {
-    return err as Record<string, unknown>;
-  }
-  throw new Error('execFileSync 没有抛 ⇒ 这一条没有真 error 可喂（node 的行为变了，或者这里的命令写错了）。把"没抛"当成通过，就是又造一个绿下面的谎');
-}
 
 /** 失败消息的截断预览：判据红的时候要把"它到底说了哪一支"印出来，但不能把 800 字节的 stderr 也印进报告。 */
 const msgPeek = (msg: string): string => msg.slice(0, 240);
 
 describe('nbconvertCrashEvidence 吃真 error 的四支判读（常驻，宿主也跑）', () => {
   it('真 error ①：非 0 退出（status=3、signal=null）⇒ 报 code=3，不许落进"被信号终止/先想超时"那一支', () => {
-    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'process.exit(3)'], { encoding: 'utf8' }));
+    const err = realExecError({ kind: 'nonZeroExit', exitCode: 3 });
     // 这两个断言就是本轮的病灶本身：退出码在 `status`，而 `signal` 是 `null` —— 旧判读把 `null !== undefined`
     // 读成"有 signal"，于是这一种（真故障最常见的那一种）每次都走错支。
     expect(err.status, `node 给的退出码不在 status 上（实际 ${JSON.stringify(err.status)}）⇒ 下面那几条的对象已经不是"真非 0 退出"了，先重读 notebook-evidence.ts 那张实测表`).toBe(3);
@@ -1094,7 +1092,7 @@ describe('nbconvertCrashEvidence 吃真 error 的四支判读（常驻，宿主�
   it('真 error ②：execFileSync 预算到点（真 SIGTERM）⇒ 落"被信号终止"那一支，并带上调用方传的预算', () => {
     // 真的把子进程挂住、真的让 execFileSync 的 timeout 到点：node 给的是 `{code:'ETIMEDOUT', status:null, signal:'SIGTERM'}`
     // （宿主 Windows 与容器 Linux 实测同形 —— 见 notebook-evidence.ts 那张表）。
-    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'setTimeout(() => {}, 1_000_000_000)'], { encoding: 'utf8', timeout: 250 }));
+    const err = realExecError({ kind: 'execTimeout', timeoutMs: 250 });
     expect(err.signal, `到点这一种的 signal 不是 SIGTERM（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是"预算到点"那个形状`).toBe('SIGTERM');
     expect(err.status, `被外力结束时没有退出码（实际 ${JSON.stringify(err.status)}）`).toBeNull();
 
@@ -1111,7 +1109,7 @@ describe('nbconvertCrashEvidence 吃真 error 的四支判读（常驻，宿主�
   });
 
   it('真 error ③：spawn 级失败（code="ENOENT" 是**字符串**）⇒ 单独一支说"可执行文件不在"，不进上面两支', () => {
-    const err = realExecError(() => execFileSync('arena-no-such-executable-wi92-xyz', ['--version'], { encoding: 'utf8' }));
+    const err = realExecError({ kind: 'spawnEnoent' });
     expect(typeof err.code, `spawn 级失败的 code 应当是字符串错误名（实际 ${JSON.stringify(err.code)}）`).toBe('string');
     expect(err.code, `这里要的是 ENOENT（实际 ${JSON.stringify(err.code)}）`).toBe('ENOENT');
     // ENOENT 的 `status` 是 null（不是"退出码是 null"，是"根本没有退出码"）；`signal` 也是 null —— 命令没跑起来。
@@ -1155,7 +1153,7 @@ describe('nbconvertCrashEvidence 吃真 error 的四支判读（常驻，宿主�
    * 少了这一条，那一族就还是一句"先想超时"，而读的人去调一个根本没撞上的数字。
    */
   it('真 error ⑤：撑破 maxBuffer（ENOBUFS + SIGTERM）⇒ 说 maxBuffer，不许说"预算到点"的那两个秒数', () => {
-    const err = realExecError(() => execFileSync(process.execPath, ['-e', 'console.log("x".repeat(200_000))'], { encoding: 'utf8', maxBuffer: 1024 }));
+    const err = realExecError({ kind: 'maxBufferOverflow', maxBufferBytes: 1024 });
     expect(err.code, `maxBuffer 溢出的错误名应当是 ENOBUFS（实际 ${JSON.stringify(err.code)}）⇒ 这一条喂进去的不是那个形状`).toBe('ENOBUFS');
     expect(err.signal, `node 结束它用的信号（实际 ${JSON.stringify(err.signal)}）`).toBe('SIGTERM');
 

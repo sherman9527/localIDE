@@ -6,7 +6,7 @@ import { NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
 import { venvPythonPath } from '../../src/ide/env.js';
 import { TUTORIAL_CLAIMS, TUTORIAL_TIMEOUT_MS, markerOf } from './tutorial-claims.js';
-import { executedNotebookEvidence, nbconvertCrashEvidence } from './notebook-evidence.js';
+import { executedNotebookEvidence, nbconvertCrashEvidence, realExecError } from './notebook-evidence.js';
 
 /**
  * 教程 notebook 的**可运行性**闸门（WI-90 子项目 B，Task 1 = 闸门本体；教程本身是 Task 2/3/4）。
@@ -417,6 +417,10 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
    * 事在绿色断言下面活了三档。`kernel.test.ts` 常驻那组早在提交 `584c249` 就改成真 spawn ——
    * **同一个公共件只有一边有牙**，改公共件时另一边不会喊，这就是 WI-104 的形状。
    * ⇒ 下面每一条都真的起一个子进程（同一个 `process.execPath`，同一套造法），原样喂进去。
+   * ⚠ "同一套造法"从 WI-107 起是**字面意义上的同一份**：造法住在 `./notebook-evidence.js` 的 `realExecError`，
+   * 本文件与 `kernel.test.ts` import 同一个函数。原来两边各有一份（这里叫 `spawnFailingNode`、那边叫
+   * `realExecError(run)`），而两份漂开的坏法不是"少判"，是"两边都绿而喂的不是同一个对象" ——
+   * 实测把本地那份换成手搓 `{status:3, signal:null}` 之后，隔壁整档照样 exit 0，没有一条红来通知。
    * 每条仍然判三件事：① **有界**（真 40KB stderr 进去，消息不许跟着长）；② **说得出超时**
    * （预算 / timeout / 超时）；③ **不许拿着别人的数字说话**：带 budget 的那次必须点名**本档**的
    * 135s/120s 且**不出现** 180（180 是 `kernel.test.ts` 的预算，逐字搬运时它跟着搬进了公共件，
@@ -425,7 +429,7 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
    * （node 换了字段、execFileSync 不抛了）判据只是安静地喂进别的东西 —— 那正是本轮要根掉的病。
    */
   it('真 error ①：非 0 退出（status=3、signal=null、stderr 40KB）⇒ 报得出 code=3 与"非 0 退出"，且不许落到"被信号终止"那一支', () => {
-    const err = spawnFailingNode(noiseScript('process.exit(3)'));
+    const err = realExecError({ kind: 'nonZeroExit', exitCode: 3, noiseBytes: CRASH_NOISE });
     // 形状钉子：这两行就是 584c249 那个 bug 的病灶本身（旧判读把 `null !== undefined` 读成"有 signal"）
     expect(err.status, `node 把退出码放在 status 上（实际 ${JSON.stringify(err.status)}）⇒ 喂进去的已经不是"进程自己非 0 退出"那个形状，先重读 notebook-evidence.ts 里那张实测表`).toBe(3);
     expect(err.signal, `非 0 退出时 signal 是 null（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是那个形状`).toBeNull();
@@ -441,7 +445,7 @@ describe('教程闸门的常驻判据（宿主也跑）', () => {
   });
 
   it('真 error ②：execFileSync 的 timeout 真的到点（SIGTERM + ETIMEDOUT）⇒ 落"被信号终止"那一支并点名本档的 135s/120s；不传 budget 时不点名任何秒数', () => {
-    const err = spawnFailingNode(noiseScript('setTimeout(() => {}, 1_000_000_000)'), { timeoutMs: 300 });
+    const err = realExecError({ kind: 'execTimeout', timeoutMs: 300, noiseBytes: CRASH_NOISE });
     expect(err.signal, `预算到点时 node 给的是 SIGTERM（实际 ${JSON.stringify(err.signal)}）⇒ 这一条喂进去的不是"到点"那个形状`).toBe('SIGTERM');
     expect(err.status, `被外力结束时没有退出码（实际 ${JSON.stringify(err.status)}）⇒ status 有数就说明这一次没被外力结束，喂进去的不是"到点"那个形状`).toBeNull();
 
@@ -515,39 +519,18 @@ function hasNbconvert(): boolean {
   }
 }
 
-// ──────── WI-104：给常驻那组造**真 error** 的三个小工具（造法与 `kernel.test.ts` 常驻那组同一套） ────────
+// ──────── WI-104 / WI-107：常驻那组喂的**真 error** 由 `./notebook-evidence.js` 的 `realExecError` 造 ────────
 
 /**
- * 子进程往 stdout/stderr 里写这么多字符。为什么要有这段噪声：`nbconvertCrashEvidence()` 的"消息有界"
+ * 子进程往 stdout/stderr 各写这么多字符 —— 这是**本档判据的参数**，不是造法（造法在公共件里）。
+ * 为什么这一档要带噪声而 `kernel.test.ts` 那组不带：`nbconvertCrashEvidence()` 的"消息有界"
  * 那条判据在空 stderr 上是**空判** —— Spark 的真实日志实践上没有上界，判据必须在真字节上判一次，
  * 否则"上限被删掉"这件事只在下一次真崩溃里暴露（而那次正好是最不该把报告写成日志转储的一次）。
  * 40KB 足够撑破那段搬运的上限，又远小于 `maxBuffer`，不会自己变成另一种故障形状。
+ * ⚠ 噪声的**写法**（往哪个流写、写多少个字符）现在只有一份，在 `realExecError` 里 ——
+ * 本文件原来那份 `noiseScript` 与 `spawnFailingNode` 就是把它挪过去之后删掉的（WI-107）。
  */
 const CRASH_NOISE = 40_000;
-
-/** 先写噪声、再按 `tail` 失败的那段子进程源码（`process.exit(n)` / 挂住不返回）。 */
-const noiseScript = (tail: string): string => `process.stdout.write('y'.repeat(${CRASH_NOISE})); process.stderr.write('x'.repeat(${CRASH_NOISE})); ${tail}`;
-
-/**
- * 起一个**注定失败**的 node 子进程，把 `execFileSync` 抛的那个 error 原样交出去。
- * ⚠ `stdio` 必须显式设成 pipe：默认那一种会把子进程的 stderr **转发到父进程 stderr**，
- *   于是那 40KB 噪声会同时刷进测试报告 —— 而这一条用例存在的理由恰恰是"报告不许是日志转储"。
- * ⚠ 没抛就是这一条**没有判据对象** ⇒ 当场红，不许退化成"那就喂一份手搓的"（那正是 WI-104 要根掉的病）。
- */
-function spawnFailingNode(script: string, opts: { timeoutMs?: number } = {}): Record<string, unknown> {
-  const run = () =>
-    execFileSync(process.execPath, ['-e', script], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
-    });
-  try {
-    run();
-  } catch (err) {
-    return err as Record<string, unknown>;
-  }
-  throw new Error('execFileSync 没有抛 ⇒ 这一条没有真 error 可喂（node 的行为变了，或者这里的命令写错了）。把"没抛"当成通过，就是又造一个绿下面的谎');
-}
 
 /** error 上那段 stderr/stdout 的字节数（`encoding: 'utf8'` 时是字符串，别的形状算 0）。 */
 const byteLen = (v: unknown): number => (typeof v === 'string' ? v.length : 0);

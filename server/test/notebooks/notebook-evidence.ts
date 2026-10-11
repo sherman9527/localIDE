@@ -1,7 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
 
 /**
- * notebook 执行证据的**两处提取**（从 `server/test/notebooks/kernel.test.ts` 原样搬来，WI-90 Task 1 Step 2）。
+ * notebook 执行证据的**三处提取**（前两件从 `server/test/notebooks/kernel.test.ts` 原样搬来，WI-90 Task 1 Step 2；
+ * 第三件 `realExecError` —— "造真 error 的造法" —— 是 WI-107 从 `kernel.test.ts` 与 `tutorials.test.ts` 各一份的
+ * 状态里合并进来的）。
  *
  * 为什么要搬而不是复制第三份：`kernel.test.ts`（A1 的 smoke 那一档）与 `tutorials.test.ts`（WI-90 的教程那一档）
  * 判的是同一件事的两半 —— "从 `jupyter nbconvert --to notebook --execute --stdout` 那份输出里只取
@@ -9,12 +12,18 @@ import { NOTEBOOK_KERNELS } from '@arena/shared';
  * 这两件的教训都不是审美：它们在上一轮终审里被逐条打磨过（有界证据 / allow_errors 的分工 / 枚举里必须有 timeout 这一条自己），
  * 抄第二份的地方会各自漂，而漂掉的那一份**不会报错**，只会在下一次故障里给出比不判更差的报告。
  *
+ * ⚠ 第三件（造法）同源的理由与前两件**不一样**，别混着宣称：前两件漂了会少判，而造法漂了的最坏形状是
+ * "两边各自都绿，但喂的是两个不同的对象" ⇒ "同一个公共件只有一组真对象在判它"这句话悄悄不成立，
+ * 而它的坏法没有任何一条红会来通知（实测见 `realExecError` 的注释）。
+ *
  * ⚠ 不要把它做成"从测试文件 import 测试文件"：`kernel.test.ts` 一被 import 就带着它那些
  * `describe.skipIf` 与 `beforeAll`（真的 `ensureIdeEnv`）在别人的档位里跑一遍。
  * ⇒ 工具住在**非** `.test.ts` 的模块里（本仓库的同类做法：`server/test/notebooks/` 下同目录的 helper）。
  * 它不在 `verify-coverage.test.ts` 的孤儿判据对象里（那条只收 `*.test.ts`），
  * 但它在 `server/tsconfig.test.json` 的 include 覆盖面里（`test` 目录下的全部 `.ts`）⇒ 类型检查照跑，
  * 覆盖面由 `typecheck-coverage.test.ts` 那条"不存在没被任何 tsconfig 认领的测试文件"钉住。
+ * 现在这个模块自己会 `execFileSync` 起子进程（只有 `realExecError` 用得到，判读那几件不碰它），
+ * 所以**import 它不再有副作用**：模块加载时什么都不跑，起进程只在被调用时。
  */
 
 /** nbconvert 那份输出里，断言消息最多可以带走这么多字符（评审 minor：别把 32MB 打进报告）。 */
@@ -298,4 +307,91 @@ export function executedNotebookEvidence(raw: string): { stdout: string[]; error
     }
   });
   return { stdout, errors };
+}
+
+// ──────── 造**真 error** 的造法（两个测试文件共用的一份，WI-107） ────────
+
+/**
+ * `execFileSync` 失败时那种"注定要失败"的场景，一种对应 `nbconvertCrashEvidence` 上方实测表的一行。
+ * 做成**判别联合**而不是"一个 kind 字符串 + 一堆互不相干的选项"：选项与场景不匹配时编译期就该红，
+ * 而运行时静悄悄少给一个参数（比如 timeout 没传）会让造出来的对象根本不是那一行的形状 ——
+ * 那正是本轮要根掉的东西在造法这一侧的化身。
+ */
+export type RealExecErrorSpec =
+  /** 进程自己非 0 退出（最常见的那一种真故障：kernel 没注册、notebook 不合法…） */
+  | { kind: 'nonZeroExit'; exitCode?: number; noiseBytes?: number }
+  /** 调用方给的 `timeout` 真的到点（node 给 SIGTERM + `ETIMEDOUT`） */
+  | { kind: 'execTimeout'; timeoutMs: number; noiseBytes?: number }
+  /** 可执行文件不在 PATH 里（宿主档没有 jupyter 就是这一种，spawn 级失败） */
+  | { kind: 'spawnEnoent' }
+  /** stdout 撑破 `maxBuffer`（node 给 SIGTERM + `ENOBUFS`，结论与"预算到点"是两件事） */
+  | { kind: 'maxBufferOverflow'; maxBufferBytes?: number };
+
+/** 一个谁都起得来、但永远起不成的可执行文件名（`spawnEnoent` 那一行用；带 WI 前缀免得撞真工具）。 */
+const MISSING_EXECUTABLE = 'arena-no-such-executable-wi92-xyz';
+/** 挂住不返回的源码（`execTimeout` 那一行用：要的是真 SIGTERM，不是"我们假装是 SIGTERM"）。 */
+const HANG_SCRIPT = 'setTimeout(() => {}, 1_000_000_000)';
+/** `maxBufferOverflow` 那一行往 stdout 写这么多字符，远大于任何调用方给的缓冲上限。 */
+const OVERFLOW_BYTES = 200_000;
+
+/** 先往 stdout/stderr 各写 `bytes` 个字符、再跑 `tail`。`bytes` 为 0 时就是 `tail` 本身。 */
+const noiseScript = (bytes: number, tail: string): string =>
+  bytes > 0 ? `process.stdout.write('y'.repeat(${bytes})); process.stderr.write('x'.repeat(${bytes})); ${tail}` : tail;
+
+/**
+ * **跑一次真 spawn**，把 node 抛出来的那个 error 原样交出去 —— `kernel.test.ts` 与 `tutorials.test.ts`
+ * 两边判的都是它，不再各写一份造法（WI-107）。
+ *
+ * 为什么要同源，理由不是 DRY 本身：这两档判的是**同一个公共件的错误形状**，而形状判据的可信度取决于
+ * "喂进去的那个对象真的是 node 造的"。两份造法可以各自漂（一份显式设 `stdio`、一份没设；一份带 40KB 噪声、
+ * 一份没有），漂完之后两边喂的就不是同一个对象，于是"两边都有牙"这句话只在那一边成立 ——
+ * 而坏掉的时候没有任何一条红会来通知你（实测：把 `kernel.test.ts` 那份造法换成手搓的 `{status:3, signal:null}`，
+ * 本文件那一组的①照样绿、`tutorials.test.ts` 整档 exit 0）。⇒ 造法住在这里，两边 import。
+ *
+ * 三个不许退化的点：
+ * ① **没抛就是红**，不许"那就喂一份手搓的"——那正是 `584c249` 修掉的那个病（全绿下面把话说反）。
+ * ② `stdio` 显式设成 pipe：默认那一种会把子进程的 stderr **转发到父进程 stderr**，
+ *    于是噪声那 40KB 会同时刷进测试报告 —— 而"报告不许是日志转储"恰恰是这套 plumbing 存在的理由。
+ * ③ 噪声是**参数**不是造法的一部分：`tutorials.test.ts` 那条"有界"判据要在真字节上判（空 stderr 是空判），
+ *    `kernel.test.ts` 那几组不需要。两种都从同一份 `noiseScript` 出来，所以字节数不同而形状相同。
+ *
+ * 返回 `Record<string, unknown>`：调用方要拿 `err.status` / `err.signal` / `err.code` **先钉形状再喂**
+ * （少了钉形状那一段，"造真 error"这件事自己坏掉时判据只是安静地喂进别的东西）。
+ *
+ * ⚠ 这些形状是在**宿主 Windows / node v24.14.1** 上逐键量出来的（`killed` 键压根不存在、非 0 退出时
+ * `code` 键也不存在）。容器那一档（Linux node）跑的是同一组常驻判据，所以形状若在两个平台不一致，
+ * 红会红在这里 —— 那正是这里要的判据，不是需要绕过的麻烦。
+ */
+export function realExecError(spec: RealExecErrorSpec): Record<string, unknown> {
+  const run = (): unknown => {
+    switch (spec.kind) {
+      case 'nonZeroExit':
+        return execFileSync(process.execPath, ['-e', noiseScript(spec.noiseBytes ?? 0, `process.exit(${spec.exitCode ?? 3})`)], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      case 'execTimeout':
+        return execFileSync(process.execPath, ['-e', noiseScript(spec.noiseBytes ?? 0, HANG_SCRIPT)], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: spec.timeoutMs,
+        });
+      case 'spawnEnoent':
+        return execFileSync(MISSING_EXECUTABLE, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      case 'maxBufferOverflow':
+        return execFileSync(process.execPath, ['-e', `console.log('x'.repeat(${OVERFLOW_BYTES}))`], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          maxBuffer: spec.maxBufferBytes ?? 1024,
+        });
+    }
+  };
+  try {
+    // `run()` 的返回值**故意不用**：这条造法的唯一产出就是那个 error —— 子进程正常退出说明命令写错了，
+    // 而"拿一个成功结果当 error 喂判据"正是本函数要防的那种谎，所以宁可抛。
+    run();
+  } catch (err) {
+    return err as Record<string, unknown>;
+  }
+  throw new Error('execFileSync 没有抛 ⇒ 这一条没有真 error 可喂（node 的行为变了，或者这里的命令写错了）。把"没抛"当成通过，就是又造一个绿下面的谎');
 }
