@@ -36,12 +36,20 @@
 | 成本与性能治理（`data-cost`） | 单位成本口径（$/TB 扫描、$/作业、$/查询）；识别"重复物化 + 冗余报表副本 + 小文件"三大浪费；shuffle/存储/计算三者互相省错的陷阱；把成本纳入需求评审 | 冷热分层 + 生命周期策略；compaction/统计维护的显式预算；查询级成本归因（按团队/表/作业）；BI/agent 侧缓存与并发限制；开源 OLAP 替代部分托管仓库的迁移评估 | rubric | llm-rubric | 成本归属、效率 |
 | 隐私与数据治理（`data-governance-privacy`） | 数据分级（PII/敏感）、最小化与去标识化（假名化、k-匿名、差分隐私的适用边界）；列级/行级权限与动态脱敏；访问审计与用途限制（Apple 式"数据最小化 + 端侧优先"） | 端侧聚合 + 上传加噪（DP）；属性基/关系型授权（Airlock 风格）与 catalog 层策略（Iceberg REST / Polaris 类）；PII 发现的自动化扫描；湖仓删除请求落地（crypto-shredding + 备份/湖内延迟删除承诺） | rubric | llm-rubric | 隐私工程、合规 |
 | 特征平台与时点正确性（`feature-store-pit`） | 训练-服务偏斜（不同代码路径）、point-in-time correctness（join 时用事件时间而非到达时间）、标签泄漏（用了未来信息）、离线/在线一致性校验、回填成本 | Airbnb 开源 Chronon 的窗口聚合/批次定义模型（offline batch + realtime 补差）、embedding 基座（如 Airbnb "Vibe" 类项目，2025，需核实细节）；把特征作为可版本化契约 + 在线缓存新鲜度 SLA；向量湖（Paimon/Iceberg 向量索引）承载 embedding | rubric | llm-rubric | ML/数据平台协同 |
+| Spark on K8s 的资源账与失效模型（`spark-on-k8s-resources`） | **五本账互不换算**：requests（只决定调度）/ limits（cgroup 硬边界，内存超 = OOMKilled、CPU 超 = 节流不报错）/ JVM heap（`spark.executor.memory`，必须小于 limits）/ memoryOverhead+off-heap（netty、native、线程栈）/ Python worker 的 RSS（pandas/Arrow 的账不在堆里）；`OOMKilled` ≠ `OutOfMemoryError` ≠ `Pending` ≠ "task 变慢"，四条诊断与四种修法各不同 | `toPandas()` 的峰值是转换途中的**多份副本**、不是结果的净大小（本仓库 `local[2]` 实测：2M 行 int64 净 16 MB、进程高水位一次涨约 550 MB ≈ 35 倍；且 `ru_maxrss`/`VmHWM` 是高水位，`del` 之后不掉 —— 仪器选错就读错）；heap+overhead+Python 一起进 limits 的留余量算法；"heap 调大反而更容易被杀" | rubric | llm-rubric | 生产稳定性、资源治理 |
+| Spark on K8s 的提交、身份与分发（`spark-on-k8s-submit-and-identity`） | `deploy-mode cluster` 下 driver 是集群里的 Pod、提交端断开不影响作业，代价是状态只能从 API/历史服务读；driver 要**申请** executor Pod ⇒ 需要命名空间内最小 RBAC（`pods`/`pods/log`/`services`/`configmaps`），`cluster-admin` 等于把集群交给一个作业；`local:///` 与"远端分发"语义不同；**只给 driver 装依赖，executor 一定失败**（同一镜像 ≠ 继承临时安装） | tag 必须 pin（`latest` 叠 `imagePullPolicy` 与节点缓存会造出"同一 YAML 跑出不同解释器"）；镜像构建期定 Python 版本与依赖，`--py-files` 只搬代码不搬环境；Spark Connect + Operator 组合成"笔记本/批/作业"统一入口 | rubric | llm-rubric | 平台工程、安全边界 |
+| Spark on K8s 的 shuffle、临时盘与弹性（`spark-on-k8s-shuffle-storage`） | executor Pod 被删/被抢占 = 它写的 shuffle 分区没了 ⇒ 上游 stage 重算；动态分配与"缩容即丢 shuffle"天生矛盾，三档解法各有运维代价：ESS sidecar / PVC 承载 shuffle / 远端服务化（Celeborn 类）；`emptyDir` 配 tmpfs 的 shuffle **花的是内存那本账**，不是免费磁盘；`ephemeral-storage` 与 inode 耗尽会伪装成随机失败 | "计算与 shuffle 存储分离"成为弹性前提；PDB 只保护自愿中断（不保护 OOM/抢占），长作业要靠 checkpoint 与可重算性；ClusterAutoscaler 只看 requests ⇒ 调大 limits 不会多要节点、只会更容易被杀 | rubric | llm-rubric | 弹性伸缩、成本 |
+| Spark Operator、多租户与调度公平（`spark-on-k8s-operator-multitenancy`） | `spark-submit` 是命令式、operator + `SparkApplication` CRD 是声明式（期望态 + reconcile + 状态机），迁移要管 CRD 版本兼容、镜像 tag、密钥不进 Git；隔离层次由弱到强：namespace+ResourceQuota+LimitRange → PriorityClass/抢占 → 独立节点池（taint/toleration/亲和）→ 独立集群；**K8s 上没有 YARN queue**，批作业的公平性与优先级必须落到具体机制（上层调度器/配额+抢占/队列系统） | GitOps 化作业定义与 RBAC 同仓 review；Spot/抢占环境下的 checkpoint 与重算预算；allocatable 要给系统组件与短时并行副本留余量（不把 allocatable 全卖给应用）；成本口径按 `$/TB 扫描`、`$/作业` 而非 `$/核时` | rubric | llm-rubric | 多租户治理、平台演进 |
 
 ## 排课与出题建议
 
 - 30 天里每周保证：1 个 `code + pyspark`（真跑，用例区分度最高）、1 个 `code + mysql`（口径/建模）、1 个 `rubric + llm-rubric`（选型/架构）。
-- 专题文件：`spark-shuffle-tuning.md`、`pyspark-correctness-and-perf.md`、`streaming-lakehouse-flink-paimon-iceberg.md`、`olap-engine-selection.md`、`warehouse-modeling-quality-backfill.md`。
-- 所有 `pyspark` 判分题必须能在单机 Spark（`local[*]`）跑通：禁止依赖 HDFS/Kafka/Hive Metastore，必要时用内存表或临时目录 parquet；断言用行集 + 指标（如 shuffle 记录数）双验证。
+- 专题文件：`spark-shuffle-tuning.md`、`pyspark-correctness-and-perf.md`、`streaming-lakehouse-flink-paimon-iceberg.md`、`olap-engine-selection.md`、`warehouse-modeling-quality-backfill.md`、`spark-on-kubernetes-deployment.md`。
+- 所有 `pyspark` 判分题必须能在单机 Spark 跑通 —— 但**两套底座的并行度不是同一个数**（2026-10-11 按代码核实）：
+  `pyspark` 走 `judge/spark_worker.py:66` 的 **`local[2]`**（notebook 的 `arena-pyspark` kernel 也是 `local[2]`），
+  `spark-scala` 走 `judge/harness/ArenaScalaHarness.scala:29` 的 **`local[*]`**。
+  ⇒ 凡判据依赖分区数/task 数（`defaultParallelism`、分桶是否均匀、`coalesce` 后剩几个 task），**必须按所属那一套写**，
+  写成 `local[*]` 的 pyspark 题在 2 核语义下会时对时错。禁止依赖 HDFS/Kafka/Hive Metastore，必要时用内存表或临时目录 parquet；断言用行集 + 指标（如 shuffle 记录数）双验证。
 
 ## 语料文件
 
@@ -51,5 +59,6 @@
 | [`pyspark-correctness-and-perf.md`](./pyspark-correctness-and-perf.md) | PySpark 正确性与性能：语义陷阱、4.x 新武器、可判分写法 |
 | [`spark-dataset-api.md`](./spark-dataset-api.md) | Scala Dataset API：什么时候该用 typed Dataset |
 | [`spark-shuffle-tuning.md`](./spark-shuffle-tuning.md) | Spark Shuffle 深水区：机理、ESS、AQE 与倾斜（PySpark 可判分） |
+| [`spark-on-kubernetes-deployment.md`](./spark-on-kubernetes-deployment.md) | Spark on K8s：五本资源账、Pod 生命周期与失效模型、shuffle/临时盘三档解法、Operator 与多租户（**口径题，本机不可真跑**） |
 | [`streaming-lakehouse-flink-paimon-iceberg.md`](./streaming-lakehouse-flink-paimon-iceberg.md) | 实时链路与湖仓：Flink 2.x + Iceberg v3 / Paimon + 流批一致 |
 | [`warehouse-modeling-quality-backfill.md`](./warehouse-modeling-quality-backfill.md) | 数仓建模、口径治理与回溯：让"数字一致"成为可验证的工程属性 |

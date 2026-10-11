@@ -342,14 +342,16 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
   （`venv ok` / `rows 15`）、读活进程 `/proc/<pid>/environ` 的 PATH 首项、探 DNAT 目标上有没有人听、
   **直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter** 解 kernelspecs（同文件里那组假 `/proc` 树 /
   假 executed-notebook JSON 的用例是宿主侧的 plumbing，另一码事）。
-- **「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」**（WI-90）：`tutorials.test.ts` 16 条里
-  有 4 条要真 Spark，三篇 senior 级教程（`content/notebooks/01-skew-and-hot-keys.ipynb`、
-  `02-small-files-and-partitioning.ipynb`、`03-reading-the-plan-and-aqe.ipynb`）**各起一次 session 真跑**。
+- **「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」**（WI-90，第四篇归 WI-108）：`tutorials.test.ts` 17 条里
+  有 5 条要真 Spark，四篇 senior 级教程（`content/notebooks/01-skew-and-hot-keys.ipynb`、
+  `02-small-files-and-partitioning.ipynb`、`03-reading-the-plan-and-aqe.ipynb`、
+  `04-memory-accounts-and-the-boot-time-ceiling.ipynb`）**各起一次 session 真跑**。
   实测（量具 = vitest 的 per-test duration，取自 `data/verify-tutorials.json`；
-  **26.31s / 56.31s / 18.98s**（2026-10-10，合计 ≈101.6s）与 **34.31s / 65.69s / 24.49s**（2026-10-11，合计 ≈124.5s）
-  两趟都记在这里 —— 差别在宿主负载，判据一个字没动，所以这里给区间不给单值）——
+  **四篇全绿那一趟（2026-10-11）**：27.82 / 59.76 / 20.96 / 16.22，合计 ≈124.8s；
+  三篇时代的两趟是 26.31 / 56.31 / 18.98（≈101.6s）与 34.31 / 65.69 / 24.49（≈124.5s）——
+  同一判据在负载不同的读数上漂 30% 是常态，所以这里给区间不给单值）——
   单篇目标 ≤90s、闸门硬预算 `TUTORIAL_TIMEOUT_MS=120s`（cell 级超时按秒从它推导，"单位是秒不是毫秒"
-  由常驻那组按量级判住）。整档 CV 里那两条阶段的原文：`教程 notebook：16 passed / 0 skipped / 16 total ✓`，
+  由常驻那组按量级判住）。整档 CV 里那两条阶段的原文：`教程 notebook：17 passed / 0 skipped / 17 total ✓`，
   上一条阶段则报 `Test Files 2 passed (2) / Tests 53 passed (53)`（kernel 35 + embed 18，容器里 0 skipped）。
   两层判据缺任何一层都放过一种真实的坏法：**执行层** = 零 `output_type=error` 且 kernel 必须是
   `arena-pyspark`（写成 `python3` 照样跑得绿，而它跑在镜像自带的系统解释器上 ⇒ 红线①的示范）；
@@ -667,7 +669,7 @@ localLearning/
 │  ├─ db/               node:sqlite（WAL + user_version 迁移）
 │  └─ config.ts / log.ts / ports.ts / shutdown.ts（优雅退出序列 —— 从组合根拆出来才测得到）
 ├─ web/src/             pages(6：Today/Bank/Progress/Question/Ide/Notebook) / components / lib / styles / router.tsx
-├─ content/             questions(7 类；题数以 git 跟踪的基线为准，`npm run bank:check` 报) / notebooks(smoke + 三篇 PySpark 教程) / knowledge / curriculum / jd-cache / hidden.json
+├─ content/             questions(7 类；题数以 git 跟踪的基线为准，`npm run bank:check` 报) / notebooks(smoke + 四篇 PySpark 教程) / knowledge / curriculum / jd-cache / hidden.json
 ├─ data/                arena.db(.wal) / logs / judge / ide-env / notebooks / e2e / llm-bridge.log   ← 不进 git
 ├─ docker-cache/        npm / pip / maven 缓存（依赖全留在仓库内）
 ├─ docker/              Dockerfile / entrypoint.sh / mirrors.sh / jupyter/（kernelspec 与 kernel 侧脚本）/ BUILDINFO.md

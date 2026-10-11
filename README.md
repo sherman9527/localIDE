@@ -137,18 +137,21 @@ Jupyter（`docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起，它自己
   闸门与页面都拦不住这种写法（红线①的可复现性靠**镜像 + 闸门**，见 `docs/JUDGING.md` 红线①最后两段）。
 - **示例**在 `content/notebooks/*.ipynb`（进 git、可 diff）。启动时"缺失才复制"进 `data/notebooks/`，
   **绝不覆盖你改过的那份**；铺不进去（只读挂载 / 磁盘满）会单独说成一句话，不伪装成"没有示例"。
-  里面是 `00-smoke-pyspark.ipynb`（环境自检，`kernel.test.ts` 真跑它）加**三篇 senior 级 PySpark 教程**（WI-90）：
+  里面是 `00-smoke-pyspark.ipynb`（环境自检，`kernel.test.ts` 真跑它）加**四篇 senior 级 PySpark 教程**
+  （前三篇 WI-90，第四篇 WI-108）：
   `01-skew-and-hot-keys`（数据倾斜与热 key：加盐两阶段 + 广播阈值改 join 的算子）、
   `02-small-files-and-partitioning`（小文件：落盘文件数 = 非空 writer 数、读侧打包、`openCostInBytes` 的方向与流传口径相反）、
-  `03-reading-the-plan-and-aqe`（读执行计划与 AQE：合并读侧归 `coalescePartitions` 那一个开关）。
+  `03-reading-the-plan-and-aqe`（读执行计划与 AQE：合并读侧归 `coalescePartitions` 那一个开关）、
+  `04-memory-accounts-and-the-boot-time-ceiling`（五本内存账与启动期锁死的上限：`toPandas()` 的峰值是净大小的
+  几十倍、`local` 模式压根没有 executor 内存这本账、这个容器没有 memory limit ⇒ `OOMKilled` 那一族在本机不可复现）。
   **它们不是"读读就好"的文档**：容器档把它们**各真起一次 Spark 跑一遍**（`./start.sh --verify` 的
   「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」两条阶段）。判据两层 ——
   执行层（零 cell 异常，且 kernel 必须是 `arena-pyspark`）与结论层（每条方向性结论都要打出一个
   `WI90[篇名][slug] OK` 标记，打出的集合与 `server/test/notebooks/tutorial-claims.ts` 那份注册表**双向相等**）。
   实测用时（量具 = vitest 报的那条用例 duration，取 `data/verify-tutorials.json`；
-  2026-10-11 那一趟 `./start.sh --verify`：篇 1 **34.31s**、篇 2 **65.69s**、篇 3 **24.49s**，合计 **≈124.5s**；
-  2026-10-10 那趟同一条量具是 26.31 / 56.31 / 18.98（≈101.6s）—— 差在宿主负载不在判据，
-  所以这里给的是**区间**而不是一个数）。
+  **2026-10-11 那一趟四篇全绿的读数**：篇 1 **27.82s**、篇 2 **59.76s**、篇 3 **20.96s**、篇 4 **16.22s**，
+  合计 **≈124.8s**；三篇时代两趟分别是 26.31/56.31/18.98（≈101.6s）与 34.31/65.69/24.49（≈124.5s）——
+  同一判据在负载不同的两台上漂 30% 是常态，所以这里给的是**区间而不是一个数**）。
   单篇目标 ≤90s、闸门硬预算 120s（`TUTORIAL_TIMEOUT_MS`），kernel 是 **`local[2]`** 而不是判题 `spark-scala`
   那个 `local[*]`。跑完不留活内核：每篇最后一个 cell 必须是语句级的 `spark.stop()`，
   且"打印 marker 的那个 cell 里必须有语句级 `assert`" —— 这两条在**宿主档**（每次提交都跑的那一档）就有牙，
