@@ -1624,6 +1624,16 @@
   `c.ServerApp.identity` 之外的 `cull_idle_timeout` ⇒ 攒的是"每份打开过的笔记各一个 JVM"，活到 session 被删或 jupyter 重启。
   与 WI-95（抢 CPU）是同一族账，加不加 culling 同样是一次决定。
 
+- [ ] WI-112 **跨 session 记忆文件是门禁的盲区**（2026-10-12，由一次我自己造成的、**全绿通过 pre-commit 的**数据损失发现）：
+  追加里程碑时把脚本写成一行 `io.open(p,'w').write(io.open(p).read() + add)` —— 求值顺序是**先开写模式清空文件、
+  再去读那个已经空了的文件** ⇒ `memo.md` 从 3833 行变 20 行，而 `npm run verify:fast` EXIT=0、提交成功。
+  发现它靠的不是测试，是 `git show --stat` 里那行 `memo.md | 3843 ---------`（删除远大于新增这个形状本身值得停一眼）。
+  内容没真丢（上一版在库里，`git show HEAD~1:memo.md` 完整恢复），但**下一次未必这么幸运**。
+  ｜要收的形状（一条最小判据，不要多）：`memo.md` 与 `HANDOVER.md` 的**字节数/里程碑数量不得低于上一个提交**，
+  且 `HANDOVER.md` 的 COMPLETED 条目只增不减 —— 也就是把"这些文件只能变长"钉住。
+  ⚠ 为什么它和别的守卫不同：这两个文件**不被任何运行时读**，坏了没有功能会红，只有下一个读它的人（人或 agent）
+  会拿到残缺的世界模型 —— 那正是本项目最贵的一种坏法（"记忆里的谎"）。挂在 `server/test/regression/` 下，
+  并注意 `verify-coverage` 要求新 `*.test.ts` 被某条阶段认领。
 - [ ] WI-111 **`errorKind":"sandbox"` 的语义要按 runner 拆开**（WI-72 收口时查出来的新账，2026-10-11）：
   同一个 errorKind 现在至少被**两种互不相干的故障**共用 —— `react-vitest` 用它说"脚手架落盘后不见了 /
   跑一半被删"（`server/src/judge/runners/react-vitest.ts:264`），而 mysql 那几题（`sql-mysql-0011/0015/0002`，
