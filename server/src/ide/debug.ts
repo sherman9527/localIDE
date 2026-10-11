@@ -117,6 +117,21 @@ async function finish(session: Session, event: DebugEvent): Promise<void> {
   await session.handle?.dispose().catch(() => undefined);
 }
 
+/**
+ * 后端没给 `message` 时**不许退成一句什么都没说的好话**（WI-105 断掉的那一环）。
+ * 后端给的 `text` 本身就是诊断（SyntaxError 原文、"连不上调试端口 + 哪个端点"那句），
+ * 把它丢掉就等于把一次真故障说成一次"没能开始调试"—— 冤红就是这么来的。
+ * 兜底仍然要留（后端可能真的没给），但它带上那段字。
+ * ⚠ 带上限：`text` 是**无界**字符串（一次 traceback 几十 KB 很正常），而 message 会进响应体也会被记进日志 ——
+ * 与 `notebooks/proxy.ts` 那条"字段要可枚举、可 grep，不许挂无界字符串"是同一个理由。
+ */
+export function honestMessage(given: string | undefined, text: string | undefined, fallback: string): string {
+  if (given) return given;
+  const detail = text?.replace(/\s+/g, ' ').trim();
+  if (!detail) return fallback;
+  return `${fallback}：${detail.length > 200 ? `${detail.slice(0, 200)}…` : detail}`;
+}
+
 function handleEvent(session: Session, event: BackendEvent): void {
   if (session.dead) return;
   switch (event.type) {
@@ -142,7 +157,7 @@ function handleEvent(session: Session, event: BackendEvent): void {
     case 'error':
       // 消息由后端给：它才知道是"语法错误没跑起来"还是"跑到一半抛异常"。
       // 管理器这里下结论就会说谎（SyntaxError 曾被报成"用户代码抛了异常"）。
-      void finish(session, { status: 'error', output: event.text, message: event.message ?? '调试结束' });
+      void finish(session, { status: 'error', output: event.text, message: honestMessage(event.message, event.text, '调试结束') });
       return;
   }
 }
@@ -270,7 +285,9 @@ export async function startDebug(
     return {
       status: 'error',
       output: event.type === 'error' ? event.text : event.type,
-      message: event.type === 'error' ? (event.message ?? '没能开始调试') : '没能开始调试',
+      // 后端给了 message 就原样转出去；没给也要带上后端给的那段字，不许只留"没能开始调试"
+      message:
+        event.type === 'error' ? honestMessage(event.message, event.text, '没能开始调试') : '没能开始调试',
       session: null,
       sessions: sessions.size,
       maxSessions: DEBUG_MAX_SESSIONS,

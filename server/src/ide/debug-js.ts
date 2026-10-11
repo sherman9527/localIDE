@@ -25,9 +25,64 @@ import { clipRepr, type DebugBackend, type DebugHandle, type LaunchResult } from
  * 而不是管理器那条兜底的"调试进程退出了，请重新开始调试"（听起来像出错）。
  */
 
+/**
+ * ws URL 只能**按行**判，不能按 chunk 判：**chunk 边界由负载决定** —— 管道的读写窗口、这个进程
+ * 同时还往别的 fd 写多少、Node 每次 `read()` 拿到多少，都会把边界挪到别的字符上。
+ * `Debugger listening on ws://127.0.0.1:54321/<会话标识>` 这一行于是可能被切成
+ * `…:5` + `4321/<会话标识>`，而在一片 chunk 上直接跑这个正则时 `\S+` 会在 chunk 末尾停下 ⇒
+ * 拿到一条被截断的 URL ⇒ 连不上 ⇒ 用户看到的是一句与真因无关的话（WI-105 的病灶，
+ * WI-92 那条"随机红"的根因候选）。同一刀还切出第二个症状：后半截 `4321/<会话标识>` 不像噪音，
+ * 会被当成用户的输出转给界面 —— 凭据于是漏进转录里。
+ * ⚠ 别把它"优化"回逐 chunk：低负载的开发机上它永远绿，机器忙的时候它永远红，而那正是最难查的红。
+ */
 const WS_URL_RE = /Debugger listening on (ws:\/\/\S+)/;
+/**
+ * 调试器自己写在 stderr 上的广播。**这一份清单同时管三件事**：哪几整行算噪音要丢掉、
+ * 哪段"还没写完的行"要扣住（因为它可能是其中一条）、切开超长行时按什么判。
+ * 分成两份写一定会漂（`INSPECTOR_NOISE_RE` 原先就是单独一份字面量，而那正是漏凭据的地方）。
+ */
+const INSPECTOR_MARKERS = [
+  'Debugger listening',
+  'Debugger attached',
+  'Waiting for the debugger',
+  'For more information',
+  'DevTools listening',
+  'Warning: ',
+];
 /** node 写在 stderr 上的调试器广播，不是用户程序的输出（stderr 整条会进输出，所以必须在这里挡住）。 */
-const INSPECTOR_NOISE_RE = /^(Debugger listening|Debugger attached|Waiting for the debugger|For more information|DevTools listening|Warning: )/;
+const INSPECTOR_NOISE_RE = new RegExp(`^(${INSPECTOR_MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`);
+/**
+ * 攒行时最多扣多少个字符。**必须有这个上界**：扣着的每一字符都是这个服务的内存，
+ * 而"一直不写换行"是任何进程都做得到的事（`process.stderr.write('x')` 循环）。
+ * 8_000 的依据：node 那几句广播实测 ~90 字符，正经输出的一行远小于这个数才会被扣住；
+ * 越界的代价只是"这一行不再按协议判"，**不丢字节**。
+ */
+const STDERR_HOLD_CAP = 8_000;
+
+const HIDDEN_SESSION_ID = '‹已隐藏会话标识›';
+const UUID_RE = /[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/gi;
+/** `ws://host:port/<会话标识>`：组 1 是说得出口的 host:port，后面那一段不是。 */
+const WS_ENDPOINT_RE = /^(wss?:\/\/[^/?#\s]+)\/[^\s]+/i;
+
+/** 兜底：任何 uuid 形状的字都不许从消息里出去（`err.message` 自己也可能回显整条 URL）。 */
+function redactSessionId(text: string): string {
+  return text.replace(UUID_RE, HIDDEN_SESSION_ID);
+}
+
+/**
+ * 把 node 那条 ws URL 说成一句**可以贴进用户消息**的话。
+ * 为什么不能原样贴：路径那一段是 CDP 的会话凭据 —— 拿到它 + 那个端口就能驱动被调试的进程
+ * （node 自己就是这么设计的，连错那一段会被拒）。判据与 `notebooks/*` 那把尺子量的是同一件事：
+ * **凭据不进消息**（那边剥的是 `?token=`，这里剥的是会话标识段）。
+ * 端口留着：它是"我们连的到底是哪一个"这句话的全部信息量，而且是个有界的数字 ——
+ * 与 `proxy.ts` 记过的"上游 host:port 勉强可接受"同一档。
+ */
+function describeWsEndpoint(raw: string): { label: string; sessionIdMissing: boolean } {
+  const found = WS_ENDPOINT_RE.exec(raw);
+  if (found?.[1]) return { label: `${found[1]}/${HIDDEN_SESSION_ID}`, sessionIdMissing: false };
+  // 没有路径段就是截断形状（`ws://127.0.0.1:5` 那种），这里没有凭据可藏，原样说反而更有用
+  return { label: redactSessionId(raw), sessionIdMissing: true };
+}
 
 type CdpValue = {
   type?: string;
@@ -105,6 +160,71 @@ function waitForWsUrl(child: ChildProcess, read: () => string | null, timeoutMs:
   });
 }
 
+/**
+ * stderr 的**攒行**读取器：协议按行判，普通字照样当场走。
+ *
+ * 两条纪律在这里并存，缺一条都会换来一个新故障：
+ * - **判协议必须等一行凑齐**（见 `WS_URL_RE` 上面那段：chunk 边界由负载决定）。
+ * - **但"攒行"不许把实时性一起攒掉**：调试面板的 `output` 事件是按块往前端推的，
+ *   用户程序打到 stderr 的字（进度条、半行诊断）如果非要等换行才发，界面就会"半天不动"。
+ *   所以这里的判据是"**这条还没写完的行有没有可能是 node 的广播**"：不可能就立刻发，
+ *   有可能（已经是某条的前缀，或已经以某条开头）才扣着 —— 扣着的量由 `STDERR_HOLD_CAP` 封顶。
+ */
+function createStderrReader(handlers: { onWsUrl: (url: string) => void; emitText: (text: string) => void }): {
+  feed: (chunk: string) => void;
+  flush: () => void;
+} {
+  let buffer = '';
+  const probe = (text: string): string => text.replace(/^\s+/, '');
+  /** 可能是调试器的广播 ⇒ 不能提前发出去（发出去的就是半条凭据），也不能现在就判掉。 */
+  const couldBeInspectorLine = (text: string): boolean => {
+    const head = probe(text);
+    return head.length > 0 && INSPECTOR_MARKERS.some((marker) => head.startsWith(marker) || marker.startsWith(head));
+  };
+  const handleLine = (line: string): void => {
+    const found = WS_URL_RE.exec(line);
+    if (found?.[1]) {
+      handlers.onWsUrl(found[1]);
+      return; // 协议行不进用户输出：它带着会话凭据
+    }
+    if (INSPECTOR_NOISE_RE.test(probe(line))) return;
+    handlers.emitText(`${line}\n`);
+  };
+  return {
+    feed(chunk: string): void {
+      buffer += chunk;
+      for (;;) {
+        const at = buffer.indexOf('\n');
+        if (at < 0) break;
+        const line = buffer.slice(0, at);
+        buffer = buffer.slice(at + 1);
+        handleLine(line);
+      }
+      if (buffer.length > STDERR_HOLD_CAP) {
+        // 越界的这一"行"已经不是广播的形状了（广播是固定那几句），所以这里**不按协议判它**：
+        // 原样交出去 + 一句说明。悄悄丢掉是另一种静默降级，而按协议判它等于让用户能伪造 URL。
+        const oversized = buffer;
+        buffer = '';
+        handlers.emitText(oversized);
+        handlers.emitText(`\n[调试输出里有一行超过 ${STDERR_HOLD_CAP} 字符还没写完，已当场切开继续（不切开就是无界缓冲）]\n`);
+        return;
+      }
+      if (buffer.length > 0 && !couldBeInspectorLine(buffer)) {
+        const eager = buffer;
+        buffer = '';
+        handlers.emitText(eager);
+      }
+    },
+    flush(): void {
+      // 进程结束时缓冲区里剩的就是"最后一行"：不交出去就是**永远丢一行**（丢的可能是那条 URL）
+      if (buffer.length === 0) return;
+      const tail = buffer;
+      buffer = '';
+      handleLine(tail);
+    },
+  };
+}
+
 export const jsBackend: DebugBackend = {
   kind: 'javascript',
   async launch({ code, breakpoints, startupBudgetMs, emit }): Promise<LaunchResult> {
@@ -135,18 +255,29 @@ export const jsBackend: DebugBackend = {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => emit({ type: 'output', text: chunk }));
     child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => {
-      const found = WS_URL_RE.exec(chunk);
-      if (found?.[1] && !wsUrl) {
-        wsUrl = found[1];
-        return;
-      }
-      if (INSPECTOR_NOISE_RE.test(chunk.trimStart())) return;
-      stderrText += chunk;
-      // 用户自己的 stderr（console.error 等）也是"这段时间里程序打出的字"，
-      // 只攒到最后一条错误里 = 平时看不见（契约写的是 stdout + stderr）
-      emit({ type: 'output', text: chunk });
+    const stderr = createStderrReader({
+      onWsUrl: (url) => {
+        // 先到的一条算数：node 那一行永远在用户输出之前，所以后面再出现同形的行是用户伪造的，
+        // 不能让它把我们指向别的 ws 端点。
+        if (!wsUrl) wsUrl = url;
+      },
+      emitText: (text) => {
+        stderrText += text;
+        // 用户自己的 stderr（console.error 等）也是"这段时间里程序打出的字"，
+        // 只攒到最后一条错误里 = 平时看不见（契约写的是 stdout + stderr）
+        emit({ type: 'output', text });
+      },
     });
+    child.stderr.on('data', (chunk: string) => stderr.feed(chunk));
+    /**
+     * 进程结束 / 管道 EOF 时把**还没写完的最后一行**交出去（`flush`），两路都接：EOF 与 exit
+     * 谁先到都不该让那一行蒸发。
+     * ⚠ 这里的注册顺序是功能性的：这一条比 `waitForWsUrl` 自己的 `exit` 监听**早**，
+     * Node 按注册顺序派发同名事件，于是 flush 一定先跑完，那边读到的才是"flush 之后的 wsUrl"。
+     * 顺序反过来（或把 flush 摘掉）就是"URL 正好停在退出那一刻 ⇒ 永远拿不到"。
+     */
+    child.once('exit', () => stderr.flush());
+    child.stderr.once('end', () => stderr.flush());
     /** 一句话说清是哪种失败。管理器不猜，所以这句得由唯一知道答案的地方给。 */
     const failureMessage = (text: string): string =>
       text.includes('SyntaxError')
@@ -198,7 +329,24 @@ export const jsBackend: DebugBackend = {
     } catch (err) {
       killQuietly(child);
       await cleanup();
-      return { ok: false, event: { type: 'error', text: `连不上 node 的调试端口：${(err as Error).message}` } };
+      const endpoint = describeWsEndpoint(seen);
+      const reason = redactSessionId((err as Error).message);
+      return {
+        ok: false,
+        event: {
+          type: 'error',
+          text: `连不上 node 的调试端口：${reason}`,
+          /**
+           * 这一格不能省（WI-105 的第 2 点）：少了 `message`，管理器那句
+           * `event.message ?? '没能开始调试'` 就会把这里的全部真话换成一句什么都没说的好话 ——
+           * 于是"随机红"既修不掉也查不了（`memo.md` 里那条原文就是 `起不来：没能开始调试`）。
+           * 话术要同时说得出两件事：连的是**哪一个端点**（脱敏后）、那条 URL **像不像被截断的**。
+           */
+          message:
+            `连不上 node 的调试端口（拿到的是 ${endpoint.label}，` +
+            `${endpoint.sessionIdMissing ? '这条少了会话标识段，形状就像被截断的' : '形状完整，会话标识已脱敏'}）：${reason}`,
+        },
+      };
     }
 
     let nextId = 1;
