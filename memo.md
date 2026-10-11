@@ -3812,14 +3812,22 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
   "复发时日志会自己点名机制"。查出来的真问题另开 **WI-111**：`errorKind=sandbox` 被 react 的
   "工作区消失"与 mysql 的"底座没就绪"共用，而日志行只有分类没有消息 ⇒ 读者分不出是哪一种。
 
-### 里程碑 BI 之后：WI-110 的 ① 也当场做完了（ scratch 归档）
+### 里程碑 BI 之后：WI-110 的 ① 也当场做完了（`data/` 的 scratch 归档）
 
-82 项一次性文件/目录移进 （**没删任何东西**，恢复方法就写在那个目录的 README 里）。
-准入是两条同时成立：HANDOVER.md 在被跟踪文件里命中 0，且 mtime 早于 24 小时。
-留下的 19 项各有实名读者（八家 、 归 entrypoint、 是 e2e 现场、
- 归 、 整族留下是因为它的**输出**被  当读数引用 ——
-不把生产者与证据分开放）。移动后  EXIT=0，并额外确认代码里没有  这种动态前缀（命中 0），
-所以那三个  不是改名就找不到的活工作区。
+82 项一次性文件/目录移进 `data/archive/scratch-2026-10-11/`（**没删任何东西**，恢复的一行命令写在那个目录的 README 里）。
+准入是两条同时成立才动：`git --no-pager grep -F -l "<名字>"` 在任何被跟踪文件里**命中 0**，且 mtime 早于 24 小时。
 
-**查出来一件值得记住的事**：那 19 项里有 6 项之所以算被引用，引用处是  自己。
-⇒ 工作板正在变成垃圾的存留理由。这不是这些文件的理由，是工作板该按 WI-109 那条历史陈述要标过期再清一遍的理由。
+留下的 19 项各有实名读者：八家 `drafts-*` 归生成器与 `check_provenance.py`；`notebook-server.log` 归
+`docker/entrypoint.sh`；`playwright-artifacts` / `playwright-report` 是 e2e 的失败现场（`ARENA_E2E_KEEP` 那条路要用）；
+`verify-judge.json` / `verify-tutorials.json` 归 `assert-ran.mjs` 每轮读；`wi94-t3-probe*` **整族**留在原处 ——
+因为它的输出 `wi94-t3-probe2-out.json` 被 `embed.test.ts` 当读数引用，不把生产者与证据分开放，
+哪怕生产者本身零引用。
+
+两条验证：移动后 `npm run verify:fast` EXIT=0；另外专门查过代码里有没有 `scratch-` 这种**动态拼出来**的目录前缀
+（`git grep` 命中 0）⇒ 那三个 `scratch-*` 不是"改了位置就找不到"的活工作区。这一条是查的，不是假设的：
+上一批清理刚学过"机械 grep 看不见模板字符串"（`ReplPanel.tsx` 里那句 `ide-repl-` 加 `entry.kind` 的动态拼接，
+差点让 `ide-repl-in` / `ide-repl-out` 被当成死 CSS 删掉）。
+
+**查出来一件比这次整理更值得记的事**：那 19 项里有 **6 项**之所以算"被引用"，引用它的地方是 `HANDOVER.md` 自己
+（工作板在某条 WI 里提到过这个文件名）。⇒ **工作板正在变成垃圾的存留理由。** 这不是这些文件的理由，
+是工作板需要按 WI-109 那条"历史陈述要标过期"再清一遍的理由。
