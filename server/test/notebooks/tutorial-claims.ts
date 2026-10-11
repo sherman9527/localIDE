@@ -90,6 +90,59 @@ export const TUTORIAL_CLAIMS: Record<string, string[]> = {
   // ⚠ 这一篇没有 aqe-not-always-faster 那条 slug：它押的是 `coalesced < planned and t > 0`，前半与上一条重复、
   //   后半恒真（Ruling(B1) 已否）。"更少分区 ≠ 更快"只活在 notebook 的 markdown 里，本机实测方向反倒是 AQE 更快。
   '03-reading-the-plan-and-aqe.ipynb': ['broadcast-threshold-changes-join', 'shuffle-partitions-is-a-plan-number', 'aqe-coalesces-shuffle-read', 'aqe-coalescing-is-one-switch'],
+  // 篇 4（WI-108）。五本"内存账"各一条 slug；与篇 1-3 刻意不重叠（倾斜 / 小文件 / AQE / 计划文本那边都讲过了，这篇只讲内存与配置的账）。
+  // 每条判据都是"同一镜像每次跑都给同一个东西"的那一类；墙上时间一条都不 assert（只打印 —— Ruling(B1) 的规矩，篇 1-3 先例）。
+  // heap-ceiling-is-boot-time = 一句"driver 堆上限是**启动期**锁死的实体，不是运行时可改的配置"。三条 assert 三面：
+  //   `maxMemory() == 512*1024*1024`（上限就是 kernel.json 里那句 `--driver-memory 512m`；逐字节相等顺带量了"512m 解析成 512 MiB"）、
+  //   `spark.conf.set("spark.driver.memory","2g")` 抛 `AnalysisException` 且消息含 `CANNOT_MODIFY_CONFIG`
+  //     ⚠ 用 except + 两条 assert，不许裸 except 吞掉：吞掉之后"没抛"与"抛了但没判"长得一模一样（简报 §3 第一行同判）；
+  //   set 之后 `maxMemory()` 逐字节不变（"改了也没用"要有读数，不能只靠正文那一句）。
+  // conf-default-is-type-checked = 一句"SQLConf 的双参 `get(key, default)` 会**给默认值做类型校验**，且你传的那个
+  //   default **顶替的是注册项自己的缺省值** ⇒ '读不到就回缺省'这条路在 int 键上是炸的、在其它键上是骗人的"。
+  //   四条 assert 是四格对照（⚠ WI-108 落地轮按第三/四轮**新量**的读数把简报那一格对照扩成了整套，见报告"新量到的读数"）：
+  //   `get("spark.sql.shuffle.partitions") == "200"`（单参读得到注册项缺省）、
+  //   `get(同一个 int 键, "(unset)")` 抛 `IllegalArgumentException` 且消息含 `should be int`（正面：默认值要过该键的类型转换）、
+  //   `get("spark.driver.memory", "(unset)")` **不抛且回 "512m"**（对照：raw 层有值 ⇒ 你传的 default 被忽略；简报只给了这一格）、
+  //   `get("spark.sql.extensions", "(unset)")` 回 "(unset)" 而单参回 Python None（对照：字符串型注册键不过校验，
+  //     而"回默认"在这里恰恰是**骗人**：那个键的行为是"没设过"，不是"(unset)"）。
+  // local-mode-has-no-executor-account = 一句"local 模式下'executor 内存'这本账**压根不存在**，而 `defaultParallelism`
+  //   有活值却没有配置项"。五条 assert：`sc.defaultParallelism == 2`（活值）、
+  //   `sc.getConf().get("spark.default.parallelism","(unset)") == "(unset)"`（同一个东西换处读法就没了 ⇒ 这两条押的是
+  //   **同一个键的两种读法不一致**，正是"读不到所以没配"那种误判的解毒剂）、
+  //   `spark.conf.get("spark.executor.memory")` 抛（SQLConf 里没有这个键）、
+  //   `sc.getConf().get("spark.executor.memory","(unset)") == "(unset)"`（SparkConf 里也没有 ⇒ 不是读法不对，是这本账不存在）、
+  //   `sc.getConf().get("spark.driver.memory") == "512m"`（对照：driver 那本账存在且有名字）。
+  // topandas-peaks-above-its-result = 一句"`toPandas()` 花的是**转换过程中的副本**，不是结果的大小"。N = 2_000_000，
+  //   ⚠ slug 里那个 P 是**被迫小写**的（WI-108 落地轮实测）：本文件那条常驻形状判据 `/^[a-z0-9][a-z0-9-]{2,60}$/`
+  //   与 `tutorials.test.ts` 的 `printedSlugs()` 那张反向正则都只收小写 ⇒ 写作 `toPandas-…` 时**宿主档就地红**，
+  //   而且反向核对会看不见那条 marker（它抓的是 `[a-z0-9…]`）。形状判据住在不许我改的那个文件里，
+  //   所以改的是 slug：只动大小写，不动词。
+  //   七条 assert：`memory_usage(deep=True)` 的列 = N*itemsize、总和 = 列 + index（净大小可纯算 ——
+  //     ⚠ 简报 §3 写的是 `sum() == N * 8`，实测 16,000,128 ≠ 16,000,000：RangeIndex 那 128 字节也在 deep
+  //     用量里，等号按读数改成"可纯算的那两条"，见报告"简报里哪一句是错的"）、
+  //   `VmHWM 增量 >= 4 × 净大小`（保守下界；六次实测 35~36×，押下界而不是那个倍数）、
+  //   `abs(ru_maxrss - VmHWM) <= 2048`（两把尺量的是同一个高水位；容差是因为两次读数之间后台线程会碰页，
+  //     六次实测差值都是 0，但逐字相等属于"押 MB 级噪声"那一类）、`hwm_did_not_drop is True`（定义保证）、
+  //   同一瞬间 `VmHWM - VmRSS >= 100_000` kB（"两把尺差一个数量级"才是可押的那一条；六次实测 457k~461k kB）。
+  //   ⚠ 落地时**撤掉过一条**（实测推翻，不是偷懒）：`assert rss_rel < rss_after` —— del+gc 之后 VmRSS 的
+  //   降幅六次实测是 +3,020 / +1,696 / +1,712 / +732 / +700 / **-324** kB，最后一次不降反升 ⇒ 容器档真的
+  //   红过一次（`cell 9: AssertionError`）。MB 级的释放会被后台线程盖掉，押它得到的是一条每次跑可能翻转的
+  //   冤红 ⇒ 换成上面那条"同一瞬间的差"，降幅只打印。同类的还有"账落在 Python 侧"那半句（collect 与
+  //   toPandas 各自的 heap 增量 vs RSS 增量）：**只打印不 assert**，由 ④b 那一格当场量给读者看
+  //   （CITE 规矩：正文敢说"实测"的必须有一格打出来；④b 因此是**无 marker 的打印格**）。
+  // container-limit-is-absent-here = 一句"本机这个容器**没有** memory limit ⇒ `OOMKilled` 那一族失效模式在这台机器上
+  //   不存在，能观测到的只有 JVM 堆异常；这是通向 K8s 那本账的分界，不是缺陷"。三条 assert：
+  //   `/sys/fs/cgroup/memory.max` 连读三次且 `set(三次) == {"max"}`（⚠ 简报给的判据是
+  //   `len(set(...)) == 1`，那一条**三次都读到异常字符串也会点头** ⇒ 落地时收紧成"既稳定、又确实是 max"；
+  //   红在这里要说清是"compose 加了上限 / cgroup 布局变了"，即**正文过期**，不是判据太严）、
+  //   `memory.events` 里 `oom_kill == 0` 且 `oom == 0`（事件计数器：本机连"逼近过上限"都没发生过）。
+  //   ⚠ CPU 那本账（`availableProcessors() == 16` 而 `defaultParallelism == 2`）**只打印**：核数是宿主机的、
+  //   并行度是 kernel.json 写的，两者不等是设计如此 —— 押它等于把结论写成"这台机器配错了"。
+  // ⚠ 这一篇**没有** pyarrow 那条 slug：`pandas_udf` 在本镜像是 ImportError（PyArrow >= 4.0.0 must be installed），
+  //   那是"为什么本篇不用 pandas_udf 量 Python worker"的前置说明、不是一条方向性结论 ⇒ 只活在 ⑤ 那节 markdown 与
+  //   一格**只打印** `try_import(...)` 的读数里（没有结论就没有 marker：给"这个包没装"发 marker 等于让注册表
+  //   为一个与判题无关的事实承担双向相等）。
+  '04-memory-accounts-and-the-boot-time-ceiling.ipynb': ['heap-ceiling-is-boot-time', 'conf-default-is-type-checked', 'local-mode-has-no-executor-account', 'topandas-peaks-above-its-result', 'container-limit-is-absent-here'],
 };
 
 /**
