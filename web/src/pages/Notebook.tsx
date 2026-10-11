@@ -9,18 +9,27 @@ import {
 import { api } from '../api';
 import { errorMessage, isAbort } from '../lib/errors';
 import { useAsync } from '../lib/hooks';
-import { Badge, Loading } from '../components/AsyncState';
+import { Loading } from '../components/AsyncState';
 
 /**
- * 第五页：Jupyter notebook（A1 档 + WI-94 的内嵌）。
+ * 第五页：Jupyter notebook（A1 档 + WI-94 的内嵌 + 2026-10-10 用户点名的布局简化）。
  *
- * 状态卡是这里唯一由后端说话的地方，后端给得出的四种形状各一句，**不许合并**（后端已经按"修的是不同东西"分了 reason）：
- *   ① 在跑且给得出链接 → 「运行中」+ 一个能点开的地址；
+ * 简化动的是**容器**，不是话：「运行时」卡壳（`notebook-status-card`）、`card-head` 那层标题、
+ * 以及"这一页读到的示例（这次铺了什么）"整块（`notebook-files` 那份带徽标的清单 + `notebook-files-empty`
+ * 那句）按用户批的范围删掉了，三把按钮并进顶部的 `page-head` 工具条。删没删由判据钉，不靠人眼：
+ * `web/test/notebook.test.tsx` 与 `tests/e2e/notebook-page.spec.ts` 里各有一条"这几样必不出现"。
+ *
+ * 状态那一行是这里唯一由后端说话的地方，后端给得出的四种形状各一句，**不许合并**（后端已经按"修的是不同东西"分了 reason）：
+ *   ① 在跑且给得出链接 → 「运行中」+ 工具条里一把能点开的地址；
  *   ② 没在跑 → 「没在运行」+ 后端那句原因 + "做题不受影响"（判题不经过这个服务）；
- *   ③ kernel 没就绪 → 「准备环境」按钮 —— 缺的是 IDE 那份 venv，不是用户的写法；
+ *   ③ kernel 没就绪 → 工具条里的「准备环境」按钮 —— 缺的是 IDE 那份 venv，不是用户的写法；
  *   ④ 在跑、但 publicUrl 被 env 配坏（`running:true` + `reason` + 没有 url）：这一态既不是
- *      "点开它"也不是"没在运行"，两句都是谎。它必须自己占一块，还要点名坏掉的那一行 env
- *      —— 症状（页面没有链接）与"服务没起"一模一样，能区分它们的只有那句话。
+ *      "点开它"也不是"没在运行"，两句都是谎。它必须自己有一句，还要点名坏掉的那一行 env
+ *      —— 症状（没有可用的链接）与"服务没起"一模一样，能区分它们的只有那句话。
+ * 再加前端自己的两个读态「状态读不到」（unreachable）与「还没读到」（loading），一共五句话同住
+ * `notebook-status` 那一处三元链 —— "任何两句同时出现"结构上不可能，总判据是
+ * `web/test/notebook.test.tsx` 的「五态状态行两两互斥」。（这段理由原来写在状态卡的卡头注释里；
+ * 卡壳删的时候**不许把它一起删**，它就是"为什么五态不许合并"的原件。）
  *
  * ⑤ WI-94 Task 6 加进来的第五件事：**notebook 现在内嵌在这一页里**（左文件树 + 右 notebook），
  *    不再是"跳出去开一个独立标签页"。它带出一条与上面四态正交的规矩：
@@ -30,6 +39,8 @@ import { Badge, Loading } from '../components/AsyncState';
  *    页面上也永远不该出现带 token 的 notebook URL（钉在 `web/test/notebook.test.tsx`）。
  *    ①②③④ 各态下 iframe 只有一态出现：`view.kind === 'open'`。`running:false` 时那棵子树结构上
  *    到不了，摆一个空 iframe 就是说谎（e2e 那个实例永远是 `running:false`，它的判据建立在这条上）。
+ *    ⚠ 布局简化没有碰这一维：Jupyter 没起时右边那棵树**渲染不出来**，所以状态话与横幅区必须留着 ——
+ *    把"少一块 UI"做成"把话也删掉"，页面就只剩一张边界卡，那正是 WI-94 修掉的"空白 iframe 就是说谎"。
  *
  * 那几句边界话常驻，不随状态切换收起（IDE 那边同一课）：①环境共用（判题用的是另一套解释器，
  * 绝对路径拦不住）、②CPU 不在这页管辖内、③答案可读不是安全边界、
@@ -41,14 +52,17 @@ import { Badge, Loading } from '../components/AsyncState';
  * 浏览器层钉"展开之后那五段真的可见"（折叠着的元素在 Playwright 里 `textContent` 照样读得到，
  * 所以只数段落数抓不到"忘了展开"，那一半必须由可见性判据负责）。
  *
- * 还有一条**与上面四态正交**的诊断：`seedError`（示例铺不进去，评审 I-1）。它不许并进那四态里 ——
- * 并进去就把"磁盘/挂载的事"说成"服务的事"了；状态那一行此刻照旧说实话，这一句只在示例那一块说。
+ * 还有一条**与上面几态正交**的诊断：`seedError`（示例铺不进去，评审 I-1）。它不许并进状态那几句里 ——
+ * 并进去就把"磁盘/挂载的事"说成"服务的事"了；状态那一行此刻照旧说实话。它原来挂在示例那一块里，
+ * 块按用户批的范围删掉后它**换家到横幅区**：话留着，容器没了（删掉这句话才是静默降级 ——
+ * 磁盘只读时页面必须还会说"铺不进去"，而不是哑掉）。它旁边那句"没有示例"随块一起删是批过的：
+ * "这次铺了什么"与左边那棵"目录里现在有什么"是两件事，前者整块不要了，后者一字未动。
  * 左栏那份列表（`notebookFiles`）用的是**同一条纪律的孪生**：有 `error` ⇒「这一次读不到」，
  * `files:[]` 且没有 `error` ⇒「目录里就是没有」，**还没读到** ⇒ 两句都不许说，
  * **那一发整请求失败**（404 / 连不上，评审 I-1）⇒ 第三句「这一次没读到左栏那份列表」+ 错误文本。
  * 三句两两互斥（同一条三元链，结构上不可能同时出现），少任何一句都是一次静默降级。
  *
- * 这里**不做定时轮询**：状态一栏有个「刷新状态」按钮，「准备环境」完成后自动重读一次。
+ * 这里**不做定时轮询**：工具条上有一把「刷新状态」，「准备环境」完成后自动重读一次。
  * 理由是那个 GET 会顺手铺示例（`server/src/api/app.ts` 的路由里），定时轮询=定时做一遍磁盘 I/O；
  * 而"这一页开着不动时状态本来就不会自己变"。真要轮询，等 Task 10 拿着容器里的数据再决定。
  * 「刷新状态」重读的是这一页**全部**读出来的真相（状态 + 左栏那份列表）：只重读前者时，用户在
@@ -78,18 +92,19 @@ function viewOf(data: NotebookStatusResponse | null, error: string | null): Stat
 }
 
 /**
- * 状态卡里的一个分组壳：**没有内容就整个不渲染**。
+ * 横幅区的分组壳：**没有内容就整个不渲染**。
  *
- * 每条分隔线的意思是"上面那组说完了"。壳在而内容全是 `null` 时，页面上会出现一条
- * **没有任何话的空白带加一根分隔线** —— 读者会去找那句被"漏掉"的话，而它根本不存在。
- * 最常见的那一态（在跑、一切正常）本来会挂两条这种空带。
+ * 壳与上下留白的意思是"这里有话要说"。壳在而内容全是 `null` 时，页面上会出现状态行下面一段
+ * **没有任何话的空白带** —— 读者会去找那句被"漏掉"的话，而它根本不存在。2026-10-10 的布局简化
+ * 之后全场只剩这一个壳：状态行是"永远有一句话"的常驻块，不再需要壳；会整块缺席的只有横幅区。
  *
  * 这条只在真浏览器里看得见，两档自动化都照不出来：jsdom 没有布局（空壳与有内容的壳在
  * `textContent` 判据下一模一样），而 e2e 那个实例是 `running:false`（诊断那一组本来就有话）。
- * 它是 Step 3 第 8 条那两张截图（1440 / 480）里看见的，实测读数：`.nb-group` 四个，其中两个
- * `childElementCount: 0` 却 `height: 17px`、`borderTopWidth: 0.67px`。
+ * 它原是 Step 3 第 8 条那两张截图（1440 / 480）里量出来的（实测读数：`.nb-group` 四个，其中两个
+ * `childElementCount: 0` 却 `height: 17px`、`borderTopWidth: 0.67px` —— 那是四组时代的数据，
+ * 今天组数变了，"空壳占地方"这个故障面没变）。
  *
- * 判据分两层：`web/test/notebook.test.tsx` 数渲染出来的壳（DOM 形状），
+ * 判据分两层：`web/test/notebook.test.tsx` 数渲染出来的壳（DOM 形状，含 loading 态"壳必须为 0"），
  * `tests/e2e/notebook-page.spec.ts` 量每个壳的真实高度（布局）。
  *
  * ⚠ 空与不空**由 children 自己算**（`Children.toArray` 会把 `null` / `undefined` / `false` 全丢掉），
@@ -171,37 +186,58 @@ export default function Notebook() {
       <div className="page-head">
         <h2>Notebook</h2>
         <span className="muted small">本机 Jupyter · kernel 用的是网页 IDE 那份环境</span>
+        <span className="spacer" />
+        {/* 三把按钮并进这条工具条（用户点名"按钮合并到下面"；档位全是既有 .btn 系，不引新样式类）。
+            「在新标签页打开」只在 open 态渲染：给一条点开就是浏览器报错的死链比不给更坏（静默降级），
+            「准备环境」只在 blocked.length > 0 时渲染：全都就绪、或"缺的是 token 不是 venv"那一态，
+            给按钮都是让人白点。两把的**缺席**各有判据（web/test 的 down/nolink/unreachable 三条 +
+            e2e 在这个真实缺失态里钉的 count 0）。 */}
+        <button type="button" className="btn btn-sm" onClick={reloadStatus} disabled={loading} data-testid="notebook-reload">
+          {loading ? '读取中…' : '刷新状态'}
+        </button>
+        {view.kind === 'open' ? (
+          <a className="btn btn-sm btn-primary" href={data?.url} target="_blank" rel="noreferrer" data-testid="notebook-open">
+            在新标签页打开
+          </a>
+        ) : null}
+        {blocked.length > 0 ? (
+          <button
+            type="button"
+            className="btn btn-sm"
+            onClick={() => {
+              void prepare();
+            }}
+            disabled={preparing}
+            data-testid="notebook-prepare"
+          >
+            {preparing ? '准备中…' : '准备环境'}
+          </button>
+        ) : null}
       </div>
 
-      <section className="card" data-testid="notebook-status-card">
-        <div className="card-head">
-          <h3 className="card-title">运行时</h3>
-          <span className="spacer" />
-          <button type="button" className="btn btn-sm" onClick={reloadStatus} disabled={loading} data-testid="notebook-reload">
-            {loading ? '读取中…' : '刷新状态'}
-          </button>
-        </div>
+      {/* 一行状态：后端四种形状各一句 + 前端两个读态，一共五句，**不许合并** —— 各修什么、
+          为什么合并就等于"有一态没人说话"，见文件顶注释（那段理由原来就住在被删掉的卡头里，
+          搬家搬的是它）。五句同住这一处三元链，互斥由结构保证；逐字与互斥的判据都在
+          `web/test/notebook.test.tsx`。 */}
+      <div data-testid="notebook-status">
+        {view.kind === 'loading' ? <Loading label="正在读 notebook 状态…" cards={1} /> : null}
+        {view.kind === 'open' ? <p role="status">运行中 · Jupyter 在本机答话</p> : null}
+        {view.kind === 'down' ? <p role="status">没在运行</p> : null}
+        {view.kind === 'nolink' ? <p role="status">在跑，但地址给不出来</p> : null}
+        {view.kind === 'unreachable' ? <p role="status">状态读不到</p> : null}
+      </div>
 
-        <Group>
-          <div data-testid="notebook-status">
-            {view.kind === 'loading' ? <Loading label="正在读 notebook 状态…" cards={1} /> : null}
-            {view.kind === 'open' ? <p role="status">运行中 · Jupyter 在本机答话</p> : null}
-            {view.kind === 'down' ? <p role="status">没在运行</p> : null}
-            {view.kind === 'nolink' ? <p role="status">在跑，但地址给不出来</p> : null}
-            {view.kind === 'unreachable' ? <p role="status">状态读不到</p> : null}
-          </div>
-
-          {view.kind === 'open' ? (
-            <div className="row-wrap row">
-              <a className="btn btn-primary" href={data?.url} target="_blank" rel="noreferrer" data-testid="notebook-open">
-                在新标签页打开
-              </a>
-              <span className="tiny faint">
-                这一页右边已经内嵌了一份，左栏点文件名就切过去；这把是给"想要整个 Jupyter 界面"的人用的逃生链接。
-              </span>
-            </div>
-          ) : null}
-        </Group>
+      {/* 横幅区：状态行之外所有"此刻还有话要说"的都堆在这一个壳里，空则整块不渲染（Group 的规矩）。
+          open 解释句 / tokenless / nolink / down / 两条 error / missingSpec / blocked 那句原因 /
+          prepareLog / seedError —— 每条各修一件不同的事，合并即"有一件事没人说"；逐句措辞由测试钉着。 */}
+      <Group>
+        {/* 逃生链接的解释句：原来贴在按钮旁边，按钮上工具条后话留在原地（"这把/上面那把"指的就是
+            工具条里那一把 —— 它确实在这句话的上面）。 */}
+        {view.kind === 'open' ? (
+          <p className="tiny faint">
+            这一页右边已经内嵌了一份，左栏点文件名就切过去；这把是给"想要整个 Jupyter 界面"的人用的逃生链接。
+          </p>
+        ) : null}
 
         {tokenless ? (
           <p className="banner banner-warning" data-testid="notebook-tokenless">
@@ -211,108 +247,73 @@ export default function Notebook() {
           </p>
         ) : null}
 
-        <Group>
-          {/* ④ 这一态单独一块：给不出链接 ≠ 没在跑。坏的是 ARENA_NOTEBOOK_PUBLIC_URL 那一行 env。
-              措辞刻意绕开"没在运行"那四个字 —— 它们是另一态的话，两句同时出现读者就分不清了。
-              role 用 status 不用 alert（评审 Fix-1 的 Minor）：这是"配置坏了"的诊断，不是"你刚才那次
-              操作失败了"；alert 会打断屏幕阅读器当前的朗读，而邻块（down / tokenless / spec-missing）
-              说的同一类事并没有各自升级成报警。 */}
-          {view.kind === 'nolink' ? (
-            <p className="banner banner-warning" data-testid="notebook-nolink" role="status">
-              <span>Jupyter 确实在答话，只是这个实例拼不出能点开的链接 ⇒ 别按"服务没起"去处理，重启它修不了这一态。</span>
-              <span className="tiny mono">{view.reason}</span>
-            </p>
-          ) : null}
+        {/* ④ 这一态单独一句：给不出链接 ≠ 没在跑。坏的是 ARENA_NOTEBOOK_PUBLIC_URL 那一行 env。
+            措辞刻意绕开"没在运行"那四个字 —— 它们是另一态的话，两句同时出现读者就分不清了。
+            role 用 status 不用 alert（评审 Fix-1 的 Minor）：这是"配置坏了"的诊断，不是"你刚才那次
+            操作失败了"；alert 会打断屏幕阅读器当前的朗读，而邻块（down / tokenless / spec-missing）
+            说的同一类事并没有各自升级成报警。 */}
+        {view.kind === 'nolink' ? (
+          <p className="banner banner-warning" data-testid="notebook-nolink" role="status">
+            <span>Jupyter 确实在答话，只是这个实例拼不出能点开的链接 ⇒ 别按"服务没起"去处理，重启它修不了这一态。</span>
+            <span className="tiny mono">{view.reason}</span>
+          </p>
+        ) : null}
 
-          {view.kind === 'down' ? (
-            <p className="banner banner-warning" data-testid="notebook-down">
-              <span>做题不受影响：判题走的是另一条执行底座，不经过这个服务。</span>
-              <span className="tiny mono">{view.reason}</span>
-            </p>
-          ) : null}
+        {view.kind === 'down' ? (
+          <p className="banner banner-warning" data-testid="notebook-down">
+            <span>做题不受影响：判题走的是另一条执行底座，不经过这个服务。</span>
+            <span className="tiny mono">{view.reason}</span>
+          </p>
+        ) : null}
 
-          {/* 刷新失败而手上还有上一次读到的东西：状态照旧显示，但必须补一句"这次没读到"，
-              否则界面是在拿旧真相冒充新真相（本项目在桥 token 上付过同一次学费）。 */}
-          {error && data ? (
-            <p className="banner banner-danger" data-testid="notebook-error" role="alert">
-              <span>这次没读到，下面显示的是上一次读到的状态。</span>
-              <span className="tiny mono">{error}</span>
-            </p>
-          ) : null}
-          {error && !data ? (
-            <p className="banner banner-danger" data-testid="notebook-error" role="alert">
-              <span>状态没读到，做题不受影响。</span>
-              <span className="tiny mono">{error}</span>
-            </p>
-          ) : null}
+        {/* 刷新失败而手上还有上一次读到的东西：状态照旧显示，但必须补一句"这次没读到"，
+            否则界面是在拿旧真相冒充新真相（本项目在桥 token 上付过同一次学费）。 */}
+        {error && data ? (
+          <p className="banner banner-danger" data-testid="notebook-error" role="alert">
+            <span>这次没读到，下面显示的是上一次读到的状态。</span>
+            <span className="tiny mono">{error}</span>
+          </p>
+        ) : null}
+        {error && !data ? (
+          <p className="banner banner-danger" data-testid="notebook-error" role="alert">
+            <span>状态没读到，做题不受影响。</span>
+            <span className="tiny mono">{error}</span>
+          </p>
+        ) : null}
 
-          {missingSpec ? (
-            <p className="banner banner-warning" data-testid="notebook-spec-missing">
-              探到的 kernel 表里没有 <span className="mono">{NOTEBOOK_KERNELS.pyspark}</span> —— 那是镜像级的注册，
-              「准备环境」修不了它。多半是镜像没按 Dockerfile 重建：跑一次 <span className="mono">./start.sh --rebuild</span>。
-            </p>
-          ) : null}
-        </Group>
+        {missingSpec ? (
+          <p className="banner banner-warning" data-testid="notebook-spec-missing">
+            探到的 kernel 表里没有 <span className="mono">{NOTEBOOK_KERNELS.pyspark}</span> —— 那是镜像级的注册，
+            「准备环境」修不了它。多半是镜像没按 Dockerfile 重建：跑一次 <span className="mono">./start.sh --rebuild</span>。
+          </p>
+        ) : null}
 
-        <Group>
-          {/* kernel 没就绪（venv 还没建）与"表里没有 spec"是两件事：只有前者这个按钮有用。 */}
-          {blocked.length > 0 ? (
-            <div className="row-wrap row">
-              <button
-                type="button"
-                className="btn"
-                onClick={() => {
-                  void prepare();
-                }}
-                disabled={preparing}
-                data-testid="notebook-prepare"
-              >
-                {preparing ? '准备中…' : '准备环境'}
-              </button>
-              <span className="tiny faint">
-                {blocked.map((k) => k.id).join('、')} 现在跑不起来：{blocked.map((k) => k.reason ?? '原因未给').join('；')}
-              </span>
-            </div>
-          ) : null}
+        {/* 「准备环境」的按钮本体在工具条，这句"为什么点它"留在横幅区：kernel 没就绪（venv 还没建）
+            与"表里没有 spec"是两件事：只有前者那把按钮修得了。 */}
+        {blocked.length > 0 ? (
+          <p className="tiny faint">
+            {blocked.map((k) => k.id).join('、')} 现在跑不起来：{blocked.map((k) => k.reason ?? '原因未给').join('；')}
+          </p>
+        ) : null}
 
-          {prepareLog ? (
-            <p className="banner" data-testid="notebook-prepare-result" role="status">
-              {prepareLog}
-            </p>
-          ) : null}
-        </Group>
+        {prepareLog ? (
+          <p className="banner" data-testid="notebook-prepare-result" role="status">
+            {prepareLog}
+          </p>
+        ) : null}
 
-        <Group>
-          <div className="small nb-group-label">这一页读到的示例（"这次铺了什么"，与左边那棵"目录里现在有什么"是两件事）</div>
-          {data && data.notebooks.length > 0 ? (
-            <div className="row-wrap row tiny" data-testid="notebook-files">
-              {data.notebooks.map((n) => (
-                <span key={n.file} className="row">
-                  <span className="mono">{n.file}</span>
-                  <Badge tone={n.seeded ? 'primary' : 'plain'}>{n.seeded ? '这次新铺的' : '已存在，没动它'}</Badge>
-                </span>
-              ))}
-            </div>
-          ) : null}
-
-          {/* 评审 I-1 的前端那一半：后端现在把"示例铺不进去"单独成一个字段（`seedError`），
-              因为它与"没有示例"修的是不同东西 —— 前者查挂载/磁盘/权限，后者本来就没示例。
-              混着说的症状是读者去翻示例目录，而该修的是只读挂载。
-              语气仍按"配置/IO 诊断"写：运行时那一块（上面几行）此刻照旧说实话，这一行不宣称服务坏了。 */}
-          {data?.seedError ? (
-            <p className="banner banner-warning" data-testid="notebook-seed-error" role="status">
-              <span>示例这次没能铺进工作目录 —— 这是"铺不进去"，不是"没有示例"，也与 Jupyter 在不在跑无关。</span>
-              <span className="tiny mono">{data.seedError}</span>
-            </p>
-          ) : null}
-
-          {data && !data.seedError && data.notebooks.length === 0 ? (
-            <p className="tiny faint" data-testid="notebook-files-empty">
-              工作目录里现在没有示例：那是<span className="mono">没有</span>，不是铺失败（铺失败上面会单独点名原因）。
-            </p>
-          ) : null}
-        </Group>
-      </section>
+        {/* 评审 I-1 的前端那一半：后端把"示例铺不进去"单独成一个字段（`seedError`），因为它与
+            "没有示例"修的是不同东西 —— 前者查挂载/磁盘/权限，后者本来就没示例。混着说的症状是读者
+            去翻示例目录，而该修的是只读挂载。（"没有示例"那句连同它所在的示例清单一起，按 2026-10-10
+            用户批的范围删了；这句话因此只否定误解、不再引用页面上的另一块。）
+            语气仍按"配置/IO 诊断"写：状态那一行此刻照旧说实话，这一句不宣称服务坏了。 */}
+        {data?.seedError ? (
+          <p className="banner banner-warning" data-testid="notebook-seed-error" role="status">
+            <span>示例这次没能铺进工作目录 —— 这是"铺不进去"，不是"没有示例"，也与 Jupyter 在不在跑无关。</span>
+            <span className="tiny mono">{data.seedError}</span>
+          </p>
+        ) : null}
+      </Group>
 
       {view.kind === 'open' ? (
         <section className="card" data-testid="notebook-embed">
@@ -356,8 +357,8 @@ export default function Notebook() {
                   <span className="mono">{filesError}</span>
                 </p>
               ) : /* ⚠ 第五种形状（Task 7c）：`listing && filesError` = 上一轮读回来了、这一轮刷新整发失败。
-                   `useAsync` 失败那一支保留 `prev.data`（`web/src/lib/hooks.ts:41`），所以旧的那几份**还挂在
-                   上面的列表里** —— 此时一句都不说就是拿上一轮的真相冒充刚读到的（状态卡对同一件事早有先例：
+                   `useAsync` 失败那一支保留 `prev.data`（`web/src/lib/hooks.ts` 的失败分支），所以旧的那几份**还挂在
+                   上面的列表里** —— 此时一句都不说就是拿上一轮的真相冒充刚读到的（状态那一行对同一件事早有先例：
                    「这次没读到，下面显示的是上一次读到的状态」）。
                    它排在 `notebook-tree-empty` **之前**不是随手放的：旧的列表恰好是空的（上一轮"没有"、这一轮
                    "没读到"）时，先报"没读到"才是真话 —— 让"目录里现在没有笔记"赢就会把"还不知道"说成"没有"，
@@ -371,8 +372,8 @@ export default function Notebook() {
                 </p>
               ) : /* ⚠ 这里必须判 `listing &&`（= "这一次读回来了"），不能写
                    `(listing?.files ?? []).length === 0`：后者在"还没读回来"时也是 0，于是首屏会闪一句
-                   "目录里现在没有笔记" —— 那是把"还不知道"说成"没有"，与本文件里 `notebook-files-empty`
-                   （判的是 `data &&`）与 `seedError` 那条纪律同型。brief 原稿那段少了这一半，
+                   "目录里现在没有笔记" —— 那是把"还不知道"说成"没有"，与本文件 `seedError` 那条纪律同型
+                   （"这一次读过了吗"决定"没有"这句话有没有资格说出口）。brief 原稿那段少了这一半，
                    已按先例补上（加上上面那条"占位值改成 null"，两半合起来才真的拦得住；
                    `web/test/notebook.test.tsx` 那条 pending 的用例就是它的破坏性验证）。 */
               listing && listing.files.length === 0 ? (
@@ -383,7 +384,7 @@ export default function Notebook() {
             </div>
             {/*
               src 只能是**同源相对路径**（`/jupyter/…`，全部由 `@arena/shared` 那三个常量派生）。
-              为什么不是后端那把 `notebook-open` 的绝对地址：那串带的是 `http://127.0.0.1:7789/…`，
+              为什么不是后端那把 `notebook-open` 的绝对地址：那串给的是 `http://127.0.0.1:7789/…`，
               iframe 里的请求就会从"我们这条同源通道"变成"往另一台主机发跨源请求"。用户用
               `http://localhost:7788` 打开页面时，浏览器给这些请求判 `cross-site` ⇒ Jupyter 的
               Host/Origin 守卫（`--ServerApp.allow_remote_access=False`）直接拒，症状是 iframe 里

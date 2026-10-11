@@ -288,12 +288,15 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
 `files.ts`（左栏那棵树：只读目录名，Jupyter 没起来也照答，读不到给 `error` 而不是空数组）、
 `proxy.ts`（`/jupyter/*` 的两条通道：HTTP 与内核 ↔ 页面的 websocket，逐跳头摘掉、客户端塞的 token 先摘再注入我们那份）与
 `proxyGuard.ts`（**唯一的放行判据**：对端 + `Host` 的合取，不过就 403/503）。
-前端 `web/src/pages/Notebook.tsx`：状态卡（后端四种形状各一句，不许合并）+「准备环境」+
-"这次铺了什么"那份示例清单 + 五段常驻边界话（默认折进 `<details>`）+ 左栏树 + 右栏 iframe。
+前端 `web/src/pages/Notebook.tsx`：一行状态（后端四种形状各一句，不许合并）+ 工具条三把
+（刷新状态 / 在新标签页打开 / 准备环境，后两把各按状态出现）+ 横幅区（空则整块不渲染；
+`seedError` 那句诊断住在里面）+ 五段常驻边界话（默认折进 `<details>`）+ 左栏树 + 右栏 iframe。
+2026-10-10 用户点名的简化删的是**容器不是话**：「运行时」卡壳与"这次铺了什么"示例清单
+（`notebook-files`）整块没了，五态那句逐字未动，删没删由缺席判据钉（单元层 + e2e 各一条）。
 **内嵌那一路不带凭据**：iframe 的 src 只是同源路径，token 在服务端注入；
 `running:false` 时那棵子树结构上到不了（摆一个空白 iframe 就是说谎 —— e2e 那个实例永远是这一态，
 它的判据就建在这条上：`tests/e2e/notebook-page.spec.ts` 钉 `notebook-frame` / `notebook-tree` 计数为 0，
-同时钉 `notebook-files` 照旧列得出文件）。
+同时钉那块已删的示例清单（`notebook-files`）计数为 0 —— 用户点名删的东西也要有判据）。
 
 四条边界，每条都有闸门，不是约定：
 

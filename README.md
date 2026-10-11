@@ -122,7 +122,8 @@ C / C++ / MySQL 8 / Redis 7 / PySpark / Spark Scala。它与做题系统同容�
 Jupyter（`docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起，它自己带 `--ServerApp.base_url=/jupyter/`，
 所以页面里每个链接生来就在 `/jupyter/` 下面）。内嵌这一路**不带凭据**：token 由服务端在反代里注入，
 放行判据不过就在隧道里回 403/503；`running:false` 时那棵子树结构上到不了，页面上不会摆一个空白 iframe。
-状态卡那边另留一条**逃生链接**（`http://127.0.0.1:7789/jupyter/tree?token=…` —— 在新标签页打开时才需要，
+工具条上另留一把**逃生链接**（`http://127.0.0.1:7789/jupyter/tree?token=…` —— 只在 open 态出现，
+在新标签页打开时才需要，
 且 token 只在你本机点开的那次通信里附上去，判据是**合取**：
 **socket 对端地址**（内核给的）与 **`Host` 头是本机字面量**（`localhost` / `127.x` / `::1`）两条都要成立，
 因为单看对端拦不住 DNS rebinding（那种攻击里对端真的是 `127.0.0.1`），单看头拦不住局域网里伪造头的人；
@@ -156,7 +157,7 @@ Jupyter（`docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起，它自己
 - **Jupyter 掉了不会自己回来**：`./start.sh` 在镜像没变时不重建容器（实测 `Recreate` 计数 0），
   横幅会点名那条真能修好这个症状的命令 `docker compose up -d --force-recreate arena`。**故意不给它加看门狗**：
   重建容器会带走正在跑的 IDE 调试会话与判题任务，那一次执行是你的决定（`HANDOVER.md` WI-93）。
-- 服务起不来**不挡做题与判题**：状态卡照实说"没在运行"+ 原因（判题不经过这个服务）。
+- 服务起不来**不挡做题与判题**：状态那一行照实说"没在运行"+ 原因（判题不经过这个服务）。
 - 想验证环境真在工作：打开 `00-smoke-pyspark.ipynb`，右上角选 `PySpark (arena)`，Run All，
   预期三行 `python /opt/arena-ide-env/...`、`rows 15`、`venv ok`（那个 15 是 `range(6)` 里 id 的**和**，不是行数 6）。
 

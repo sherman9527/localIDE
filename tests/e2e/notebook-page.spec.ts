@@ -18,7 +18,7 @@ import { expect, test, type Page } from '@playwright/test';
  * ## 为什么这里没有 brief 原稿那条"非回环 ⇒ 不出现 notebook-open"
  *
  * 那不是一条会成立的条件：无 token 但服务在跑时页面**照样**渲染那个链接（钉住它的是
- * `web/test/notebook.test.tsx:65-72`，它要求的是"当场说破要贴一次 token"而不是把链接藏掉）。
+ * `web/test/notebook.test.tsx` 里「链接里没有 token」那条用例，它要求的是"当场说破要贴一次 token"而不是把链接藏掉）。
  * 照原稿写成断言它只会红，而最省事的"修法"是给非本机用户隐藏链接 —— 那正是本项目单测守着不许发生的
  * **静默降级**。所以这一条不写。（容器里非回环的那个对端正是**拿得到 token** 的那一支，判据在
  * `server/src/notebooks/status.ts` 的 `isLocalPeer`：回环或本进程默认网关。）
@@ -29,7 +29,7 @@ import { expect, test, type Page } from '@playwright/test';
  * 而这个实例结构上到不了 `running:true` —— 要它就得给 e2e 透传 token，等于拆掉上面 ⑥/③ 两条隔离判据。
  * 这里**不**用 `page.route` 伪造一份"在跑"的回话去凑那条断言：伪造载荷下"链接不存在"是 fixture 自己
  * 保证的，产品行为一分没测到，而真 Jupyter 的任何东西都没被碰。那一态由
- * `web/test/notebook.test.tsx:108-126` 在单元层钉住；浏览器这一层能诚实钉的是**反着的那半** ——
+ * `web/test/notebook.test.tsx` 的「在跑但 publicUrl 配坏」用例在单元层钉住；浏览器这一层能诚实钉的是**反着的那半** ——
  * 服务确实没在跑时，那句「Jupyter 确实在答话」（`notebook-nolink`）不许出现，出现就是谎。
  *
  * ## 这个文件断的三件（+ 顺手钉住的谎）
@@ -51,10 +51,19 @@ import { expect, test, type Page } from '@playwright/test';
  *    折叠着的 `<p>` 仍在 DOM 里，`textContent()` 与 `toHaveCount()` 都读得到它 ——
  *    所以只数段落数的话，"忘了展开"与"展开后根本看不见"这两种故障**都不会红**。
  *    真正有牙的是那句 `toBeVisible()`：删掉前面那次 `.click()` 它必红（本轮实测见 task-6-report.md）。
- * ⑥ **空的分组壳不许留在页面上**（每个 `.nb-group` 自带一条 `border-top` + 一段留白）。这一条是
- *    "真浏览器那一眼"（Step 3 第 8 条的两张截图）暴露的缺陷，两档自动化原本都照不出来：jsdom 没有
- *    布局（空壳与有内容的壳在 `textContent` 判据下长得一样），而这里的实例是 `running:false` ——
- *    诊断那一组本来就有话，只有「准备环境」那一组是空的。所以单元层数 DOM 形状、这里量真实盒子。
+ * ⑥ **空的分组壳不许留在页面上**。这一条是"真浏览器那一眼"（Step 3 第 8 条的两张截图）暴露的缺陷，
+ *    两档自动化原本都照不出来：jsdom 没有布局（空壳与有内容的壳在 `textContent` 判据下长得一样），
+ *    这里的实例是 `running:false` —— 横幅区此刻有那句"做题不受影响"撑着，壳**必须存在且不塌陷**；
+ *    "空则整块不渲染"的缺席那一半（loading 态壳数必须为 0）在单元层数 DOM 形状，这里量真实盒子。
+ *
+ * ## 2026-10-10 用户点名的布局简化动到哪一句（本文件的判据搬家而不是放宽）
+ *
+ * 卡壳（`notebook-status-card`）、标题「运行时」、"这次铺了什么"那块（`notebook-files`）按批的范围
+ * 整片删掉，三把按钮并入 page-head 工具条。判据随之搬家：`notebook-status-card` 由"count 1"变
+ * "count 0"（缺席判据，第一例）、`notebook-files` 由"列得出 smoke"变 count 0（同例），并新增
+ * 「运行时」标题必不出现。逐字没动的：状态话、五段边界话、横幅措辞；按钮显隐的判据一条没少
+ * （down 态 `notebook-open` / `notebook-prepare` 依旧 count 0 —— 它们现在住在工具条里，这条 e2e
+ * 恰好是最真的验证，因为这个实例**永远**是 down）。
  */
 
 type Collected = { errors: string[]; warnings: string[] };
@@ -135,13 +144,20 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
   // 展开之后这五段是真的**看得见**，不是只是挂在 DOM 上（折叠时它们对读者等于不存在）
   await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' })).toBeVisible();
 
-  // 示例清单与"在不在跑"无关：GET 顺手铺示例，所以 running:false 时也列得出那一份 smoke
-  await expect(page.getByTestId('notebook-files')).toContainText('00-smoke-pyspark.ipynb');
+  // 2026-10-10 用户点名的布局简化 —— 删没删要靠判据而不是人眼。这一态（running:false）正是
+  // "这次铺了什么"那块以前**必出现**的一态（GET 顺手铺示例，`data.notebooks` 与在不在跑无关，
+  // 原稿在这里断的是"列得出那份 smoke"）；现在它、卡壳、标题「运行时」都必须整片不在。
+  // `notebook-status-card` 以前钉的是 count 1（第二例里），判据**搬家**成了这里的 count 0。
+  await expect(page.getByTestId('notebook-files')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-files-empty')).toHaveCount(0);
+  await expect(page.getByTestId('notebook-status-card')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '运行时' })).toHaveCount(0);
+  expect(pageText, '那块的小标题还在 ⇒ "这次铺了什么"没删干净').not.toContain('这一页读到的示例');
 
-  // ⑥ **空的分组壳不许留在页面上**（真浏览器那一眼实测发现的缺陷，见 task-6-report.md）。
-  //    每个 `.nb-group` 带一条 `border-top` + 一段留白，所以"壳在而内容全是 null"的症状是
-  //    卡片里多出几条**没有话的空白带** —— 那是布局事实，jsdom 照不出来（单元层只能数 DOM 形状），
-  //    所以这一半判据必须在这里量真实盒子。这一态（running:false）里「准备环境」那一组正是空的。
+  // **空的分组壳不许留在页面上**（真浏览器那一眼实测发现的缺陷，见 task-6-report.md）。
+  //    壳带上下留白（简化前还带一条 border-top），所以"壳在而内容全是 null"的症状是状态行下面
+  //    多出**没有话的空白带** —— 那是布局事实，jsdom 照不出来（单元层只能数 DOM 形状 + 壳数），
+  //    所以这一半判据必须在这里量真实盒子。这一态（running:false）里那个唯一的壳由"做题不受影响"撑着。
   const groupBoxes = await page.$$eval('.nb-group', (els) =>
     els.map((e) => ({
       children: e.childElementCount,
@@ -149,16 +165,16 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
       borderTop: getComputedStyle(e).borderTopWidth,
     })),
   );
-  expect(groupBoxes.length, '一张卡里一个壳都没有 ⇒ 分组结构整个没了（那上面挂着分隔线与留白）').toBeGreaterThan(0);
+  expect(groupBoxes.length, '一个壳都没有 ⇒ 这一态那句"做题不受影响"没人说了（诊断话不许连壳一起删）').toBeGreaterThan(0);
   for (const g of groupBoxes) {
-    expect(g.children, '空的 .nb-group 还挂在页面上 ⇒ 多出一条没有话的空白带 + 一根分隔线').toBeGreaterThan(0);
+    expect(g.children, '空的 .nb-group 还挂在页面上 ⇒ 多出一条没有话的空白带').toBeGreaterThan(0);
   }
 
   // ④ WI-94 Task 6：`running:false` 这一屏不许出现内嵌那一块 —— 那棵子树在这个实例上结构上到不了，
   //   摆一个空 iframe 就是谎（`web/src/pages/Notebook.tsx` 的门是 `view.kind === 'open'`）。
   //   这一条与"这一页不 iframe 里真跑通了什么"无关，它判的是**缺席**。
-  //   注意 `notebook-files`（"这次铺了什么"）在上面照旧出现而 `notebook-tree`（"目录里现在有什么"）
-  //   必须不出现：两个 testid 一家一半，正是 Task 5 那条"两个语义不许合并成一个字段"的界面形状。
+  //   （简化前这里还有一句对照 —— "`notebook-files` 照旧出现而 `notebook-tree` 不出现"，两个 testid
+  //   一家一半；那块按用户批的范围删了，对照的左边那一半搬到了上面的 count 0 判据，这一半原样。）
   await expect(page.getByTestId('notebook-frame'), '服务没在跑却渲染 iframe ⇒ 读者对着一个空白框查一个不存在的服务').toHaveCount(0);
   await expect(page.getByTestId('notebook-tree')).toHaveCount(0);
   await expect(page.getByTestId('notebook-embed')).toHaveCount(0);
@@ -195,9 +211,10 @@ test('按「刷新状态」重读之后：链接依旧不出现，面板不重�
   await expect(page.getByTestId('notebook-frame')).toHaveCount(0);
   expect(fileRequests, '服务没在跑却打了那次 readdir ⇒ 页面在按一个它已经知道不存在的接口').toEqual([]);
 
-  // 一块面板一个实例：重复 key / 复用挂载在这里的表现就是"两个运行时块"或"按完钮多出一个是非不明的"
+  // 一块面板一个实例：重复 key / 复用挂载在这里的表现就是"两个运行时状态行"或"按完钮多出一个是非不明的"
   await expect(page.getByTestId('notebook-status')).toHaveCount(1);
-  await expect(page.getByTestId('notebook-status-card')).toHaveCount(1);
+  // （原来这里还有一条 `notebook-status-card` 的 count 1 —— 卡壳按 2026-10-10 用户点名的简化删了，
+  // "面板唯一"现在由上面那句判；卡壳自己的判据搬成第一例里的 count 0 缺席判据，不许再长回来。）
 
   // 这一态不许说另外三态的假话
   await expect(page.getByTestId('notebook-nolink'), '服务没在跑，那句"Jupyter 确实在答话"就是谎').toHaveCount(0);

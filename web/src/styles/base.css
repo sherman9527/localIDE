@@ -2283,7 +2283,7 @@ tbody th {
   width: 60%;
 }
 
-/* ─────────────── WI-94 第五页：运行时卡的分组留白 + 两栏内嵌 ───────────────
+/* ─────────────── WI-94 第五页：横幅区留白 + 两栏内嵌 ───────────────
    ⚠ 这里只准用 tokens.css 里真的定义过的变量。brief 原稿写的 `--space-md` / `--hover` / `--muted`
    在本仓库**一个都不存在**（间距阶梯是 --space-1…7，悬停底色走 --surface-2，弱文字是 --text-muted）：
    未定义的 var 不会报错，它静默 fallback（带兜底值的那条属性直接生效成兜底值，没兜底的就成了"这条属性
@@ -2291,22 +2291,16 @@ tbody th {
    所以变量名改成了既有 token，**没有**顺手往 tokens.css 里加新 token（加一个只有这一处用的档位
    等于给后面的改动留"其实存在两套间距体系"的坑）。 */
 
-/* 运行时卡内的分组：状态与操作 / 诊断横幅们 / 准备环境 / 示例那一堆，各成一组，组间留白。
-   以前这四堆是同层级一路排下来的，视觉上"这一张卡里全是话"，而它们的语气其实分四档。 */
+/* 第五页的横幅区壳（2026-10-10 布局简化：「运行时」卡壳与"这次铺了什么"那块删掉后，全场只剩这一个壳）。
+   上下 margin 替代了原来的组间分隔线 —— "空则整块不渲染"由 `Group()` 保证，这里只负责有话时的留白。
+   `.nb-group + .nb-group`（组间分隔线）与 `.nb-group-label`（示例清单的小标题）随多组结构与那块一起删 ——
+   不留无引用的死 CSS。 */
 .nb-group {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-}
-
-.nb-group + .nb-group {
-  margin-top: var(--space-4);
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--line);
-}
-
-.nb-group-label {
-  color: var(--text-muted);
+  margin-top: var(--space-3);
+  margin-bottom: var(--space-4);
 }
 
 /* 两栏。宽度给 220px 是"文件名不折行"的经验值，窄屏直接改成上下堆叠 ——

@@ -41,6 +41,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *
  * 顺带一条被删掉的东西：内核徽章那一排（`notebook-kernels`）没了，但 `blocked`（「准备环境」）与
  * `missingSpec`（该 `--rebuild`）两条诊断必须还在 —— 它们修的是两件不同的事。
+ *
+ * ## 2026-10-10 用户点名的布局简化（这一档删的是容器，不是话）
+ *
+ * 「运行时」卡壳（`notebook-status-card`）、`card-head` 那层标题、"这次铺了什么"整块
+ * （`notebook-files` / `notebook-files-empty`）按批的范围删掉，三把按钮并入 page-head 工具条。
+ * 随块消失的判据只有两条：open 态列得出 `00-smoke-pyspark.ipynb`、对照态必现 `notebook-files-empty`
+ * —— 它们判的对象已经不在这页上了。补回来的是三条：① 卡壳/标题/那块在 open 与 down **两态**都必不出现
+ * （"用户点名删的东西，删没删要能被判住，而不是靠人眼"；down 态是那块清单以前**必出现**的一态，
+ * 只测 open 态分不清"删掉了"与"恰好没数据"）；② 五句状态话两两互斥的**总判据**（原来散在各条用例的
+ * 点名式 toBeNull，加第五、第六句时没人回头补得起来，这条一次顶满）；③ seedError 横幅换家到横幅区
+ * 后仍必现 —— 它是话，不是容器。状态行的五句逐字未动，边界五段逐字未动（`boundarySentences` 契约原样）。
  */
 
 const status = vi.fn();
@@ -117,27 +128,33 @@ describe('Notebook 第五页', () => {
     // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpec 两块还靠它。
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
     expect(screen.getByTestId('notebook-page').textContent).not.toContain('PySpark (arena)');
-    expect(screen.getByTestId('notebook-page').textContent).toContain('00-smoke-pyspark.ipynb');
+    // 「这次铺了什么」那份清单整块删掉了（用户点名，2026-10-10）：这里原来断的是"open 态列得出
+    // 00-smoke-pyspark.ipynb" —— 判的对象没了，断言随块搬家成"它必不出现"，专门那条见
+    // 「卡壳与那块确实没了」（open 与 down 两态各查一次，别只信这一眼的 null）。
+    expect(screen.queryByTestId('notebook-files')).toBeNull();
     // 反向也要判：全都就绪时不许挂一个"准备环境"按钮（给了就是让人白点）
     expect(screen.queryByTestId('notebook-prepare')).toBeNull();
   });
 
   /**
-   * **状态卡里不许出现空的分组壳。** 这一条是 Step 3 第 8 条（真浏览器截图）暴露出来的缺陷，
-   * 不是审美：每个 `.nb-group` 带一条 `border-top` + 一段 `--space-4` 留白，于是"壳在而内容全是
-   * `null`"时页面上出现的是一条**没有任何话的空白带加一根分隔线** —— 而分隔线的意思是
-   * "上面那组说完了"，读者会去找那句并不存在的话。最常见的那一态（在跑、一切正常）本来挂两条。
+   * **横幅区不许出现空的分组壳。** 这一条是 Step 3 第 8 条（真浏览器截图）暴露出来的缺陷，
+   * 不是审美：壳自带上下留白（2026-10-10 布局简化前还各带一条 `border-top`），于是"壳在而内容
+   * 全是 `null`"时页面上出现的是一段**没有任何话的空白带** —— 读者会去找那句被"漏掉"的话，
+   * 而它根本不存在。
    *
    * 为什么两档自动化原本都照不出来（也是这条为什么要配一个 e2e 兄弟判据）：
    *  · jsdom 没有布局 —— 空壳与有内容的壳在 `textContent` 判据下长得一模一样，所以这里只能判
    *    **DOM 形状**（壳的数量、每个壳有没有子节点）；
-   *  · e2e 那个实例永远是 `running:false`，诊断那一组本来就有话，只有「准备环境」那一组是空的
-   *    ⇒ "空壳真的占 17px 高并画出线"由 `tests/e2e/notebook-page.spec.ts` 量真实高度钉住。
+   *  · e2e 那个实例永远是 `running:false`，横幅区此刻本来就有话（那句"做题不受影响"）
+   *    ⇒ "壳的真实盒子不塌陷"由 `tests/e2e/notebook-page.spec.ts` 量高度钉住。
    *
-   * 两态各数一次，是为了让"2"不是被写死的巧合：有话说的那一组必须**出现**，没话说的那一组必须
-   * **不存在**（只判"没有空壳"的话，把壳全删掉也能绿）。
+   * 简化后全场只剩这一个壳，三种读法各数一次，"1"和"0"都不是被写死的巧合：
+   *  · open 且一切正常：壳必须存在，由逃生链接那句解释撑着（把壳删掉也在这条红）；
+   *  · down：诊断那句"做题不受影响"撑着（把它一起删掉=把"没在跑"那句话说没了，同一条红）；
+   *  · 还没读到（loading）：横幅区没有任何一句话可说 ⇒ **整块缺席** —— "空则不渲染"在新布局
+   *    里的形状；壳要是还在，页面上就是状态行下面一段没有话的空白。
    */
-  it('状态卡里不许出现空的分组壳：分隔线后面必须真有一句话（真浏览器实测发现的缺陷）', async () => {
+  it('横幅区不许出现空的分组壳：留白后面必须真有一句话（真浏览器实测发现的缺陷）', async () => {
     status.mockResolvedValue(up);
     files.mockResolvedValue({ files: ['01-a.ipynb'] });
     const first = render(<Notebook />);
@@ -145,21 +162,59 @@ describe('Notebook 第五页', () => {
     const openGroups = [...document.querySelectorAll('.nb-group')];
     expect(
       openGroups.length,
-      '在跑且一切正常时多出来的分组壳 ⇒ 页面上是空白带 + 分隔线（诊断组与准备环境组此刻都没有话说）',
-    ).toBe(2);
+      '在跑且一切正常时多出来的分组壳 ⇒ 状态行下面出现没有话的空白带（壳本身又必须存在：逃生链接那句解释住在里面）',
+    ).toBe(1);
     for (const g of openGroups) expect(g.childElementCount, '空的 .nb-group 还挂在 DOM 上').toBeGreaterThan(0);
     first.unmount();
 
-    // 换一态：这一态诊断组有话要说（那句"做题不受影响"），它必须出现 —— 于是总共三组
+    // 换一态：这一态横幅区有话要说（那句"做题不受影响"），壳必须还在，且不是靠解释句撑的
     status.mockResolvedValue({ running: false, reason: '这个实例没有被给予 ARENA_JUPYTER_TOKEN …', kernels: [], notebooks: [] });
-    render(<Notebook />);
+    const second = render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-down')).toBeTruthy());
     const downGroups = [...document.querySelectorAll('.nb-group')];
-    expect(
-      downGroups.length,
-      '诊断那一组此刻有内容，壳必须存在（把它一起删掉=把"没在跑"那句话说没了）；而「准备环境」那一组仍然没有话，不许出现',
-    ).toBe(3);
+    expect(downGroups.length, '诊断那一组此刻有内容，壳必须存在（把它一起删掉=把"没在跑"那句话说没了）').toBe(1);
     for (const g of downGroups) expect(g.childElementCount, '空的 .nb-group 还挂在 DOM 上').toBeGreaterThan(0);
+    second.unmount();
+
+    // 第三态：一次都没读到过 ⇒ 横幅区一句可选的话都没有 ⇒ 整块不渲染（连壳都不许留）
+    status.mockReturnValue(new Promise(() => {}));
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-status').textContent).toContain('正在读 notebook 状态'));
+    expect(document.querySelectorAll('.nb-group').length, 'loading 态留着空壳 ⇒ 状态行下面是一段没有话的空白带').toBe(0);
+  });
+
+  /**
+   * 用户点名的简化要能被判住（派发词第 3 条：删没删不许靠人眼）。卡壳、标题「运行时」、
+   * "这次铺了什么"那块在 open 与 down **两态**都必不出现 —— down 态是那块清单以前**必出现**的
+   * 一态（`GET /api/notebook/status` 顺带铺示例，`data.notebooks` 与在不在跑无关；夹具故意给一份
+   * notebooks，判的就是"就算后端还回着那份数据，页面也不列它"）。
+   * 浏览器层有同一件事的兄弟判据（`tests/e2e/notebook-page.spec.ts` 数 count 0）。
+   */
+  it('「运行时」卡壳与「这次铺了什么」那块确实没了（open 与 down 两态各查一次）', async () => {
+    const absentChecks = (state: string): void => {
+      expect(screen.queryByTestId('notebook-status-card'), `${state}：卡壳又回来了 ⇒ 用户点名"去掉运行时这张卡"没守住`).toBeNull();
+      expect(screen.queryByRole('heading', { name: '运行时' }), `${state}：「运行时」标题又回来了`).toBeNull();
+      expect(screen.queryByTestId('notebook-files'), `${state}：那份带徽标的示例清单又回来了`).toBeNull();
+      expect(screen.queryByTestId('notebook-files-empty'), `${state}：那句"没有示例"又回来了`).toBeNull();
+      expect(screen.getByTestId('notebook-page').textContent ?? '', `${state}：那块的小标题还在`).not.toContain('这一页读到的示例');
+    };
+
+    status.mockResolvedValue(up);
+    files.mockResolvedValue({ files: ['01-a.ipynb'] });
+    const first = render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
+    absentChecks('open');
+    first.unmount();
+
+    status.mockResolvedValue({
+      running: false,
+      reason: 'Jupyter 未在监听：ECONNREFUSED',
+      kernels: [],
+      notebooks: [{ file: '00-smoke-pyspark.ipynb', seeded: false }],
+    });
+    render(<Notebook />);
+    await waitFor(() => expect(screen.getByTestId('notebook-down')).toBeTruthy());
+    absentChecks('down');
   });
 
   /**
@@ -182,6 +237,34 @@ describe('Notebook 第五页', () => {
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.queryByTestId('notebook-tokenless'), '两句话同时出现 ⇒ 读者分不清自己是不是本机').toBeNull();
+  });
+
+  /**
+   * 五句状态话的**总判据**（派发词那条"任何两句不许同时出现"）：每一态渲染一次，
+   * `notebook-status` 里出现的句子**恰好一个**，且必须等于该态那句。
+   * 为什么已有的点名式 `queryByTestId(...).toBeNull()` 不算这条：它们只从某一态的视角手点另几态，
+   * 加第五、第六句时没人回头补对点（`notebook-tree-*` 那族就漏过一回，见 `treeLinesSpeaking` 的注释）——
+   * 这条一视同仁地扫全部五句。布局简化之后五句同住一处三元链（`web/src/pages/Notebook.tsx`），
+   * 这条只会更好判，**不许放宽成"至少一个"或"至多一个"**：toEqual([expected]) 同时钉住"说了"与"只说了这句"。
+   */
+  const statusSentences = ['运行中 · Jupyter 在本机答话', '没在运行', '在跑，但地址给不出来', '状态读不到', '正在读 notebook 状态'];
+  it('五态状态行两两互斥：每一态恰好说一句，任何两句不同时出现（总判据）', async () => {
+    const cases: Array<[string, () => void, string]> = [
+      ['在跑', () => status.mockResolvedValue(up), '运行中 · Jupyter 在本机答话'],
+      ['没在跑', () => status.mockResolvedValue({ running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }), '没在运行'],
+      ['在跑但链接坏', () => status.mockResolvedValue({ running: true, reason: 'ARENA_NOTEBOOK_PUBLIC_URL 不是合法 URL', kernels: [], notebooks: [] }), '在跑，但地址给不出来'],
+      ['这次读不到', () => status.mockRejectedValue(new Error('连不上本地服务')), '状态读不到'],
+      ['还没读到', () => status.mockReturnValue(new Promise(() => {})), '正在读 notebook 状态'],
+    ];
+    for (const [label, set, expected] of cases) {
+      set();
+      const { unmount } = render(<Notebook />);
+      // 先等那一句话题上台（前面几态是"loading → 目标态"的两段式渲染，不等就会拿 loading 那帧来判）
+      await waitFor(() => expect(screen.getByTestId('notebook-status').textContent).toContain(expected));
+      const spoken = statusSentences.filter((s) => (screen.getByTestId('notebook-status').textContent ?? '').includes(s));
+      expect(spoken, `「${label}」这一态的状态行说了 ${spoken.length} 句（应恰好 1 句：「${expected}」）`).toEqual([expected]);
+      unmount();
+    }
   });
 
   /* ─────────── WI-94 Task 6：这一页现在**内嵌** notebook（左树 + 右 iframe） ─────────── */
@@ -271,8 +354,8 @@ describe('Notebook 第五页', () => {
 
   /**
    * 第三种形状：**还没读到**。brief 原稿那段代码是 `(listing?.files ?? []).length === 0` 就报"没有"，
-   * 于是首屏一定会闪一句"目录里现在没有笔记"——而这一次读还没回来。这一页对同一个纪律已经有先例
-   * （`notebook-files-empty` 判的是 `data &&` 读过之后），所以这里补一条把它钉住：
+   * 于是首屏一定会闪一句"目录里现在没有笔记"——而这一次读还没回来。这一页对同一个纪律早有先例
+   * （`seedError` 那对"铺不进去 vs 没有示例"、左栏的"读不到 vs 没有"都是同一条），所以这里补一条把它钉住：
    * pending 的那一会儿两种话都不许说。
    * 破坏性验证（本轮实测，见 task-6-report.md）：去掉 `listing &&` 守卫 ⇒ 本条红。
    */
@@ -314,7 +397,7 @@ describe('Notebook 第五页', () => {
 
   /**
    * **第五种形状：手上还挂着上一轮读到的列表，而这一轮刷新失败**（`listing && filesError`）。
-   * 状态卡对同一件事早有先例（`error && data` ⇒「这次没读到，下面显示的是上一次读到的状态」），
+   * 状态那一行对同一件事早有先例（`error && data` ⇒「这次没读到，下面显示的是上一次读到的状态」），
    * 左栏过去没有：列还显示旧的那两份、一句"这次没读到"都不说 = 拿上一轮的真相冒充刚读到的
    * （本项目在桥 token 上付过同一次学费）。Task 7a 把它登记成"没有判据"，本轮（7c）按裁定补上。
    *
@@ -546,9 +629,12 @@ describe('Notebook 第五页', () => {
    * 评审 I-1 的前端那一半：`seedError` 是"示例铺不进去"，与"没有示例"是两件事。
    * 混起来的症状很难查：磁盘只读 / ENOSPC 时界面写着"没有示例"，读者就会去翻示例目录，
    * 而该修的是挂载。这一行必须是**一句 config/IO 诊断**，不许读成"服务坏了"，
-   * 也不许抢走运行时那一块（状态卡此刻仍然照说"运行中"）。
+   * 也不许抢走状态那一行（此刻仍然照说"运行中"）。
+   * 2026-10-10 布局简化：那条与 `notebook-files-empty` 的互斥断言随块搬家了 —— "没有示例"那句
+   * 按用户批的范围整片删掉，互斥对象没了；这条现在判的是"换家之后 seedError 仍在、仍是一句诊断"
+   * （它是话不是容器，删它=静默降级，所以这一半判据一个字没松）。
    */
-  it('示例铺不进去：单独说一句原因，且不许说成"没有示例"', async () => {
+  it('示例铺不进去：单独说一句原因，且不许把状态行带跑', async () => {
     status.mockResolvedValue({
       running: true,
       url: `${TREE}?token=x`,
@@ -562,14 +648,14 @@ describe('Notebook 第五页', () => {
     expect(line.textContent).toContain('EEXIST');
     // role 必须是 status：它是"某一半没做成"，不是"整个服务不可用"（alert 会把朗读打断成故障）
     expect(line.getAttribute('role')).toBe('status');
-    // 两种"空"不许同时出现，否则读者分不清是没有还是铺失败
-    expect(screen.queryByTestId('notebook-files-empty')).toBeNull();
-    // 运行时那一半不许被带跑：seed 坏了 Jupyter 照样在跑
+    // 状态那一半不许被带跑：seed 坏了 Jupyter 照样在跑
     expect(screen.getByTestId('notebook-status').textContent).toContain('运行中');
   });
 
-  /** 对照的那一态：真的一个示例都没有（源目录是空的）⇒ 只许说"没有"，不许凭空报一个铺失败的错。 */
-  it('没有示例 ≠ 铺不进去：没有 seedError 时只说"没有"，不渲染那句诊断', async () => {
+  /** 对照的那一态：没有 seedError 时不许凭空报"铺不进去"（假警报那一半的判据）。
+   *  这条原来等的是 `notebook-files-empty` 必现 —— 那句与"这次铺了什么"那块一起按用户批的范围删了，
+   *  所以搬家后的判据只剩"不许有假警报"；真报的那一半由上一条守着。两半合起来才是互斥。 */
+  it('没有 seedError 时不许报"铺不进去"（对照态：没有失败却不点名，才是假警报）', async () => {
     status.mockResolvedValue({
       running: true,
       url: `${TREE}?token=x`,
@@ -577,7 +663,7 @@ describe('Notebook 第五页', () => {
       notebooks: [],
     });
     render(<Notebook />);
-    await waitFor(() => expect(screen.getByTestId('notebook-files-empty')).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.queryByTestId('notebook-seed-error'), '没有失败却报一句失败 = 最响的假警报').toBeNull();
   });
 
