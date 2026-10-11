@@ -384,10 +384,6 @@ main {
   border-radius: var(--radius-sm);
 }
 
-.btn-block {
-  width: 100%;
-}
-
 kbd {
   font-family: inherit;
   font-size: 11px;
@@ -436,10 +432,6 @@ kbd {
   background: var(--warning-soft);
   border-color: #f2dfc0;
   color: var(--warning);
-}
-
-.badge-plain {
-  background: transparent;
 }
 
 .swatch {
@@ -536,22 +528,6 @@ th.mono {
 
 /* 今日挑战 --------------------------------------------------------- */
 
-.set-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-4);
-  align-items: center;
-}
-
-.set-metrics {
-  display: flex;
-  gap: var(--space-4);
-  flex-wrap: wrap;
-  font-size: var(--font-sm);
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
 .meter {
   height: 6px;
   border-radius: var(--radius-pill);
@@ -596,54 +572,6 @@ th.mono {
 .plan-item:hover {
   transform: translateY(-1px);
   border-color: var(--line-strong);
-}
-
-.plan-index {
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-pill);
-  display: grid;
-  place-items: center;
-  background: var(--surface-2);
-  color: var(--text-muted);
-  font-size: var(--font-xs);
-  font-weight: 700;
-}
-
-.cat-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: var(--shadow-1);
-  transition: transform var(--dur-2) var(--ease);
-}
-
-.cat-card:hover {
-  transform: translateY(-2px);
-  text-decoration: none;
-  border-color: var(--cat-accent, var(--line-strong));
-}
-
-.cat-card .cat-label {
-  font-size: var(--font-lg);
-  font-weight: 650;
-}
-
-.cat-card .cat-stack {
-  font-size: var(--font-sm);
-  color: var(--text-muted);
-}
-
-.cat-card .cat-foot {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  align-items: center;
 }
 
 /* 今日页：flex 带 + 主次层级（替代"等边盒子一路往下"） */
@@ -834,12 +762,6 @@ th.mono {
     overflow: auto;
     overscroll-behavior: contain;
   }
-}
-
-.q-title {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
 }
 
 .tags {
@@ -1606,10 +1528,6 @@ tbody th {
 
 .answer-echo summary {
   cursor: pointer;
-}
-
-.editor-note {
-  margin-top: var(--space-2);
 }
 
 .filters label {

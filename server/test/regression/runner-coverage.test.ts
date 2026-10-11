@@ -18,12 +18,26 @@ const COVERED_ELSEWHERE: Partial<Record<JudgeKind, string>> = {
 
 const JUDGE_TEST_DIR = join(config.repoRoot, 'server', 'test', 'judge');
 
-/** 双向的机械判据：文件里既要断言过 pass，也要断言过"不是 pass"。 */
+/**
+ * 双向的**机械**判据：文件里既要断言过 pass，也要断言过"不是 pass"。
+ *
+ * ⚠ 两个设计点都是被"这条为什么曾经是装饰"教出来的（WI-90 收尾轮实测）：
+ * ① **先剥注释再匹配**。旧实现直接匹配整份源码，而备选里放着 `全部通过` / `不通过` /
+ *   `必须被判不通过` 这种中文散文 —— 后果是"删掉错解方向那条 assert，只在注释里留一句'不通过'"
+ *   照样绿：一条判"有没有双向"的门，判的其实是"文件里出现过这几个字"。散文备选全部去掉。
+ * ② 只认**比较调用本身**（`toBe/toEqual/toStrictEqual` 配 `'pass'|'fail'|'error'|'needs_human'`，
+ *   以及 `not.toBe('pass')`）。期望值写进消息串不算 —— 消息是给读者看的，不是判据。
+ * 实测：剥注释 + 只认调用点之后，6 个 runner 测试文件**全部仍然满足**（pass/fail 各 4~19 处），
+ * 所以这条收紧不是把门调松，是把它从"读散文"变成"读断言"。
+ */
 function hasBothDirections(source: string): { pass: boolean; fail: boolean } {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   return {
-    pass: /toBe\('pass'\)|status\)\.toBe\('pass'|全部通过/.test(source),
+    pass: /toBe\(\s*['"]pass['"]\s*\)|toEqual\(\s*['"]pass['"]\s*\)|toStrictEqual\(\s*['"]pass['"]\s*\)/.test(code),
     fail:
-      /toBe\('fail'\)|toBe\('error'\)|not\.toBe\('pass'\)|toBe\('needs_human'\)|必须被判不通过|不通过/.test(source),
+      /toBe\(\s*['"](?:fail|error|needs_human)['"]\s*\)|toEqual\(\s*['"](?:fail|error|needs_human)['"]\s*\)|not\.toBe\(\s*['"]pass['"]\s*\)/.test(
+        code,
+      ),
   };
 }
 

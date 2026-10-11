@@ -133,7 +133,14 @@ describe('REPL 面板', () => {
     await typeAndSend('x = 1');
     await waitFor(() => expect(feed).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getByRole('button', { name: '关会话' }));
+    // ⚠ 必须是 findByRole，不是 getByRole（2026-10-11 实测：全树验证那一趟这条红过一次
+    //   "Unable to find an accessible element with the role button and name 关会话"，
+    //   单独跑 4/4 绿 —— 是测试自己的竞态，不是产品坏了）：
+    //   上面等的只是 `feed` 被调用过一次，而那颗按钮的条件是 `sessionId` **已经落到渲染**
+    //   （`ReplPanel.tsx:146` 的 `sessionId ? <button>关会话</button> : null`）——
+    //   SSE 首帧与 React 提交不是同一个微任务，全树验证的负载足以让它翻面。
+    //   等错了东西 = 这条用例每次跑都在赌，而赌输时报的是"后端没通知"那种假话。
+    fireEvent.click(await screen.findByRole('button', { name: '关会话' }));
     await waitFor(() => expect(stop).toHaveBeenCalledWith({ sessionId: 's1' }));
     expect((await screen.findByTestId('ide-repl-note')).textContent).toContain('会话已关闭');
   });

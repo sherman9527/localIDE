@@ -228,7 +228,6 @@ function manualGate(file: string): { declared: boolean; label: string | null } {
 
 describe('verify.sh 覆盖到每一个测试文件', () => {
   const all = stages();
-  const patterns = all.flatMap((s) => s.patterns);
 
   /**
    * 一条**成立**的"手动闸门"申报：那行注释里点的阶段必须 (a) 真实存在、(b) 确实认领了这个文件。
@@ -241,8 +240,21 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
     return all.some((s) => s.label === label && stageClaims(s, file));
   };
 
+  /**
+   * "解析器还认得这份脚本吗" —— 原来这条写的是 `expect(patterns.length).toBeGreaterThan(3)`，
+   * 而今天 patterns 有 20 多个 ⇒ 删掉 17 条阶段它照样绿（WI-90 收尾轮的审计把这种门叫装饰）。
+   * 换成**自洽判据**，不留会腐烂的魔法数：脚本原文里 `npx vitest run` 出现的次数，
+   * 必须等于解析出的阶段数。有人改了 `run "…"` 的写法而没同步这里的正则 ⇒ 两个数当场对不上；
+   * 一条阶段都解析不出来 ⇒ 第二个判据（>0）红。
+   */
   it('脚本里确实有 vitest 阶段（防止改名把守卫一起废掉）', () => {
-    expect(patterns.length).toBeGreaterThan(3);
+    const raw = readFileSync(join(ROOT, 'scripts', 'verify.sh'), 'utf8');
+    const occurrences = (raw.match(/npx vitest run/g) ?? []).length;
+    expect(occurrences, 'verify.sh 里一条 `npx vitest run` 都没有 ⇒ 这个守卫在空转，去查脚本是不是被改写了').toBeGreaterThan(0);
+    expect(
+      all.length,
+      `解析出 ${all.length} 条 vitest 阶段，而脚本原文里有 ${occurrences} 处 \`npx vitest run\` ⇒ 这里的正则与那边的写法对不上了`,
+    ).toBe(occurrences);
   });
 
   it('没有"谁都不跑"的孤儿测试文件', () => {

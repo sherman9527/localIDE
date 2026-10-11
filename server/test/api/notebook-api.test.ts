@@ -499,7 +499,7 @@ describe('POST /api/notebook/prepare-env', () => {
     const { app } = await injectApp({ token: CANARY });
 
     await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '127.0.0.1' });
-    expect(envSpy.ensureIdeEnv.mock.calls, 'status 会被轮询 ⇒ 读路径里建环境是错的').toHaveLength(0);
+    expect(envSpy.ensureIdeEnv.mock.calls, '这个读接口会被重放（刷新/重进页面）⇒ 读路径里建环境是错的').toHaveLength(0);
 
     const res = await app.inject({
       method: 'POST',

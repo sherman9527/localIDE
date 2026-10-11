@@ -525,7 +525,9 @@ describe('notebookStatus', () => {
   /**
    * 第 4 条钉的是**文案分类**（拿到一个 abort 样的拒绝该怎么说），它钉不住"超时这件事真有人负责"：
    * 那个假 fetch 自己就把 abort 文案抛出来了，删掉实现里的 AbortSignal 它照样绿。
-   * 这条把接线本身判上 —— 探活会被前端轮询（Task 9），没有 deadline 的请求遇到"在听但不答"的
+   * 这条把接线本身判上 —— 探活是**用户会反复点的读路径**（刷新按钮；A1 Task 9 当时预期的是轮询，
+   * 今天前端明确不做定时轮询，见 `web/src/pages/Notebook.tsx` 的导语，但"会被重放"这件事没变），
+   * 没有 deadline 的请求遇到"在听但不答"的
    * jupyter 会永远挂着，而"永远挂着"在界面上长得跟"慢但迟早出结果"一模一样。
    * 后半段用真形状：AbortSignal.timeout 到点给的是 DOMException(TimeoutError)，undici 还会把它
    * 包一层 "fetch failed" ⇒ 分类必须顺着 cause 链看，不然真实的超时会被报成"没在监听"。

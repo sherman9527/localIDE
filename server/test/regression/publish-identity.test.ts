@@ -78,8 +78,14 @@ describe('发布闸门：库里不许有本机身份', () => {
     ).toBeGreaterThan(0);
   });
 
-  it('在镜像里跳过只能因为镜像里没有 .git，不能因为宿主仓库坏了', () => {
-    if (tracked !== null) return; // 拿得到文件清单 ⇒ 本条无需判据，正常跑主用例
+  /**
+   * ⚠ 这里原来是 `if (tracked !== null) return;` —— 而"拿不到东西的那条 it 报 passed"正是本仓库
+   * 明确禁止的形状（`.qoder/rules/dev_verify_workflow.md` 第 3 条；同文件 86 行那条主用例就用 `it.skipIf`，
+   * 理由写在它自己的注释里）。改成 skipIf 之后：宿主上是 `1 skipped`（看得见"这条没判"），
+   * 容器里 tracked === null ⇒ 真跑，判的是"整条交付档被一条与判题无关的闸门撞红之前，先确认
+   * 原因是镜像里本来就没有 `.git`（`.dockerignore` 排的），而不是宿主的仓库坏了"。
+   */
+  it.skipIf(tracked !== null)('在镜像里跳过只能因为镜像里没有 .git，不能因为宿主仓库坏了', () => {
     expect(inImage, 'git ls-files 失败了，但这里不是镜像（/.dockerenv 不存在）⇒ 宿主仓库出问题，不许当"跳过"混过去').toBe(true);
   });
 

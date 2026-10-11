@@ -381,8 +381,3 @@ function ensureSweeper(): void {
     });
   }
 }
-
-/** 供测试与收尾：关掉所有会话。 */
-export async function stopAllRepl(): Promise<void> {
-  for (const id of [...sessions.keys()]) await stopRepl(id);
-}

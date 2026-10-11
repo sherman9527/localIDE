@@ -203,7 +203,10 @@ function httpReason(status: number): string {
 
 /**
  * 只做"读"：探 `/api/status` + 列 `/api/kernelspecs`。
- * 重活（建 venv）不挂在这里 —— 这个接口会被前端轮询，把分钟级的创建塞进读路径是错的
+ * 重活（建 venv）不挂在这里 —— ⚠ 措辞订正（2026-10-11 文档清扫）：**这一页今天不做定时轮询**
+ * （`web/src/pages/Notebook.tsx` 的纪律是"刷新按钮 + 准备环境后自动重读一次"，理由写在那儿：
+ * 这个 GET 会顺手铺示例，轮询 = 定时做磁盘 I/O）。但结论不变、而且不依赖"会不会轮询"：
+ * 读路径可以被**重放**（手动刷新、重进页面、以及以后真要加轮询），把分钟级的创建塞进去就是错的
  * （IDE 同样把 ensureIdeEnv 挂在显式动作上，不挂在语言列表上）。
  */
 export async function notebookStatus(input: {
@@ -294,13 +297,13 @@ export async function notebookStatus(input: {
      * 红线①正好在被 entrypoint 那段警告为它而写的状态下踩掉。
      *
      * 判的是**解释器在不在**（一次本地 stat），不是"本进程有没有跑过 ensureIdeEnv"那种内存状态：
-     * 那个状态跨不过重启，而这一页是要被轮询的。路径一律从 `venvPythonPath(config.ideEnvDir)` 派生 ——
+     * 那个状态跨不过重启，而这个读接口随时可能被重放（刷新按钮 / 重进页面）。路径一律从 `venvPythonPath(config.ideEnvDir)` 派生 ——
      * **不写死 `/opt/arena-ide-env`**，也**不加"Windows 上就跳过"的平台分支**：
      * 台账 `Ruling(T2-C 修正)` 记着那条分支的后果（宿主档恒为真 = 这条判据在唯一每天跑它的那一档
      * 永不生效）。宿主直跑时 `config.ideEnvDir` 是 `data/ide-env`，解释器同样还没建 ⇒
      * 这一态在宿主也真实存在，不是为容器编出来的。
      *
-     * ⚠ 这里**只 stat、绝不创建**：分钟级的 venv 不许挂在会被轮询的只读路径上
+     * ⚠ 这里**只 stat、绝不创建**：分钟级的 venv 不许挂在会被重放的只读路径上
      * （与本文件顶部那段、以及 prepare-env 那条路由的注释同一条纪律）。
      */
     const venvInterpreter = venvPythonPath(config.ideEnvDir);

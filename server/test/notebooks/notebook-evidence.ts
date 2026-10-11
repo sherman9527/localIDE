@@ -177,8 +177,11 @@ function spawnEvidence(spawnCode: string): string {
 
 /**
  * 「进程自己非 0 退出」那一支。`from` 说的是这个数取自哪个键：真 error 只有 `status` 这一种，
- * `code` 那份是**调用方映射过的形状**（`scalaKernelProbe.ts` 的 `evidenceShapedExecError` 与
- * `tutorials.test.ts` 那组手搓判据都把数字放在 `code` 上）—— 两种都要认，否则那一层 shim 会把真故障
+ * `code` 那份是**调用方映射过的形状** —— 今天唯一的生产者是 `tutorials.test.ts` 里那组手搓判据
+ * （它把数字放在 `code` 上）。⚠ 原先的另一个生产者 `scalaKernelProbe.ts` 的 `evidenceShapedExecError`
+ * 已随 WI-91 的探针改造删掉（2026-10-11 全仓 grep 命中 0），所以这里不是留着向后兼容的壳子：
+ * 这一支**仍有对象**，删它会让那组手搓判据失去可说的形状；哪天 `tutorials.test.ts` 也不再用 `code`，连着删。
+ * 两种都要认，否则那一层 shim 会把真故障
  * 又搬回错支（这正是本轮修掉的那个病的另一种走法）。
  */
 function exitEvidence(exitCode: string, from: 'status' | 'code', budget?: NbconvertBudget): string {

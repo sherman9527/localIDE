@@ -2,7 +2,6 @@ import type {
   CategoriesResponse,
   GradePostResponse,
   HideResponse,
-  JudgePostResponse,
   ProgressResponse,
   StackHealth,
   TodayResponse,
@@ -250,8 +249,4 @@ export function progressResponse(over: Partial<ProgressResponse> = {}): Progress
 
 export function hideResponse(id: string, hidden = true): HideResponse {
   return { id, hidden };
-}
-
-export function judgePostResponse(result: JudgeResult = JUDGE_FAIL): JudgePostResponse {
-  return { result };
 }
