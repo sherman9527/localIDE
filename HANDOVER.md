@@ -7,6 +7,97 @@
 
 ## COMPLETED
 
+- [x] WI-98 **逃生链接改同源，长期凭据彻底不进任何浏览器可见的 URL**（`db14d5e`；A1 的 `Ruling(4)`/`Ruling(10)` 那条"设计级、要重开 C-1 合取表验收"的账，2026-10-11 落地）：
+  ｜改完的形状：`GET /api/notebook/status` 的 `url` = 同源 `/jupyter/tree`（由 `NOTEBOOK_TREE_PATH` 编译期派生），
+  与内嵌 iframe 走同一条反代、凭据只在服务端注入 ⇒ 原先那四处凭据露面里的 ①② 两处**不存在了**
+  （③ 是上游 Jupyter 自己的 PageConfig、不由我们负责；④ 日志两条早已只剥 `token` 键）。
+  ｜`nolink` 态**整块删除**（后端 catch、前端分支与横幅、状态行五句收成四句、e2e 的反向判据）：
+  不是"用不到了"，是**结构上不可达** —— 那一态的成因是"env 能把链接拼坏"，而链接现在是常量派生。
+  ｜**守卫一个字没动**：`isLocalPeer ∧ isLoopbackHostHeader` 原样复用，结论改经新增的 `localPeer: boolean` 送达；
+  含义从"能不能拿 token"变成"这条连接过不过守卫"，威胁模型也改写进注释（rebinding 那一半现在拦的是
+  **借用**守卫注入的凭据执行代码，不再是抄走 `url` 里那份）。`tokenless` 那句话没消失，改了含义才活着
+  （非本机连接现在会被直接 403，横幅说破"被拒的是守卫不是 Jupyter、这不是故障、只在宿主本机用是决定"）。
+  ｜`ARENA_NOTEBOOK_PUBLIC_URL` **保留**但按 grep 证据只剩一个读者（`missingTokenReason()` 那句诊断文案），
+  `notebook-contract.test.ts:161` 的判据同步改成"端口与诊断文案的账，不是链接的账"。
+  ｜实测（这次唯一真正会翻车的地方，两条都是量出来的）：`Sec-Fetch-Site: same-origin` 的顶层导航 →
+  **200**，且证据钉的是"回话来自上游树页分支"（body 含 `tree`、**不含** `<div id="root">`、隧道补的
+  `frame-ancestors 'self'` 在位），不是"200 就算过"；`none` 与头缺席两种形状也各量一发，都过。
+  ｜破坏性三条（实现者被 150 轮截断没来得及做，由控制端补跑）：摘掉合取第二半 ⇒ 三个文件 7 条红；
+  把 token 放回 `url` ⇒ 三个文件全红；关掉 `guardRefused` 横幅 ⇒ web 层红。mutation 全部还原。
+  ｜验证：`npm run verify:fast` EXIT=0；`./start.sh --verify` **EXIT=0**（按 HEAD 重建 ⇒ 权威：教程
+  `17 passed / 0 skipped`、矩阵 `533 passed / 7 skipped`、判题 158/158、栈跳过 0）；`npm run e2e` **74 passed**；
+  真浏览器：`href=/jupyter/tree`、DOM 文本与 outerHTML 均**不含** `token=`、`notebook-not-local`/`nolink`/`tokenless`
+  全 0（本机连接该不出现）、点出去落的是**真 JupyterLab 树页**（有 File/View/Settings 与教程列表，无登录表单，URL 无 token）；
+  已部署产物层入口 chunk 与 `Notebook-*.js` 里 `token=` 出现 **0 次**。
+  ⚠ 诚实说明：e2e 那个实例恒为 `running:false`，所以它那条 `token=` 判据在 count-0 形状上判的是
+  "这一页根本没渲染链接"；真链接那一路的证明只存在于真浏览器那一次。
+
+- [x] WI-97 **`report_notebook` 的冷启动竞态**（`15e0399`，两个实现同步改）：
+  按 A1 裁定 R4 的精神做，而不是推翻它 —— **"有界"重试（6 发 × 2 秒 ≈ 10 秒）+ 两句不同的话**：
+  第 k>1 次才答话 ⇒ 单独说"冷启动：前 k-1 次是 000 = 还没人监听，那不是故障，不用照下面那条去修"；
+  6 发全空才说"起不来"并把等过的次数印进句子（"连探 6 次"本身就是信息：它说的不是"我们没试"）。
+  非 2xx 仍算"有进程应答" ⇒ 那条 404 假阳性不会因为加重试而回来；用户会点开的那句横幅**一字未动**
+  （它有自己的判据：`notebook-contract.test.ts` 评审 I-2，且它钉的是"两个实现必须同步"）。
+  验证：真服务上跑一次改后函数 ⇒ 一发答话且**没有**多打冷启动那句（重试在本机健康时不该制造噪音）；
+  对无人监听端口跑同一段循环 ⇒ `probe=3 code=[000]`、5.3s、说的是"连探 3 次（约 6 秒）"那句；
+  `bash -n` 过、两脚本 CR 字节 0、`start.ps1` BOM 仍是 `ef bb bf`；`scripts-syntax` + `notebook-contract` 25 passed。
+
+
+- [x] WI-72 判题沙箱偶发" harness 半路消失"：隐患已堵，根因未定（2026-09-24 交付档位那轮唯一的一条红）
+  ｜**2026-09-25 主动证伪了两条候选（不再等复发）**，结论都是量出来的：
+  ① **fd 压力 ⇒ 排除**。容器 `ulimit -n` 是 1,048,576；把它压到 160，`react-vitest.test.ts` 仍然
+     10/10 全过，压到 64 / 48 时报的是 `Error: spawn /usr/local/bin/node EMFILE`（**spawn 阶段硬错**），
+     不是 `Could not resolve …/vitest.config.mjs` —— 症状形状不同，不是同一条路。
+  ② **启动清扫误删活沙箱 ⇒ 机制真实，但对那次红不成立**。机制确认：清扫只看目录 mtime，
+     **"有进程开着句柄"根本挡不住删除**（Windows 与 Linux 都量过：Node 打开文件默认带
+     `FILE_SHARE_DELETE`，POSIX 本来就不挡）⇒ 唯一防线是那道 1h 时限。
+     不成立的原因很朴素：那次红发生在一轮不到 1h 的 verify 里，而新建的 harness 目录 mtime 就是当下。
+     ⇒ 所以它是**潜在隐患**而非凶手：把"时限必须大于任何沙箱的最长寿命"钉成测试
+     （`RUNNER_TIMEOUT_CAP_MS` / `IDE_LIMITS.maxTimeoutMs` / `idleMs + stopGraceMs` 三者取大，还要留两倍余量），
+     并把机制本身写成断言。破坏性：把 `idleMs` 抬到 65 分钟 ⇒ 那条不变量当场红，
+     消息直接给出两个数（`3600000 必须大于最长寿命 3902000`）。
+  ⇒ 两条候选都关掉之后，**剩下的唯一已知机制**就是 AO 那轮堵掉的"同目录并发测试互相删"（`maxAgeMs: 0`）。
+     根因仍未定，但下次复发不用再猜：看 `data/logs` 里 `react-scaffold-missing`（从来没写成）
+     与 `react-resolve-failed`（跑一半被删）哪个出现。
+  症状：`server/test/judge/react-vitest.test.ts` 的"参考解全部用例通过…"报
+  `Could not resolve /app/data/judge/fe-react-harness-0001-XXXX/vitest.config.mjs`（445ms 就挂，
+  单跑 10/10 全过）。当天同一份 verify 里其余 406 条全过、题库矩阵（含 23 道 react-vitest 题）也全过。
+  ｜已做：把 `server/test/judge-workspace.test.ts` 里那条 `sweepStaleWorkspaces({ maxAgeMs: 0 })`
+  挪进临时目录 —— `maxAgeMs: 0` 的语义是"一个都不放过"，打在**共享的** `data/judge` 上
+  等于允许一个测试删掉并发 worker 正在用的沙箱，这是仓库里唯一能对"兄弟 harness 消失"给出
+  机械解释的路径。改完断言变强（`toBe(1)` + 目录被删、普通文件留着），3 tests 全过。
+  ｜**没做到的**：三次"前端矩阵 + runner 自检"并发复现都不红，所以**没证明它就是这次的凶手**，
+  也没排除另外两条：`sweepStaleWorkspaces({ maxAgeMs: HOUR })` 在启动时删掉一个"一小时没写过
+  但还活着"的长任务沙箱；esbuild 在 fd 压力下把读不到报成 "Could not resolve"。
+  ｜**2026-09-24（里程碑 AO）落了取证钩子**（原先列的"下次再红前该做的第③件事"）：
+  react-vitest 在 spawn **之前** stat 一遍脚手架 —— 缺就返回一条写清"这不是你提交内容的问题"的 error
+  并打 `react-scaffold-missing`；vitest 报 `Could not resolve` 时再 stat 一次打 `react-resolve-failed`。
+  这两条日志之差就是"从来没写成"vs"跑一半被删"，而那正是根因至今没定的原因。
+  配套测试两条（探测器本身 + **接线**：stat 必须在最后一次 `ws.write(` 之后、`runProcess(` 之前，两处 `logWarn` 都在），
+  删掉 stat 那段 → 接线断言立刻红（已验证）。**根因仍未定，别当 flaky 关掉**；
+  下次复发先看 `data/logs` 里那两个事件名，再按上面 ①② 取证。
+  ｜顺带抓到一个跨环境的坑（修这条测试时自己撞上的）：`maxAgeMs: 0` 在容器里绿、在宿主上红 ——
+  Windows 上刚建目录的 mtime 可以比 `Date.now()` 晚几十毫秒，于是"一个都不放过"变成"一条都没删"。
+  改成注入 `SweepOptions.now` 断言才不赌时钟（宿主 3 passed、容器 3 passed）。
+  ｜下次再红时的取证顺序：① 立刻 `docker exec daily-arena ls -la /app/data/judge`（看还剩谁）；
+  ② 抓 boot 的 `judge-workspace-sweep` 日志行与容器启动时间对比；③ 把 `react-vitest.test.ts`
+  改成"spawn 前先 stat 一次 config、失败重试一次并打日志"，这样至少能区分"文件从来没写过"
+  与"写过后被删"。**别把它当 flaky 关掉**——本仓库有过三个"断言下全绿的静默降级"。
+  ｜**2026-10-11 收口（用当初为它装的那对取证钩子量的，不是等复发）**：
+  ① 钩子都在、且不是装饰 —— `react-scaffold-missing` / `react-resolve-failed` 住在
+     `react-vitest.ts:260/285`，结构判据在 `judge-workspace.test.ts:122-123`（删掉调用点就红），
+     所以"零命中"不等于"没接线"。
+  ② 17 天负证据：`data/logs` 166 个文件（09-19 → 10-11，含多次全量容器验证，每次判题 158 道）里
+     **两个钩子各 0 次命中**；`errorKind":"sandbox"` 共 21 条，**全部落在 09-19 ~ 09-24**，此后为 0。
+  ③ **当初调查没有的新数据点**：那 21 条里有 4 条是 **mysql** 题（`sql-mysql-0011`×2、`-0015`、`-0002`，
+     09-22/23）。mysql 的 `sandbox` 只可能是"底座还没就绪"，不可能是"沙箱被半路删" ⇒
+     这一族的共同形状更早可能是 bring-up 期没就绪，而不是 react 特有的删除竞态。
+  ⇒ 结论按实说：**根因仍未定**（那一次红没有留下能区分两种机制的读数），但两条候选都已被量掉、
+     判别钩子已接上且 17 天零命中、日志行本身仍带着能区分它们的字段。
+     **"下次复发不用再猜"这一条今天成立** —— 所以这条工作项剩下的部分不是调查，是观察；
+     而 ③ 查出来的真问题另开 **WI-111**（`errorKind=sandbox` 被两种互不相干的故障共用，
+     读者从日志分不出是哪一种 —— 那正是这条收口之后唯一还留着的可行动信息）。
+
 - [x] WI-109 **文档/脚本清扫 + 死代码与装饰用例清理（第一批）**（用户 2026-10-11 点名"完善所有文档和脚本，尤其历史文档；清理无效 code/dead file/测试用例"）：
   ｜**改掉的"今天仍在说谎"的句子**（`f9fdd36` + `9662972`，每条都先查证再改）：ARCHITECTURE §12 目录树缺
   `exec/`、`net/`、`shutdown.ts`、`docker/jupyter/` 且把 `guards` 挂在 `judge/` 下（那个文件在 `exec/`）；
@@ -1525,17 +1616,15 @@
   `c.ServerApp.identity` 之外的 `cull_idle_timeout` ⇒ 攒的是"每份打开过的笔记各一个 JVM"，活到 session 被删或 jupyter 重启。
   与 WI-95（抢 CPU）是同一族账，加不加 culling 同样是一次决定。
 
-- [ ] WI-97 `start.sh` / `start.ps1` 的 `report_notebook` 有**冷启动竞态**（WI-94 收尾轮实测，2026-10-10）：
-  `./start.sh --verify` 那一次横幅打印"7789 上没有 HTTP 应答"，而 2 分钟后同一条路径探 `…/jupyter/login` 是 **200** ——
-  判据是 `000`（没人监听），与 jupyter 还在启动这件事无关。按 A1 的裁定 R4"横幅只打印不判红"本轮**没加 retry**，
-  因为加 retry 会把"起不来"与"起得慢"混成同一句话；要收的话得先决定"横幅该等多久、超时后说什么"。
-
-- [ ] WI-98 把逃生链接改指**同源** `/jupyter/tree`，让长期凭据彻底不进任何 URL（WI-94 的 `Ruling(4)`/`Ruling(10)` 记账，2026-10-10）：
-  今天凭据出现在四处 —— ① `GET /api/notebook/status` 的 `url` 字段（合取门控，我们生成的）② 由它渲染进的逃生链接 `href`
-  （同一个值，所以顶文档 HTML 里能看到）③ 上游 jupyter 自己的 PageConfig（`7789` 直连也有，不由我们负责）
-  ④ 日志（两条路都已收窄：`app.ts` 的 `onResponse` 与 Fastify 自带 pino 的 `incoming request`，都只剥查询串里 `token` 这一个键）。
-  ｜改法：逃生链接换成同源相对路径 `/jupyter/tree` ⇒ 隧道守卫自己判"能不能放"，①② 这两处从此不存在，
-  C-1 的"往 URL 塞 token"那一支也变多余 —— 那是**设计级改动**（要重开 C-1 那张合取表的验收），所以不在 WI-94 里顺手做。
+- [ ] WI-111 **`errorKind":"sandbox"` 的语义要按 runner 拆开**（WI-72 收口时查出来的新账，2026-10-11）：
+  同一个 errorKind 现在至少被**两种互不相干的故障**共用 —— `react-vitest` 用它说"脚手架落盘后不见了 /
+  跑一半被删"（`server/src/judge/runners/react-vitest.ts:264`），而 mysql 那几题（`sql-mysql-0011/0015/0002`，
+  2026-09-22~23 的日志）用它说的大概是"底座还没就绪"。日志行只有分类、没有消息
+  （实测：一条 sandbox 记录的字段就是 `time/level/module/event/traceId/ms/questionId/kind/status/errorKind/passed/failed/total`），
+  所以读者从 `data/logs` 分不出是哪一种 —— 而这条分类正是 WI-72 收口时唯一还留着的可行动信息。
+  ｜修法方向：要么按 runner 拆 errorKind，要么给每条 sandbox 记录补一个"量到的形状"字段
+  （missing 列表 / 连接失败原因），别只留一个词。**改之前要想的是判题契约与题库里已入库题目的兼容**，
+  不是随手加一个字段。
 
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
@@ -1571,47 +1660,6 @@
 
 - [ ] 【已决议：暂不做 · 2026-09-20 用户拍板】WI-38 JDK 21 与 Spark 并存的取舍（WI-26② 的评估结论）：镜像里 Spark 是 3.5.5，官方支持矩阵到 Java 17（21 要 Spark 4.0），而**同一个 JDK 既跑 javac/java 判算法题又跑 Spark**，整体升到 21 会把 pyspark / spark-scala 推到未支持路径。可行做法是并装 `openjdk-21-jdk-headless`（约 +400MB、stack 层要全量重建），只让 `java-junit` 用 21、Spark 继续用 17，并给 `RunnerConfig` 加 `jdk` 选项。
   当前损失面评估：record / sealed / switch 表达式在 17 就能编译，真正判不了的是**虚拟线程（21 正式）与 sequenced collections（21）**；而虚拟线程这类题本来就不适合"纯函数 + 用例"判分，所以先不付这个体积与重建成本。（"Spark 3.5 不支持 21"引自官方发布说明，本机未验证 —— 镜像里没有第二个 JDK）
-
-- [ ] WI-72 判题沙箱偶发" harness 半路消失"：隐患已堵，根因未定（2026-09-24 交付档位那轮唯一的一条红）
-  ｜**2026-09-25 主动证伪了两条候选（不再等复发）**，结论都是量出来的：
-  ① **fd 压力 ⇒ 排除**。容器 `ulimit -n` 是 1,048,576；把它压到 160，`react-vitest.test.ts` 仍然
-     10/10 全过，压到 64 / 48 时报的是 `Error: spawn /usr/local/bin/node EMFILE`（**spawn 阶段硬错**），
-     不是 `Could not resolve …/vitest.config.mjs` —— 症状形状不同，不是同一条路。
-  ② **启动清扫误删活沙箱 ⇒ 机制真实，但对那次红不成立**。机制确认：清扫只看目录 mtime，
-     **"有进程开着句柄"根本挡不住删除**（Windows 与 Linux 都量过：Node 打开文件默认带
-     `FILE_SHARE_DELETE`，POSIX 本来就不挡）⇒ 唯一防线是那道 1h 时限。
-     不成立的原因很朴素：那次红发生在一轮不到 1h 的 verify 里，而新建的 harness 目录 mtime 就是当下。
-     ⇒ 所以它是**潜在隐患**而非凶手：把"时限必须大于任何沙箱的最长寿命"钉成测试
-     （`RUNNER_TIMEOUT_CAP_MS` / `IDE_LIMITS.maxTimeoutMs` / `idleMs + stopGraceMs` 三者取大，还要留两倍余量），
-     并把机制本身写成断言。破坏性：把 `idleMs` 抬到 65 分钟 ⇒ 那条不变量当场红，
-     消息直接给出两个数（`3600000 必须大于最长寿命 3902000`）。
-  ⇒ 两条候选都关掉之后，**剩下的唯一已知机制**就是 AO 那轮堵掉的"同目录并发测试互相删"（`maxAgeMs: 0`）。
-     根因仍未定，但下次复发不用再猜：看 `data/logs` 里 `react-scaffold-missing`（从来没写成）
-     与 `react-resolve-failed`（跑一半被删）哪个出现。
-  症状：`server/test/judge/react-vitest.test.ts` 的"参考解全部用例通过…"报
-  `Could not resolve /app/data/judge/fe-react-harness-0001-XXXX/vitest.config.mjs`（445ms 就挂，
-  单跑 10/10 全过）。当天同一份 verify 里其余 406 条全过、题库矩阵（含 23 道 react-vitest 题）也全过。
-  ｜已做：把 `server/test/judge-workspace.test.ts` 里那条 `sweepStaleWorkspaces({ maxAgeMs: 0 })`
-  挪进临时目录 —— `maxAgeMs: 0` 的语义是"一个都不放过"，打在**共享的** `data/judge` 上
-  等于允许一个测试删掉并发 worker 正在用的沙箱，这是仓库里唯一能对"兄弟 harness 消失"给出
-  机械解释的路径。改完断言变强（`toBe(1)` + 目录被删、普通文件留着），3 tests 全过。
-  ｜**没做到的**：三次"前端矩阵 + runner 自检"并发复现都不红，所以**没证明它就是这次的凶手**，
-  也没排除另外两条：`sweepStaleWorkspaces({ maxAgeMs: HOUR })` 在启动时删掉一个"一小时没写过
-  但还活着"的长任务沙箱；esbuild 在 fd 压力下把读不到报成 "Could not resolve"。
-  ｜**2026-09-24（里程碑 AO）落了取证钩子**（原先列的"下次再红前该做的第③件事"）：
-  react-vitest 在 spawn **之前** stat 一遍脚手架 —— 缺就返回一条写清"这不是你提交内容的问题"的 error
-  并打 `react-scaffold-missing`；vitest 报 `Could not resolve` 时再 stat 一次打 `react-resolve-failed`。
-  这两条日志之差就是"从来没写成"vs"跑一半被删"，而那正是根因至今没定的原因。
-  配套测试两条（探测器本身 + **接线**：stat 必须在最后一次 `ws.write(` 之后、`runProcess(` 之前，两处 `logWarn` 都在），
-  删掉 stat 那段 → 接线断言立刻红（已验证）。**根因仍未定，别当 flaky 关掉**；
-  下次复发先看 `data/logs` 里那两个事件名，再按上面 ①② 取证。
-  ｜顺带抓到一个跨环境的坑（修这条测试时自己撞上的）：`maxAgeMs: 0` 在容器里绿、在宿主上红 ——
-  Windows 上刚建目录的 mtime 可以比 `Date.now()` 晚几十毫秒，于是"一个都不放过"变成"一条都没删"。
-  改成注入 `SweepOptions.now` 断言才不赌时钟（宿主 3 passed、容器 3 passed）。
-  ｜下次再红时的取证顺序：① 立刻 `docker exec daily-arena ls -la /app/data/judge`（看还剩谁）；
-  ② 抓 boot 的 `judge-workspace-sweep` 日志行与容器启动时间对比；③ 把 `react-vitest.test.ts`
-  改成"spawn 前先 stat 一次 config、失败重试一次并打日志"，这样至少能区分"文件从来没写过"
-  与"写过后被删"。**别把它当 flaky 关掉**——本仓库有过三个"断言下全绿的静默降级"。
 
 ## 新增需求池（尚未成为 WI）
 
