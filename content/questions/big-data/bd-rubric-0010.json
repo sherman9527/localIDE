@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0010",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Spark on K8s 的弹性悖论：缩容、shuffle 丢失与「tmpfs 提速」的账单",
+  "statement": "## 场景（数据平台 / Spark on Kubernetes 方向，25 分钟）\n\n一个 ETL 作业迁到 Kubernetes 后开了动态分配：`spark.dynamicAllocation.enabled=true`、`minExecutors=2`、`maxExecutors=300`、`executorIdleTimeout=60s`。集群用 ClusterAutoscaler 扩缩节点，Spot/抢占实例占 40%。上线后出现一串现象：\n\n- **①** 一个有 5 个 stage 的作业，夜里跑完后两个 stage 时会**重复执行**前面已经跑完的 stage；白天空闲时段几乎不出现。日志里能看到 executor 编号在作业中途减少。\n- **②** 团队为「消除磁盘 IO」把 executor 的本地目录改挂成 `emptyDir{medium: Memory}`，三天后出现新的失败：executor 被杀，`Reason: OOMKilled`，而 JVM 堆使用率始终很低。\n- **③** 运维做节点维护（`kubectl drain`）时，一批正在跑长 stage 的 executor Pod 被逐出，作业重算；他们给这些 Pod 加了 PDB（`maxUnavailable: 1`），报告说「已经保护好了」。\n- **④** 成本复盘发现：把 `requests.cpu` 从 4 提到 8 之后，ClusterAutoscaler 更积极加节点，但作业总墙钟时间变长，且 `Pending` 的邻居作业变多。\n\n## 要你回答的（四小问，每问给「证据 → 结论 → 修法/取舍」）\n\n1. ①的机制是什么？说明**为什么恰好是后两个 stage**、以及为什么白天空闲时段不出现。给出你会用来确认它的两类日志/事件证据（不是「看监控」）。\n2. 针对「executor 消失导致重算」，给出**三种**工程解法并比较取舍（至少覆盖：shuffle 数据的存放位置、服务化/外置、以及不改 shuffle 而改变作业形状的做法）。每一档要说清它把复杂度或成本搬去了哪里，以及在什么条件下你**不**推荐它。\n3. ②错在哪？把「tmpfs 更快」这句话拆成：它省掉的是什么成本、花掉的是哪一本账、以及为什么这次 JVM 堆看起来完全健康。给出你会用什么读数在**改动之前**就预判这个结果（有界的估算方法，不许用无界压测）。\n4. 分别判断 ③ 和 ④：PDB 那条「已经保护好了」的说法错在哪里？把 `requests.cpu` 提倍为什么会同时让作业变慢、让邻居变 Pending？两问都要给出你推荐的做法。\n",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "spark-on-k8s-shuffle-storage",
+    "spark-on-k8s-resources",
+    "orchestration-scheduling",
+    "data-cost",
+    "modern:spark-on-k8s"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "缩容即丢 shuffle 的机制与时序特征（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：说清 executor 的 shuffle 输出写在**它自己的本地盘**，Pod 消失（动态分配空闲回收、抢占、驱逐、OOM）即那些分区不可读，Spark 只能重算产生它们的 stage（`spark.shuffle.service.enabled` 未开时尤其如此）。解释时序特征：后两个 stage 依赖**前几个 stage 的 shuffle 输出**，而作业跑动时早期 executor 已因 idle 超时被回收 ⇒ 重算集中在下游 stage；白天空闲 ⇒ 集群不忙、回收后重算代价小/并发少不易察觉（或 executor 存活期更长）。必须给两类证据：Spark 侧（StageAttempt 重新出现、`Job ... cancelled`/`Resubmitted Stage`、executor 下线时间戳与 stage 起始时间对齐、UI 里 Storage/Shuffle 块缺失）与 K8s 侧（`kubectl get events` 的 `ScaleDown`/`Preempted`/`Deleted`、Pod 的 `Last State`、审计日志里 driver 删除 executor Pod 的记录）。只说「executor 被杀了」不解释为什么是下游 stage 的，最多 1 分。"
+      },
+      {
+        "label": "三档解法与各自的代价（3 分）",
+        "weight": 3,
+        "criteria": "命中条件，三档都要有且各自带**代价去向**与**不推荐条件**：(a) 节点侧 ESS（external shuffle service 以 sidecar/DaemonSet 形式持有 shuffle 文件）→ shuffle 生命周期与 executor 解耦，代价是每节点常驻组件与本地盘占用，作业很短/节点很少时不划算；(b) 为 executor 挂 PVC，让 Pod 重建后还能读回自己的 shuffle → 保留弹性，代价是卷的生命周期/绑定延迟与 IO 性能（以及谁负责删卷的泄漏风险），stage 数少、shuffle 量大的场景要谨慎；(c) 远端/服务化 shuffle（Celeborn 类）→ 计算与 shuffle 存储彻底分离、弹性最好，代价是多一跳网络与一套独立服务的运维与容量规划。允许第四档：**改变作业形状**（把长 DAG 拆成多个作业/在中间做 checkpoint 落盘、降低 `executorIdleTimeout` 敏感度或限制 `maxExecutors` 换稳定性）——但必须承认它是拿重算可控性换吞吐。只列名字不给取舍本考点最多 1 分。"
+      },
+      {
+        "label": "tmpfs 花的是内存这本账（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：`medium: Memory` 的 emptyDir **计入容器内存 limit**（tmpfs 是 RAM），于是 shuffle spill 从磁盘 IO 变成内存占用，与 heap + overhead + Python 峰值共用同一个 `limits.memory` ⇒ 触发 cgroup OOMKill；**JVM 堆健康恰好证明被杀原因在堆外**（shuffle 文件不在堆里）。省掉的成本是磁盘写读与 fsync 等待，不省序列化。改动前的有界预判：从上一版运行里量出每 executor 的 shuffle 写入字节（Spark UI/事件日志的 `shuffleLocalBytesWritten`、`memoryUsage`，或 stage 输出量 ÷ executor 数），与 `limits - (heap + overhead + Python 峰值)` 比较；若 spill 峰值可能超过这个余量就不该上 tmpfs（或必须相应提高 limits 并下调 heap）。推荐结论要落到「shuffle 用本地盘/远端服务，内存留给执行」这一类，而不是「把 limit 再调大一点」。把 OOMKilled 归因于 heap 太小或 pandas 泄漏的，本考点 0 分。"
+      },
+      {
+        "label": "PDB 的保护范围与 requests 的连锁反应（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：③——PDB 只约束**自愿中断**（drain/升级），挡不住 OOM、抢占、节点故障，而且 Spark executor 是无状态可重建的、给它设 PDB 常常只是把 drain 卡住；真正的保护是「可重算 + shuffle 不丢 + 关键作业用非 Spot 池/更高 PriorityClass」。同时要指出 driver Pod 的可达性与 Service 才是长尾风险点。④——**ClusterAutoscaler 依据 requests（而非 limits 或使用率）扩容**：requests 翻倍使同一批 Pod 占据更多可分配量 ⇒ 节点数上升、单位成本上升；同时 CPU 争抢/缓存与 NUMA 画像变差、调度装箱变紧导致 Pending 上升，作业变慢往往来自 D 类节流与局部性损失，而不是「核给少了」。推荐做法：requests 按观测的 p95 实际用量设定、limits 用来兜住突发，需要弹性就不要设死 cpu limit（或按队列分档）。"
+      },
+      {
+        "label": "把结论写回成本口径（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：至少给一个可归因的成本口径（如「$/作业」或「每 GB shuffle 的重算成本」），并说明它如何驱动上面的取舍（例如为省 30% shuffle IO 引入远端服务，是否抵得上重算率下降的收益）；或指出节点池 40% Spot 下应当用 checkpoint 间隔/重算预算来定价稳定性。只说「成本变高了」不给口径不给 0 分判定线。"
+      }
+    ],
+    "notes": "判分看「机制是否说到位 + 取舍是否落到成本与复杂度」，不看是否背出配置名。第 2 问只给一种解法（例如「用 Celeborn」）不给比较与不推荐条件，最多 1 分。任何一小问把 Spot/抢占说成「换按量实例就好了」这类无取舍答案，该考点按 0 分处理。"
+  },
+  "answer": "## 1. 机制与时序\n\nexecutor 的 shuffle 输出落在**自己 Pod 的本地卷**上。动态分配在 `executorIdleTimeout=60s` 后让 driver 删掉空闲 executor Pod；Pod 没了，它写出的那些 reduce 分区就不可读，依赖它们的 stage 必须重算（没开 shuffle service 时必然如此）。\n\n**为什么是后两个 stage**：下游 stage 消费的是**上游全部**分区的输出；作业运行到后半程时，产出这些输出的早期 executor 早已空闲并被回收，所以缺块集中在下游。夜间才明显是因为：夜间集群整体在缩容（节点也在 drain/回收），空闲回收更激进；白天空闲时段节点稳定、executor 存活期长，重算不容易发生。\n\n**两类证据**：Spark 侧看事件日志里同一 `StageId` 出现第二个 `StageAttempt`、`Resubmitted Stage`/`Job cancelled`，把 executor 的 `Removed`（reason: idle timeout / decommission）时间戳与 stage 起始时间对齐，并在 UI 的 executors/storage 页确认对应 shuffle 块已消失；K8s 侧看 `kubectl get events -n <ns> --field-selector reason!=Normal` 里的删除/驱逐/抢占、Pod 的 `Last State.Reason`、以及 driver 的 RBAC 审计（是 driver 主动删的，还是被平台抢走的）—— 两种原因的修法不同。\n\n## 2. 三档解法\n\n| 方案 | 消除了什么 | 把代价搬去哪 | 不推荐 |\n| --- | --- | --- | --- |\n| (a) 节点侧 ESS（sidecar/DaemonSet 持有 shuffle） | executor 消失即丢 shuffle | 每节点常驻组件 + 本地盘容量管理；升级要同时动 Spark 与 service 版本 | 节点数很少、作业很短、shuffle 量小（常驻成本换不到收益） |\n| (b) 每 executor 挂 PVC | Pod 重建后仍可读回 | 卷的绑定/解绑延迟与 IO 路径；**谁删卷**（生命周期泄漏）；跨可用区绑定的调度约束 | stage 少、执行时间接近卷创建耗时；或存储层没有快盘 |\n| (c) 远端/服务化 shuffle（Celeborn 类） | 计算与 shuffle 存储彻底分离，弹性最好 | 多一跳网络 + 一套独立服务的容量规划与运维 | 团队小、SLA 不要求这么强的弹性（复杂度回报不成正比） |\n\n第四档是**改作业形状**：把长 DAG 拆成多作业并在中间落盘 checkpoint，让「重算的边界」变小；或收紧 `maxExecutors`/抬高 `executorIdleTimeout` 换稳定。它不解决抢占，只是把损失半径切小——适合 shuffle 巨大但逻辑分段自然的管道。\n\n## 3. tmpfs\n\n`emptyDir{medium: Memory}` 是 tmpfs，**计入 `limits.memory`**。于是 shuffle 写入不再花磁盘，而是与 heap + `memoryOverhead` + 序列化缓冲 + Python RSS 抢同一份内存配额；`shuffle spill 峰值 + 堆用量 > limits` 时由 cgroup 杀进程，JVM 堆看起来健康正是**原因在堆外**的证据。\n\n改动前的有界预判（不用无界压测）：从上一版运行读每 executor 的 `shuffleLocalBytesWritten`（或 stage 输出字节 ÷ executor 数），再看它同时能容纳的并发 reduce 分区数；把该值与 `limits − (heap + overhead + Python 峰值)` 比。若前者可能超过后者，tmpfs 就是在赌运气；正确结论是「shuffle 归磁盘或远端服务，内存只留给执行」，而不是「再把 limits 调大」。\n\n## 4. ③ 与 ④\n\n**PDB**：只约束自愿中断（drain、升级），挡不住 OOM、抢占、节点故障；而 Spark executor 本来就是可丢弃可重建的，给它设 `maxUnavailable:1` 往往只是让维护窗口卡住，换来「看起来被保护了」。该做的是：drain 前让 executor 优雅 decommission（`spark.dynamicAllocation.decommission.enabled`），关键长作业走非 Spot 池或更高 PriorityClass，driver 的 Service 与可达性单独保证，重算预算用 checkpoint 间隔定价。\n\n**requests.cpu 翻倍**：ClusterAutoscaler 按 **requests**（可分配量的占用）决定加节点，所以节点数与成本上去、装箱更紧、邻居作业更容易 Pending；而作业变慢通常不是「核少了」，而是 CPU 限流/局部性与并发画像改变（同节点争抢、缓存与 NUMA 变差、task 与核的对应关系被打乱）。做法：requests 按观测 p95 实设，limits 兜突发；需要吞吐弹性就不要把 cpu limit 设死（或按队列分档），并用「$/作业、重算率、p95 task duration」三个量同时验收，而不是只看 CPU 使用率。\n\n## 5. 成本口径\n\n用 `$/作业 = (executor 数 × 存活时长 × 单位核价) + (重算 stage 的重复字节 × 单位 IO 价)` 给上面每条决策定价：例如引入远端 shuffle 服务换来重算率从 6% 降到 0.5%，但新增常驻容量与一跳网络——把这个差值摊到每月作业数上，才是「值不值得上 (c)」的判据，而不是「别人都上了」。\n",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/big-data/spark-on-kubernetes-deployment.md#5-shuffle临时盘与-executor-丢失",
+    "era": "2026",
+    "addedBy": "content-agent-bd",
+    "ingestedAt": "2026-10-11T16:42:26.621Z"
+  }
+}

@@ -1593,14 +1593,20 @@
   目录不是"改名了就找不到"的活工作区。**顺带查出来的一件事**：那 19 项里有 6 项之所以"被引用"，
   引用处是 `HANDOVER.md` 本身（工作板提到过这个文件名）⇒ 工作板正在变成垃圾的存留理由，
   这本身就是 WI-109 那条"历史文档要标过期"的账，不是这些文件的理由。
-  ② **llm-rubric 主观题**：WI-108 的语料已就位（`spark-on-kubernetes-deployment.md` + 矩阵 4 行），
-  题还没出。出之前要按 `docs/ADD_QUESTIONS.md` 的四件套形状补 `probe_naive.py`/`precheck.py` 那一族
-  （rubric 类只需要 `points` + 判分点，不需要 runner），并先核实 K8s 版本基线（各站点口径不一致）。
-  ③ **历史文档第二批**：`docs/superpowers/plans/2026-09-19-daily-interview-arena.md` 与 A1/WI-94 两份计划里
-  还剩"当时预期、后来改主意"的句子没逐条标注；性能/体积类数字里唯一还需要新读数是
-  README:149-150 与 ARCHITECTURE:348 的教程用时（本轮已更新成四篇，下次容器档要再对一次）。
-  ④ **`rule.md` 的"红线"编号**已加解歧指针（`f9fdd36`），但 C 清单与 `## 红线` 那节的**命名统一**仍是
-  一次用户决定（改文档口径 or 把 C 清单升格），不是修复。
+  ② **K8s 语料的主观题：4 行矩阵已出 2 道 `principal` 档 `llm-rubric`（2026-10-12，题库 254 → 256）** ——
+  `bd-rubric-0009`（五本资源账：`OOMKilled` / `OutOfMemoryError` / `Pending` / CPU 节流四种失效四种诊断，
+  题面把"净 16 MB 而高水位 +563 MB"当作**给定读数**供引用，不要求 candidate 背我们的数）、
+  `bd-rubric-0010`（弹性悖论：缩容即丢 shuffle 的三档解法与各自代价、`emptyDir{medium:Memory}` 花的是
+  `limits.memory` 这本账、PDB 只管自愿中断、ClusterAutoscaler 只看 requests）。
+  入库走 `bank:add`（先 `--dry-run` 再真入库，两个字节都没动过已有题目），`npm run verify:fast` EXIT=0。
+  ⚠ **这两道的真判分往返（rubric 走 qodercli → copilot → manual 那条降级链）本轮没在容器里跑过** ——
+  Docker 被暂停，矩阵那一档没补。恢复后 `./start.sh --verify` 要确认这两条进得了矩阵且 `跳过（栈不可用）0` 不变。
+  还剩 `spark-on-k8s-submit-and-identity` 与 `spark-on-k8s-operator-multitenancy` 两行矩阵没有对应题目。
+  ③ ~~历史文档第二批~~ **已完成**（`43942a0`）：六份已交付的计划各加状态头（写清"勾选是历史"与"今天再读会踩空
+  的具体句子"），`WI-91b` 反过来标成唯一一份还没开工的。清点时量到的数字是 7 份计划里 342 个未勾步骤。
+  ④ ~~`rule.md` 的"红线"编号统一~~ **已完成**（`43942a0`）：先量范围再动手 —— `红线 C[0-9]` 全仓 12 处里
+  9 处在 `memo.md`/`HANDOVER.md`（历史记录不动），**活文档只剩 1 处**，改掉它并同步 `rule.md` 的解歧指针
+  （指针若不同步，它自己就变成新的谎）。
 - [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
   ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
   `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；

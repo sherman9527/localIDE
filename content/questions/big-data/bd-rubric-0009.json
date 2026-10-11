@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0009",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Spark on K8s 的资源账：把「OOMKilled」和「Java OOM」分开修",
+  "statement": "## 场景（数据平台 / Spark on Kubernetes 方向，25 分钟）\n\n你把一个跑在 YARN 上的 PySpark 批作业迁到 Kubernetes（`deploy-mode cluster`，driver 与 executor 都是 Pod）。迁移后一周内出现四类**互不相同**的现象，团队把它们统称为「内存不够」并统一把 `spark.executor.memory` 从 4g 调到 8g：\n\n- **A**：部分 executor Pod 被杀，`kubectl describe pod` 显示 `Last State: Terminated, Reason: OOMKilled, Exit Code 137`；JVM 日志里**没有** `OutOfMemoryError`。\n- **B**：另一些 executor 抛 `java.lang.OutOfMemoryError: Java heap space`，而 Pod **没有**被杀。\n- **C**：调大内存之后，一批 Pod 长期 `Pending`，`kubectl get events` 里有 `Insufficient cpu` / `Insufficient memory`；节点利用率监控显示集群并不空。\n- **D**：还有一批作业没报错也没被杀，只是同样数据的 task duration 从 3 分钟漂到 7 分钟，且**只出现在集群晚间高峰**。\n\n已知事实（这些是你调查时可以引用的读数，不需要猜）：\n1. Pod 的 `resources.requests.memory = 6Gi`、`resources.limits.memory = 8Gi`；`spark.executor.memory = 4g`（后来改成 8g）；`spark.memory.fraction`、`spark.memory.offHeap.enabled`、`spark.executor.memoryOverhead` 全部保持出厂默认。\n2. 每个 executor 跑 4 个 task，作业里有两处 `toPandas()`：一次取 2,000,000 行单列 `int64`，一次取 300,000 行 × 12 列字符串。\n3. 平台侧做过一次隔离实验（**这组数是量出来的，可以直接引用**）：同一份 2,000,000 行 `int64` 数据，`pandas` 结果的净占用是 16,000,128 B，而该进程的高水位 RSS 在那一步涨了约 563 MB；把结果对象 `del` 并强制 GC 之后，高水位**不下降**，当前 RSS 才下降。\n\n## 要你回答的（四小问，每问都要给「证据 → 结论 → 修法」三段）\n\n1. 分别解释 A / B / C / D 的成因，并说明**为什么它们不能用同一个修法**。每一问必须点名你会去查的具体证据（一个命令、一个指标或一个字段），不许只说「看监控」。\n2. 这个 Pod 的内存请求与限制应该怎么定？给出**由哪些分量相加**的算式（哪些进 requests、哪些进 limits、为什么不是同一个数），并说明 `spark.memory.offHeap.enabled` 打开之后这个算式哪一项会移动。\n3. 事实 3 那组读数对「Python 侧的账记在哪里」说明了什么？如果只在 `spark.executor.memory` 上按 JVM 堆的画像加余量，会发生什么？（要求解释「净占用 16 MB 而高水位 563 MB」为什么不矛盾。）\n4. 「调大 requests 让 C 消失」和「调大 limits 让 A 消失」这两个直觉各自错在哪？给出你会怎么用**一次可控实验**证伪其中任意一个（有界输入、明确观测指标，不许无界造数据压垮共享集群）。\n",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "spark-on-k8s-resources",
+    "pyspark-python-perf",
+    "data-cost",
+    "production-stability",
+    "modern:spark-on-k8s"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "四类失效的成因分离（3 分）",
+        "weight": 3,
+        "criteria": "命中条件：A = cgroup 超限由内核杀死（`Reason: OOMKilled` / exit 137 是容器级证据，堆里没异常是正常的，因为被杀的原因在堆之外——overhead、native、Python RSS 之和越过 limits）；B = JVM 堆内分配失败（Pod 没被杀恰好说明 limits 还有余量，账在 heap 内）；C = requests 才是调度依据，requests 变大直接让可放置的节点变少，与「集群不空」并不矛盾（要指出 limits 不参与调度）；D = CPU **节流**而非失败：limits 到顶后被压时间片，表现为 task duration 漂移且没有报错，与数据量无关（高峰才出现正是争抢的特征）。必须点出四者修法不同：A 调 limits 与 overhead、B 调 heap 与算子、C 调 requests 或节点容量、D 去掉/放宽 cpu limit 或降并行。**把 A 归因于 heap 太小，或把 D 说成「数据变多了」，最多 1 分。**"
+      },
+      {
+        "label": "内存算式与 requests/limits 的不对称（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：给出分量式（heap = `spark.executor.memory`；堆外 = overhead + off-heap（若启用）+ netty/序列化缓冲 + 线程栈；Python = worker 进程 RSS，且 Arrow 转换期是多份副本并存）并说明 limits ≥ heap + 堆外 + Python 峰值，而 requests 可以低于 limits（过量提交是常态，但内存的过量提交会在机器压力时变成 A）。要明确指出题面「heap 4g→8g 而 limits 仍 8Gi」是**自伤**：提高 heap 挤掉的正是 overhead 余量，于是 B 变少而 A 变多。答对打开 off-heap 后账从 heap 挪进堆外（于是该同时**下调** heap 或上调 limits）再加成分量与原因。**只报「按 10% 配 overhead」不给算式与方向的，最多 1 分。**"
+      },
+      {
+        "label": "Python 那本账的可观测性与高水位陷阱（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：解释 16 MB 净占用与 ~563 MB 峰值不矛盾（峰值是**转换过程中** JVM/Arrow/pandas 多份副本同时存在，净大小是结果；且 JVM 侧还要先物化才能过 Arrow）；由此推出「按结果大小估 Python 侧余量会系统性低估」；再用高水位与当前 RSS 的差别（`del`+GC 后高水位不掉、当前值才掉）说明**监控该看哪一个**、以及在容器上等价于什么（`memory.current` 与 `memory.max`/`memory.events` 的 `oom_kill` 计数），并指出 `toPandas()` 的账落在 Python 进程而不是 JVM 堆——只调 `spark.executor.memory` 看不见它。把高水位不降说成泄漏，或建议「用 `ru_maxrss` 当当前用量」，本考点 0 分。"
+      },
+      {
+        "label": "反直觉的两个直觉都要推翻，并给出可控实验（2 分）",
+        "weight": 2,
+        "criteria": "命中条件：指出「调大 requests 解决 C」会把调度让出去但把成本与碎片换进来，且完全没动 D 的节流；「调大 limits 解决 A」在不改 heap/overhead 算式时只是把 OOMKilled 推迟到更大的输入上。实验必须是**有界**的：固定输入规模与轮数、单变量（只改 limits 或只改 cpu limit）、观测指标明确（termination reason、heap 使用与 GC、`memory.events.oom_kill`、task duration 分布、`kubectl top`/节点压力），并说明什么读数会证伪自己的假设。允许引用题面给的读数做对照。**提出「跑一次全量数据看看会不会炸」这类无界压测的，本考点 0 分。**"
+      },
+      {
+        "label": "迁移层面的取舍（1 分）",
+        "weight": 1,
+        "criteria": "命中条件：至少落到一个 K8s 特有而 YARN 没有的结构问题——例如动态分配与「executor Pod 消失即 shuffle 丢失」的矛盾、PDB 只保护自愿中断不保护 OOM、`deploy-mode cluster` 下提交端断开后状态只能从 API/历史服务读、driver 需要命名空间内的最小 RBAC 而不是 cluster-admin。只泛泛说「K8s 运维复杂」不给这一分的判定标准。"
+      }
+    ],
+    "notes": "判分看「有没有把四本账分开并且每一问落到可验证的证据」，不看名词密度。任何一小问只给参数清单（例如「limits 调到 16Gi」）而不给分量算式或观测证据的，该考点最多给一半分。事实 3 的读数是题面给的，candidate 不必背出 563 MB，但必须正确解释它的含义；把它解释成「pandas 内存泄漏」按 0 分处理。"
+  },
+  "answer": "## 1. 四类失效分开\n\n**A（OOMKilled / 137，堆里无异常）**：这是 **cgroup 把进程杀掉**，不是 JVM 分配失败。容器看到的是 `limits.memory = 8Gi` 这一个数，而它的占用是 heap + 堆外（netty、序列化缓冲、线程栈、`memoryOverhead`）+ Python worker 进程 RSS 的总和。堆里干净只说明**原因不在堆里**。证据就是 `kubectl describe pod` 的 `Terminated.Reason` 与 exit code 137，再配合节点侧 `dmesg`/`memory.events` 的 `oom_kill` 计数。\n\n**B（Java heap OOM，Pod 活着）**：账在 `spark.executor.memory` 内（或 execution/storage 内存被 `spark.memory.fraction` 划走后的大聚合、`collect()` 拉回 driver 的那类形状）。**Pod 没被杀恰好说明 limits 还够**——所以 B 的修法是提高 heap，而 A 的修法是提高「limits 相对 heap 的余量」，两者方向不同，用同一个动作必然误伤一个。\n\n**C（Pending: Insufficient cpu/memory）**：调度看的是 **requests**（以及节点可分配量），与 limits 无关，所以「集群不空」与「放不下」同时成立完全正常——碎片、taint、亲和、其他 Pod 的 requests 之和才是约束。修法要么是 requests 定得过高（过量预留），要么是节点池容量/亲和问题；**动 limits 一点也帮不上 C**。\n\n**D（时长漂移，无异常，只在高峰出现）**：CPU limit 造成的是**节流**——配额用完就被压住，表现为同样数据 task duration 变长。查法：task 级别的 duration 分布、容器 `cpu.stat` 的 `nr_throttled`/`throttled_time`、以及是否只在同节点争抢时段出现。它不是「数据变多了」，也不是内存问题。\n\n## 2. 算式\n\n```\nlimits  ≥ heap(spark.executor.memory)\n        + memoryOverhead(堆外 JVM 侧)\n        + off-heap(若启用 spark.memory.offHeap.size，它算在堆外总量里)\n        + netty/序列化缓冲 + 线程栈\n        + Python worker 峰值 RSS（toPandas/Arrow 的转换期，不是结果净大小）\nrequests ≲ limits（内存可以适度过量提交，但要明白压力时刻它变成 A）\ncpu     requests 决定调度与伸缩；cpu limits 决定会不会被节流 → 有 D 就别设死 cpu limit\n```\n题面把 heap 从 4g 调到 8g 而 limits 仍是 8Gi，等于把堆外与 Python 的空间压成零——**预期结果就是 B 减少、A 增加**。开 `offHeap.enabled` 之后，同一份用量的部分从 heap 移到堆外：要么下调 heap，要么上调 limits，否则还是撞 A。\n\n## 3. Python 侧\n\n16,000,128 B 是结果 DataFrame 的净占用（2,000,000 × 8）；~563 MB 是那一步的**进程高水位增量**，因为转换途中 JVM 侧的 Arrow 记录、Python 侧的中间数组与最终列同时存在，峰值与净大小不是一回事。`del` + GC 之后高水位不降、当前 RSS 降——这正好说明**仪器选择**：想看「有没有花掉」要看当前值与容器 `memory.current`/`memory.max` 的比值以及 `memory.events` 里的 `oom_kill`；`ru_maxrss`/`VmHWM` 只能回答「历史上最多到过哪里」。结论：Python 的账在**进程 RSS** 里，`spark.executor.memory` 这个参数看不见它，所以只按 JVM 画像估 limits 必然低估含 `toPandas()` 的作业。\n\n## 4. 两个直觉都要推翻 + 实验\n\n调大 requests 让 C 消失，代价是把节点容量买空（更多 Pending 给邻居作业）且不解决 D；调大 limits 让 A 消失，在不改 heap/overhead 算式时只是把 OOMKilled 推到更大的输入上。**可控实验**（以 D 为例）：固定输入 2,000,000 行、跑 5 轮、单变量 = 去掉 cpu limit（requests 不变），观测 task duration 分布 + `cpu.stat.nr_throttled`。若节流计数从有到无且时长回到 3 分钟 ⇒ D 成立；若时长仍 7 分钟 ⇒ 不是节流，回去查数据倾斜与磁盘争抢——**这条实验同时也是对自己假设的证伪设计**。内存侧同理：保持 heap 不变只提高 limits，若 A 消失而 B 不增加，说明原来确实卡在 limits；若 B 冒出来，说明问题一直在算式里。\n\n## 5. 迁移层面\n\n最值钱的三条：① 动态分配与 shuffle 持久化矛盾（executor Pod 被删就丢它的 shuffle 分区，要 ESS sidecar / PVC / 远端 shuffle 服务三选一）；② PDB 只挡自愿中断，挡不住 OOM 与抢占，长作业要靠可重算性；③ cluster 模式下 driver 在集群里当 Pod，需要**命名空间内最小 RBAC**（`pods`、`pods/log`、`services`、`configmaps`），给 `cluster-admin` 是把整个集群交给一个作业。\n",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/big-data/spark-on-kubernetes-deployment.md#1-五本资源账先问哪一本在管再谈调参",
+    "era": "2026",
+    "addedBy": "content-agent-bd",
+    "ingestedAt": "2026-10-11T16:42:26.618Z"
+  }
+}
