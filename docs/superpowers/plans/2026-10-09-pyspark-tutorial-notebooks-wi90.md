@@ -272,7 +272,7 @@ JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
 
 单元按顺序（`md` = markdown，`code` = code）：
 
-1. `md` 标题与本篇要回答的问题：**"一个 task 跑了 90% 时间"这个坏结果，怎么用本地这台机器量出来、三种解法各治哪一半**。写破边界：本机是 `local[*]`，没有节点级 shuffle 与 fetch failed，"某台机器被拖垮"这类失效模式本机演示不了，凡涉及它都标未验证。
+1. `md` 标题与本篇要回答的问题：**"一个 task 跑了 90% 时间"这个坏结果，怎么用本地这台机器量出来、三种解法各治哪一半**。写破边界：本机是 `local[2]`（原稿此处写 `local[*]`，篇 1 实测订正，见上面约束段），没有节点级 shuffle 与 fetch failed，"某台机器被拖垮"这类失效模式本机演示不了，凡涉及它都标未验证。
 2. `code` 建立 session（**不预设 shuffle 分区**，配置在①里显式设，读者看得见）：
    ```python
    import time
@@ -375,7 +375,7 @@ JSON 骨架（`metadata` 必须是这个形状，kernel 那条判据读它）：
    print("WI90[01-skew-and-hot-keys][broadcast-changes-plan] OK")
    ```
    ⚠ 上面那份 `hasattr` 试探是**给你手测用的脚手架**，落地时删掉：先用一次性脚本跑出两种阈值下的真实计划文本，**按实测算子名写断言**，把没用的分支删干净。
-   ⚠ ③ 解法 C（`hint("skew")` + `spark.sql.adaptive.skewJoin.enabled`）**不断言**：AQE 的 skew join 只在 shuffle 统计真倾斜时才生效，`local[*]` 上小数据常常不触发。写成"跑一遍看计划与 `explain()` 里有没有 skew 痕迹，把实测文本贴在这里"，并明确一句：**skew hint 救 join、救不了聚合**（这是本篇最值钱的一句话，不需要时间也能成立）。
+   ⚠ ③ 解法 C（`hint("skew")` + `spark.sql.adaptive.skewJoin.enabled`）**不断言**：AQE 的 skew join 只在 shuffle 统计真倾斜时才生效，`local[2]` 上小数据常常不触发。写成"跑一遍看计划与 `explain()` 里有没有 skew 痕迹，把实测文本贴在这里"，并明确一句：**skew hint 救 join、救不了聚合**（这是本篇最值钱的一句话，不需要时间也能成立）。
 8. `code` 计时对照（只打印，不断言）：三种写法各跑一次 `count()` 与真实聚合，打印耗时与 `shares_before/shares_after`。
 9. `md` ⑤ 速查表（`spark.sql.shuffle.partitions`、`advisoryPartitionSizeThreshold`、`adaptive.*`、`skewJoin.*`：默认值 / 什么时候动 / 动错的表征）+ 追问链（count distinct 为什么更容易倾斜、空 key 怎么处理、**为什么 skew hint 救不了聚合**——这条要推到机制层：聚合的倾斜发生在 hash 分区那一步，而 skew join 的改写只针对 join 的 key）。
 10. `md` 题库指针：`bd-pyspark-0001`（匿名流量占九成的 UV：热点 key 拆分 + 两阶段精确去重 —— 本篇面试题的本体）与 `bd-pyspark-0002`（join 右表多版本导致行数膨胀：先收敛维度再广播 —— 广播绕开倾斜那一解）。

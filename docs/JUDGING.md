@@ -82,7 +82,7 @@
 - 数值 `"250.50"` 与 `250.5` 等价；字符串比较不区分大小写；默认行序不敏感。
 - SQL 的 `NULL` 在期望值里直接写 JSON `null` 即可（runner 把输出的 `NULL` 与期望的 `null` 归一到同一个值）。
 - **限制**：每条语句都用新的 mysql 连接执行，所以会话变量、`Handler_*` 差值、跨语句锁状态都无法断言；考生只能提交一条查询。因此 gap lock / 并发交错 / `EXPLAIN` 代价类考点请出成 `llm-rubric` 主观题。
-- **白名单**（判据在 `server/src/judge/guards.ts`，改它要同步这里）：
+- **白名单**（判据在 `server/src/exec/guards.ts`，改它要同步这里）：
   一次只允许**一条**返回结果集的查询，可前置一条 `SET SESSION`；放行的开头关键字是
   `SELECT / WITH / EXPLAIN / DESCRIBE / SHOW`（后两个是调优题要看执行计划用的）。
   黑名单：`INTO OUTFILE|DUMPFILE`、`LOAD_FILE(`、`LOAD DATA`、`GRANT|REVOKE`、`SHUTDOWN`、
@@ -96,7 +96,8 @@
 ```jsonc
 "runner": { "setup": ["DEL board", "ZADD scores 10 a"], "timeoutMs": 10000 }
 ```
-- 考生提交**多行命令序列**（`#` 开头是注释）；用独立 db index（1-15），判题前后各自 `FLUSHDB`。
+- 考生提交**多行命令序列**（`#` 开头是注释）；判题从 `JUDGE_DBS`（1–14）里轮转取库，15 号库**留给网页 IDE**
+  （`IDE_DB_INDEX`，见 `server/src/exec/redis.ts`），判题前后各自 `FLUSHDB`。
 - `cases[].input` 是一条命令（返回其结果）或多条命令（返回结果数组）；期望值比较前把
   Buffer / 大整数 / 数字字符串归一化（`"3"` 与 `3` 等价）。
 - **禁用命令**（集合在 `guards.ts` 的 `REDIS_FORBIDDEN`，改它要同步这里）：
@@ -177,7 +178,7 @@ env，它证明不了服务进程那一侧）。
 
 **第二类影响不落在红线①上、落在超时上**：notebook 的 kernel 自带
 `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的
-`PYSPARK_SUBMIT_ARGS`），那是判题池**之外**的第二个 Spark JVM。`docs/ARCHITECTURE.md:249` 那套
+`PYSPARK_SUBMIT_ARGS`），那是判题池**之外**的第二个 Spark JVM。`docs/ARCHITECTURE.md` §3「常驻 worker 的排队」那套
 "判题优先于 IDE 且不抢占"排的是 `exec/spark-pool.ts` 里的 worker，notebook 这个 JVM 不在队列里 ——
 笔记本里跑重活会与被判题的 Spark 题抢宿主 CPU，把它推向超时。这条记为 **WI-95**（目前没有闸门，
 页面文案已说实话）。

@@ -3,6 +3,10 @@
 设计文档：`docs/superpowers/specs/2026-09-26-ide-dependency-environment-design.md`
 日期：2026-09-26
 
+> ⚠ **本计划已执行完毕（WI-87）**，留在仓库里的价值是"当时的判据是怎么排的"，不是"现在代码长什么样"。
+> 各任务 `Files:` 里的 **file:line（`repl.ts:68`、`languages.ts:249-250`、`java-junit.ts:102`…）是改造前的快照**，
+> 那些行现在装着别的函数 —— 要复核结论请按符号名找，或直接读 `docs/ARCHITECTURE.md` 与当前测试。
+
 ## Global Constraints
 
 - **范围只到 IDE**：不碰 `server/src/judge/**` 的执行逻辑，不碰 `shared/src/question.ts` 的 `RunnerConfig`（它是 `.strict()`，本期不需要扩）。

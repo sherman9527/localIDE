@@ -5,6 +5,17 @@
 > `2026-10-05-pyspark-enterprise-notebooks-design.md`（子项目 B）。
 > 用户 2026-10-05 拍板：**B 排在 A2 之前**，理由见 §4-C6。
 
+> **⚠ 这份设计里有四处已经被后面的实现推翻或改写**（历史文档不重写，但读者必须知道哪几句不再是现状）：
+> ① **A1 的"第五页只做入口、不 iframe"没了** —— WI-94 把 Jupyter 经**同源反代** `/jupyter/*` 内嵌进第五页
+> （左文件树 + 右 iframe，token 只在服务端注入、不进 URL），当时登记为"未实施"的那条现在就是交付形状，
+> 判据与取舍见 `docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md` 与 `docs/ARCHITECTURE.md` §3。
+> ② **A2 至今没落地**：本文按"会有 `arena-scala` 这个 kernel"写的契约示例与错误表都是**纸面的**，
+> `NOTEBOOK_KERNELS`（`shared/src/notebook.ts`）今天只有 `pyspark` 一条；Scala 的探索结论与选型（Toree）
+> 在 `2026-10-10-scala-jupyter-kernel-spike-wi91.md`，接入计划是 `2026-10-10-scala-kernel-integration-wi91b.md`。
+> ③ **token 的放行判据是合取，不只按 socket 对端**：`isLocalPeer` ∧ `isLoopbackHostHeader`
+> （只看对端拦不住 DNS rebinding）—— 本文写"只按对端"的那几段按此读。
+> ④ 本文"现状"表里的**行号快照已漂移**（`docker/Dockerfile:66` 这类指针），要按符号名找，不要按行号。
+
 ## 1. 现状（实测，不是推测）
 
 | 事实 | 出处 |
@@ -116,6 +127,9 @@ arena 服务加 `127.0.0.1:7789:8888` 与 `ARENA_JUPYTER_TOKEN`（透传 `${VAR:
   // 更正（实施时 · 评审 M-1）：契约里**没有独立的 token 字段** —— token 拼在上面那条 url 的 ?token= 里；"日志里必须剥掉"那条纪律不变（§7-4）
   //   释放判据也**不是**"本机同源"（同源要由 Origin/Host 推，而 Host 是客户端自报的）：判的是内核给的 socket 对端地址
   //   （request.raw.socket.remoteAddress）= 回环，或等于本进程的默认网关（compose 里宿主浏览器经网桥 NAT 进来，对端就是网关而非回环）
+  //   再更正（WI-94 终审）：今天它是**合取** —— 上面那半 ∧ `isLoopbackHostHeader(Host 头是本机字面量)`。
+  //   "Host 客户端自报所以不能单独信"仍然成立，但**只按对端**拦不住 DNS rebinding（那种攻击里对端真是 127.0.0.1）
+  //   ⇒ 两半各挡一种，谁都不是可省的那个。判据在 `server/src/notebooks/status.ts` + `server/src/net/localOrigin.ts`。
   "reason"?: "…",                   // running:false 时必填，说清是"没起"还是"端口不通"
   "kernels": [ { "id": "arena-pyspark", "label": "PySpark (arena)", "ready": true },
                { "id": "arena-scala", "label": "Scala (Spark)", "ready": false,
@@ -208,6 +222,10 @@ argv=venv python → import pyspark 命中系统 site-packages（venv 的 --syst
   同源反代 `/jupyter/*` + `--ServerApp.base_url=/jupyter/` + 服务端注入 token 的设计已批准、**未实施**，
   登记为 `HANDOVER.md` WI-94。它的硬前提是 7788 那侧补上 Host 白名单 + `Sec-Fetch-Site` 判据（fail-closed，
   只在这个子树上加）—— 一旦由 7788 注入 token，"谁能打开 7788"就等价于"谁能在容器里执行代码"。
+  > **更正（WI-94 交付后 · 2026-10-11）**：这一条已经实施 —— 上面那句"设计已批准、未实施"不再成立。
+  > 而且那句"7788 一条 Host 白名单都没有"**也不再成立**：`server/src/net/localOrigin.ts` 的那个 Host 判据
+  > 今天管着**整个 API**（外来 `Host` ⇒ 403），不只 `/jupyter/*` 那棵子树。它仍然**不替代**绑回环 ——
+  > Host 谁都写得出来，两件事的分工见 `docs/ARCHITECTURE.md` §3 与 `README.md` 的 notebook 一节。
   顺带记一条**等用户点头的开放事实**（它不是 WI-94 的前置，它今天就已经成立）：7788 一条 Host 白名单都没有，
   所以对那张未鉴权的题库做 DNS rebinding 现在就行得通 —— 这一条与 notebook 无关，是 7788 自己的边界。
 - 不在 notebook 里做判题/答题闭环（那是 IDE 与做题系统的边界，`ide/boundary.test.ts` 的白名单会拦住）。

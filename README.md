@@ -145,9 +145,10 @@ Jupyter（`docker/entrypoint.sh` 与 mysqld/redis 同级常驻拉起，它自己
   「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」两条阶段）。判据两层 ——
   执行层（零 cell 异常，且 kernel 必须是 `arena-pyspark`）与结论层（每条方向性结论都要打出一个
   `WI90[篇名][slug] OK` 标记，打出的集合与 `server/test/notebooks/tutorial-claims.ts` 那份注册表**双向相等**）。
-  实测用时（2026-10-10 的 `./start.sh --verify` 那一趟，量具 = vitest 报的那条用例 duration，
-  取 `data/verify-tutorials.json`）：篇 1 **26.31s**、篇 2 **56.31s**、篇 3 **18.98s**，三篇合计 **≈101.6s**；
-  同一天单跑那一条阶段量到 25.86 / 55.50 / 18.44（≈99.8s），差别在负载不在判据。
+  实测用时（量具 = vitest 报的那条用例 duration，取 `data/verify-tutorials.json`；
+  2026-10-11 那一趟 `./start.sh --verify`：篇 1 **34.31s**、篇 2 **65.69s**、篇 3 **24.49s**，合计 **≈124.5s**；
+  2026-10-10 那趟同一条量具是 26.31 / 56.31 / 18.98（≈101.6s）—— 差在宿主负载不在判据，
+  所以这里给的是**区间**而不是一个数）。
   单篇目标 ≤90s、闸门硬预算 120s（`TUTORIAL_TIMEOUT_MS`），kernel 是 **`local[2]`** 而不是判题 `spark-scala`
   那个 `local[*]`。跑完不留活内核：每篇最后一个 cell 必须是语句级的 `spark.stop()`，
   且"打印 marker 的那个 cell 里必须有语句级 `assert`" —— 这两条在**宿主档**（每次提交都跑的那一档）就有牙，
@@ -257,7 +258,9 @@ tests/       Playwright E2E
   题目本身不转录这些文档的原文：`source` 的字段只有
   `origin/jds/ingestedAt/era/company/role/location/knowledgeRef/addedBy`，没有任何 quote/excerpt 字段，
   公开的是我们自己写的题面与判分点。
-- **单镜像**：所有技术栈都在一个镜像里（`docker images daily-arena` 实测 **2.36GB**）。
+- **单镜像**：所有技术栈都在一个镜像里（`docker images daily-arena` 实测 **2.55GB**，2026-10-11 由 HEAD 重建那一版；
+  这里旧写的 2.36GB 是更早一版镜像的读数 —— **涨在哪一层本轮没有量过**，所以别拿这两个数做任何体积预算的依据，
+  要用的时候现跑 `docker images`）。
   Windows 上磁盘占的比这大得多，而且**只涨不缩** —— 那是 Docker Desktop 的 VHDX，删镜像不还空间、
   重启也不还（实测回收 40GB 后 `df` 一点没动）；保持已分配反而让下次构建复用空间、不再涨盘。
   镜像层实体存在 Docker 的 VM 存储里，仓库内的 `./docker-cache` 只承载 npm/pip 等构建缓存 ——

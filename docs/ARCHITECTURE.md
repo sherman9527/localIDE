@@ -28,7 +28,7 @@
 （外加一个 `Clock`，让连击测试不必等真过一天）。实现只在组合根 `server/src/index.ts` 里注入 ——
 所以 API 测试可以塞假判题器，宿主机没装 JDK 也能跑完整个 HTTP 层。
 
-`shared/` 一共 1080 行、零依赖除 zod，是四个子系统唯一的共同语言。它放在页底而不是画成箭头穿过中间，
+`shared/` 一千五百余行、零依赖除 zod，是四个子系统唯一的共同语言。它放在页底而不是画成箭头穿过中间，
 因为它不属于任何一层：**每一层都 import 它，它不 import 任何一层。**
 
 ---
@@ -49,12 +49,13 @@
 文件名的 hash 每次构建都会变，所以只记体积）：
 
 ```
-首屏 index-*.js   237.3KB → gzip 75.6KB（预算 84KB）+ CSS gzip 5.3KB
+（2026-10-11 由 `npm run verify:fast` 的「前端产物预算」那条阶段原样抄下，单位 gzip KB）
+首屏 index-*.js   240.0KB → gzip 76.2KB（预算 84KB）+ CSS gzip 6.8KB
    ↑ 只有这一个 JS 进 <script src>，且一个 modulepreload 都不许有
 
-按需加载：CodeEditor 209.4KB · typescript 123.6KB · 共享 chunk 74.4KB
-          · prettier/estree 60.3KB · Question 34.3KB · prettier/standalone 26.5KB
-          · Progress 3.3KB · Ide 2.2KB · Bank 1.9KB
+按需加载：format-source 211.2 · typescript 123.6 · 共享 chunk(index-*) 74.4
+          · prettier/estree 60.3 · Question 33.6 · prettier/standalone 26.5
+          · Ide 7.5 · Notebook 3.7 · Progress 3.3 · Bank 2.2
 ```
 
 **首屏不许拖进 zod 和 CodeMirror**、**懒加载 chunk 里必须确实找得到 CodeMirror**（否则说明切分假了，
@@ -87,7 +88,7 @@ TypeScript 5.7 strict，`tsc -b` 三栈引用构建（`shared → server → web
 | POST | `/ide/run` | 网页 IDE 执行一次（与判题共用沙箱、白名单与并发闸，但不写 attempt） |
 | GET·POST | `/ide/repl*`、`/ide/debug*` | 两类**跨请求存活的子进程**：逐句求值（WI-77）与行断点单步（WI-81）。都是一问一答（每条命令都有天然的结束点），端点形状见下面两段 |
 | GET·POST | `/ide/env`、`/ide/env/command`、`/ide/env/reset` | 依赖环境（WI-87）：清单（GET，含占用字节）、命令窗口（POST，SSE 逐行回显）、回到镜像默认（POST reset）。落点在命名卷，**判题看不到**（见 `docs/JUDGING.md`） |
-| GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + 拼给宿主的链接。token **只按 socket 对端附上**（`isLocalPeer`：回环或本进程默认网关；不是 `Host` 头，那玩意客户端想写什么就写什么）；非本机对端照样给链接、只是里面没有凭据。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
+| GET | `/notebook/status` | 第五页唯一的事实来源：探活 + 解 `kernelspecs` + 拼给宿主的链接。token 按**合取**释放：`isLocalPeer`（内核给的 socket 对端：回环或本进程默认网关）**且** `isLoopbackHostHeader`（`Host` 头是本机字面量，判据在 `server/src/net/localOrigin.ts`）—— 只看对端拦不住 DNS rebinding（那种攻击里对端真是 `127.0.0.1`），只看头拦不住局域网里伪造头的人，所以两个都不是可以省掉的那个。非本机对端照样给链接、只是里面没有凭据。这条 GET 顺手铺示例，铺不进去是 `200 + seedError + notebooks:[]`，不是 500 |
 | POST | `/notebook/prepare-env` | 显式建 IDE 那个 venv（`arena-pyspark` kernel 的 argv 指着它）。成功只有 `{ok:true}`，失败是 `200 + {ok:false, reason}`。**铺示例不在这条路上** —— 那是上面那个 GET 顺带做的，两件事坏的是不同的东西 |
 | GET | `/notebook/files` | 第五页**左栏那棵树**（WI-94 Task 5）：只读目录、不读内容，与"这次铺了什么"（上面那个 GET 的 `notebooks` 字段）是两件事，所以分两个口子。Jupyter 没起来也照答；读不到是 `error` 字段，不是空数组 |
 | ALL | `/jupyter/*` | 同源反代（WI-94 Task 3/4）：HTTP 与 **websocket** 两条通道都隧道到**同一个容器里的** Jupyter。上游写死在组合根（`127.0.0.1:config.notebook.port`，默认 8888；那个注入口子只为测试开 —— 上游可配等于给一个没有鉴权的服务加一条 SSRF）。jupyter 自己带 `--ServerApp.base_url=/jupyter/`，所以回话里的绝对路径生来就在 `/jupyter/` 下面。token 由服务端注入、客户端塞的那一份**先摘掉**；放行判据只有 `proxyGuard.ts` 那一处，不过就 403/503 |
@@ -341,13 +342,14 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
   （`venv ok` / `rows 15`）、读活进程 `/proc/<pid>/environ` 的 PATH 首项、探 DNAT 目标上有没有人听、
   **直接调生产 `notebookStatus()` 打这个容器里跑着的 Jupyter** 解 kernelspecs（同文件里那组假 `/proc` 树 /
   假 executed-notebook JSON 的用例是宿主侧的 plumbing，另一码事）。
-- **「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」**（WI-90）：`tutorials.test.ts` 14 条里
+- **「教程 notebook 可运行（结论层）」+「教程闸门确实跑到了」**（WI-90）：`tutorials.test.ts` 16 条里
   有 4 条要真 Spark，三篇 senior 级教程（`content/notebooks/01-skew-and-hot-keys.ipynb`、
   `02-small-files-and-partitioning.ipynb`、`03-reading-the-plan-and-aqe.ipynb`）**各起一次 session 真跑**。
-  实测（2026-10-10 的 `./start.sh --verify`，量具 = vitest 的 per-test duration，取自
-  `data/verify-tutorials.json`）：**26.31s / 56.31s / 18.98s，三篇合计 ≈101.6s** ——
+  实测（量具 = vitest 的 per-test duration，取自 `data/verify-tutorials.json`；
+  **26.31s / 56.31s / 18.98s**（2026-10-10，合计 ≈101.6s）与 **34.31s / 65.69s / 24.49s**（2026-10-11，合计 ≈124.5s）
+  两趟都记在这里 —— 差别在宿主负载，判据一个字没动，所以这里给区间不给单值）——
   单篇目标 ≤90s、闸门硬预算 `TUTORIAL_TIMEOUT_MS=120s`（cell 级超时按秒从它推导，"单位是秒不是毫秒"
-  由常驻那组按量级判住）。整档 CV 里那两条阶段的原文：`教程 notebook：14 passed / 0 skipped / 14 total ✓`，
+  由常驻那组按量级判住）。整档 CV 里那两条阶段的原文：`教程 notebook：16 passed / 0 skipped / 16 total ✓`，
   上一条阶段则报 `Test Files 2 passed (2) / Tests 53 passed (53)`（kernel 35 + embed 18，容器里 0 skipped）。
   两层判据缺任何一层都放过一种真实的坏法：**执行层** = 零 `output_type=error` 且 kernel 必须是
   `arena-pyspark`（写成 `python3` 照样跑得绿，而它跑在镜像自带的系统解释器上 ⇒ 红线①的示范）；
@@ -422,7 +424,7 @@ Spark 的 blockmgr 暂存目录同理，在每次 JVM 重启前扫一次。
 主栈资格线是该类别"带参考解的可判分题 ≥ 6"，否则宁可排出缺口也不硬凑）；没排到就按日期轮转。
 主栈题量按近 7 天正确率微调，只在 **1..3** 之间（`adaptive.ts` 的 `minMain/maxMain`）：
 正确率 <0.4 减 1、≥0.8 加 1，且样本 <5 题不动；上限还要被该类别现有可判题数压一道（`available`）。
-`pickForDay()` 是以日期为种子的确定性算法，且当天结果写进 `settings['plan:<date>']` 缓存兜住题库漂移 ——
+`pickForDay()` 是以日期为种子的确定性算法，且当天结果写进 `settings['daily:plan:<date>']` 缓存兜住题库漂移 ——
 **同日两次调用 deep-equal**。
 
 **错题本 = SM-2 的二值退化**（WI-41）。完整 SM-2 要一个 0–5 的"回忆质量"评分，本系统只有 pass/fail 与用时，
@@ -564,7 +566,7 @@ entrypoint 那条"缺 token 就不起"的守卫因此让那两个实例干净地
 
 | 命令 | 用途 |
 | --- | --- |
-| `npm run verify:fast` | 宿主机快子集（约 45s）：跳过判题矩阵与 E2E |
+| `npm run verify:fast` | 宿主机快子集（约 2 分半，2026-10-11 实测）：跳过判题矩阵与 E2E |
 | `npm run verify` | 全量入口（等价 `bash scripts/verify.sh`）；**要在容器内跑**才有判题矩阵，且容器内要带 `SKIP_E2E=1`（镜像不带浏览器，E2E 归宿主） |
 | `npm run e2e` | 宿主 Playwright：自己起隔离实例（`127.0.0.1:7798`、`data/e2e`、题库只读），用默认浏览器 Edge |
 | `npm run dev` / `build` / `start` | 容器内 `scripts/dev.mjs` 编排（先编 shared+server，再并行起后端 watch 与 vite）/ 三栈构建 / 起 dist |
@@ -613,7 +615,7 @@ ARENA_E2E_KEEP=1 npm run e2e                       # 留现场排查
 
 | 场景 | 命令 |
 | --- | --- |
-| 随手改（lint/类型/单测能覆盖） | `npm run verify:fast`（宿主，约 45s；装了 hooks 就是每次 commit 自动跑） |
+| 随手改（lint/类型/单测能覆盖） | `npm run verify:fast`（宿主，约 2 分半，2026-10-11 实测；装了 hooks 就是每次 commit 自动跑） |
 | 碰了判题器 / 题库 / 容器相关 | `./start.sh --verify`（= 容器内 `SKIP_E2E=1 ARENA_REQUIRE_STACKS=1 npm run verify`）；判题矩阵必须报 `0 skipped` |
 | 交付前 / 改了前端 | `./start.sh`（改到 Dockerfile 才 `--rebuild`）→ `./start.sh --verify` → 宿主 `npm run e2e` |
 
@@ -648,25 +650,27 @@ WI-90 那条「教程 notebook 可运行」接的是同一条脚本但多带 `--
 
 ```
 localLearning/
-├─ shared/src/          契约：question / judge / api / game / attempt / day / taxonomy（1080 行，零 IO）
+├─ shared/src/          契约：question / judge / api / game / attempt / day / ide / notebook / taxonomy（零 IO）
 ├─ server/src/
 │  ├─ index.ts          组合根（注入 4 个端口）
 │  ├─ api/app.ts        全部路由 + traceId + SSE + 静态资源
 │  ├─ bank/             loader / hide（软删除）/ ingest（append-only）
-│  ├─ judge/            registry / workspace / process / guards / runners/*(6)
+│  ├─ judge/            registry / workspace / process / runners/*(6)
+│  ├─ exec/             真跑东西的那一层：guards（红线白名单）/ mysql / redis / spark-pool / spark-queue / spark-scala
+│  ├─ net/              localOrigin（`Host` 头是不是本机字面量 —— 合取判据的第二半在这里）
 │  ├─ ide/              runner / languages / 执行内核（与做题共用一个容器，边界由 boundary.test.ts 把住）
-│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + 逃生链接的 token 按 socket 对端释放）
+│  ├─ notebooks/        seed（缺失才复制）/ status（探活 + kernelspecs + 逃生链接的 token 按"对端 ∧ Host 头"合取释放）
 │  │                    / files（左栏那棵树）/ proxy（`/jupyter/*` 的 HTTP + websocket 两条隧道）
 │  │                    / proxyGuard（唯一的放行判据）
 │  ├─ llm/              rubric / provider / providers/*(4) / cli / settings
 │  ├─ game/             daily / review / xp / streak / weekly / adaptive / achievements
 │  ├─ db/               node:sqlite（WAL + user_version 迁移）
-│  └─ config.ts / log.ts / ports.ts
-├─ web/src/             pages(6：Today/Bank/Progress/Question/Ide/Notebook) / components(13) / lib / styles / router.tsx
-├─ content/             questions(7 类 252 题) / notebooks(smoke + 三篇 PySpark 教程) / knowledge / curriculum / jd-cache / hidden.json
-├─ data/                arena.db(.wal) / logs / judge / e2e / llm-bridge.log   ← 不进 git
+│  └─ config.ts / log.ts / ports.ts / shutdown.ts（优雅退出序列 —— 从组合根拆出来才测得到）
+├─ web/src/             pages(6：Today/Bank/Progress/Question/Ide/Notebook) / components / lib / styles / router.tsx
+├─ content/             questions(7 类；题数以 git 跟踪的基线为准，`npm run bank:check` 报) / notebooks(smoke + 三篇 PySpark 教程) / knowledge / curriculum / jd-cache / hidden.json
+├─ data/                arena.db(.wal) / logs / judge / ide-env / notebooks / e2e / llm-bridge.log   ← 不进 git
 ├─ docker-cache/        npm / pip / maven 缓存（依赖全留在仓库内）
-├─ docker/              Dockerfile / entrypoint.sh / mirrors.sh
+├─ docker/              Dockerfile / entrypoint.sh / mirrors.sh / jupyter/（kernelspec 与 kernel 侧脚本）/ BUILDINFO.md
 ├─ scripts/             verify.sh / dev.mjs / llm-bridge.mjs / check-bundle.mjs / check-bank.mjs
 │                       / curriculum.mjs / tail-logs.mjs / assert-ran.mjs / bank/ jd/ kb/
 ├─ tests/               Playwright E2E（宿主跑，独立隔离实例）

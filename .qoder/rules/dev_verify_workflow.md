@@ -6,7 +6,9 @@
 ## 四条不可跳过
 
 1. **任何改动都要跑验证**，且**没看到通过输出之前不许说"完成"**。
-   验证入口只有两个：`npm run verify:fast`（宿主，约 45s）与 `./start.sh --verify`
+   验证入口只有两个：`npm run verify:fast`（宿主，**约 2 分半**，2026-10-11 实测：大头是「单元测试」那条
+   阶段 73s，而它里面 `ide/debug.test.ts` 一条"停在断点上 31 秒不按任何键"就占 31s —— 那正是本文件下面
+   "还要故意停顿一次"那条规矩的自动化版本，不许当冗余删掉；旧文档写的"约 45s"是测试条数还少一半时的读数）与 `./start.sh --verify`
    （容器内 `SKIP_E2E=1 ARENA_REQUIRE_STACKS=1 npm run verify`，含判题矩阵）。
    **`--verify` 会先 build + `up -d` 再 exec**（两个脚本都是这条判据，2026-09-27 补）：
    `docker compose exec` 进的是**当前跑着的容器**，而容器用的是它被创建时的镜像 ——

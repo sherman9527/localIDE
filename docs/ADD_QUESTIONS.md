@@ -73,12 +73,19 @@
    坏题会被拒并给出 zod 的具体路径；同 id / 同题面（排版不同也算）自动跳过，**已有题目永不覆盖**。
    **要改一道已入库的题**（本仓库是 append-only 的题库，红线 C5）：`bank:add` 撞到同 id 只会
    "跳过"，所以**不存在"再 add 一次就同步了"**，也不许手改 JSON —— 手改必漏（本批就漏过一次：
-   改了库里的 `expected`，没改与之矛盾的用例名）。正规出口是**该题所在公司的生成器**：
+   改了库里的 `expected`，没改与之矛盾的用例名）。正规出口是**生成器 + 一条把草稿写回库的脚本**，
+   而这两件事今天**不是每家同一个形状**：
    ```bash
-   python scripts/bank/drafts/<公司>/gen.py --check        # 草稿与库逐字段比对（先看清差在哪）
-   python scripts/bank/drafts/<公司>/gen.py --sync <key>   # 只覆盖这一道，保留 ingest 补的字段
+   # 只有 alibaba 把这两个开关长在自己家 gen.py 里
+   python scripts/bank/drafts/alibaba/gen.py --check        # 草稿与库逐字段比对（先看清差在哪）
+   python scripts/bank/drafts/alibaba/gen.py --sync <key>   # 只覆盖这一道，保留 ingest 补的字段
+
+   # 其余各家（airbnb / apple / bytedance / deepseek / pdd）的 gen.py 没有这两个开关，
+   # 走跨公司通用件 —— 判据集中在一处；五家各复制一份迟早漂移（sync_one.py 文件头记着这段来历）
+   python scripts/bank/drafts/sync_one.py <key>                            # 按题目前缀认公司
+   python scripts/bank/drafts/sync_one.py --company ByteDance --dry-run k1 k2
    ```
-   `--sync` 只认"题面已存在"的题（绝不新建、绝不换 id），写完立刻用 `--check` 的同一段判据复验。
+   两条路的约束是同一条：只认"题面已存在"的题（绝不新建、绝不换 id），写完立刻用同一段判据复验。
    没有生成器的早期题目（`source.company` 为空的那 70 道）只能原地精修：
    先按 `source.company` + 建表语句/`runner` 核对"这道题确实是我要改的那道"，再只改需要改的那一个字段
    —— 按文件名猜出处然后整块覆盖 `cases`，会毁掉一道好题（本仓库真发生过一次，
@@ -108,12 +115,13 @@
 
 判题矩阵证明"题能做对、朴素解会挂"，它**不看文案**。而库里最常见的真缺陷恰恰在文案与数据之间：
 用例名说"删不掉别人的，返回 0"，答案却引用了一个不存在的用例名；答案说"基线八行"，`expected` 只有五行。
-所以每家出题目录配四份东西，各司其职：
+所以每家出题目录配四份东西，各司其职（⚠ 前两份**只有 alibaba 是 `gen.py` 的开关**，其余各家的写回走
+`drafts/sync_one.py` —— 上面那段 bash 是准的，别照着这张表去敲 `<公司>/gen.py --check`）：
 
 | 文件 | 判什么 | 什么时候跑 |
 | --- | --- | --- |
-| `gen.py --check` | 生成器算出的草稿与**已入库那份**逐字段一致（防"改了题库、模型还是老的"） | 改过题或改过生成器之后 |
-| `gen.py --sync <key>` | 纠正一道已入库的题的**正规出口**（`bank:add` 撞同 id 只会跳过，手改 JSON 必漏） | 需要改已入库题时 |
+| `gen.py --check`（仅 alibaba） | 生成器算出的草稿与**已入库那份**逐字段一致（防"改了题库、模型还是老的"） | 改过题或改过生成器之后 |
+| `gen.py --sync <key>`（仅 alibaba）／`drafts/sync_one.py <key>`（其余各家） | 纠正一道已入库的题的**正规出口**（`bank:add` 撞同 id 只会跳过，手改 JSON 必漏） | 需要改已入库题时 |
 | `probe_naive.py` | 文案里点名的数字，从**同一份题文件的种子与 expected** 里量出来再比（数字用正则从文案抠，不在探针里重写常量） | 每次入库后；已接进题库闸门 |
 | `precheck.py` | 用另一份**不同算法**的实现跑同一批用例（证明"题能做对"不依赖模型自证） | 与 `gen.py` 同一轮 |
 

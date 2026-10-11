@@ -3,6 +3,14 @@
 > 依赖子项目 A 的 **A1**（Jupyter + PySpark kernel + 第五页），**不依赖 A2**（Scala kernel）——
 > 排序上 B 在 A2 之前正是这个原因。设计见 `2026-10-05-jupyter-notebook-runtime-design.md`。
 > 用户 2026-10-05 拍板：第一轮 **3 篇打样**；教程的"可运行"**要变成闸门**（每篇在容器里真跑过才算绿）。
+>
+> **⚠ 订正（2026-10-11，WI-90 实施中量出来的）**：本文两处写的"本机只有 `local[*]`"**是错的** ——
+> `arena-pyspark` kernel 的 `PYSPARK_SUBMIT_ARGS` 是 `--master local[2] --driver-memory 512m`
+> （`docker/jupyter/kernels/arena-pyspark/kernel.json`），`spark.sparkContext.defaultParallelism` 实测 = 2；
+> `local[*]` 只属于判题侧的 `spark-scala` runner。这一字之差不是措辞问题：篇 1 的分桶/分区数字
+> **只有按 2 个 task 才对得上**，写成 `local[*]` 就是一句和不上任何实测读数的话。已按 `local[2]` 订正
+> （同一条订正在 `docs/superpowers/plans/2026-10-09-pyspark-tutorial-notebooks-wi90.md` 的约束段里，
+> 那次改动是 commit `1c61378`）。
 
 ## 1. 目标与读者
 
@@ -148,13 +156,13 @@
 - 不做"Spark 入门 20 讲"式的全谱教程（RDD 演化史、宽窄依赖背诵、DataFrame vs RDD 八股）——
   这些在面试里已经不值 senior 的分，且没有可量化的坏结果。
 - 不做视频/图文站、不做练习题自动判分（notebook 不是判题器，也不接题库写侧）。
-- 不在教程里教"怎么在生产集群调 YARN/K8s 资源"——本机只有 `local[*]`，写出来就是没验证过的话（纪律 2）。
+- 不在教程里教"怎么在生产集群调 YARN/K8s 资源"——本机只有 `local[2]`（不是 `local[*]`），写出来就是没验证过的话（纪律 2）。
 - 不做 Delta/Iceberg 的实装演示（镜像里没有，v4 那批改写成"口径与取舍"，并标未验证）。
 
 ## 9. 已知代价与不确定性
 
 - 每篇都要"能当场量出差异"，比写解释性教程贵得多；v1 三篇的工作量集中在**造数据和构造对照**上，不在文字。
-- `local[*]` 下倾斜/资源类现象与真实集群不完全一致（没有节点级 shuffle 与 fetch 失败）；
+- `local[2]` 下倾斜/资源类现象与真实集群不完全一致（没有节点级 shuffle 与 fetch 失败）；
   凡涉及"分布式才有的失效模式"，写清"本机只能演示到这一层"，剩下的标未验证。
 - 教程内容进 git 后就是**可增不可静默改**的东西：结论被后续实测推翻时，改文并留一行"何时被推翻、依据是什么"
   （沿用 `memo.md` 那套自我修正的写法）。
