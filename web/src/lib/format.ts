@@ -27,7 +27,10 @@ export const ERROR_KIND_LABEL: Record<JudgeErrorKind, string> = {
   timeout: '判题超时',
   runtime: '运行时崩了',
   forbidden: '用了判题器禁止的东西',
-  sandbox: '沙箱没起来',
+  sandbox: '沙箱被半路清掉了',
+  'question-config': '这道题本身配错了（该改题目，不是你提交的锅）',
+  infra: '判题底座没就绪（该修平台，不是你提交的锅）',
+  'invalid-submission': '提交内容不符合要求（不用改判题器）',
   unavailable: '该栈当前不可用',
 };
 

@@ -57,7 +57,7 @@ export const mysqlRunner: Runner = {
     try {
       assertSetupSql(setup);
     } catch (err) {
-      return errorResult('sandbox', `题目预置语句非法：${(err as Error).message}`, Date.now() - started);
+      return errorResult('question-config', `题目预置语句非法：${(err as Error).message}`, Date.now() - started);
     }
     // 自测面板贴进来的语句属于"外部输入"，必须按考生提交的标准过守卫，
     // 不能借"预置语句允许 DDL"这条通道以 root 执行任意 DDL/DCL
@@ -72,7 +72,7 @@ export const mysqlRunner: Runner = {
       try {
         assertSetupSql(cases.flatMap((c) => (Array.isArray(c.input) ? (c.input as string[]) : [])));
       } catch (err) {
-        return errorResult('sandbox', `题目预置语句非法：${(err as Error).message}`, Date.now() - started);
+        return errorResult('question-config', `题目预置语句非法：${(err as Error).message}`, Date.now() - started);
       }
     }
 
@@ -80,7 +80,7 @@ export const mysqlRunner: Runner = {
     const clientTimeoutMs = timeoutMs + CLIENT_GRACE_MS;
     const scratch = await createScratchDb(question.id, clientTimeoutMs);
     if (!scratch.db) {
-      return errorResult('sandbox', truncateLog(`建判题库失败：${scratch.error ?? ''}`), Date.now() - started);
+      return errorResult('infra', truncateLog(`建判题库失败：${scratch.error ?? ''}`), Date.now() - started);
     }
     const db = scratch.db;
 
@@ -95,7 +95,7 @@ export const mysqlRunner: Runner = {
           const seeded = await runSql(statement, db, logLine, clientTimeoutMs);
           if (seeded.code !== 0) {
             return errorResult(
-              'sandbox',
+              'question-config',
               truncateLog(`题目预置语句执行失败（${testCase.name}）：${seeded.stderr}`),
               Date.now() - started,
             );

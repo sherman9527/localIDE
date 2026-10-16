@@ -44,14 +44,14 @@ export const javaJUnitRunner: Runner = {
 
   async run(req: JudgeRequest, question: Question, onEvent?: (e: JudgeEvent) => void): Promise<JudgeResult> {
     const signature = question.runner?.signature?.trim();
-    if (!signature) return errorResult('sandbox', '题目缺少 runner.signature（形如 int[] twoSum(int[] nums, int target)）', 0);
+    if (!signature) return errorResult('question-config', '题目缺少 runner.signature（形如 int[] twoSum(int[] nums, int target)）', 0);
 
     const className = question.runner?.className ?? 'Solution';
     if (!CLASS_NAME_RE.test(className)) return errorResult('forbidden', `非法类名：${className}`, 0);
 
     const timeoutMs = question.runner?.timeoutMs ?? config.judge.defaultTimeoutMs;
     const cases = question.cases ?? [];
-    if (cases.length === 0) return errorResult('sandbox', '题目没有测试用例', 0);
+    if (cases.length === 0) return errorResult('question-config', '题目没有测试用例', 0);
 
     // 指针结构题（N-04）：签名里出现才注入内置类 —— 一律注入会跟考生自己写的同名类撞编译
     const pointerTypes = (['ListNode', 'TreeNode'] as const).filter((name) => new RegExp(`\\b${name}\\b`).test(signature));

@@ -15,7 +15,7 @@
   "passed": 2, "failed": 1, "total": 3,
   "failedCases": [{ "name": "中间重复需要滑动窗口截断", "expected": "3", "actual": "0", "message": "..." }],
   "passedCases": ["空事件流返回 0"],
-  "errorKind": "compile | timeout | runtime | forbidden | sandbox | unavailable",  // status=error 时才有
+  "errorKind": "compile | timeout | runtime | forbidden | sandbox | question-config | infra | invalid-submission | unavailable",  // status=error 时才有
   "logs": "截断后的原始输出（≤20 行 / 4000 字）",
   "durationMs": 1412
 }

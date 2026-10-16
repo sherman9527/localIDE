@@ -60,7 +60,7 @@ export const redisRunner: Runner = {
 
     const userCommands = commandLines(req.submission).map(tokenizeRedis);
     if (userCommands.length === 0) {
-      return errorResult('sandbox', '没有检测到任何 Redis 命令', Date.now() - started);
+      return errorResult('invalid-submission', '没有检测到任何 Redis 命令', Date.now() - started);
     }
     // 用例里的校验命令也要过白名单：customCases 来自请求体，不过检查就等于给外部输入开了后门
     const caseCommands = cases.flatMap((testCase) => (Array.isArray(testCase.input) ? (testCase.input as string[]).map(tokenizeRedis) : []));

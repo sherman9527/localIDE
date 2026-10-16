@@ -222,7 +222,8 @@ describe('react-vitest runner', () => {
     });
     const result = await runJudge({ questionId: 'x', submission: CORRECT }, q);
     expect(result.status).toBe('error');
-    expect(result.errorKind).toBe('sandbox');
+    // WI-111：这一格判的是「题目缺 runner.files」，归属是**出题人**，不再是一句「沙箱没起来」
+    expect(result.errorKind).toBe('question-config');
   }, 30_000);
 
   guarded('extraFiles 路径穿越被拒绝（需求 场景 6）', async () => {

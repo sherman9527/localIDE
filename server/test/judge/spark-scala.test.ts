@@ -148,7 +148,8 @@ describe('spark-scala runner', () => {
     const question = makeQuestion();
     const result = await runJudge({ questionId: question.id, submission: NO_SOLVE }, question);
     expect(result.status).toBe('error');
-    expect(result.errorKind).toBe('sandbox');
+    // WI-111：提交里没写 `def solve` 是**候选人**自己能修的一类，与「平台没就绪」分开
+    expect(result.errorKind).toBe('invalid-submission');
     expect(result.logs).toMatch(/def solve/);
   }, 240_000);
 

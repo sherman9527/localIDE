@@ -74,7 +74,7 @@ export async function runJudge(
     });
     return result({
       status: 'error',
-      errorKind: 'sandbox',
+      errorKind: 'infra',
       traceId,
       logs: `判题器内部异常：${(err as Error).stack ?? String(err)}`,
     });

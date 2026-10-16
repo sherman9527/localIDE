@@ -30,7 +30,7 @@ import {
 
 function errorKindForStage(stage: string | undefined): JudgeErrorKind {
   if (stage === 'compile') return 'compile';
-  if (stage === 'protocol' || stage === 'worker') return 'sandbox';
+  if (stage === 'protocol' || stage === 'worker') return 'infra';
   return 'runtime';
 }
 
@@ -53,11 +53,11 @@ export const pysparkRunner: Runner = {
     const logLine = lineReporter(onEvent);
 
     const cases = question.cases ?? [];
-    if (cases.length === 0) return errorResult('sandbox', '题目没有测试用例', elapsed());
-    if (!req.submission.trim()) return errorResult('sandbox', '提交内容为空', elapsed());
+    if (cases.length === 0) return errorResult('question-config', '题目没有测试用例', elapsed());
+    if (!req.submission.trim()) return errorResult('invalid-submission', '提交内容为空', elapsed());
     const entry = question.runner?.entry ?? 'function';
     if (!SUPPORTED_ENTRIES.has(entry)) {
-      return errorResult('sandbox', `pyspark runner 不支持 runner.entry='${entry}'（可用：function / sql / script）`, elapsed());
+      return errorResult('question-config', `pyspark runner 不支持 runner.entry='${entry}'（可用：function / sql / script）`, elapsed());
     }
 
     const payload: SparkRequestPayload = {
@@ -85,7 +85,7 @@ export const pysparkRunner: Runner = {
             true,
           );
         }
-        return errorResult('sandbox', truncateLog(`spark worker 不可用：${(err as Error).message ?? String(err)}`), elapsed());
+        return errorResult('infra', truncateLog(`spark worker 不可用：${(err as Error).message ?? String(err)}`), elapsed());
       }
 
       progress('collect');

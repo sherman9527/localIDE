@@ -177,7 +177,7 @@ function errorResult(message: string): JudgeResult {
     total: 0,
     failedCases: [],
     passedCases: [],
-    errorKind: 'sandbox',
+    errorKind: 'infra',
     logs: message,
     durationMs: 0,
   };

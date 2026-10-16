@@ -63,13 +63,13 @@ export const sparkScalaRunner: Runner = {
     if (!OBJECT_NAME_RE.test(target)) return errorResult('forbidden', `非法 object 名：${target}`, elapsed(started));
 
     const cases = question.cases ?? [];
-    if (cases.length === 0) return errorResult('sandbox', '题目没有测试用例', elapsed(started));
-    if (!req.submission.trim()) return errorResult('sandbox', '提交内容为空', elapsed(started));
+    if (cases.length === 0) return errorResult('question-config', '题目没有测试用例', elapsed(started));
+    if (!req.submission.trim()) return errorResult('invalid-submission', '提交内容为空', elapsed(started));
 
     const method = question.runner?.method ?? 'solve';
     if (!new RegExp(`def\\s+${method}\\s*\\(`).test(req.submission)) {
       return errorResult(
-        'sandbox',
+        'invalid-submission',
         `spark-scala 题要求 object ${target} 里存在 def ${method}(df: org.apache.spark.sql.DataFrame): org.apache.spark.sql.DataFrame`,
         elapsed(started),
       );
@@ -146,7 +146,7 @@ export const sparkScalaRunner: Runner = {
       const raw = await readFile(ws.path(RESULTS_FILE), 'utf8').catch(() => null);
       if (!raw) {
         return errorResult(
-          'sandbox',
+          'infra',
           truncateLog(`harness 没写出结果（exit=${ran.code}）\n${ran.stderr || ran.stdout}`, 400, 6_000),
           elapsed(started),
         );
@@ -155,7 +155,7 @@ export const sparkScalaRunner: Runner = {
       try {
         report = JSON.parse(raw) as HarnessReport;
       } catch (err) {
-        return errorResult('sandbox', truncateLog(`harness 输出不是合法 JSON：${(err as Error).message}\n${raw}`, 400, 4_000), elapsed(started));
+        return errorResult('infra', truncateLog(`harness 输出不是合法 JSON：${(err as Error).message}\n${raw}`, 400, 4_000), elapsed(started));
       }
       if (report.setupError) {
         return errorResult('runtime', truncateLog(`判题环境错误：${report.setupError}`, 400, 6_000), elapsed(started));
@@ -164,7 +164,7 @@ export const sparkScalaRunner: Runner = {
       const outcomes = report.cases ?? [];
       if (outcomes.length !== cases.length) {
         return errorResult(
-          'sandbox',
+          'infra',
           truncateLog(`harness 上报 ${outcomes.length} 个用例，与题目 ${cases.length} 个不符`, 400, 2_000),
           elapsed(started),
         );
@@ -182,7 +182,7 @@ export const sparkScalaRunner: Runner = {
       });
       return { ...summarize(results, elapsed(started)), logs: truncateLog(ran.stderr || '', 200, 2_000) };
     } catch (err) {
-      return errorResult('sandbox', truncateLog(`判题器内部错误：${(err as Error).message}`, 400, 4_000), elapsed(started));
+      return errorResult('infra', truncateLog(`判题器内部错误：${(err as Error).message}`, 400, 4_000), elapsed(started));
     } finally {
       await ws.cleanup();
     }

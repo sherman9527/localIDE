@@ -3,7 +3,32 @@ import type { Question } from './question.js';
 
 export type JudgeStatus = 'pass' | 'fail' | 'error' | 'needs_human';
 
-export type JudgeErrorKind = 'compile' | 'timeout' | 'runtime' | 'forbidden' | 'sandbox' | 'unavailable';
+/**
+ * 失败的**归属**，不是失败的表象。2026-10-16（WI-111）之前，"题目写错了"、"底座没就绪"、
+ * "提交是空的"、"沙箱被半路删"四类互不相干的故障共用一个 `sandbox` —— 而 `sandbox` 的界面文案
+ * 是「沙箱没起来」，于是"题目缺 `runner.files`"这种**出题人自己的 bug** 会以"判题器坏了"的身份
+ * 出现在考生与值班的人面前。分界的判据只有一个：**谁改一行东西能让它变好。**
+ *
+ * - `question-config` —— 题目作者修（缺 `signature` / 没有用例 / 缺 `runner.files` / 预置 SQL 语法错…）
+ * - `infra` —— 平台修（spark worker 不可用、harness 没产出可解析结果、判题器内部异常、协议层失败）
+ * - `invalid-submission` —— 候选人修（提交为空、没写要求的接口形状、一条命令都没有）
+ * - `sandbox` —— **只**留给"工作区/脚手架本来在、跑着跑着不见了"（WI-72 那一族，
+ *   对应日志里的 `react-scaffold-missing` / `react-resolve-failed`）。这个词保留原义是为了
+ *   让那对取证钩子的读数在界面上还有名字。
+ *
+ * ⚠ 加在这里就等于加在 UI 上：`web/src/lib/format.ts` 的 `ERROR_KIND_LABEL` 是
+ * `Record<JudgeErrorKind, string>`，漏一条就是编译错误 —— 这是故意的，别绕过它。
+ */
+export type JudgeErrorKind =
+  | 'compile'
+  | 'timeout'
+  | 'runtime'
+  | 'forbidden'
+  | 'sandbox'
+  | 'question-config'
+  | 'infra'
+  | 'invalid-submission'
+  | 'unavailable';
 
 export interface JudgeCaseResult {
   name: string;

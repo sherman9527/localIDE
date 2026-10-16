@@ -222,15 +222,15 @@ export const reactVitestRunner: Runner = {
     }
 
     const cases = question.cases ?? [];
-    if (cases.length === 0) return errorResult('sandbox', '题目没有测试用例', elapsed());
-    if (!req.submission.trim()) return errorResult('sandbox', '提交内容为空', elapsed());
+    if (cases.length === 0) return errorResult('question-config', '题目没有测试用例', elapsed());
+    if (!req.submission.trim()) return errorResult('invalid-submission', '提交内容为空', elapsed());
 
     const files = question.runner?.files ?? [];
     if (files.length === 0) {
-      return errorResult('sandbox', '题目缺少 runner.files（测试文件与脚手架）', elapsed());
+      return errorResult('question-config', '题目缺少 runner.files（测试文件与脚手架）', elapsed());
     }
     if (!files.some((f) => TEST_FILE_RE.test(f.path))) {
-      return errorResult('sandbox', 'runner.files 里没有任何 *.test.tsx / *.spec.ts 测试文件，无法判题', elapsed());
+      return errorResult('question-config', 'runner.files 里没有任何 *.test.tsx / *.spec.ts 测试文件，无法判题', elapsed());
     }
 
     const extra = req.extraFiles ?? [];
