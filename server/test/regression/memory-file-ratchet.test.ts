@@ -24,10 +24,15 @@
  * ① **相对 HEAD 的 ratchet**（只有拿得到 git 时判）：pre-commit 是在提交**之前**跑的，
  *    那一刻的 `HEAD` 就是上一版 —— 正好是这次事故的作案时刻。工作树里这两个文件不许显著变小，
  *    `## 里程碑` 与 `- [x]` 的数量一个都不许减少。
- * ② **绝对下限**（永远判，包括镜像里）：`.dockerignore` 排掉了 `.git` ⇒ 镜像里 `git show` 直接 fatal。
- *    本仓库对这类门的规矩是白纸黑字写着的（`dev_verify_workflow.md` 第 3 条）：跳过要用 `it.skipIf`
- *    让报告显形，而且**必须另起一条永远会跑的断言**解释"为什么会是 null"。所以下面那组下限
- *    在镜像里仍然守住"这两个文件没被清空"这件事 —— 它拦不住"少了一行"，但拦得住"只剩 20 行"。
+ * ② **绝对下限**（宿主永远判）：拦不住"少了一行"，但拦得住"只剩 20 行"。
+ *    ⚠ 这一条原本写的是"永远判，包括镜像里"—— **那是错的**，2026-10-16 容器档实测撞红：
+ *    `.dockerignore` 排掉 `.git` 那一族时，把 `memo.md` / `HANDOVER.md` 自己也排掉了
+ *    （与 docs / 会话笔记同族，见 `.dockerignore:12-13`）⇒ 镜像里 `readFileSync` 直接 ENOENT，
+ *    这条门在容器档红成"文件不存在"而不是"文件被截断"。正确的形状是下面那条永远跑的判据：
+ *    它判的不再是内容，而是**这张网还在不在** —— 文件在就判非空，文件不在就必须同时满足
+ *    "在容器里"与"`.dockerignore` 里真写了这条排除"，两个理由缺一个就红。
+ *    本仓库对这类门的规矩白纸黑字（`dev_verify_workflow.md` 第 3 条）：跳过要用 `it.skipIf`
+ *    让报告显形，而且必须另起一条永远会跑的断言解释"为什么会是 null"。
  *
  * ## 容差为什么不是 0
  *
@@ -36,7 +41,7 @@
  * 一次正常改动的量级是个位数到几十行，而事故的量级是 3813 行。
  */
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
@@ -94,14 +99,48 @@ function countMatches(rel: string, re: RegExp): number {
 }
 
 describe('跨 session 记忆文件不许被改小（WI-112）', () => {
+  /** 两份文件在不在仓库根 —— 镜像里 `.dockerignore` 故意不带上它们（见文件头 ②）。 */
+  const present = MEMORY_FILES.filter((rel) => existsSync(join(ROOT, rel))).length;
+  const allPresent = present === MEMORY_FILES.length;
+  const allAbsent = present === 0;
+
+  /**
+   * **永远跑**的那条，而且它不读记忆文件的内容 —— 它判"这张网还在不在"。
+   * 上一版在这里判的是字节下限，而镜像里根本没有那两个文件 ⇒ 红成 ENOENT，
+   * 报出来的错与"记忆被截断"毫无关系，正是本仓库点名的"与判题无关的一条闸门把整档撞红"。
+   * 三种合法状态只有两种：全在（宿主）或全不在（容器，且 `.dockerignore` 里真写了这条排除）。
+   * "一份在一份不在"不是任何一种能自圆其说的状态 —— 那是有人挪走了其中一个。
+   */
+  it('记忆文件可以不在镜像里，但"不在"必须是被声明过的原因（不许是改名/挪走让闸门消失）', () => {
+    if (allPresent) {
+      for (const rel of MEMORY_FILES) {
+        expect(workTreeSize(rel), `${rel} 在仓库根却几乎为空 ⇒ 下面的下限会退化成判一个空文件`).toBeGreaterThan(1_000);
+      }
+      expect(existsSync(join(ROOT, '.dockerignore')), '.dockerignore 不见了 ⇒ 本条"容器里为什么没有这两个文件"的解释失去依据').toBe(true);
+      return;
+    }
+    expect(
+      allAbsent,
+      `两份记忆文件只找到 ${present} 份 ⇒ 不是"镜像整体排掉"能解释的，去看是不是有人改名/挪走了其中一个`,
+    ).toBe(true);
+    expect(
+      process.env.ARENA_IN_CONTAINER,
+      '仓库根没有这两份文件、又不是跑在容器里 ⇒ 记忆文件是真的丢了（赖以判据的文件消失 = 这条闸门消失，必须响亮）',
+    ).toBe('1');
+    const di = readFileSync(join(ROOT, '.dockerignore'), 'utf8');
+    for (const rel of MEMORY_FILES) {
+      expect(di, `${rel} 不在仓库根，但 .dockerignore 里没有这一行 ⇒ "它是被排掉的"这个理由是编出来的`).toMatch(new RegExp(`^${rel}$`, 'm'));
+    }
+  });
+
   /**
    * 判据本身不许悄悄失效：拿不到 HEAD 的 blob（镜像里、或 git 不可用）时，
-   * 这条以 skip 的形态显形，而不是"跑过了"—— 下面那条下限网仍然会跑。
+   * 这条以 skip 的形态显形，而不是"跑过了"—— 上面那条永远跑的那条负责解释为什么。
    */
   const sizes = MEMORY_FILES.map((rel) => ({ rel, head: headBlobSize(rel) }));
   const haveGit = sizes.every((s) => s.head !== null);
 
-  it.skipIf(!haveGit)(
+  it.skipIf(!haveGit || !allPresent)(
     '工作树里的记忆文件不许相对 HEAD 显著缩小（ratchet 判的是"这次提交会删掉多少"）',
     () => {
       for (const { rel, head } of sizes) {
@@ -119,11 +158,10 @@ describe('跨 session 记忆文件不许被改小（WI-112）', () => {
   );
 
   /**
-   * ⚠ 这一条在**镜像里也跑**（没有 .git 也跑）。它判的是"文件还在、没被截断成骨架"，
-   * 正是上一条拿不到 git 时唯一还立着的网 —— 所以它的消息必须把"为什么这里可能是 null"说清：
-   * 上面那条在镜像里 skip，看不见 skip 本身就是缺陷（`publish-identity.test.ts` 同一条课）。
+   * 绝对下限：拦得住"只剩 20 行"。它只在文件在场时判（镜像里由上面那条负责说清为什么没判），
+   * 而"文件在不在"这件事本身已经有一条永远跑的判据兜着 —— 两条合起来才是完整的网。
    */
-  it('绝对下限永远判（镜像里没有 .git 时，它是唯一还立着的那张网）', () => {
+  it.skipIf(!allPresent)('绝对下限：字节数与"只增不减"的计数都不许掉到底（文件在场时判）', () => {
     for (const rel of MEMORY_FILES) {
       expect(workTreeSize(rel), `${rel} 低于字节下限 ${BYTE_FLOORS[rel]} —— 记忆文件被清空/截断`).toBeGreaterThanOrEqual(
         BYTE_FLOORS[rel],
@@ -137,7 +175,7 @@ describe('跨 session 记忆文件不许被改小（WI-112）', () => {
    * 里程碑与 COMPLETED 条数不许比 HEAD 少。这两个是"只增"的语义承诺，不是体积，
    * 所以不放容差：删掉一条已完成记录就是删掉一次交付的证据（本仓库明确不收的形状）。
    */
-  it.skipIf(!haveGit)('里程碑数量与 COMPLETED 条目数量不许低于上一版（只增不减的东西不许被编辑掉）', () => {
+  it.skipIf(!haveGit || !allPresent)('里程碑数量与 COMPLETED 条目数量不许低于上一版（只增不减的东西不许被编辑掉）', () => {
     for (const rel of MEMORY_FILES) {
       const { marker, label } = COUNT_FLOORS[rel];
       const text = readFileSync(join(ROOT, rel), 'utf8');
