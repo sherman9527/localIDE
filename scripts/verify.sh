@@ -26,6 +26,33 @@ run() {
   fi
 }
 
+# 仓库真 .env 的"整轮没被动过"哨兵（WI-114）。
+# 为什么还要一条：env-write-atomicity.test.ts 里那条 afterAll 哨兵只在**它自己那一个文件**的起止之间比
+# size/mtime ⇒ 别的测试、或任何被 verify 拉起来的脚本写坏 .env 时，没有任何东西会红。而 .env 里是桥 token
+# 与那个 --allow-root 起的 Jupyter 的 token。2026-10-16 这不是假想风险：一个临时探针脚本把真 .env 覆盖成了
+# 两行垃圾（详见 memo 里程碑 BK），全靠"容器还在跑、它的进程 env 里就是同一份"才原样取回。
+# 口径：只报 size / mtime / sha256 前 16 位，**永远不许打印内容** —— 这条闸门不许自己破第 ⑥ 条纪律。
+env_sig() {
+  if [ -f .env ]; then
+    printf '%s %s %s' "$(stat -c '%s' .env)" "$(stat -c '%Y' .env)" "$(sha256sum .env | cut -c1-16)"
+  else
+    printf 'absent' # 镜像里 .env 本来就被 .dockerignore 排掉：缺席也要能被比出来，不是跳过
+  fi
+}
+ENV_SIG_START="$(env_sig)"
+env_guard_check() {
+  local now
+  now="$(env_sig)"
+  if [ "$now" != "$ENV_SIG_START" ]; then
+    printf '\n\033[31m✗ 仓库里的 .env 在这一轮 verify 中被改动过（WI-114）\033[0m\n' >&2
+    printf '   开始：%s\n   结束：%s\n' "$ENV_SIG_START" "$now" >&2
+    printf '   三个字段依次是 size / mtime / sha256 前 16 位 —— 内容一概不打印（那是 token，不是日志该收的东西）。\n' >&2
+    printf '   该修的是写它的那一条：任何测试都只许在临时目录里造 .env（判据见 env-write-atomicity.test.ts 的 ②）。\n' >&2
+    return 1
+  fi
+  printf '✓ .env 未被改动（%s）\n' "$now"
+}
+
 run "lint" npx eslint . --max-warnings=0
 run "typecheck" npm run typecheck
 # 先构建再量产物：拆包成果（首屏不许拖进 zod / CodeMirror）只有从 dist 才看得出真相。
@@ -128,5 +155,8 @@ if [ "${SKIP_E2E:-0}" != "1" ]; then
 else
   printf '\n\033[33m跳过 E2E（SKIP_E2E=1）\033[0m\n'
 fi
+
+# 收尾再比一次 .env（哨兵的"结束"那一半；两半都由 env-write-atomicity.test.ts 的结构判据钉着在不在）
+run "仓库 .env 没被动过（WI-114）" env_guard_check
 
 printf '\n\033[32m✓ verify 全部通过\033[0m\n'

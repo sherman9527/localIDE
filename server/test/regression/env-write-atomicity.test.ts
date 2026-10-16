@@ -34,6 +34,8 @@ import { config } from '../../src/config.js';
 
 const SH_SRC = readFileSync(join(config.repoRoot, 'start.sh'), 'utf8');
 const PS_SRC = readFileSync(join(config.repoRoot, 'start.ps1'), 'utf8');
+/** verify.sh 也在判据对象里：它带着 WI-114 那条"仓库真 .env 整轮没被动过"的跨阶段哨兵。 */
+const VERIFY_SRC = readFileSync(join(config.repoRoot, 'scripts', 'verify.sh'), 'utf8');
 
 const hasBash = spawnSync('bash', ['--version'], { encoding: 'utf8' }).status === 0;
 const hasPs = spawnSync('powershell.exe', ['-NoProfile', '-Command', 'exit 0'], { encoding: 'utf8' }).status === 0;
@@ -418,6 +420,27 @@ describe('闸门真的在守东西（空转防护 + 结构判据）', () => {
     expect(code, 'catch 里要写明后果（会把 .env 放宽成继承默认）——上一轮就是靠这句话让人知道自己没被加固').toMatch(/放宽/);
   });
 
+  /**
+   * WI-114：本文件的 afterAll 哨兵只在**它自己这一条文件**的起止之间比 size/mtime ⇒
+   * "别的测试或别的脚本写坏仓库真 .env"这件事全仓没人管。2026-10-16 这不是假想：一个临时探针命令
+   * 把真 .env 覆盖成两行垃圾（详见 memo 里程碑 BK），靠运行中的容器 env 才原样取回。
+   * 补的是 `scripts/verify.sh` 里一对跨阶段的哨兵（开始记录 / 收尾比对），
+   * 而"记了没比"与"比了没记"都得判住 —— 只记不判就会退化成又一条活在文档里的规矩。
+   * 口径与第 ⑥ 条同源：哨兵只许报 size / mtime / 哈希前缀，**不许把 .env 的内容读进 stdout**。
+   */
+  it('verify.sh 的跨阶段 .env 哨兵两半都在，且它自己不打印内容', () => {
+    const sh = VERIFY_SRC;
+    expect(sh, 'verify.sh 里没有 env_sig() ⇒ 读数函数没了，两半都无从谈起（这条闸门退化成注释）').toContain('env_sig()');
+    expect(sh, '缺"开始"那一半 ⇒ 收尾没有基准可比').toMatch(/ENV_SIG_START="\$\(env_sig\)"/);
+    expect(sh, '缺"结束"那一半 ⇒ 记录了也没人比，等于没设岗').toMatch(/run[^\n]*env_guard_check/);
+    expect(sh, '比对不一致必须能让这一档红（run() 靠返回码，所以要 return 1）').toMatch(/env_guard_check\(\) \{[\s\S]{0,900}?return 1/);
+    // .env 缺席也要比得出：镜像里它被 .dockerignore 排掉，写成"没文件就跳过"就又是一条装饰品
+    expect(sh, '哨兵要给"文件不存在"一个可比读数（absent），否则镜像里这一档静默空转').toMatch(/printf 'absent'/);
+    const guard = /env_sig\(\)[\s\S]*?printf '✓ \.env 未被改动/.exec(sh)?.[0] ?? '';
+    expect(guard.length, '取不到哨兵那一段的边界 ⇒ 本条判据要跟着实现同步（不许静默空转）').toBeGreaterThan(200);
+    expect(guard, '哨兵里出现了把 .env 内容读出来的命令 ⇒ 那是把 token 往日志里印（只许 size/mtime/哈希）').not.toMatch(/\b(cat|head|tail|sed|grep|awk)\b[^\n]*\.env/);
+  });
+
   it('结构判据认得旧实现（把旧代码的形状喂给它必须红，否则这条闸门是空的）', () => {
     expect(silentSwallowPatterns(OLD_GREP_LINE, '旧 grep 写法').length, '旧那行 grep -v … || : >"$tmp" 没被判据认出来 ⇒ 那一类故障又没人守了').toBeGreaterThanOrEqual(3);
     expect(silentSwallowPatterns(OLD_SED_LINE, '旧 sed 写法').length).toBeGreaterThanOrEqual(1);
@@ -472,6 +495,52 @@ describe('闸门真的在守东西（空转防护 + 结构判据）', () => {
         `口径 B（644/600 两文件对照）说"${contrastRecordsMode ? '记' : '不记'}" ⇒ 对不上：` +
         '下面那两条看落盘 mode 的判据要么在空转，要么它们 skipIf 的理由是别的故障（不是"文件系统不记 chmod"）——两种都不许当"跳过"混过去',
     ).toBe(fsRecordsMode);
+  });
+});
+
+describe.skipIf(!hasBash)('verify.sh 的 .env 跨阶段哨兵（WI-114）：把实现抠出来真跑', () => {
+  /**
+   * WI-114 的**行为**判据：把 verify.sh 里那对哨兵函数当场抠出来跑，不是只读文本。
+   * 结构判据能证明"两半都在"，证明不了"改了真的会红" —— 而这条闸门拦的是"有人在这轮里写了 .env"，
+   * 那是一个行为。四种改动各判一次，再加一次"什么都没动必须绿"当反向锚。
+   * 落点仍然是临时目录：真 .env 一个字节都不许参与（文件末尾那条 afterAll 哨兵会抓）。
+   * 抠取按**索引**而不是正则：这里的边界是"顶格的 }"，indexOf 比转义地狱可靠。
+   */
+  function extractFn(name: string): string {
+    const at = VERIFY_SRC.indexOf(`${name}() {`);
+    expect(at, `verify.sh 里找不到 ${name}() { ⇒ 函数改名或挪走了，本闸门要同步改（不许静默空转）`).toBeGreaterThanOrEqual(0);
+    const close = VERIFY_SRC.indexOf('\n}\n', at);
+    expect(close, `${name}() 找不到顶格的 } ⇒ 书写风格变了，本闸门的抠取逻辑要同步`).toBeGreaterThan(at);
+    return VERIFY_SRC.slice(at, close + 3);
+  }
+  const SH_ENV_SIG = extractFn('env_sig');
+  const SH_ENV_GUARD = extractFn('env_guard_check');
+
+  it('哨兵真的会红：内容改一个字节 / 只动 mtime / 从无到有，三种都要抓到', () => {
+    const prelude = [SH_ENV_SIG, '# 与 verify.sh 一样：基准在开头记一次', 'ENV_SIG_START="$(env_sig)"', SH_ENV_GUARD].join('\n');
+
+    const runGuard = (body: string): Run => {
+      const dir = newDir('guard');
+      writeFileSync(join(dir, 'harness.sh'), ['#!/usr/bin/env bash', 'set -uo pipefail', prelude, body].join('\n'), 'utf8');
+      const r = spawnSync('bash', ['harness.sh'], { cwd: dir, encoding: 'utf8', shell: false });
+      return resultOf(dir, r);
+    };
+
+    const clean = runGuard("printf 'K=1\\n' >.env\nENV_SIG_START=\"$(env_sig)\"\nenv_guard_check >/dev/null");
+    expect(clean.rc, `什么都没动却红了：${clean.err}`).toBe(0);
+
+    const rewritten = runGuard("printf 'K=1\\n' >.env\nENV_SIG_START=\"$(env_sig)\"\nprintf 'K=2\\n' >.env\nenv_guard_check 2>&1");
+    expect(rewritten.rc, '改了一个字节而哨兵没红 ⇒ 这轮 verify 里写坏 .env 还是没人管').not.toBe(0);
+
+    const touched = runGuard("printf 'K=1\\n' >.env\nENV_SIG_START=\"$(env_sig)\"\nsleep 1.1\ntouch .env\nenv_guard_check 2>&1");
+    expect(touched.rc, '只动 mtime（内容没变）也必须是红：那正是"有人打开过又写回去"的形状').not.toBe(0);
+
+    const created = runGuard("ENV_SIG_START=\"$(env_sig)\"\nprintf 'TOKEN=leak\\n' >.env\nenv_guard_check 2>&1");
+    expect(created.rc, '开始时无 .env、结束时有了 ⇒ 也要红（镜像里缺席是常态，所以缺席本身是基准值）').not.toBe(0);
+
+    // 报错只许报 size / mtime / 哈希前缀：探针值不许出现在被重定向出去的输出里
+    const leaky = runGuard("printf 'CANTEXISTONLYINTHEFILE\\n' >.env\nENV_SIG_START=\"$(env_sig)\"\nprintf 'OTHER=1\\n' >>.env\nenv_guard_check 2>&1");
+    expect(`${leaky.out}${leaky.err}`, '哨兵把 .env 的内容印出来了 ⇒ 这条"保护 token"的闸门自己泄 token').not.toContain('CANTEXISTONLYINTHEFILE');
   });
 });
 
