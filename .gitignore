@@ -38,3 +38,7 @@ docker-cache/npm/_update-notifier-last-checked
 # Python 编译缓存（spark_worker 的 .pyc 曾被提交进仓库）
 __pycache__/
 *.pyc
+
+# SDD/计划的工作区：ledger、briefs、评审包、探针输出（.dockerignore 里同一族已经排掉，理由照搬 ——
+# 会话笔记不是运行时产物）。它一直显示成 untracked 还有个副作用：`git add -A` 会把整批会话笔记提交进去。
+.superpowers/

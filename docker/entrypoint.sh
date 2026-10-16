@@ -98,63 +98,90 @@ start_jupyter() {
   # `status.ts` 的探活与拼链接都跟着它走。前缀的真相只有一份，住在 `shared/src/notebook.ts`
   # （`NOTEBOOK_PREFIX` / `JUPYTER_BASE_URL`）；钉住这一点的闸门是
   # `server/test/regression/notebook-contract.test.ts` 的那三条（值必须等于那个常量，不是"出现过"）。
-  PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
-  jupyter notebook --allow-root --no-browser \
-    --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888 --ServerApp.port_retries=0 \
-    --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
-    --ServerApp.root_dir="${nb_root}/notebooks" \
-    --ServerApp.base_url=/jupyter/ \
-    >"${nb_root}/notebook-server.log" 2>&1 &
+  # WI-93：以前这里是"一次性后台起进程 + 打一行已拉起"，于是 Jupyter 掉掉之后没人管 ——
+  # 实测两次：容器里 pkill -f jupyter-notebook 之后 8888 一直空着，只有再跑一次 ./start.sh 才起得来
+  # （而 /api/notebook/status 会老实说 running:false，所以页面上看得见，恢复却要人动手）。
+  # 现在整个函数变成**一个有上限的重启循环**，由下面那句 `start_jupyter &` 放到后台。
+  # 上限不是保守，是必要：见下面 port_retries=0 那条 —— 8888 被占时它**立刻**退出，
+  # 那种失败重启一万次也不会好，无限循环只会把日志刷满、把"其实起不来"藏进噪音里；
+  # 到上限就停手，让状态接口继续如实报 running:false（不假装在跑，本来就不关键到能拖垮做题）。
+  # 这句在循环**之前**打：它说的是"我们开始监督它了"，不是"它活着" —— 后者由 /api/notebook/status 判，
+  # 而循环里每次重启各打一行（带 rc 与活了多久），所以日志分得开"起来了"与"又掉了"。
+  log "Jupyter 进入监督循环（监听 0.0.0.0:8888 ⇒ 宿主 127.0.0.1:7789 那条 DNAT 的目标是**本容器的 eth0**，不是它的回环；日志 ${nb_root}/notebook-server.log；连续快速失败上限 ${ARENA_JUPYTER_RESTART_MAX:-10} 次）"
 
-  # 为什么 ip 是 0.0.0.0 而不是 127.0.0.1（Task 10 实测到的缺陷，不是推理）：
-  # 发布的端口是 **DNAT 到容器的 eth0 地址**（compose 那条 127.0.0.1:7789:8888 把宿主的请求转给
-  # 172.18.0.x:8888），**不是**转到容器的回环 —— 于是监听在容器 loopback 上的 jupyter
-  # 永远打不通发布端口：容器里 curl 127.0.0.1:8888 得 302（**当时的实测** —— DNAT 那一轮 base_url 还没落地，
-  # 根路径就是 jupyter 的树；**现在**它挂在 base_url=/jupyter/ 下，根路径给 404，要复现这条得打
-  # `curl 127.0.0.1:8888/jupyter/tree` —— 2026-10-09 容器与宿主两侧实测：/login → 404、/jupyter/login → 200、
-  # /tree → 404、/jupyter/tree → 302，另外 /api/status → 404 而 /jupyter/api/status → 403（不带 token 时
-  # 前缀活着、鉴权层还在说话）），curl $(hostname -i):8888 得 000，
-  # 宿主上 7789 也是 000，而容器档全绿（它的判据全走回环）。
-  # ⚠ 加这段年代标记的理由（评审 M-1）：不是把实测记录改没 —— 那三个值是那次 DNAT 实验的证据，
-  # 改没了它就变成猜测；只是给它们标"属于哪一天"，免得下一个照抄的人把 404 读成"DNAT 又坏了"
-  # （那条误读通向 --force-recreate / --rebuild 这种 10-20 分钟的空等）。
-  # 闸门：server/test/notebooks/kernel.test.ts 那条「发布端口的 DNAT 目标上也必须有人在听」
-  # —— 它是这次唯一会红的东西；start.sh 的横幅只打印不判红，不算闸门。
-  # 真正的边界从来不在这个 ip 上，下面两道一条都没放松：
-  # ① 宿主侧只绑回环 127.0.0.1:7789（闸门 server/test/regression/compose-ports.test.ts
-  #    与 notebook-compose.test.ts ①）⇒ 局域网里别的机器照样打不到；
-  # ② token 必填（上面那道守卫：拿不到 token 干脆不起）。
-  # 残余风险照实写：bind 到 0.0.0.0 之后，**compose 网桥上的同伴服务**（dev / tools / e2e，
-  # 以及任何挂进这张网络的容器）能路由到 8888 —— 但它们必须拿到 token 才能做任何事，
-  # 而同伴跑的是同一个镜像、同一个 .env、同一个信任级；这道口子换来的是"用户真能点开链接"。
-  # 附带一条 jupyter 自己的行为（实测 jupyter_server 2.21.1 的源码，不是推理）：
-  # serverapp.py 的 `@default("allow_remote_access")` 写的是 `return not addr.is_loopback` ——
-  # **ip 一绑到非回环，它自己就把这个默认值算成 True**，而 base/handlers.py 的 check_host()
-  # 第一行就是 `if settings["allow_remote_access"]: return True` ⇒ 那道防 DNS rebinding 的
-  # Host 头守卫整块关闭（实测改之前：`Host: rebinding.example:7789` 得到 302，也就是照收）。
-  # 于是 --ServerApp.ip=0.0.0.0 与"守卫关掉"是同一次改动的两面，只钉 ip 那一面不够，
-  # 这里必须**显式写 False** 才把守卫留得住。
-  # "宿主侧只绑 127.0.0.1:7789"（compose-ports.test.ts 钉着）替不了它：那条限的是**谁能路由到这里**，
-  # 而 rebinding 攻击里"到这里"的是受害者自己的浏览器 —— 恶意页面先把域名解析到自己服务器、
-  # 读完之后再改成 127.0.0.1，同源检查拦不住改解析；token 登录之后 jupyter 靠 cookie 认后续请求，
-  # cookie 会跟着这些请求发到 127.0.0.1，所以"不用 token 也能干活"这条路是通的，
-  # 唯一还认得出"这个 Host 不是本机"的就是这一道。
-  # 代价（照实说，也照实测）：容器**自己的 eth0 地址**上的请求现在拿 403（那个 IP 不是回环）。
-  # 那不影响功能：宿主浏览器的请求进来之后 Host 是 127.0.0.1:7789 或 localhost:7789，
-  # check_host() 先摘端口再按 ipaddress 判 is_loopback ⇒ 用户那条路照旧 302/200；
-  # 而可达性那条闸门（kernel.test.ts「DNAT 目标上也必须有人在听」）判的是"有没有真实 HTTP 应答"，
-  # 403 恰恰证明包转到了、有 jupyter 在按 Host 做决定 —— 不许为了让那条闸门显示 302 把它松回去。
-  # 闸门：kernel.test.ts「Host 守卫在位」（行为终判）+ notebook-contract.test.ts（静态前身，宿主档就红）。
+  local fail=0 rc dur wait t0
+  while :; do
+    t0=$(date +%s)
+    PATH="${ARENA_IDE_ENV_DIR:-/opt/arena-ide-env}/python/bin:${PATH}" \
+    jupyter notebook --allow-root --no-browser \
+      --ServerApp.ip=0.0.0.0 --ServerApp.allow_remote_access=False --ServerApp.port=8888 --ServerApp.port_retries=0 \
+      --ServerApp.token="${ARENA_JUPYTER_TOKEN}" \
+      --ServerApp.root_dir="${nb_root}/notebooks" \
+      --ServerApp.base_url=/jupyter/ \
+      >>"${nb_root}/notebook-server.log" 2>&1
 
-  # port_retries=0：8888 被占时 jupyter 默认会**换个端口**继续起（8889），而宿主映射钉的是
-  # 7789:8888 —— 静默换端口等于那条映射变成死的，日志却照样"已拉起"。宁可让它起不来并报错。
-  # 日志落在数据目录里（不是 /var/log）：./start.sh --logs 只看 compose 的 stdout，
-  # 而 jupyter 自己的输出要能在宿主 data/ 下直接翻到。
-  log "Jupyter 已拉起（监听 0.0.0.0:8888 ⇒ 宿主 127.0.0.1:7789 那条 DNAT 的目标是**本容器的 eth0**，不是它的回环；日志 ${nb_root}/notebook-server.log）"
+    rc=$?  # 必须紧跟那条命令：注释不算命令、$? 理论上活得过注释块，但不该让下一个人去确认这件事
+
+    # 为什么 ip 是 0.0.0.0 而不是 127.0.0.1（Task 10 实测到的缺陷，不是推理）：
+    # 发布的端口是 **DNAT 到容器的 eth0 地址**（compose 那条 127.0.0.1:7789:8888 把宿主的请求转给
+    # 172.18.0.x:8888），**不是**转到容器的回环 —— 于是监听在容器 loopback 上的 jupyter
+    # 永远打不通发布端口：容器里 curl 127.0.0.1:8888 得 302（**当时的实测** —— DNAT 那一轮 base_url 还没落地，
+    # 根路径就是 jupyter 的树；**现在**它挂在 base_url=/jupyter/ 下，根路径给 404，要复现这条得打
+    # `curl 127.0.0.1:8888/jupyter/tree` —— 2026-10-09 容器与宿主两侧实测：/login → 404、/jupyter/login → 200、
+    # /tree → 404、/jupyter/tree → 302，另外 /api/status → 404 而 /jupyter/api/status → 403（不带 token 时
+    # 前缀活着、鉴权层还在说话）），curl $(hostname -i):8888 得 000，
+    # 宿主上 7789 也是 000，而容器档全绿（它的判据全走回环）。
+    # ⚠ 加这段年代标记的理由（评审 M-1）：不是把实测记录改没 —— 那三个值是那次 DNAT 实验的证据，
+    # 改没了它就变成猜测；只是给它们标"属于哪一天"，免得下一个照抄的人把 404 读成"DNAT 又坏了"
+    # （那条误读通向 --force-recreate / --rebuild 这种 10-20 分钟的空等）。
+    # 闸门：server/test/notebooks/kernel.test.ts 那条「发布端口的 DNAT 目标上也必须有人在听」
+    # —— 它是这次唯一会红的东西；start.sh 的横幅只打印不判红，不算闸门。
+    # 真正的边界从来不在这个 ip 上，下面两道一条都没放松：
+    # ① 宿主侧只绑回环 127.0.0.1:7789（闸门 server/test/regression/compose-ports.test.ts
+    #    与 notebook-compose.test.ts ①）⇒ 局域网里别的机器照样打不到；
+    # ② token 必填（上面那道守卫：拿不到 token 干脆不起）。
+    # 残余风险照实写：bind 到 0.0.0.0 之后，**compose 网桥上的同伴服务**（dev / tools / e2e，
+    # 以及任何挂进这张网络的容器）能路由到 8888 —— 但它们必须拿到 token 才能做任何事，
+    # 而同伴跑的是同一个镜像、同一个 .env、同一个信任级；这道口子换来的是"用户真能点开链接"。
+    # 附带一条 jupyter 自己的行为（实测 jupyter_server 2.21.1 的源码，不是推理）：
+    # serverapp.py 的 `@default("allow_remote_access")` 写的是 `return not addr.is_loopback` ——
+    # **ip 一绑到非回环，它自己就把这个默认值算成 True**，而 base/handlers.py 的 check_host()
+    # 第一行就是 `if settings["allow_remote_access"]: return True` ⇒ 那道防 DNS rebinding 的
+    # Host 头守卫整块关闭（实测改之前：`Host: rebinding.example:7789` 得到 302，也就是照收）。
+    # 于是 --ServerApp.ip=0.0.0.0 与"守卫关掉"是同一次改动的两面，只钉 ip 那一面不够，
+    # 这里必须**显式写 False** 才把守卫留得住。
+    # "宿主侧只绑 127.0.0.1:7789"（compose-ports.test.ts 钉着）替不了它：那条限的是**谁能路由到这里**，
+    # 而 rebinding 攻击里"到这里"的是受害者自己的浏览器 —— 恶意页面先把域名解析到自己服务器、
+    # 读完之后再改成 127.0.0.1，同源检查拦不住改解析；token 登录之后 jupyter 靠 cookie 认后续请求，
+    # cookie 会跟着这些请求发到 127.0.0.1，所以"不用 token 也能干活"这条路是通的，
+    # 唯一还认得出"这个 Host 不是本机"的就是这一道。
+    # 代价（照实说，也照实测）：容器**自己的 eth0 地址**上的请求现在拿 403（那个 IP 不是回环）。
+    # 那不影响功能：宿主浏览器的请求进来之后 Host 是 127.0.0.1:7789 或 localhost:7789，
+    # check_host() 先摘端口再按 ipaddress 判 is_loopback ⇒ 用户那条路照旧 302/200；
+    # 而可达性那条闸门（kernel.test.ts「DNAT 目标上也必须有人在听」）判的是"有没有真实 HTTP 应答"，
+    # 403 恰恰证明包转到了、有 jupyter 在按 Host 做决定 —— 不许为了让那条闸门显示 302 把它松回去。
+    # 闸门：kernel.test.ts「Host 守卫在位」（行为终判）+ notebook-contract.test.ts（静态前身，宿主档就红）。
+
+    # port_retries=0：8888 被占时 jupyter 默认会**换个端口**继续起（8889），而宿主映射钉的是
+    # 7789:8888 —— 静默换端口等于那条映射变成死的，日志却照样"已拉起"。宁可让它起不来并报错。
+    # 日志落在数据目录里（不是 /var/log）：./start.sh --logs 只看 compose 的 stdout，
+    # 而 jupyter 自己的输出要能在宿主 data/ 下直接翻到。
+    dur=$(( $(date +%s) - t0 ))
+    # 活够 60 秒就不算"快速失败"：计数清零。否则一次偶发崩溃会把之后所有重启都推到 60s 退避上。
+    if [ "$dur" -ge 60 ]; then fail=0; else fail=$(( fail + 1 )); fi
+    if [ "$fail" -ge "${ARENA_JUPYTER_RESTART_MAX:-10}" ]; then
+      log "Jupyter 连续 ${fail} 次在 ${dur}s 内退出（最后一次 rc=${rc}）⇒ 不再重启；现场见 ${nb_root}/notebook-server.log"
+      return 0
+    fi
+    wait=$(( 2 ** fail ))
+    [ "$wait" -gt 60 ] && wait=60
+    log "Jupyter 退出（rc=${rc}，活了 ${dur}s）⇒ ${wait}s 后再起（连续快速失败 ${fail}/${ARENA_JUPYTER_RESTART_MAX:-10}）"
+    sleep "$wait"
+  done
   return 0
 }
 
-start_jupyter
+start_jupyter &   # WI-93：监督循环要后台跑，下面 exec "$@" 才会变成容器主进程
 
 # PySpark 判题用的常驻 worker 由 spark-pool 按需拉起，这里只保证目录存在。
 mkdir -p /app/data/judge /app/data/spark-warehouse
