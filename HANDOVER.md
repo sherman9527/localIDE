@@ -1656,6 +1656,7 @@
 ## TODO
 
 - [ ] WI-100 **把 Toree 接成第五页可用的 Scala kernel**（= WI-91 探索的胜出路径，**接入是另一版计划**）：
+  ｜**2026-10-16 用户点头：这一版先不接**（当前镜像与文档自洽 —— Scala 在界面上没被承诺过），留一个完整执行窗口再做，理由是"中途停在半程会让镜像处于只有 Python 能用、界面却写着两个都能用"的状态。
   `docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，五个任务：① **先改量具**
   （Toree 把两行注册表打到 stdout，混在 `nbconvert --stdout` 的 JSON 前面 ⇒ 现成的 `JSON.parse(整个 stdout)` 会抛，
   而抛出来与"kernel 坏了"无法区分）；② 镜像产物从 `.superpowers/sdd/…/path-B-toree/` 落回工作树并证离线可复现；
@@ -1689,18 +1690,6 @@
   `npm run verify:fast` EXIT=0，新阶段现场打印的那行只含 size / mtime / 哈希前缀，内容一个字节都没出。
   ｜顺带把操作纪律也记在案（都真用到过）：临时探针脚本一律显式传绝对目录 + 开头拒绝在仓库根跑，
   取值只报长度或哈希前缀。
-- [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
-  `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
-  于是它是 `exec/spark-pool.ts` 那套队列**之外**的第二个 JVM —— `docs/ARCHITECTURE.md:249` 写的
-  "判题优先于 IDE 且不抢占"管不到它，笔记本里跑重活会把被判题的 Spark 题推向超时。
-  ｜本轮只做了两件事：把 `web/src/pages/Notebook.tsx` 那段"不会让判题少跑一秒"（一个默认被写成了一道保证）
-  改成说实话 + `docs/JUDGING.md` 红线①一节同步（含 `!/usr/local/bin/pip3 install X` 这条绕过：拦不住的是闸门与界面，
-  可复现性靠镜像）。**没有**动 `local[2]`、**没有**给 notebook 侧做任何排队或 cpu 配额。
-  ｜要收的话有三档，按代价排：① 把 `--master local[1]` 或降 `driver-memory`（改一行 kernelspec，代价是笔记本侧变慢）；
-  ② compose 给 arena 服务加 `cpus:` 配额（容器级，但会同时限住判题本身 —— 要先确认判题池在这台容器里的 CPU 预算）；
-  ③ 让 notebook 的 Spark 会话也过 `spark-pool` 的队列（改动最大，且 notebook 是长会话、与"一题一 worker"的模型不合）。
-  闸门形状：现在**没有**任何一条能判住"notebook 起第二个 JVM 时判题题的超时余量"，这条要配什么判据由 A2 一起定。
-
 - [ ] WI-96 "这条 kernel 要不要 IDE 那份 venv"是**按 id 猜**的，A2 会把 I-1 刚关掉的洞再挖开一次（收尾轮记账，2026-10-08，**本轮只记不做**）：
   `server/src/notebooks/status.ts` 里那句 `const needsVenv = id === NOTEBOOK_KERNELS.pyspark;` 是那个问题的**唯一**答案来源，
   而它判的是 id 相等 —— 于是 A2 新加的 `arena-scala` 一进来就恒为 `needsVenv: false` ⇒ `ready: true`、没有 `reason`、
