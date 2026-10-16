@@ -98,6 +98,71 @@
      而 ③ 查出来的真问题另开 **WI-111**（`errorKind=sandbox` 被两种互不相干的故障共用，
      读者从日志分不出是哪一种 —— 那正是这条收口之后唯一还留着的可行动信息）。
 
+- [x] WI-113 **抄 `.env` 权限那段在这台机器上从来就没生效过 —— 换成实测能生效的写法**（`943ab22`，2026-10-16；由一次真实事故撞出来）：
+  ｜根因两条，都是**量出来**的而不是推断：① Store 版 PowerShell 7 把自己的 Modules 目录写进了**机器级** `PSModulePath`
+  ⇒ Windows PowerShell 5.1 解析到 7 的那份 `Microsoft.PowerShell.Security`，`Get-Acl` 直接加载失败；
+  而**在本进程里清洗 `$env:PSModulePath` 救不回来**（放脚本第一句、放别的 cmdlet 跑完之后，两种放法都还是失败 ——
+  模块搜索路径在进程启动时就定了；只有让**父进程**带着干净 env 起 `powershell.exe` 才有效，而用户手敲 `.\start.ps1` 做不到）
+  ⇒ 我第一版加进去的那段清洗自己就是装饰品，删掉。② 不能把从源文件读来的 ACL 对象**原样**交给 `SetAccessControl`：
+  实测那样静默什么都不写（不抛异常、目标 SDDL 一字不变，看起来像成功）—— .NET Framework 的 `ObjectSecurity` 只在对象被改过的前提下才落盘。
+  ｜改法：拿目标自己的 ACL 对象逐条搬（`SetAccessRuleProtection` + 清空 + 逐条 `AddAccessRule`）；
+  失败口径与 sh 侧一致（`chmod` 失败也只是提示一句继续，不是所有落点都有 ACL），但话必须说破"这次改写没保住你的加固"。
+  ｜判据两条 + 破坏性两次：结构那条（代码行里六个 .NET API 名必须在、`Get-Acl`/`Set-Acl` 不许出现、`catch` 里要写"放宽"）；
+  行为那条的**观测面也改走 .NET** ⇒ 这条 ACL 判据第一次在这台机器上真的跑起来（此前它红在量具自错上，等于不存在）。
+  破坏性：整段删掉 ⇒ 两条都红（after = `D:(A;ID;FA;;;SY)(A;ID;FA;;;BA)…` 而 before = `D:PAI(A;;0x1301bf…)`）；
+  换成"原样交给 `SetAccessControl`"那种**看起来完全正确**的写法 ⇒ 行为判据照样红，它抓的就是这一类静默 no-op。
+  ｜同一次事故的账记在 WI-114：我的临时探针脚本用 `Get-Location` 拼 `.env`，bash 的 cwd 中途被重置回仓库根
+  ⇒ 真 `.env` 被覆盖成两行垃圾，两份 token 从文件里没了。已从运行中的容器 env 原样取回（sha256 前 16 位逐条比对，
+  桥 32 字符 / Jupyter 24 字符都一致；309 B、无 CR、无 BOM），而容器没重建 ⇒ 两侧本来就是同一份，无错配。
+
+- [x] WI-112 **跨 session 记忆文件不再是门禁的盲区**（`ec85548` + 容器档修正 `ee114a2`，2026-10-16；发现于 2026-10-12 一次**全绿通过 pre-commit 的**数据损失）：
+  ｜事故形状：`io.open(p,'w').write(io.open(p).read() + add)` —— Python 先**把目标开成写模式当场清空**、再去读那个已经空了的文件
+  ⇒ `memo.md` 从 3833 行变 20 行，而 `npm run verify:fast` EXIT=0、提交成功。发现它靠的不是测试，是 `git show --stat` 里那行
+  `3843 ---------`。内容没真丢（上一版在库里），但下一次未必这么幸运。
+  ｜闸门三条：相对 HEAD 的字节 ratchet（容差 `max(4096 B, 5%)` —— 事故是 3813 行、正常编辑是几十行，两个量级分得开）、
+  只增不减的计数下限（`^## 里程碑` ≥ 19 / `^- [x] ` ≥ 95；正则**必须带 `m`**，少了它只数到 1 ⇒ 不是变松，是一条永远撞不到的装饰）、
+  以及一条永远跑的"这张网还在不在"。
+  ｜**这条闸门自己也撞红过一次**，而且是同一族错：第一版写着"绝对下限永远判（包括镜像里）"，而 `.dockerignore:12-13`
+  把这两份记忆文件连同 `.git` 一起排掉了 ⇒ 容器档红在 `ENOENT`，报的错与"记忆被截断"毫无关系 ——
+  正是我几天前刚写进 `dev_verify_workflow.md` 的那类"与判题无关的一条闸门把整轮容器验证撞红"。
+  修法是把"永远跑"的那条从判内容改成判**存在性与理由**：文件不在就必须同时满足"在容器里"与"`.dockerignore` 里真写了这条排除"。
+  ｜验证：宿主 `4 passed`；容器里 `1 passed | 3 skipped`（skip 的理由由那条永远跑的判据负责说清）；
+  破坏性 —— 容器内 `sed -i '/^memo\.md$/d' /app/.dockerignore` ⇒ 那条永远跑的红并说出"这个理由是编出来的"，随后拷回复原。
+
+- [x] WI-111 **`errorKind` 按"谁改一行能让它变好"重新分家**（`c508aa0`，2026-10-16；WI-72 收口时记下的那笔账）：
+  ｜26 处原来全挤在 `'sandbox'` 一个词上，而它同时装着"题目没配测试用例""提交内容为空""判题底座没就绪""判题器自己崩了"
+  四种互不相干的责任方 ⇒ 用户看到"沙箱"就以为是自己代码的锅。新增三类 `question-config` / `infra` / `invalid-submission`，
+  `sandbox` 只留一种真实含义：**沙箱被半路清掉了**（只有 `react-vitest` 那句"脚手架落盘后不见了"留着它，
+  与 `react-scaffold-missing` / `react-resolve-failed` 两个真实故障对齐）。`web/src/lib/format.ts` 的 `ERROR_KIND_LABEL`
+  是 `Record<JudgeErrorKind, string>` ⇒ 加一类不写标签就是编译错误（这是故意的），`docs/JUDGING.md` 的清单同步。
+  ｜**我自己第一版改错了，形状值得记**：判归属时用的是**回溯 140 字符**的窗口 ⇒ 匹配到的常常是上一条消息而不是本条的，
+  于是"提交内容为空"被分成 `question-config`、`runner.files` 那句被分成 `invalid-submission`，两头都反。
+  发现靠的是读 diff；处理是 `git checkout -- server/src` 整个回退，改成只向前看 + 两处显式按行覆盖，
+  26 条全部打印出来逐条看过才落盘。判据侧跟着改两条用例（`react-vitest.test.ts` 期望 `question-config`、
+  `spark-scala.test.ts` 期望 `invalid-submission`）。
+  ｜验证：`npm run verify:fast` EXIT=0；判题契约变了 ⇒ 容器档与宿主 E2E 都补跑（读数见里程碑 BK 的验证表）。
+
+- [x] WI-110 **清扫的剩余部分（WI-109 第一批之外的四条）全部落地**（① 2026-10-11 深夜，②③④ `43942a0` + `4594b03`，② 的另外两格 `d01bdfc` 2026-10-16 收口）：
+  ｜① `data/` 的 82 项一次性 scratch 是**归档而不是删除**，进 `data/archive/scratch-2026-10-11/`（恢复方法写在该目录 README）。
+  准入判据两条同时成立：`git --no-pager grep -F -l "<名字>"` 在任何被跟踪文件里命中 0，且 mtime 早于 24 小时；
+  留下的 19 项各有实名读者。**顺带查出来的一件事值得记住**：那 19 项里有 6 项"被引用"的引用处就是 `HANDOVER.md` 自己
+  ⇒ 工作板正在变成垃圾的存留理由，那是 WI-109"历史文档要标过期"的账，不是这些文件的理由。
+  ｜② K8s 语料的四行矩阵**四道题出齐**（题库 254 → 258）：`bd-rubric-0009` 五本资源账 / 四种失效四种诊断、
+  `0010` 缩容即丢 shuffle 的三档解法与 `tmpfs` 花的是哪本账、`0011` 提交/身份/分发（cluster 模式下 driver 是集群里的 Pod、
+  driver 是 executor 的**申请方**所以 RBAC 要按动词推而不能背清单、只给 driver 装依赖为什么 executor 一定失败、
+  全 Running + Restart 0 + 无 stage 为什么加内存必然无效）、`0012` operator/多租户/公平与成本口径
+  （CRD↔operator↔Spark 三者错配都长成"提交成功但没有 Pod"、PDB 只管自愿中断所以挡不住 Spot 抢占、
+  没有 YARN queue 之后公平性落到哪四档机制、"清 Git 历史"为什么是错的顺序 —— 先吊销轮换）。
+  入库两次都走 `npm run bank:add`（`--dry-run`：新增 2、跳过 0、拒绝 0）。
+  ⚠ 我第一版是**手写进 `content/questions`** 的 —— 绕过 `bank:add` 就是绕过"唯一写入口"：schema 与覆盖度闸门虽然都过，
+  但 `source.ingestedAt` 变成我自己盖的。撤回、草稿放 `data/drafts-wi110b-k8s/`、剥掉那个字段重走正规路径。
+  ｜③④ 历史文档第二批（清点量到 7 份计划里 **342 个未勾步骤**，六份已交付的各加状态头，并写明"file:line 是改造前的快照"；
+  `WI-91b` 反过来标成唯一一份还没开工的）+ 活文档里"红线 Cn"→"硬约束 Cn" 统一（先量范围：12 处里 9 处在历史记录里不动，
+  活文档只剩 1 处，改它并同步 `rule.md` 的解歧指针 —— 指针不同步它自己就变成新的谎）。
+  ｜验证与一处顺带修掉的旧漂移：`npm run bank:check`（含 `--full` 覆盖度闸门）22 passed；`npm run kb:index` +
+  `node scripts/curriculum.mjs` 重生成后 `content/knowledge/INDEX.md` 从停在 **2026-09-25** 的 254 题 / big-data 26 考点 / 66%
+  更新到 258 题 / 30 考点 / **70%** —— 那处漂移本身就是 WI-108 加完语料没重跑生成器留下的（又是"文档说的与库里装的不是同一件事"）。
+  两道新题是 `llm-rubric`，不进 158 道代码题那条矩阵；rubric 的 qodercli→copilot→manual 降级链读数在容器档那轮。
 - [x] WI-109 **文档/脚本清扫 + 死代码与装饰用例清理（第一批）**（用户 2026-10-11 点名"完善所有文档和脚本，尤其历史文档；清理无效 code/dead file/测试用例"）：
   ｜**改掉的"今天仍在说谎"的句子**（`f9fdd36` + `9662972`，每条都先查证再改）：ARCHITECTURE §12 目录树缺
   `exec/`、`net/`、`shutdown.ts`、`docker/jupyter/` 且把 `guards` 挂在 `judge/` 下（那个文件在 `exec/`）；
@@ -1581,32 +1646,22 @@
   它唯一的结构性优势是"`error` 消息发什么字段我们说了算"（Almond 就是死在别人说了算的那一件上）；
   代价是我们自研并长期维护一个 ZMQ kernel（协议 + HMAC 签名 + ROUTER/DEALER/PUB 三件套）。
   ⇒ 别因为"探索档说了要试三条"就去做它：B 已过排序规则①②③，C 只能赢④的体积，而那不值这个维护面。
-- [ ] WI-110 **清扫的剩余部分**（WI-109 是第一批，这条是还没做完的那一半）：
-  ① **`data/` 的 scratch 已归档完成（2026-10-11 深夜）** —— 82 项一次性文件/目录移进
-  `data/archive/scratch-2026-10-11/`（**没有删任何东西**，恢复方法写在那个目录的 README 里）。
-  准入判据是两条同时成立：`git --no-pager grep -F -l "<名字>"` 在任何被跟踪文件里**命中 0**，
-  且 mtime 早于 24 小时。留下的 19 项各有实名的读者（八家 `drafts-*` 归生成器与出处审计、
-  `notebook-server.log` 归 `docker/entrypoint.sh`、`playwright-*` 是 e2e 现场、
-  `verify-*.json` 归 `assert-ran.mjs`、`wi94-t3-probe*` 整族留下是因为它的**输出**被
-  `embed.test.ts` 当读数引用 —— 不把生产者与证据分开放）。移动后 `npm run verify:fast` EXIT=0，
-  且确认代码里没有 `scratch-` 这种动态拼出来的前缀（`git grep` 命中 0），所以那三个 `scratch-*`
-  目录不是"改名了就找不到"的活工作区。**顺带查出来的一件事**：那 19 项里有 6 项之所以"被引用"，
-  引用处是 `HANDOVER.md` 本身（工作板提到过这个文件名）⇒ 工作板正在变成垃圾的存留理由，
-  这本身就是 WI-109 那条"历史文档要标过期"的账，不是这些文件的理由。
-  ② **K8s 语料的主观题：4 行矩阵已出 2 道 `principal` 档 `llm-rubric`（2026-10-12，题库 254 → 256）** ——
-  `bd-rubric-0009`（五本资源账：`OOMKilled` / `OutOfMemoryError` / `Pending` / CPU 节流四种失效四种诊断，
-  题面把"净 16 MB 而高水位 +563 MB"当作**给定读数**供引用，不要求 candidate 背我们的数）、
-  `bd-rubric-0010`（弹性悖论：缩容即丢 shuffle 的三档解法与各自代价、`emptyDir{medium:Memory}` 花的是
-  `limits.memory` 这本账、PDB 只管自愿中断、ClusterAutoscaler 只看 requests）。
-  入库走 `bank:add`（先 `--dry-run` 再真入库，两个字节都没动过已有题目），`npm run verify:fast` EXIT=0。
-  ⚠ **这两道的真判分往返（rubric 走 qodercli → copilot → manual 那条降级链）本轮没在容器里跑过** ——
-  Docker 被暂停，矩阵那一档没补。恢复后 `./start.sh --verify` 要确认这两条进得了矩阵且 `跳过（栈不可用）0` 不变。
-  还剩 `spark-on-k8s-submit-and-identity` 与 `spark-on-k8s-operator-multitenancy` 两行矩阵没有对应题目。
-  ③ ~~历史文档第二批~~ **已完成**（`43942a0`）：六份已交付的计划各加状态头（写清"勾选是历史"与"今天再读会踩空
-  的具体句子"），`WI-91b` 反过来标成唯一一份还没开工的。清点时量到的数字是 7 份计划里 342 个未勾步骤。
-  ④ ~~`rule.md` 的"红线"编号统一~~ **已完成**（`43942a0`）：先量范围再动手 —— `红线 C[0-9]` 全仓 12 处里
-  9 处在 `memo.md`/`HANDOVER.md`（历史记录不动），**活文档只剩 1 处**，改掉它并同步 `rule.md` 的解歧指针
-  （指针若不同步，它自己就变成新的谎）。
+- [x] WI-114 **仓库真 `.env` 在整轮 verify 里没被动过 —— 现在有一条跨阶段的哨兵**（2026-10-16，本批内落地，起因见 WI-113 最后一节）：
+  ｜为什么"记一条纪律"不够：`env-write-atomicity.test.ts` 的 afterAll 哨兵只在**它自己那一个文件**的起止之间比 size/mtime
+  ⇒ 别的测试、别的脚本、或我手工敲的一条命令写坏 `.env` 时，全仓没有任何东西会红。今天就是这么撞上的。
+  ｜实现（`scripts/verify.sh`）：`env_sig()` 把"size mtime sha256 前 16 位"折成一个可比读数，文件不在就是 `absent`
+  —— 镜像里 `.env` 被 `.dockerignore` 排掉，**缺席也得能被比出来**，写成"没文件就跳过"就又是一条装饰品；
+  `env_guard_check()` 在收尾比一次，不一致就红并说清"该修的是写它的那一条测试/脚本"。
+  ｜判据两条：① 结构 —— 记录点、比对点、`return 1`、`absent` 基准四个都要在，且哨兵里不许出现
+  `cat|head|tail|sed|grep|awk` 读 `.env`（这条保护 token 的闸门不许自己把 token 印进日志）；
+  ② 行为 —— 把那两个函数**抠出来真跑**：什么都没动必须绿，而"改一个字节"、"只 `touch` 动 mtime"、"从缺席到凭空造出一份"
+  三种都必须红，外加探针值不许出现在被重定向出去的输出里。
+  ｜破坏性两次：删掉收尾那一行 ⇒ 结构判据红在"记录了也没人比，等于没设岗"；`printf 'absent'` 改成 `printf ''` ⇒
+  红在"镜像里这一档会静默空转"。恢复后 `bash -n scripts/verify.sh` 通过。
+  ｜验证：`npx vitest run server/test/regression/env-write-atomicity.test.ts` 28 passed / 2 skipped；
+  `npm run verify:fast` EXIT=0，新阶段现场打印的那行只含 size / mtime / 哈希前缀，内容一个字节都没出。
+  ｜顺带把操作纪律也记在案（都真用到过）：临时探针脚本一律显式传绝对目录 + 开头拒绝在仓库根跑，
+  取值只报长度或哈希前缀。
 - [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
   ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
   `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；
@@ -1623,26 +1678,6 @@
   ⇒ **是复用不是每次攒一个**；但 SPA 内切页只让 `connections` 掉到 0、内核照样活着，且 entrypoint **没配**
   `c.ServerApp.identity` 之外的 `cull_idle_timeout` ⇒ 攒的是"每份打开过的笔记各一个 JVM"，活到 session 被删或 jupyter 重启。
   与 WI-95（抢 CPU）是同一族账，加不加 culling 同样是一次决定。
-
-- [ ] WI-112 **跨 session 记忆文件是门禁的盲区**（2026-10-12，由一次我自己造成的、**全绿通过 pre-commit 的**数据损失发现）：
-  追加里程碑时把脚本写成一行 `io.open(p,'w').write(io.open(p).read() + add)` —— 求值顺序是**先开写模式清空文件、
-  再去读那个已经空了的文件** ⇒ `memo.md` 从 3833 行变 20 行，而 `npm run verify:fast` EXIT=0、提交成功。
-  发现它靠的不是测试，是 `git show --stat` 里那行 `memo.md | 3843 ---------`（删除远大于新增这个形状本身值得停一眼）。
-  内容没真丢（上一版在库里，`git show HEAD~1:memo.md` 完整恢复），但**下一次未必这么幸运**。
-  ｜要收的形状（一条最小判据，不要多）：`memo.md` 与 `HANDOVER.md` 的**字节数/里程碑数量不得低于上一个提交**，
-  且 `HANDOVER.md` 的 COMPLETED 条目只增不减 —— 也就是把"这些文件只能变长"钉住。
-  ⚠ 为什么它和别的守卫不同：这两个文件**不被任何运行时读**，坏了没有功能会红，只有下一个读它的人（人或 agent）
-  会拿到残缺的世界模型 —— 那正是本项目最贵的一种坏法（"记忆里的谎"）。挂在 `server/test/regression/` 下，
-  并注意 `verify-coverage` 要求新 `*.test.ts` 被某条阶段认领。
-- [ ] WI-111 **`errorKind":"sandbox"` 的语义要按 runner 拆开**（WI-72 收口时查出来的新账，2026-10-11）：
-  同一个 errorKind 现在至少被**两种互不相干的故障**共用 —— `react-vitest` 用它说"脚手架落盘后不见了 /
-  跑一半被删"（`server/src/judge/runners/react-vitest.ts:264`），而 mysql 那几题（`sql-mysql-0011/0015/0002`，
-  2026-09-22~23 的日志）用它说的大概是"底座还没就绪"。日志行只有分类、没有消息
-  （实测：一条 sandbox 记录的字段就是 `time/level/module/event/traceId/ms/questionId/kind/status/errorKind/passed/failed/total`），
-  所以读者从 `data/logs` 分不出是哪一种 —— 而这条分类正是 WI-72 收口时唯一还留着的可行动信息。
-  ｜修法方向：要么按 runner 拆 errorKind，要么给每条 sandbox 记录补一个"量到的形状"字段
-  （missing 列表 / 连接失败原因），别只留一个词。**改之前要想的是判题契约与题库里已入库题目的兼容**，
-  不是随手加一个字段。
 
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），

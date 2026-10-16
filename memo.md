@@ -3864,3 +3864,61 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 ② 一个只被人和 agent 读、不被任何判据读的仓库记忆文件（`memo.md`/`HANDOVER.md`）**是门禁的盲区** ——
 它坏了没有东西会红。要不要给它加一条最小判据（例如"里程碑数量只增不减 + 文件字节数下限"）
 记成待办，不在本轮顺手做。
+## 里程碑 BK：三笔自己撞出来的账（WI-111/112/113）+ K8s 题目收口（WI-110 的 ②）（2026-10-16）
+
+这一批的开头是**一次我自己造成的数据损失**，而它恰好把三条一直裸奔的账照了出来：一条闸门在镜像里从来没跑过、
+记忆文件不被任何判据读、以及仓库真 `.env` 没有跨文件级的保护。三笔都补了，第四笔登记成 WI-114。
+
+### 做了什么
+
+1. **WI-113（`943ab22`）** —— `.env` 改写时"抄权限"那段在这台机器上**从来没生效过**：Store 版 PowerShell 7 污染机器级
+   `PSModulePath` ⇒ Windows PowerShell 5.1 的 `Get-Acl` 加载失败；而**在本进程里清洗 `$env:PSModulePath` 救不回来**
+   （实测放脚本第一句、放别的 cmdlet 之后都失败 —— 模块搜索路径在进程启动时就定了）。所以"只换个写法"是不够的，
+   得换 API：走 .NET `FileInfo` + **拿目标自己的 ACL 对象逐条搬**。为什么不能原样搬是今天最值钱的一条发现 ——
+   **把源文件读来的对象直接交给 `SetAccessControl` 会静默什么都不写**（不抛异常、目标 SDDL 一字不变，长得完全像成功），
+   因为 .NET Framework 的 `ObjectSecurity` 只在对象被改过的前提下才落盘。
+2. **WI-112（`ec85548` + `ee114a2`）** —— 记忆文件棘轮。写完它的第一件事就是被自己的容器档撞红：
+   我在文件头写"绝对下限永远判（包括镜像里）"，而 `.dockerignore:12-13` 早就把 `memo.md` / `HANDOVER.md` 连同 `.git` 排掉了
+   ⇒ 镜像里 `readFileSync` 直接 `ENOENT`。这正是本仓库文档里那句"与判题无关的一条闸门把整轮容器验证撞红"的现行犯，
+   只不过加害者是四天前的我自己。修法：那条永远跑的判据不再读内容，改判**这张网还在不在**（文件不在 ⇒ 必须同时满足
+   "在容器里"与"`.dockerignore` 里真写了这条排除"；只少一份 ⇒ 那是有人挪走了它，直接红）。
+3. **WI-111（`c508aa0`）** —— `errorKind` 按**"谁改一行能让它变好"**分家：新增 `question-config` / `infra` / `invalid-submission`
+   三类，`sandbox` 收缩成"沙箱被半路清掉了"这一种真实含义（26 处原先全挤在一个词上，而"题目没配用例"和"底座没起来"
+   是两种完全不同的责任方）。⚠ 我第一版用**回溯 140 字符**的窗口判归属 ⇒ 匹配到的是上一条消息而不是本条的，
+   两条正好分反；靠读 diff 发现、`git checkout --` 整个回退、改成只向前看 + 两处显式按行覆盖，26 条逐条打印看过才落盘。
+4. **WI-110 的 ②（`d01bdfc`）** —— K8s 语料四行矩阵出齐四道题（`bd-rubric-0009`…`0012`，258 题），入库走 `bank:add`；
+   顺带冲掉一处旧漂移：`content/knowledge/INDEX.md` 从 2026-09-25 起没重生成过，一直说 254 题 / 覆盖 66%，真实是 258 / 70%
+   —— 又是"文档说的与库里装的不是同一件事"，而那处漂移的成因是 WI-108 加完语料没跑生成器。
+
+### 事故：我把真 `.env` 覆盖了（以及怎么无损收回来）
+
+临时探针脚本里用 `Get-Location` 拼 `.env` 路径，而 bash 工具的 cwd **在中途被重置回仓库根** ⇒ 一次 `WriteAllText`
+打在真文件上，`ARENA_LLM_BRIDGE_TOKEN` / `ARENA_JUPYTER_TOKEN` 从文件里消失。恢复路径：**容器还在跑，它的进程 env 里就是那份**
+⇒ `docker exec … printenv` 取回、按 sha256 前 16 位逐条比对一致后原样写回（309 B、无 CR、无 BOM）。
+容器没有重建 ⇒ 两侧本来就是同一份，**没有产生 WI-86 那一类"进程新值 / .env 旧值"的错配**。
+三条教训：① 探针脚本一律显式传绝对目录 + 开头拒绝在仓库根跑（今天这条硬检查救回了后续两次误写）；
+② "`ENV_FILE` 一律落临时目录"是**判据**的纪律，不是**我操作**的纪律 —— 后者需要一条跨文件级的闸门 ⇒ 登记成 WI-114；
+③ 取值时永远只报长度或哈希前缀，值本身不进终端、不进日志（这条本来就是 `env-write-atomicity` 第 ⑥ 条）。
+
+### 验证表
+
+| 档 | 命令 | 结果 |
+| --- | --- | --- |
+| 宿主 | `npm run verify:fast` | EXIT=0（四次 pre-commit 实跑全绿，含 lint / typecheck / 前端构建 / 单测） |
+| 单文件 | `npx vitest run env-write-atomicity scripts-syntax` | 35 passed / 2 skipped（跳的是 NTFS 不记 chmod，理由由双口径判据守） |
+| 单文件 | `npx vitest run memory-file-ratchet` | 宿主 4 passed；容器里 1 passed / 3 skipped（skip 的理由由那条永远跑的判据说清） |
+| 题库 | `npm run bank:check`（含 `--full` 覆盖度闸门） | 22 passed；258 题 |
+| 容器（第一轮） | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` | 代码题矩阵 **158 可判 / 跳过 0**、633 passed、**1 failed —— 就是我自己那条 WI-112**（`ee114a2` 修） |
+| 容器（第二轮，含 `ee114a2` + 两道新题） | 同一条命令 | **`VERIFY_EXIT=0`**：单测档 `634 passed / 10 skipped`、判题矩阵 `158 可判 / 跳过 0`、教程档 `17 passed / 0 skipped`，且「教程闸门确实跑到了」那条也在 ⇒ 篇 4 是新加的那一篇，它在容器里真起过 session |
+| 宿主 E2E | `npm run e2e` | **74 passed（3.1m）/ EXIT=0**（独立 e2e 实例，`data/e2e/`，不碰真 db 与 hidden.json） |
+| 新闸门现场 | `npm run verify:fast`（含 WI-114 那一段） | EXIT=0，收尾阶段打印 `✓ .env 未被改动（size mtime sha256前16）` —— 只报读数不报内容 |
+| 为什么换源 | `curl -o /dev/null -w %{http_code}` 实测 | aliyun 对整片 jammy pocket 回 **403**（`compose.yml:18` 的注释写了这是外部条件），ustc / tuna 200 ⇒ shell 前缀换源，被跟踪文件一个没动 |
+
+### 已知问题 / 还欠的
+
+- **WI-114 已随本批落地**（不是只登记）：`scripts/verify.sh` 里一对 `env_sig` / `env_guard_check`，判据两条 —— 结构那条钉「记录点、比对点、`return 1`、`absent` 基准都在，且哨兵自己不许 `cat`/`grep` 读 `.env`」；行为那条把两个函数抠出来真跑：没动必须绿，改一个字节 / 只 `touch` 动 mtime / 从缺席到凭空造出一份都要红。破坏性两次各撞对应那一半。
+- 上表的容器第二轮与宿主 E2E 已补跑并填好（本批收尾时两边都是绿的）。
+- WI-93 / WI-95 仍是"要用户点头"的两笔（Jupyter 无人守护、notebook 那个第二个 JVM 抢 CPU）；WI-100/96/101 卡在 Toree 接入。
+- 这台机器的 `PSModulePath` 污染是**机器级**的：产品侧绕开了，但用户自己在 Windows PowerShell 5.1 里调 `Get-Acl` 照样会撞。
+  根治要动系统配置（把 Store 版 PS 7 那条目录从机器级变量里去掉，或改用 `pwsh`），那不归本仓库管 —— 本仓库只负责不再假装它可用。
+
