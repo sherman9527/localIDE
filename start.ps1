@@ -63,6 +63,7 @@ function Read-EnvKey([string]$key) {
 }
 
 function Write-EnvKey([string]$key, [string]$value) {
+  # 抄权限那段（下面 if (Test-Path $EnvFile) 里）决定这次改写会不会静默把 .env 放宽；机制与两个坑写在那里。
   # 同上：缺键名会往 .env 里写一行 "=值"，而 compose 读到的是一行非法键
   if (-not $key) { throw 'Write-EnvKey 需要键名' }
   # 键名先过形状闸门（与 start.sh 的 case 同判据）。旧写法把键名当**正则**用（-notmatch "^$key="），
@@ -99,9 +100,27 @@ function Write-EnvKey([string]$key, [string]$value) {
     # —— 而 .env 里是桥 token 与 notebook 的 Jupyter token，那个 Jupyter 还是 entrypoint 里 --allow-root 起的。
     # 有原文件就照抄它的 ACL。新建时不动：Windows 没有 umask 0600 的对等物，硬造一份 ACL 只会把人家的
     # 文件改成谁也读不了的样子 —— 这条与 sh 侧的差别写在这，不是漏了一半。
+    # 抄法用 .NET 的 FileSystemSecurity，不用 Get-Acl / Set-Acl，这是实测撞出来的：这台机器上 Get-Acl 根本不可用
+    # —— Store 版 PowerShell 7 把自己的 Modules 目录塞进了**机器级** PSModulePath，于是 Windows PowerShell 5.1
+    # 解析到 7 的那份 Microsoft.PowerShell.Security，加载失败（"在模块…找到 Get-Acl 命令，但无法加载该模块"）。
+    # 在本进程里清洗 $env:PSModulePath 救不回来（实测两种放法都失败：放在脚本第一句、以及放在别的 cmdlet 跑完之后
+    # —— 模块搜索路径在进程启动时就定了；只有**父进程**带着干净的 PSModulePath 起 powershell.exe 才有效，
+    # 而用户手敲 .\start.ps1 做不到这一步）。.NET 那几个类型不走模块加载，因此不受这个污染影响。
+    # 另一个坑：不能把源文件读来的对象原样交给 SetAccessControl —— 实测那样**静默什么都不写**（不抛异常、
+    # 目标 SDDL 一字不变，看起来像成功）：.NET Framework 的 ObjectSecurity 只在对象被改过的前提下才落盘。
+    # 所以这里拿目标自己的 ACL 对象逐条搬。（2026-10-16 实测：这么写之后，加固过的文件经 tmp + Move-Item 改写
+    # 之后 SDDL 与改写前一字不差；去掉这段则退回继承默认，两种状态区得开。）
     if (Test-Path $EnvFile) {
-      try { Set-Acl -Path $tmp -AclObject (Get-Acl -Path $EnvFile) }
-      catch { Write-Host "[arena] 没能把 $tmp 的权限对齐 $EnvFile（将以默认权限改写 .env）：$($_.Exception.Message)" -ForegroundColor Yellow }
+      try {
+        $secAccess = [System.Security.AccessControl.AccessControlSections]::Access
+        $secSidType = [System.Security.Principal.SecurityIdentifier]
+        $srcAcl = (New-Object System.IO.FileInfo $EnvFile).GetAccessControl($secAccess)
+        $dstAcl = (New-Object System.IO.FileInfo $tmp).GetAccessControl($secAccess)
+        [void]$dstAcl.SetAccessRuleProtection($srcAcl.AreAccessRulesProtected, $false)
+        foreach ($ace in @($dstAcl.GetAccessRules($true, $false, $secSidType))) { [void]$dstAcl.RemoveAccessRule($ace) }
+        foreach ($ace in @($srcAcl.GetAccessRules($true, $false, $secSidType))) { $dstAcl.AddAccessRule($ace) }
+        (New-Object System.IO.FileInfo $tmp).SetAccessControl($dstAcl)
+      } catch { Write-Host "[arena] 没能把 $tmp 的权限对齐 $EnvFile ⇒ 这次改写会把 .env 放宽成目录继承来的默认权限（通常含 SYSTEM/Administrators 完全控制），而里面是桥 token 与 Jupyter token：$($_.Exception.Message)" -ForegroundColor Yellow }
     }
     Move-Item -Force -Path $tmp -Destination $EnvFile -ErrorAction Stop
   } catch {

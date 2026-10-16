@@ -241,6 +241,11 @@ function runPs(body: string, opts: { seed?: string | null; env?: Record<string, 
     // 下面那些**中文**断言（如"报错里只许报长度"那句要匹配的 `读回 N 个字符`）在这台机器上永远读不到原字。
     // 这是 harness 的观测口径，不改 start.ps1 的行为（实测：加这一行之前 stdout 是 mojibake、之后可正解）。
     '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    // 这里**不清洗 PSModulePath**，也不再需要清洗：这台机器上 Store 版 PS 7 污染了机器级 PSModulePath，
+    // 5.1 的 Get-Acl / Set-Acl 加载不起来（实测：清洗 $env:PSModulePath 放在脚本第一句、或放在别的 cmdlet
+    // 跑完之后都救不回来 —— 模块搜索路径在进程启动时就定了，只有父进程带干净 env 起 powershell.exe 才有效）。
+    // 所以两侧都改走 .NET 的 FileSystemSecurity：harness 用它观测，产品侧用它抄权限，
+    // "产品侧不许退回 Get-Acl / Set-Acl"由上面那条结构判据钉住，权限抄写真的有没有发生由下面那条 ACL 行为判据钉住。
     '# ↓↓↓ 从仓库里的 start.ps1 当场抠出来的本体（不是副本） ↓↓↓',
     PS_READ,
     PS_WRITE,
@@ -383,6 +388,34 @@ describe('闸门真的在守东西（空转防护 + 结构判据）', () => {
     expect(PS_READ).toContain('Select-String');
     expect(PS_BRIDGE).toContain('Write-EnvToken');
     expect(PS_BRIDGE).toContain('Write-EnvJupyterToken');
+  });
+
+  /**
+   * 抄权限的**机制**也钉住（2026-10-16 实测撞出来的两条，都是"看起来像在工作"的写法）：
+   * ① 不许走 `Get-Acl` / `Set-Acl`：这台机器上 Store 版 PS 7 把模块目录塞进机器级 PSModulePath，
+   *    5.1 加载 `Microsoft.PowerShell.Security` 直接失败 ⇒ 走那两个 cmdlet 等于每次改写都把 .env
+   *    放宽成目录继承来的默认权限（里面是桥 token 与 `--allow-root` 的 Jupyter token）而只打一行黄字。
+   *    在本进程里清洗 `$env:PSModulePath` 救不回来（实测：放脚本第一句、放别的 cmdlet 之后都失败；
+   *    模块搜索路径在进程启动时就定了，只有**父进程**带干净 env 起 powershell.exe 才有效，
+   *    而用户手敲 `.\start.ps1` 做不到）⇒ 只有 .NET 那条路真的能跑。
+   * ② 不许把从源文件读来的对象**原样**交给 `SetAccessControl`：实测那样静默什么都不写
+   *    （不抛异常、目标 SDDL 一字不变）—— .NET Framework 的 ObjectSecurity 只在对象被改过的前提下才落盘。
+   *    所以判"拿目标自己的 ACL 对象逐条搬"：`RemoveAccessRule` 与 `AddAccessRule` 必须都在。
+   * 真正"权限跟没跟过去"由下面那条 powershell 行为判据判（它会红），这条只挡住退化成好看的写法。
+   * 只看代码行：注释里写着 Get-Acl 不算实现（与 silentSwallowPatterns 同一口径）。
+   */
+  it('Write-EnvKey 抄权限走 .NET 逐条搬，不走 Get-Acl / Set-Acl（这台机器上那两个加载不起来 = 等于不抄）', () => {
+    const code = PS_WRITE
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('#'))
+      .join('\n');
+    for (const need of ['System.IO.FileInfo', 'GetAccessControl', 'SetAccessControl', 'SetAccessRuleProtection', 'RemoveAccessRule', 'AddAccessRule']) {
+      expect(code, `Write-EnvKey 的抄权限那段里看不到 ${need} ⇒ 机制换了（本条判据要跟着同步）或者那段被删了`).toContain(need);
+    }
+    expect(code, 'Write-EnvKey 又用起 Get-Acl / Set-Acl cmdlet 了 ⇒ 在这台机器上它们加载不起来，改写会把 .env 静默放宽').not.toMatch(/\b(Get-Acl|Set-Acl)\b/);
+    // 抄不动了要**说一声**（与 sh 侧 chmod 失败那句同判据：不是所有文件系统都有 ACL，所以不致命，但不能当没事发生）
+    expect(code, '抄权限那段没有 catch ⇒ 在非 NTFS / 无权读 ACL 的落点上整个改写会一起炸，而 sh 侧只是提示一句继续').toContain('catch');
+    expect(code, 'catch 里要写明后果（会把 .env 放宽成继承默认）——上一轮就是靠这句话让人知道自己没被加固').toMatch(/放宽/);
   });
 
   it('结构判据认得旧实现（把旧代码的形状喂给它必须红，否则这条闸门是空的）', () => {
@@ -689,30 +722,42 @@ describe.skipIf(!hasPs)('powershell 侧行为：Write-EnvKey / Start-Bridge（st
     expect(r.text()).not.toContain('fresh-token');
   });
 
+  /**
+   * 加固过的 .env 改写之后 ACL 必须一模一样 —— 上一轮这条判据在**这台机器上从来没跑起来过**：
+   * 它和实现都依赖 Get-Acl / Set-Acl，而 PSModulePath 被 Store 版 PS 7 污染后那两个 cmdlet 加载不起来
+   * （红在 harness 自错上，看起来像"这台机器跑不了"，于是整条闸门等于不存在）。
+   * 现在观测与实现都走 .NET FileSystemSecurity，量具不借产品那个模块 ⇒ 它真的在判东西：
+   * 把产品里抄权限那段删掉，改写后的 SDDL 会退回目录继承来的 SY/BA FullControl（实测区得开）。
+   */
   it('加固过的 .env 改写之后 ACL 一模一样（Move-Item 搬的是 tmp 那份继承默认）', () => {
     const r = runPs(
       [
+        '$SEC = [System.Security.AccessControl.AccessControlSections]::Access',
+        '$SIDT = [System.Security.Principal.SecurityIdentifier]',
+        'function GetSddlOf([string]$p) { (New-Object System.IO.FileInfo $p).GetAccessControl($SEC).GetSecurityDescriptorSddlForm($SEC) }',
         '$who = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name',
-        '$acl = Get-Acl $EnvFile',
-        '[void]$acl.SetAccessRuleProtection($true, $false)',
-        'foreach ($ace in @($acl.Access)) { [void]$acl.RemoveAccessRule($ace) }',
-        '[void]$acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($who, "Modify", "Allow")))',
-        'Set-Acl -Path $EnvFile -AclObject $acl',
-        'Write-Host ("HARDEN=" + @((Get-Acl $EnvFile).Access).Count)',
-        '$before = (Get-Acl $EnvFile).Sddl',
+        // 加固：断开继承、清空、只留当前用户 Modify —— 与 sh 侧"手工把 .env 收成 0600"对等
+        '$h = (New-Object System.IO.FileInfo $EnvFile).GetAccessControl($SEC)',
+        '[void]$h.SetAccessRuleProtection($true, $false)',
+        'foreach ($e in @($h.GetAccessRules($true, $false, $SIDT))) { [void]$h.RemoveAccessRule($e) }',
+        '$h.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($who, "Modify", "Allow")))',
+        '(New-Object System.IO.FileInfo $EnvFile).SetAccessControl($h)',
+        'Write-Host ("HARDEN=" + @((New-Object System.IO.FileInfo $EnvFile).GetAccessControl($SEC).GetAccessRules($true, $false, $SIDT)).Count)',
+        '$before = GetSddlOf $EnvFile',
         'Write-EnvKey "ARENA_ACL" "v"',
-        'Write-Host ("AFTER=" + (Get-Acl $EnvFile).Sddl)',
+        'Write-Host ("AFTER=" + (GetSddlOf $EnvFile))',
         'Write-Host ("BEFORE=" + $before)',
       ].join('\r\n'),
     );
     expect(r.rc, `harness 自己出错了：${r.err}`).toBe(0);
-    expect(r.out, '加固没做成 ⇒ 这条判据在空转（这个卷不支持 Set-Acl？').toContain('HARDEN=1');
+    expect(r.out, '加固没做成 ⇒ 这条判据在空转（这个卷不支持 ACL？换个 NTFS 落点再看）').toContain('HARDEN=1');
     const before = /BEFORE=(\S+)/.exec(r.out)?.[1] ?? '';
     const after = /AFTER=(\S+)/.exec(r.out)?.[1] ?? '';
     expect(before.length, '取不到加固后的 SDDL ⇒ 判据空转').toBeGreaterThan(10);
     // .env 里是桥 token 与 notebook 的 Jupyter token，而那个 Jupyter 是 --allow-root 起的：
     // 不抄 ACL 的话改写会把"只允许当前用户"降回目录继承来的 SY/BA FullControl
     expect(after, '改写把 .env 的 ACL 换成了 tmp 那份（继承默认）⇒ 人手加固被静默抹掉').toBe(before);
+    expect(r.text(), '内容侧也得真的写进去了，否则"权限没变"可能是整次改写没发生').toContain('ARENA_ACL=v');
   });
 
   it('成功路径：Start-Bridge 正常写完桥 token、不动已有的 notebook token 并返回', () => {
