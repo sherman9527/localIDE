@@ -1,7 +1,7 @@
 {
   "version": 1,
   "month": "2026-10",
-  "generatedAt": "2026-09-25T06:30:53.109Z",
+  "generatedAt": "2026-10-16T02:09:17.031Z",
   "policy": {
     "days": 30,
     "mainCodeQuota": 2,
@@ -58,13 +58,13 @@
       "sideEligible": true
     },
     "big-data": {
-      "total": 34,
+      "total": 38,
       "solvableCode": 26,
-      "rubric": 8,
+      "rubric": 12,
       "code": 26,
       "kinds": {
         "pyspark": 24,
-        "llm-rubric": 8,
+        "llm-rubric": 12,
         "spark-scala": 2
       },
       "mainEligible": true,
@@ -102,7 +102,7 @@
     },
     "side": {
       "system-design": 36,
-      "big-data": 8,
+      "big-data": 12,
       "agent-design": 27,
       "hot-interviews": 25
     }
@@ -126,30 +126,30 @@
     {
       "date": "2026-10-02",
       "main": "sql",
-      "side": "hot-interviews",
+      "side": "agent-design",
       "mainPicks": [
         "sql-mysql-0027",
         "sql-redis-0005"
       ],
       "sidePicks": [
-        "hot-rubric-0006"
+        "ag-rubric-0013"
       ],
-      "minutes": 79,
+      "minutes": 74,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
     {
       "date": "2026-10-03",
       "main": "big-data",
-      "side": "agent-design",
+      "side": "hot-interviews",
       "mainPicks": [
-        "bd-rubric-0001",
-        "bd-pyspark-0019"
+        "bd-pyspark-0008",
+        "bd-scala-0001"
       ],
       "sidePicks": [
-        "ag-rubric-0008"
+        "hot-rubric-0002"
       ],
-      "minutes": 109,
+      "minutes": 84,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -171,30 +171,30 @@
     {
       "date": "2026-10-05",
       "main": "sql",
-      "side": "hot-interviews",
+      "side": "agent-design",
       "mainPicks": [
         "sql-redis-0013",
         "sql-mysql-0012"
       ],
       "sidePicks": [
-        "hot-rubric-0001"
+        "ag-rubric-0005"
       ],
-      "minutes": 75,
+      "minutes": 90,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
     {
       "date": "2026-10-06",
       "main": "big-data",
-      "side": "agent-design",
+      "side": "hot-interviews",
       "mainPicks": [
-        "bd-pyspark-0015",
-        "bd-pyspark-0012"
+        "bd-rubric-0004",
+        "bd-pyspark-0015"
       ],
       "sidePicks": [
-        "ag-rubric-0011"
+        "hot-rubric-0001"
       ],
-      "minutes": 95,
+      "minutes": 90,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -216,30 +216,30 @@
     {
       "date": "2026-10-08",
       "main": "sql",
-      "side": "hot-interviews",
+      "side": "agent-design",
       "mainPicks": [
         "sql-mysql-0008",
         "sql-redis-0007"
       ],
       "sidePicks": [
-        "hot-rubric-0002"
+        "ag-rubric-0005"
       ],
-      "minutes": 73,
+      "minutes": 83,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
     {
       "date": "2026-10-09",
       "main": "frontend",
-      "side": "agent-design",
+      "side": "hot-interviews",
       "mainPicks": [
         "fe-react-0004",
         "fe-react-0006"
       ],
       "sidePicks": [
-        "ag-rubric-0017"
+        "hot-interviews-rubric-0003"
       ],
-      "minutes": 77,
+      "minutes": 72,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -261,30 +261,30 @@
     {
       "date": "2026-10-11",
       "main": "sql",
-      "side": "hot-interviews",
+      "side": "agent-design",
       "mainPicks": [
         "sql-redis-0002",
         "sql-mysql-0003"
       ],
       "sidePicks": [
-        "hot-rubric-0015"
+        "ag-rubric-0011"
       ],
-      "minutes": 56,
+      "minutes": 71,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
     {
       "date": "2026-10-12",
       "main": "big-data",
-      "side": "agent-design",
+      "side": "system-design",
       "mainPicks": [
-        "bd-pyspark-0003",
-        "bd-rubric-0004"
+        "bd-scala-0001",
+        "bd-pyspark-0017"
       ],
       "sidePicks": [
-        "ag-design-rubric-0002"
+        "sys-rubric-0016"
       ],
-      "minutes": 100,
+      "minutes": 93,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -357,9 +357,9 @@
         "sql-mysql-0035"
       ],
       "sidePicks": [
-        "bd-pyspark-0011"
+        "bd-pyspark-0010"
       ],
-      "minutes": 78,
+      "minutes": 76,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -368,7 +368,7 @@
       "main": "big-data",
       "side": "agent-design",
       "mainPicks": [
-        "bd-pyspark-0003",
+        "bd-scala-0002",
         "bd-pyspark-0020"
       ],
       "sidePicks": [
@@ -458,13 +458,13 @@
       "main": "big-data",
       "side": "system-design",
       "mainPicks": [
-        "bd-pyspark-0001",
-        "bd-pyspark-0013"
+        "bd-pyspark-0011",
+        "bd-pyspark-0015"
       ],
       "sidePicks": [
         "sys-design-rubric-0004"
       ],
-      "minutes": 96,
+      "minutes": 103,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -507,9 +507,9 @@
         "fe-react-0005"
       ],
       "sidePicks": [
-        "bd-pyspark-0015"
+        "bd-pyspark-0018"
       ],
-      "minutes": 100,
+      "minutes": 102,
       "mainShortfall": 0,
       "sideShortfall": 0
     },
@@ -567,9 +567,9 @@
       "frontend": 4
     },
     "sideByCategory": {
-      "system-design": 12,
-      "hot-interviews": 8,
+      "system-design": 13,
       "agent-design": 8,
+      "hot-interviews": 7,
       "big-data": 2
     },
     "daysWithFullMain": 30,

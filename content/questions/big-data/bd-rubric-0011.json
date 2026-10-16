@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0011",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Spark on K8s 的提交、身份与分发：driver 是集群里的 Pod 之后，哪四件事不能再混着说",
+  "statement": "## 场景（数据平台 / Spark on Kubernetes 方向，25 分钟）\n\n一个 30 作业的 PySpark 批处理组从 YARN 迁到 Kubernetes，`deploy-mode cluster`，提交动作由 CI 里的一个 Runner Pod 执行（`spark-submit` 跑在 Runner 容器里）。迁移后一个月内出现五件事：\n\n- **A** CI 的 Runner Pod 在 `spark-submit` 返回后立刻被销毁，团队认定「作业跟着没了」，于是有人在提交后面加了 `sleep 3600` 占住 Runner。加了之后成功率确实「变高」，但没人说得出为什么。\n- **B** 安全评审要求收权，把 driver 用的 ServiceAccount 从 `cluster-admin` 改成「只能 `get`/`list` pods」。改完作业全部卡在「driver 起来了，一个 executor 都没有」，driver 日志里有一行 403；有人主张改回 `cluster-admin`「先跑起来再说」。\n- **C** 有同学发现某作业缺 `requests` 库，就在**镜像的 driver 入口脚本**里加了一行 `pip install requests`，driver 侧正常，executor 侧稳定报 `ModuleNotFoundError`。他的说法是「镜像是同一个，环境应该也是同一个」。\n- **D** 某次网络策略变更后：driver Pod `Running`、executor Pod 全部 `Running`、`Restart Count` 为 0，但 Spark UI 上没有任何 stage 在推进。有人开始把 `spark.executor.memory` 从 4g 加到 8g、executor 数从 20 加到 60。\n- **E** 两个团队的 YAML 逐字相同，镜像写 `image: myorg/spark-py:latest`，`imagePullPolicy: IfNotPresent`。同一个作业在不同节点上跑出不同的 pandas 版本，报错也不同。\n\n## 要你回答的（五小问，每问都要「证据 → 结论 → 修法」，只给结论不给证据的按半对算）\n\n1. 分别判 A / B / C / D / E 的成因。四条必须给出**不同的**定位证据（一条命令、一个字段或一处事件原文），不许用一句「环境/权限没配好」把它们收成一个原因。并说明 A 里那个 `sleep` 为什么看起来有效。\n2. 给 driver 的**最小 RBAC**：按「这个作业要做什么」推导出它需要哪些 resource 与 verb（含 `pods`、`pods/log`、`services`、`configmaps` 这一族的取舍理由），说明为什么 driver 的 ServiceAccount 与 executor 的应该分开，以及多租户下 `cluster-admin` 具体把什么交出去了。B 那一版收权为什么是「收错了地方」而不是「收多了」。\n3. C 与 E 的正确修法治法：依赖必须落在哪一层、`--py-files` / `--archives` / `local:///` 三者的语义分界在哪，并给出一个**能证伪**你说法的观察（也就是说：如果观察到 X，你的结论就错了）。\n4. D 的前三步定位顺序（要说清查什么、查到什么形状算排除），并论证「加内存 / 加 executor 数」在这个形状上为什么必然无效 —— 用「它改的是哪个失败环节」来论证，不要用「浪费资源」这种说法。\n5. 迁移之后「作业状态从哪读」变了：把「`spark-submit` / `apply` 返回 0」「`SparkApplication` 状态是 RUNNING」「确实有 task 在推进」这三个事实分开，各自说要看哪个字段/哪个对象，并说明 client 模式下那个终端窗口为什么不再是真相来源。\n",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "spark-on-k8s-submit-and-identity",
+    "spark-on-k8s-resources",
+    "production-stability",
+    "modern:spark-on-k8s"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "A–E 五种失效分家，各自配一条定位证据（3 分）",
+        "weight": 3,
+        "criteria": "满分形状：A = `deploy-mode cluster` 下 driver 是集群里的一个 Pod，提交端退出**不**终止作业，所以「Runner 销毁 ⇒ 作业没了」这个因果本来就是错的；`sleep` 看起来有效的原因要归到别处（把提交端存活当成了别的东西 —— 例如 CI 变量/凭据只在 Runner 存活期间可用、或日志收集随 Pod 结束被截断，让人误判成「没 sleep 就没跑成」），能说出「相关性不是因果」即给分；定位证据 = 查 driver Pod 本身是否还在（`kubectl get pods` 找 driver 的 Pod 名）与它的 status，不是查 CI。B = driver 是 executor Pod 的**申请方**，需要 create/delete 权限，只给 get/list 就是收错了地方 —— 证据是 driver 日志里那句 403 的**原文**（它写着缺哪个 resource/verb），据此补最小权限而不是回到 cluster-admin。C = executor Pod 用同一镜像但**不继承** driver 容器里运行时的 `pip install`（那是另一个容器的可写层），证据 = executor Pod 里 `python -c \"import requests\"` 与 driver Pod 里结果不同；「同一镜像 ⇒ 同一环境」这句话错在把镜像当成运行容器的全部状态。D = executor 起不来注册：driver 的 RPC 端口/Service 不可达（NetworkPolicy/CNI）、解析到的 driver 地址不是自己所在网络能到的地址；证据 = `kubectl describe` driver 的 Service 与端点、在 executor 容器内探端口可达性、看 NetworkPolicy 事件，全 Running + Restart 0 + 无 stage 就是「连不上」不是「跑不动」。E = `latest` 叠加 `imagePullPolicy: IfNotPresent` 与节点既有镜像缓存 ⇒ 同一份 YAML 在不同节点拿到不同解释器；证据 = 到两个节点上看实际运行镜像的 digest（不是 tag）。**把 A 与 D 归成同一条、或把 C 说成「镜像没打进去」的扣 1 分**；四条以上共用一句「权限/环境没配好」最多给 1 分。"
+      },
+      {
+        "label": "driver 最小 RBAC 的推导，而不是背一份清单（2 分）",
+        "weight": 2,
+        "criteria": "要看到**推导**：driver 要创建/删除 executor Pod 与它的 Service、要读 executor 日志、要写/读它自己的配置载体，所以 `pods`(create/get/list/watch/delete)、`pods/log`(get)、`services`(create/get/list/delete)、`configmaps`(create/get/list) 这一族是**按作业实际需要**推出的，并明确「executor 不需要创建 Pod ⇒ executor 的 SA 不该和 driver 共用同一份高权限」；命名空间内 Role + RoleBinding（不是 ClusterRole）是把爆炸半径压到本 namespace 的手段。`cluster-admin` 要说清等于把一个作业的凭据换成整个集群的写权限（任意 namespace 读别人的 Secret/数据、创建特权 Pod 逃逸到节点），而不是只说「不安全」。只贴一段 Role YAML 而没有推导、或反过来只讲原则不落到 resource/verb 的，给 1 分。"
+      },
+      {
+        "label": "依赖与分发的分界：镜像构建期 vs 运行时，`--py-files` 只搬代码（2 分）",
+        "weight": 2,
+        "criteria": "正解：Python 版本与第三方依赖必须在**镜像构建期**装进「driver 与 executor 都会用的那份镜像」；`--py-files` / `--archives` 做的是**代码与归档的分发**，不是环境分发；`local:///` 指的是「镜像里已经存在的那个路径」，与「从远端拉取分发」语义不同 —— 把 `local:///opt/spark/python/mylib.zip` 当成会自动去某处下载是常见误解。E 的修法 = tag 必须 pin（用不可变 tag 或 digest），让「同一 YAML ⇒ 同一解释器」成立。「能证伪的观察」这一问要真的可操作，例如：把依赖装进镜像后 executor 侧仍失败，则说明 executor 用的镜像与 driver 不同源（或被节点缓存/`latest` 覆盖），而**不是**「重启一下就好了」。答「executor 也 pip install 一遍 / 用 `spark.kubernetes.driver.podTemplateFile` 里加 initContainer 装包」而不追问装到哪个容器的，给 1 分。"
+      },
+      {
+        "label": "D 的定位顺序，以及为什么加内存必然无效（2 分）",
+        "weight": 2,
+        "criteria": "顺序要求写成可执行三步且前三步不出现任何内存参数：① executor 容器内能否连到 driver 的 RPC 端口（NetworkPolicy/CNI/Service 与 endpoints 是否存在）；② executor 解析到的 driver 地址是谁（跨 namespace、hostNetwork、DNS search 域都会改这个结果）；③ driver 侧是否收到注册（日志/REST）。论证「加内存无效」要用失败环节：D 卡在**注册与网络可达**，还没进到「算子需要多少内存」那一步，所以改 `spark.executor.memory` 动的是另一本账；再补一句「Pod 全 Running、Restart 0、无 stage」这个形状本身就排除了 OOM 类失败（OOM 会变成容器重启或 OOMKilled）更佳。把「先加内存」说成「浪费资源但无害」的，本点 0 分 —— 错误诊断的代价是它把真因盖住。"
+      },
+      {
+        "label": "三个不同的事实：提交返回码、CR 状态、有 task 在推进（1 分）",
+        "weight": 1,
+        "criteria": "必须分三层：`apply`/`spark-submit` 返回 0 只说明**对象写进了 API server**；`SparkApplication` 的 `RUNNING` 只说明 driver 在跑，不代表有 executor 注册、更不代表有 task 推进；「真的在跑」要看 status/conditions 之外的**作业侧信号**（stage/task 进度、executor 数、以及状态只能从 API/历史服务读 —— `cluster` 模式下那个终端窗口不再是真相来源）。只说「看 Spark UI」而说不出这三个事实各由哪个字段负责的，不给分。"
+      }
+    ],
+    "notes": "判分看「失效模型是否分家 + 每条是否配了可操作的证据」，不看是否背得出配置项全名。第 2 问给满分权限清单但没有推导的，压到 1 分。本题**不要求**本机真跑：镜像里没有 kubectl/kind/k3s/helm 与 docker.sock（`content/knowledge/big-data/README.md` 的「本机可验到哪一层」一节写了这条边界），所以任何「你去 `kubectl describe` 一下」的表述按**方法论**判，不按可执行性判；但给出「在本机我们量得到什么」（cgroup v2、`memory.max = max`、`local[2]`、`Runtime.maxMemory()`）作为对照的，在第 5 问可加分至上限。"
+  },
+  "answer": "1. A：cluster 模式 driver 是集群内 Pod，提交端退出不杀作业；Runner 销毁后「看起来作业没了」多半是**观测面**没了（日志收集随 Pod 结束截断、CI 里的凭据只在 Runner 存活期可用）。查 driver Pod 是否还在即可判定。\nB：driver 是 executor Pod 的申请方，需要 create/delete；只给 get/list ⇒ 403，日志原文会写明缺哪个 resource/verb。这是「收错地方」不是「收多了」。\nC：executor 用同一**镜像**但是另一个**容器**，driver 运行时 `pip install` 落在 driver 容器的可写层，executor 看不见。在 executor 容器里 `import requests` 与 driver 里结果不同即为证据。\nD：全 Running、Restart 0、无 stage = 连不上，不是跑不动。查 driver Service/endpoints、executor 内探 RPC 端口、解析到的 driver 地址、NetworkPolicy。加内存改的是执行环节，这里还没到执行。\nE：`latest` + `IfNotPresent` + 节点缓存 ⇒ 同名不同物。看节点上实际镜像 digest。\n2. 推导：要建/删 executor Pod 与它的 Service、要读 executor 日志、要落自己的配置 ⇒ `pods`(create/get/list/watch/delete)、`pods/log`(get)、`services`(create/get/list/delete)、`configmaps`(create/get/list)，用 namespace 级 Role/RoleBinding。executor 的 SA 与 driver 分开：executor 不创建 Pod。`cluster-admin` 等于把整个集群的写权交给一个作业的凭据（读别的 namespace 的 Secret、创建特权 Pod 到节点）。\n3. 依赖与 Python 版本在镜像构建期定；`--py-files`/`--archives` 只搬代码/归档；`local:///` 指「镜像里已有该路径」。可证伪观察：装进镜像后 executor 仍缺包 ⇒ executor 实际运行的镜像与 driver 不同源（digest 不同），说明问题在 tag/缓存而不在分发。\n4. 三步：端口可达 → 地址解析正确 → driver 侧收到注册。全程不碰内存参数，因为失败发生在注册与网络，而 OOM 的形状是容器被杀/重启，与本题形状互斥。\n5. 三层事实：写进 API server（apply 返回 0）→ driver 在跑（CR `RUNNING`）→ 有 task 推进（stage/executor 注册）。cluster 模式下状态从 API/历史服务读，终端窗口不再是真相来源。",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/big-data/spark-on-kubernetes-deployment.md#2-driver-executor-%E7%9A%84%E8%A7%92%E8%89%B2%E4%B8%8E%E4%B8%80%E6%AC%A1%E6%8F%90%E4%BA%A4%E7%9A%84%E7%94%9F%E5%91%BD%E5%91%A8%E6%9C%9F",
+    "era": "2026",
+    "addedBy": "content-agent-bd",
+    "ingestedAt": "2026-10-16T02:09:03.393Z"
+  }
+}

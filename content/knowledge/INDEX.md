@@ -1,8 +1,8 @@
 # 知识库索引（自动生成，请勿手改）
 
 > 由 `npm run kb:index`（`node scripts/kb/compile-knowledge.mjs`）生成。
-> 生成时间：2026-09-25T06:30:52.925Z
-> 输入：`content/knowledge/<类别>/README.md` 考点矩阵（7 类）+ 题库 254 题（其中软删除 0 题不计入"已出题"）。
+> 生成时间：2026-10-16T02:09:16.784Z
+> 输入：`content/knowledge/<类别>/README.md` 考点矩阵（7 类）+ 题库 258 题（其中软删除 0 题不计入"已出题"）。
 > 覆盖判定：题目 `tags[]`（去掉 `modern:` 前缀）命中矩阵第 1 列反引号里的 tag 即算已覆盖；未写反引号 tag 的行列在「无显式 tag」里单独统计。
 
 ## 类别总览
@@ -13,11 +13,11 @@
 | [`algorithms`](./algorithms/README.md) 算法 | 20 | 19 | 1 | 20 | [4](./algorithms/README.md#语料文件) | 59 | 59 | 0 | 0 | 0 | — | java-junit=59 |
 | [`sql`](./sql/README.md) SQL 与存储 | 21 | 19 | 2 | 20 | [5](./sql/README.md#语料文件) | 50 | 50 | 0 | 0 | 1 | 0% | mysql=36 redis=14 |
 | [`system-design`](./system-design/README.md) 系统设计 | 21 | 8 | 13 | 0 | [5](./system-design/README.md#语料文件) | 36 | 0 | 36 | 19 | 2 | 90% | llm-rubric=36 |
-| [`big-data`](./big-data/README.md) 大数据处理 | 26 | 9 | 17 | 0 | [6](./big-data/README.md#语料文件) | 34 | 26 | 8 | 13 | 13 | 50% | pyspark=24 llm-rubric=8 spark-scala=2 |
+| [`big-data`](./big-data/README.md) 大数据处理 | 30 | 9 | 21 | 0 | [7](./big-data/README.md#语料文件) | 38 | 26 | 12 | 19 | 11 | 63% | pyspark=24 llm-rubric=12 spark-scala=2 |
 | [`agent-design`](./agent-design/README.md) Agent 设计 | 17 | 3 | 14 | 0 | [5](./agent-design/README.md#语料文件) | 27 | 0 | 27 | 13 | 4 | 76% | llm-rubric=27 |
 | [`hot-interviews`](./hot-interviews/README.md) 高频面试题 | 18 | 4 | 14 | 0 | [12](./hot-interviews/README.md#语料文件) | 25 | 0 | 25 | 10 | 8 | 56% | llm-rubric=25 |
 
-**合计**：143 个考点，其中 83 个可机器判定覆盖，已覆盖 55 个（66%）；题库 254 题。
+**合计**：147 个考点，其中 87 个可机器判定覆盖，已覆盖 61 个（70%）；题库 258 题。
 
 ## 未覆盖考点（"该出什么题"的直接答案）
 
@@ -118,12 +118,11 @@
 - `modern:stale-while-revalidate`（1 题：sys-design-rubric-0001）
 - `modern:crdt-convergence`（1 题：sys-design-rubric-0002）
 
-### `big-data`｜未覆盖 13 / 可判定 26 个考点
+### `big-data`｜未覆盖 11 / 可判定 30 个考点
 
 待出题（建议形式与 judgeKind 取自矩阵）：
 
 - `spark-aqe` AQE 能力边界｜形式 code｜judgeKind pyspark｜JD 能力项：查询调优、成本效率
-- `pyspark-python-perf` PySpark UDF 与 Python 侧性能｜形式 code｜judgeKind pyspark｜JD 能力项：工具链深度、吞吐优化
 - `spark-connect` Spark Connect 与平台化｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：平台工程、多租户治理
 - `structured-streaming` Structured Streaming 语义与运维｜形式 code｜judgeKind pyspark｜JD 能力项：实时管道
 - `flink-state-runtime` Flink 状态、checkpoint 与反压｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：流式平台、可靠性
@@ -132,20 +131,19 @@
 - `iceberg-internals` Iceberg 表格式内核与维护｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：湖仓架构
 - `stream-ingest-contracts` 采集层与契约｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：数据契约、可靠性
 - `analytics-sql-patterns` 分析型 SQL 模式｜形式 code｜judgeKind mysql｜JD 能力项：SQL 深度、指标落地
-- `orchestration-scheduling` 调度、依赖与运维｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：平台运维
 - `data-governance-privacy` 隐私与数据治理｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：隐私工程、合规
 - `feature-store-pit` 特征平台与时点正确性｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：ML/数据平台协同
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：148 个** —— 修法：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：151 个** —— 修法：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
 
 - `pyspark`（7 题：bd-pyspark-0002, bd-pyspark-0003, bd-pyspark-0004…）
+- `modern:spark-on-k8s`（4 题：bd-rubric-0009, bd-rubric-0010, bd-rubric-0011…）
 - `gaps-and-islands`（3 题：bd-pyspark-0006, bd-pyspark-0009, bd-scala-0001）
 - `spark-sql`（3 题：bd-pyspark-0009, bd-pyspark-0011, bd-pyspark-0012）
 - `modern:spark-4-2-nearest-by`（2 题：bd-pyspark-0002, bd-pyspark-0010）
 - `modern:paimon-1.4`（2 题：bd-pyspark-0003, bd-rubric-0002）
 - `modern:spark-4-ansi-default`（2 题：bd-pyspark-0004, bd-pyspark-0007）
 - `idempotent-dedup`（2 题：bd-pyspark-0005, bd-pyspark-0011）
-- `modern:iceberg-v3`（2 题：bd-pyspark-0005, bd-rubric-0004）
 
 ### `agent-design`｜未覆盖 4 / 可判定 17 个考点
 

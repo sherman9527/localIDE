@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "id": "bd-rubric-0012",
+  "category": "big-data",
+  "difficulty": "principal",
+  "title": "Spark Operator、多租户与调度公平：没有 YARN queue 之后，六件事各自要落到哪个机制上",
+  "statement": "## 场景（数据平台 / Spark Operator 与多租户治理，25 分钟）\n\n一个平台组用 Spark Operator + GitOps 管理 6 个团队约 200 个 `SparkApplication`；节点里一半是 Spot/可抢占实例。半年内出现五件事：\n\n- **A** operator 连同 CRD 做过一次版本升级后，一部分 `SparkApplication` 长期停在同一个状态、**一个 executor Pod 都没被建出来**，`kubectl describe` 那个 CR 上甚至没什么事件；另一部分作业完全正常。有人说「提交成功了啊，返回码是 0」。\n- **B** 夜间 ETL 在 Spot 节点上被反复抢占、整批重算。团队的要求是「给这些 Pod 加 PDB 就稳了」。\n- **C** 白天两个团队的 ad-hoc 并发把预定的报表挤到超时。他们的诉求是「K8s 上要有 YARN 那种 queue」。\n- **D** 某团队把长期 token 直接写进作业 YAML 的 `env` 并提交进 Git；另有团队把凭据塞在 `hadoopConf` 里。安全同学的处置是「删掉那行、把仓库历史清一遍、再加个 Secret」。\n- **E** 为了「不浪费」，平台把各节点 allocatable 的 CPU 几乎全签成了各团队的 requests；某天扩出一个新节点后一大批作业同时 `Pending`，运维的结论是「调度器坏了」。\n\n## 要你回答的（五小问，每问「结论 → 机制 → 代价」缺一不满分）\n\n1. A 有哪几种成因层次（operator 版本 ↔ CRD schema ↔ Spark 版本三者错配各会长成什么样）？为什么「提交返回 0 但没有 Pod」是声明式系统里最典型的形状？给出你的排查顺序（CR 的 status/conditions、operator 自身日志与它发出的事件、准入/webhook、driver 的身份与权限），并说明一次 operator + CRD 升级要怎么做到「可回退且不丢在跑作业」。\n2. B：PDB 保护什么、不保护什么？给出至少三种让长作业在 Spot 环境可用的做法，并说清每种把复杂度/成本搬去了哪里、在什么条件下你**不**推荐它。\n3. C：K8s 上「批作业的排队、公平性与优先级」具体从哪些机制来？把可选组合分层（namespace + ResourceQuota + LimitRange、PriorityClass 与抢占语义、独立节点池 taint/toleration/亲和、上层批调度器或队列系统），逐档说它解决什么、代价是什么。「K8s 上没有 YARN queue」这句话哪里说得太满、哪里说得对？\n4. D：凭据不进 Git 的正确落法（Secret 挂载 vs 注入 env 的暴露面差别），operator 侧写凭据时最容易外泄的两条路径，以及你如何把「这份凭据泄露」的爆炸半径论证到只有这个 namespace。安全同学那三步处置，哪一步本身就是错的？\n5. E：allocatable 为什么要给系统组件与短时并行副本留余量？这次「Pending 一片」为什么会被读成调度器故障？最后把 C 与 E 的改善写成两个可汇报的成本口径（`$/TB 扫描`、`$/作业`），并说明为什么用 `$/核时` 考核会给出错误激励。\n",
+  "judgeKind": "llm-rubric",
+  "language": "markdown",
+  "tags": [
+    "spark-on-k8s-operator-multitenancy",
+    "quota-governance",
+    "modern:multi-tenant-fairness",
+    "data-cost",
+    "modern:spark-on-k8s"
+  ],
+  "rubric": {
+    "maxScore": 10,
+    "points": [
+      {
+        "label": "A：CRD/operator/Spark 三者错配的分层与可回退升级（3 分）",
+        "weight": 3,
+        "criteria": "要分层说：CRD schema 版本升级但存量对象仍是旧形状 / operator 与它期望的 Spark 版本对不上 / reconcile 报错但不回写 status ⇒ 三者都能长成「停在某状态、没有 Pod」。关键判断：声明式系统里 `apply` 返回 0 只代表**对象写进 API server**，控制器有没有成功 reconcile 是另一件事，所以「提交成功但没有 Pod」不是矛盾而是常态形状 —— 能说出这句即给第 1 个小分。排查顺序要求**由内向外且不先动配置**：CR 的 status/conditions → operator 自己的日志与它在该对象上发的事件 → 准入/webhook 是否拒了（例如旧 schema 被新 CRD 拒收）→ driver 的 ServiceAccount 与 RBAC（建不出 Pod 的另一族原因，与 A 的形状高度相似，要能区分）。升级方案要含：CRD 与 operator 的版本对应关系先核对、状态机字段是否变过、先在灰度 namespace 验证、保留回退用的旧 operator 版本与旧 CRD（CRD 回退不会自动恢复被转换过的对象），**以及作业定义与 RBAC 同仓 review**（GitOps 的连带后果）。只答「看 operator 日志」不给顺序、或把「提交返回码」当证据的扣 1 分。"
+      },
+      {
+        "label": "B：PDB 的边界与 Spot 下长作业的三档解法（2 分）",
+        "weight": 2,
+        "criteria": "必须先划界：PDB 只约束**自愿中断**（节点 drain、滚动更新），对 OOM、对被抢占、对节点故障一律无效 —— 所以「加了 PDB 就稳了」在这道题的形状里是错的（Spot 被抢是**非自愿**中断）。三档解法要覆盖并比较代价：① checkpoint / 可重算设计（把已算完的边界落盘，重算范围变小，代价是写放大与存储）；② shuffle 持久化（external shuffle service / PVC / 服务化 shuffle），使 executor 消失不必然引发上游重算，代价是运维与额外一跳或多挂卷；③ 把 driver（或关键作业）放到不可抢占节点池、给更高 PriorityClass 与抢占边界，代价是成本与「谁有权抢占谁」的治理约定。把 PDB 说成「也防抢占」的，本点最多 1 分；提出「干脆不用 Spot」要算及格但要追问可用性成本比。"
+      },
+      {
+        "label": "C：公平性与优先级的具体机制组合，而不是要一个 queue 名词（2 分）",
+        "weight": 2,
+        "criteria": "分层要具体到机制名与其真实语义：namespace + ResourceQuota（配额，挡总量）+ LimitRange（默认值与上下界）；PriorityClass + 抢占（**高优先级能抢低优先级**，同优先级不互相抢占 ⇒ 单靠 PriorityClass 得不到「公平」）；独立节点池 + taint/toleration/亲和（物理隔离噪声邻居，代价是利用率下降与容量碎片）；上层批调度器/队列系统（把「排队、配额、公平份额」搬到一个显式队列层，代价是多一套系统与运维）。「YARN queue 没有直接对应物」这句要说对半句：K8s 的调度单位是 Pod、按 requests 打分与绑定，没有内建的「按租户份额长期均分 + 作业排队」语义；但配额 + 优先级 + 专用节点池组合可以逼近，而真正的队列/公平调度要交给上层调度器 —— 只说「没有」或只说「有 queue 就行」都不满分。必须指出 ad-hoc 与预定的差别落在**配额与优先级两件事要分开**（一个管总量、一个管谁先走）。"
+      },
+      {
+        "label": "D：凭据落法与爆炸半径论证，以及那三步里错的一步（2 分）",
+        "weight": 2,
+        "criteria": "暴露面差别要讲准：注入成 env 会出现在 Pod spec（`kubectl get pod -o yaml` 可见、被任何能读 Pod 的角色拿到、常被子进程继承并可能进日志），挂载成文件则可限定路径与权限、并可只给某个容器 —— 两者都**不如**「短寿命凭据」，长期凭据不进 Git 是底线。operator 侧最容易外泄的两条：把凭据写在 CR 的 `env`/`hadoopConf`/`sparkConf` 里（CR 本身是 API server 里的对象，读得到 CR 就读得到凭据），以及用 `--properties-file` 之类临时文件而文件落在共享盘/被别的作业读到。爆炸半径论证要落到：namespace 级 Secret + 该作业 driver/executor 各自的最小 RBAC（只 `get` 它那一个 Secret，不给 `list` 全 namespace 的 Secret）+ 网络侧只让它能连到该服务的端点。**「清 Git 历史」这一步本身有问题**：凭据已经生效过就必须先**吊销/轮换**，历史清理既不充分（fork/CI 缓存/别人已 fetch）也不改变泄露时点；把顺序说成「先删历史再加 Secret」而不提吊销的，本点最多 1 分。"
+      },
+      {
+        "label": "E：allocatable 余量与两个正确成本口径（1 分）",
+        "weight": 1,
+        "criteria": "要讲清 requests 是被**卖掉的**那一份：节点还要给系统组件（kubelet、容器运行时、DaemonSet、OS 预留）与短时并行副本/重试用留余量，把 allocatable 全签成应用的 requests ⇒ 扩出的新节点「看起来有空位」但可用容量算不出来，作业成片 Pending；把它读成「调度器坏了」是因为**账目错了却由调度器背锅** —— 判据是看节点的 allocated requests 与系统预留、而不是调度器日志。成本口径必须给出 `$/TB 扫描` 与 `$/作业` 并能解释为什么 `$/核时` 激励错方向：核时奖励「把资源占满、把 requests 抬高」而不是「少扫数据、早结束」，于是它会奖励超卖（正是 E）与更宽的 limits —— 与 A/B/C 的处置互相打脸更佳。"
+      }
+    ],
+    "notes": "判分看「机制是否落到具体名字 + 取舍是否落到成本与运维复杂度」，不看背 YAML。涉及 operator 状态机集合、CRD 版本兼容矩阵、Spot 抢占语义的细节数值，回答里写「以所用 operator/Spark 小版本为准」不扣分，写死一个具体版本集合而不说来源的按不确定处理。本题本机不可真跑（镜像里没有 kubectl/kind/k3s/helm/docker.sock），所以按口径题判；但答案若能把「哪些部分在本机量得到」（cgroup v2 无 limit、`local[2]`、堆上限在启动期锁定且运行时改不动）与「哪些只能在集群里观察」切开，属于第 3 层回答，按满分档。"
+  },
+  "answer": "1. A 三种成因层：CRD schema 换了而存量 CR 形状不匹配（新 controller 读不懂或读成半默认值）、operator ↔ Spark 版本对不上（生成的 Pod 模板字段被丢弃）、reconcile 失败不回写 status。`apply` 返回 0 只代表写进 API server。顺序：CR status/conditions → operator 日志与该对象的事件 → 准入/webhook → driver 的 SA/RBAC（建不出 Pod 的另一种形状，区别是有 403 而 A 里通常连事件都稀）。升级：核对版本对应关系与状态机字段变化、灰度 namespace、CRD 与 operator 各自留回退路径（CRD 回退不还原已被转换的对象），作业定义与 RBAC 同仓 review。\n2. PDB 只管自愿中断（drain/滚动），管不了 Spot 抢占与 OOM。三档：checkpoint+可重算（写放大换重算范围）、shuffle 持久化 ESS/PVC/Celeborn（缩容不致命，代价是运维或多一跳/多挂卷）、driver 放非抢占池 + PriorityClass（最直接但最贵，且要定义谁能抢谁）。\n3. 配额（ResourceQuota 管总量、LimitRange 管默认与上下界）→ 优先级（PriorityClass + 抢占，同优先级不互抢 ⇒ 不产生公平）→ 隔离（专用节点池 taint/toleration/亲和，代价利用率与碎片）→ 队列层（批调度器/队列系统显式做份额与排队）。K8s 没有内建「按租户长期均分 + 作业排队」语义，但可组合逼近；ad-hoc 与预定的差别要拆成配额与优先级两件事。\n4. Secret 挂载优于注入 env（Pod spec 可读、被子进程继承、易进日志）；CR 的 env/hadoopConf/properties 文件是两条最常见外泄路径。爆炸半径：namespace 级 Secret + 只 get 那一个 Secret 的最小 RBAC + 网络侧只通该端点。处置里错的一步是顺序：先吊销/轮换，再谈历史清理；清历史既不充分也不改变已泄露的事实。\n5. allocatable 要留系统组件与并行副本的余量；全卖掉后新节点的可用容量算不出来 ⇒ 成片 Pending，被误读成调度器故障。汇报口径用 `$/TB 扫描` 与 `$/作业`；`$/核时` 奖励占满资源与抬高 requests，正好奖励出 E 那种超卖，方向与治理目标相反。",
+  "estimatedMinutes": 25,
+  "source": {
+    "origin": "manual",
+    "jds": [],
+    "knowledgeRef": "content/knowledge/big-data/spark-on-kubernetes-deployment.md#9-spark-operator--crd-%E4%B8%8E-gitops",
+    "era": "2026",
+    "addedBy": "content-agent-bd",
+    "ingestedAt": "2026-10-16T02:09:03.396Z"
+  }
+}
