@@ -3890,6 +3890,18 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
    顺带冲掉一处旧漂移：`content/knowledge/INDEX.md` 从 2026-09-25 起没重生成过，一直说 254 题 / 覆盖 66%，真实是 258 / 70%
    —— 又是"文档说的与库里装的不是同一件事"，而那处漂移的成因是 WI-108 加完语料没跑生成器。
 
+5. **WI-93（本批最后一格）** —— Jupyter 掉了现在自己能回来。`docker/entrypoint.sh` 里 `start_jupyter` 整个变成
+   **有上限的重启循环**（`start_jupyter &` 后台跑，容器主进程仍是 `exec "$@"`）。三个决定各有理由：上限（默认连续 10 次
+   快速失败就停手 —— `port_retries=0` 下"8888 被占"是**立刻**失败，重启一万次也不会好，无限循环只会把日志刷满、
+   把"其实起不来"藏进噪音里）；活够 60s 就把失败计数清零（否则一次偶发崩溃会推高之后所有退避）；日志 `>` 改 `>>`
+   （截断写法会先把"掉过几次"这件事自己抹掉）。**故意没做**：空闲内核回收 `cull_idle_timeout` —— 那是"平台替用户决定
+   什么时候丢他的内核"，与"恢复一个已经死了的进程"是两种权力；攒 JVM 那笔账仍留在 WI-95 等用户点头。
+   新闸门 `server/test/regression/jupyter-supervision.test.ts` 6 条：4 条结构（不需要 bash）+ 2 条把函数**抠出来真跑**
+   （桩掉 `jupyter` 与 `sleep`，于是"退避多久"不需要真等）。破坏性：把 entrypoint 换回改造前那份 ⇒ 5 条红、1 条绿；换回全绿。
+   真容器现场连杀两次：`Jupyter 退出（rc=0，活了 23s）⇒ 2s 后再起（1/10）` 与 `…活了 36s）⇒ 4s 后再起（2/10）`，
+   pid 103→2361→3274，无 token 打 `/jupyter/api/status` 两次都 403（有人听、鉴权没松），`/api/notebook/status` 回到 `running:true`。
+   ⚠ 两次都 <60s，所以"活够 60s 清零"那一条**这次现场没走到**，它仍只有结构判据覆盖 —— 这句坦白也写在测试文件头里。
+
 ### 事故：我把真 `.env` 覆盖了（以及怎么无损收回来）
 
 临时探针脚本里用 `Get-Location` 拼 `.env` 路径，而 bash 工具的 cwd **在中途被重置回仓库根** ⇒ 一次 `WriteAllText`
@@ -3912,13 +3924,18 @@ README / `docs/ARCHITECTURE.md` / `docs/JUDGING.md` 里 notebook 原本**一个�
 | 容器（第二轮，含 `ee114a2` + 两道新题） | 同一条命令 | **`VERIFY_EXIT=0`**：单测档 `634 passed / 10 skipped`、判题矩阵 `158 可判 / 跳过 0`、教程档 `17 passed / 0 skipped`，且「教程闸门确实跑到了」那条也在 ⇒ 篇 4 是新加的那一篇，它在容器里真起过 session |
 | 宿主 E2E | `npm run e2e` | **74 passed（3.1m）/ EXIT=0**（独立 e2e 实例，`data/e2e/`，不碰真 db 与 hidden.json） |
 | 新闸门现场 | `npm run verify:fast`（含 WI-114 那一段） | EXIT=0，收尾阶段打印 `✓ .env 未被改动（size mtime sha256前16）` —— 只报读数不报内容 |
+| WI-93 现场 | 容器里 `kill $(pgrep -f "[j]upyter-notebook")`，隔 9s 再看 | 两次都被起回来（退避 2s→4s、pid 换了两次），`/jupyter/api/status` 无 token 回 403，`/api/notebook/status` 回 `running:true` |
+| WI-93 破坏性 | 把 entrypoint 换回改造前那份再跑判据 | 6 条里 5 条红（没有循环 / 没接 rc / 没上限 / 调用处没后台 / 退避序列为空），换回全绿 |
 | 为什么换源 | `curl -o /dev/null -w %{http_code}` 实测 | aliyun 对整片 jammy pocket 回 **403**（`compose.yml:18` 的注释写了这是外部条件），ustc / tuna 200 ⇒ shell 前缀换源，被跟踪文件一个没动 |
 
 ### 已知问题 / 还欠的
+- **量的过程里我自己破了一条纪律**：`pgrep -af jupyter-notebook` 打的是整条命令行，里面就有 `--ServerApp.token=…` ⇒ 取"杀之前"的基线时把真 token 印进了终端。它没进任何被跟踪文件、也没进 compose stdout（那里面只有监督循环那两句），且只在回环生效；但"永远不印值"就是"永远不印值"，破在自己手里也要记下来 —— 后续一律 `pgrep -f "[j]upyter-notebook"` 只要 pid。
+- `.superpowers/` 之前一直是 untracked 而**没被 .gitignore 挡住**（`.dockerignore` 挡了），顺手补上：一次 `git add -A` 就能把整批会话笔记提交进去，这不是假设风险。
+
 
 - **WI-114 已随本批落地**（不是只登记）：`scripts/verify.sh` 里一对 `env_sig` / `env_guard_check`，判据两条 —— 结构那条钉「记录点、比对点、`return 1`、`absent` 基准都在，且哨兵自己不许 `cat`/`grep` 读 `.env`」；行为那条把两个函数抠出来真跑：没动必须绿，改一个字节 / 只 `touch` 动 mtime / 从缺席到凭空造出一份都要红。破坏性两次各撞对应那一半。
 - 上表的容器第二轮与宿主 E2E 已补跑并填好（本批收尾时两边都是绿的）。
-- WI-93 / WI-95 仍是"要用户点头"的两笔（Jupyter 无人守护、notebook 那个第二个 JVM 抢 CPU）；WI-100/96/101 卡在 Toree 接入。
+- WI-93 **已在本批做掉**（见上面第 5 条：有上限的重启循环 + 6 条判据 + 容器里两次真杀掉再起来）。WI-95 仍开着，而且它现在有两笔决定要点头：notebook 那个第二个 JVM 抢 CPU（`local[2]` 还是排队还是 compose 配额），以及这次**故意没加**的空闲内核回收（`cull_idle_timeout`）—— 后者是"平台替用户决定什么时候丢内核"，不该顺手做掉。WI-100/96/101 仍卡在 Toree 接入那版计划。
 - 这台机器的 `PSModulePath` 污染是**机器级**的：产品侧绕开了，但用户自己在 Windows PowerShell 5.1 里调 `Get-Acl` 照样会撞。
   根治要动系统配置（把 Store 版 PS 7 那条目录从机器级变量里去掉，或改用 `pwsh`），那不归本仓库管 —— 本仓库只负责不再假装它可用。
 

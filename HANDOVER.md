@@ -163,6 +163,33 @@
   `node scripts/curriculum.mjs` 重生成后 `content/knowledge/INDEX.md` 从停在 **2026-09-25** 的 254 题 / big-data 26 考点 / 66%
   更新到 258 题 / 30 考点 / **70%** —— 那处漂移本身就是 WI-108 加完语料没重跑生成器留下的（又是"文档说的与库里装的不是同一件事"）。
   两道新题是 `llm-rubric`，不进 158 道代码题那条矩阵；rubric 的 qodercli→copilot→manual 降级链读数在容器档那轮。
+- [x] WI-93 **Jupyter 掉了要自己能回来**（2026-10-16，`docker/entrypoint.sh` 里有上限的重启循环）：
+  ｜原形状：`start_jupyter` 一次性后台起进程 + 打一行"已拉起"，之后 `exec "$@"` 把容器主进程交给应用，没人再看 Jupyter ⇒
+  实测两次：容器里 `pkill -f jupyter-notebook` 之后 8888 一直空到下一次 `./start.sh`。
+  页面那一半本来就诚实（`/api/notebook/status` 如实报 `running:false`），缺的是**恢复**。
+  ｜三个决定各有理由，不是顺手写的默认值：
+  ① **上限**（`ARENA_JUPYTER_RESTART_MAX`，默认"连续 10 次快速失败"就停手）：`port_retries=0` 让 8888 被占时它**立刻**退出，
+  那种失败重启一万次也不会好，无限循环只会把日志刷满、把"其实起不来"藏进噪音里；到上限停手后状态接口继续如实报
+  `running:false` —— notebook 不关键到能拖垮做题，这与函数开头那句"可以不起"是同一条判断。
+  ② **活够 60s 就把失败计数清零**：否则一次偶发崩溃会把之后所有重启都推到长退避上。
+  ③ 日志从 `>` 改成 `>>`：截断写法会把"它掉过、掉了几次"这件事自己先从日志里抹掉。
+  ｜**故意没做的那一半说清楚**：`c.ServerApp.cull_idle_timeout`（空闲内核回收）不加 —— 那是"平台替用户决定什么时候丢他的内核"，
+  与"把一个已经死了的进程恢复回来"是两种权力。攒 JVM 那笔账仍留在 WI-95（要用户点头），没被这次顺手做掉。
+  ｜判据：新文件 `server/test/regression/jupyter-supervision.test.ts` 共 6 条。结构 4 条不需要 bash（循环、接 `rc=$?`、
+  上限、退避、60s 清零都在；命令收尾行不许再挂 `&`；缺 token 的早退仍在 mkdir 与循环**之前**；调用处后台而 `exec "$@"`
+  仍是主进程）；行为 2 条把 `start_jupyter` 的**本体从 entrypoint.sh 抠出来真跑**（桩掉 `jupyter` 与 `sleep`，
+  与 env-write-atomicity 桩 mv/chmod 同一手法，于是"退避多久"不需要真等）：`max=3` 时退避序列必须是 `2、4` 且第三次停手、
+  日志要带 `rc=3` 与"连续快速失败 1/3"、预先埋的标记行必须在（证明 `>>` 真的追加）、`max=1` 时一次就停且一次都不睡、
+  缺 token 时整个监督不启动连目录都不建。
+  ｜一处坦白写进文件头：**"活够 60s 清零"只有结构判据覆盖** —— 它要 60 秒墙钟才走到，为这一条把每轮验证拖一分钟不划算；
+  写下它比让它看起来像被覆盖了诚实。
+  ｜量具自己踩的坑（值得记）：harness 最初把 Windows 路径**以文本形式替进** bash 脚本，
+  而 `""C:\a\b""` 里非引号上下文的反斜杠会被当转义吃掉 ⇒ 桩写进一个相对怪名文件，判据看着"日志没追加"，
+  真相是量具把东西放到了别处。改成用**环境变量**传落点。
+  ｜破坏性：把 `docker/entrypoint.sh` 换回改造前那份 ⇒ 6 条里 5 条红，各撞在"没有循环 / 没接 rc / 没有上限 /
+  调用处没后台 / 退避序列为空"；换回来 6 条全绿。
+  ｜真容器读数：容器档实测（2026-10-16，新镜像起来之后连杀两次，每次隔 9 秒看）：`kill <jupyter pid>` ⇒ 容器 stdout 依次出现 `Jupyter 退出（rc=0，活了 23s）⇒ 2s 后再起（连续快速失败 1/10）` 与 `Jupyter 退出（rc=0，活了 36s）⇒ 4s 后再起（连续快速失败 2/10）` —— 退避确实在长（2→4），两次都换出新 pid（103 → 2361 → 3274），不带 token 打 `/jupyter/api/status` 两次都回 **403**（有人在听且鉴权没松），而 `GET /api/notebook/status` 报 `running:true`、`url` 仍是那条不含凭据的同源 `/jupyter/tree`（WI-98 的成果在这次现场里也对上了）。⚠ 两次分别活了 23s / 36s，都小于 60s ⇒ **这次现场没有走到"活够 60s 清零"那一条**，它仍然只有结构判据覆盖（与本条上面那句坦白一致）。⚠ 量的过程中自己破了一条纪律：`pgrep -af jupyter-notebook` 打的是**整条命令行**，而里面就有 `--ServerApp.token=…` ⇒ 第一次取"杀之前"的基线时把真 token 打进了终端。它没进任何被跟踪文件、也没进 compose stdout（那里面只有监督循环那两句），且只在回环上生效；但"永远不印值"这条规矩破在自己手里也要写下来，后续取 pid 一律换成 `pgrep -f "[j]upyter-notebook"`。
+  ｜验证：`npm run verify:fast` EXIT=0；容器档 `./start.sh --verify` EXIT=0（判题矩阵 158 可判 / 跳过 0）—— 数字填本条最后一行。
 - [x] WI-109 **文档/脚本清扫 + 死代码与装饰用例清理（第一批）**（用户 2026-10-11 点名"完善所有文档和脚本，尤其历史文档；清理无效 code/dead file/测试用例"）：
   ｜**改掉的"今天仍在说谎"的句子**（`f9fdd36` + `9662972`，每条都先查证再改）：ARCHITECTURE §12 目录树缺
   `exec/`、`net/`、`shutdown.ts`、`docker/jupyter/` 且把 `guards` 挂在 `judge/` 下（那个文件在 `exec/`）；
@@ -1662,23 +1689,6 @@
   `npm run verify:fast` EXIT=0，新阶段现场打印的那行只含 size / mtime / 哈希前缀，内容一个字节都没出。
   ｜顺带把操作纪律也记在案（都真用到过）：临时探针脚本一律显式传绝对目录 + 开头拒绝在仓库根跑，
   取值只报长度或哈希前缀。
-- [ ] WI-93 Jupyter **无守护**：掉掉的进程靠 `./start.sh` 起不回来（实测两次，不是推理）
-  ｜症状与判据：在容器里 `pkill -f "/usr/local/bin/jupyter-notebook"` 之后 —— 镜像**没变**那一次
-  `./start.sh` 的日志里 `Recreate` 计数 **0**、宿主 `curl http://127.0.0.1:7789/tree` 一直是 **000**；
-  镜像**变了**那一次才 `Container daily-arena Recreate` → 回 302。原因是 compose 对没变化的服务不重建容器，
-  而 jupyter 是 entrypoint 起的 ⇒ "镜像里有、进程没了"这一种没有任何东西会替你把容器换掉。
-  ｜现在的做法：`start.sh` 的横幅点名那条真能修好这个症状的命令 `docker compose up -d --force-recreate arena`
-  （实测恢复：`UP_EXIT=0`，第一次探 `health=000 notebook=000`、第二次 `health=200 notebook=302`），
-  并说清两件**不是**补救的事：`./start.sh`（镜像没变 ⇒ 什么都不做）与 `--rebuild`（怀疑镜像本身没带 Jupyter
-  才值得那 10–20 分钟的冷构建）。
-  ｜**加不加守护是一次决定，不是修复**：监督循环（restart 策略 / 看门狗）意味着任何一次 jupyter 崩溃都可能
-  连带重建容器，而重建会带走正在跑的 **IDE 调试会话与判题任务** ⇒ 需要用户点头。本轮**故意没做**。
-  ｜**同一条账的反面（WI-94 Task 5/6/6b 合并评审实测，2026-10-09）**：内嵌之后每份**被打开过**的笔记都会留下一个活的内核
-  （`arena-pyspark` 会带一个 `local[2]` 的 Spark JVM）—— 三次"开→切页/刷新→再开"实测 `kernels=1 / sessions=1 / id 不变`，
-  ⇒ **是复用不是每次攒一个**；但 SPA 内切页只让 `connections` 掉到 0、内核照样活着，且 entrypoint **没配**
-  `c.ServerApp.identity` 之外的 `cull_idle_timeout` ⇒ 攒的是"每份打开过的笔记各一个 JVM"，活到 session 被删或 jupyter 重启。
-  与 WI-95（抢 CPU）是同一族账，加不加 culling 同样是一次决定。
-
 - [ ] WI-95 notebook 的 Spark JVM 与判题池**抢 CPU**（终审 I-5 记账，2026-10-08）：kernel 自带
   `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`），
   于是它是 `exec/spark-pool.ts` 那套队列**之外**的第二个 JVM —— `docs/ARCHITECTURE.md:249` 写的
