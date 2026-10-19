@@ -194,6 +194,8 @@ export async function probeScalaKernel(kernelName: string, notebookPath?: string
   let crash: string | null = null;
   let nb: ExecutedNotebook | null = null;
   let readFailure: string | null = null;
+  /** "删净与否"由 `removeExecutedNotebookScratch` 的返回值决定（评审 minor：不许丢弃返回值再用 existsSync 二次推导 —— 同一事实两个出处、两个时点）。 */
+  let scratchLeft: boolean;
   try {
     try {
       // 返回的 stdout 文本（今天的 nbconvert 只剩运行日志）**故意不用**：执行结果全在落盘的那份文件里。
@@ -218,11 +220,11 @@ export async function probeScalaKernel(kernelName: string, notebookPath?: string
     }
   } finally {
     // 收尾无条件（红了也不把落盘产物留在实例的数据目录里）；finally 里**只删不断言** ——
-    // 那里的断言会盖掉 try 里真正的坏点（`embed.test.ts` 实测过的那一课），"删净没有"在下面判。
-    // `removeExecutedNotebookScratch` 内部 `force`+`maxRetries`：删不掉不二次 throw。
-    removeExecutedNotebookScratch(executedPath);
+    // 那里的断言会盖掉 try 里真正的坏点（`embed.test.ts` 实测过的那一课），"删净没有"落成 scratchLeft 在下面判。
+    // `removeExecutedNotebookScratch` 内部 `force`+`maxRetries`：删不掉不二次 throw，
+    // 它的返回值就是为"在 try/finally 之外判"造的（评审 minor：旧写法丢弃返回值再 existsSync 二次推导，白拿两份真相）。
+    scratchLeft = !removeExecutedNotebookScratch(executedPath);
   }
-  const scratchLeft = existsSync(executedPath);
 
   const errors: string[] = [];
   const stdout: string[] = [];

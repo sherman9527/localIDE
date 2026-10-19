@@ -18,6 +18,9 @@ import { executedNotebookEvidence, executedNotebookScratchPath, nbconvertExecute
  *   `--output` 落盘，JSON 从**文件**里读，垃圾行留在 stderr 里根本进不了判据对象。
  * - `executedNotebookEvidence(raw)` 的**宽松**语义（解析不了给有界 error 条目而不是 throw）**不变** ——
  *   它是 `kernel.test.ts` / `tutorials.test.ts` 现有 stdout 档的判据对象，收紧它就是放宽/改写别人的判据（越界）。
+ *   ⚠ 前缀容忍**只住在严格门**（`readExecutedNotebook` / `readExecutedNotebookFile`）：宽松门对同一份污染
+ *   仍报「输出不是 notebook JSON」—— 两扇门的这条分界由「钉住两扇门真正的分界」那组用例钉死（契约原文在
+ *   `notebook-evidence.ts` 文件头，WI-91b 评审轮修正过；给 stdout 门加容忍是判据变更，要裁决 + 自己的测试）。
  *
  * 为什么新建文件而不是并进 `embed.test.ts`：本文件判的是 `notebook-evidence.ts` 这层**公共件**，
  * embed 档判的是反代隧道；混在一起会让"量具坏了"与"隧道坏了"共用一个红标签。
@@ -112,6 +115,17 @@ describe('readExecutedNotebook：严格读法（Toree 污染的前缀不许被�
     expect(msg).toContain('读不出来');
   });
 
+  it('钉住文档写明的已知边界：垃圾行里自带 `{` ⇒ 第一个 { 不是 JSON 的开头 ⇒ 两支 parse 都失败 ⇒ 仍抛并给原文开头', () => {
+    // readExecutedNotebook 的 doc 注释把这一形状写成"已知边界"（真撞上再收紧切法，不许顺手放宽）。
+    // 有主之据：注释里承诺过的边界如果没有测试，下一个人只会当它是装饰 —— 这一条就是那个边界的牙。
+    const good = JSON.stringify({ cells: [], metadata: { kernelspec: { name: 'x' } } });
+    const msg = captureThrow(() => readExecutedNotebook('(Map{k}) ' + good));
+    expect(msg, '从垃圾行里的 { 切过去仍读不出 ⇒ 必须抛；"继续往后找能 parse 的 {"就是猜，不是容忍').not.toBeNull();
+    expect(msg).toContain('读不出来');
+    // 红话给的是**原文开头**（含那行垃圾），不是编出来的原因 —— 下一个人能从预览里看见卡在哪个 { 上。
+    expect(msg, `失败预览要看得见那行垃圾（实际消息开头：${msg?.slice(0, 120)}）`).toContain('(Map{k})');
+  });
+
   it('读出的 notebook 与 stdout 宽松提取器（executedNotebookEvidence）取同一套证据 ⇒ 两扇门不许两套真相', () => {
     const good = JSON.stringify({
       cells: [
@@ -135,6 +149,26 @@ describe('readExecutedNotebook：严格读法（Toree 污染的前缀不许被�
     expect(broken.stdout).toEqual([]);
     // 而严格门对同样的输入**必须抛**（派发词硬约束）：两扇门各自的形状在这条用例里同框钉死。
     expect(captureThrow(() => readExecutedNotebook('{ 这不是 JSON'))).not.toBeNull();
+  });
+
+  it('钉住两扇门真正的分界：前缀容忍**只**服务严格门 —— 宽松门（kernel/tutorials 的 stdout 门）对同一份污染仍报「输出不是 notebook JSON」', () => {
+    // notebook-evidence.ts 文件头的契约（WI-91b 评审轮修正过一句谎报）：`executedNotebookEvidence` 吃的是
+    // 整段严格 `JSON.parse`，**没有**"从第一个 { 起切"的第二道。今天仍走 `--stdout` 的旧门
+    // （`kernel.test.ts:346/907/926`、`tutorials.test.ts:203`）喂进 Toree 污染 stdout 时得到的是
+    // 「输出不是 notebook JSON：(Scala,org…」这条**数据**，而不是被读出来。
+    // 这条判据把那个不对称钉成被验事实：将来谁"顺手"把容忍接进宽松门，这里先红 ——
+    // 让 stdout 门吞前缀是另一道门的判据变更（改量具 ≠ 放宽判据），要单独裁决与自己的测试，不许静默发生。
+    const polluted =
+      '(Scala,org.apache.toree.kernel.interpreter.scala.ScalaInterpreter@1015a4b9)\n' +
+      '(SQL,org.apache.toree.kernel.interpreter.sql.SqlInterpreter@1acb74ad)\n' +
+      JSON.stringify({ cells: [{ cell_type: 'code', outputs: [{ output_type: 'stream', name: 'stdout', text: ['alive=42\n'] }] }] });
+    // 前提：同一份文本在严格门里是**读得出**的（否则下面判的就不是门的分界，而是"两份都是垃圾"—— 那是另一条用例的形状）。
+    expect(notebookEvidence(readExecutedNotebook(polluted)).stdout, '严格门：跳过两行注册表行后 stdout 行必须在').toEqual(['alive=42']);
+    const loose = executedNotebookEvidence(polluted);
+    expect(loose.stdout, '宽松门不许从前缀污染里"救"出任何 stdout 行 —— 救出来就说明它没被裁决地接上了容忍').toEqual([]);
+    expect(loose.errors, '宽松门的宽松只体现在"落成 error 条目而不是 throw"，不体现在容忍前缀').toHaveLength(1);
+    const first = loose.errors[0] ?? '';
+    expect(first.startsWith('输出不是 notebook JSON：(Scala,org'), `宽松门这一条要逐字开头于「输出不是 notebook JSON：(Scala,org…」（实际：${first.slice(0, 60)}）—— 症状（前缀是什么字符）必须在条目里可见，否则下一次读报告的人无从判断是污染还是内容坏`).toBe(true);
   });
 });
 

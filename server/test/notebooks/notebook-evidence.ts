@@ -43,8 +43,15 @@ import { config } from '../../src/config.js';
  *   这一层的接线坏了"这一层。
  * - 主路径是 **(a)**（brief Step 3 的首选，裁决记录在此）：`nbconvertExecuteToFileArgv` 用
  *   `--output-dir <目录> --output <文件名>` 把执行后的 notebook **落盘**，垃圾行留在 stderr，JSON 天生干净。
- *   `readExecutedNotebook` 的前缀容忍是**第二道**（形状是 (b)，判据是 notebook-evidence.test.ts 的逐字污染夹具）
- *   —— 它服务的是今天仍走 `--stdout` 的旧门（`kernel.test.ts` / `tutorials.test.ts`，本轮一个字没动它们）。
+ *   ⚠ **前缀容忍的作用域**（评审轮更正 —— 此前这一句谎报旧门也沾了这份容忍）："从第一个 `{` 起切"的第二道
+ *   **只服务 `readExecutedNotebook` / `readExecutedNotebookFile` 这两扇门**（形状是 (b)，判据是 notebook-evidence.test.ts
+ *   的逐字污染夹具）。今天仍走 `--stdout` 的旧门（`kernel.test.ts` 的 smoke 与假 JSON 判据、`tutorials.test.ts` 的
+ *   marker 判据 —— 它们吃的是 `executedNotebookEvidence`：整段严格 `JSON.parse` + 宽松 error 语义）**没有这份容忍**：
+ *   把 Toree 污染的 stdout 喂给那扇门，得到的是「输出不是 notebook JSON：(Scala,org…」的一条**数据**条目，
+ *   而不是被读出来。这个不对称**是刻意的**（改量具 ≠ 放宽判据）：给 stdout 门加前缀容忍是**另一道门的判据变更**，
+ *   要单独的裁决与它自己的测试，不许顺手 —— 且今天唯一注册的 kernel `arena-pyspark` 的 nbconvert 输出不被污染，
+ *   没有现需。分界由 notebook-evidence.test.ts 的「宽松门对前缀垃圾仍报 输出不是 notebook JSON」钉成被验事实；
+ *   **下游作者（Task 4）读到这里时不要以为 stdout 门已防污染** —— Task 4 走的是文件门（`readExecutedNotebookFile`）。
  * - `executedNotebookScratchPath(tag)` / `removeExecutedNotebookScratch(path)` —— 落盘临时文件的**唯一**选址与
  *   收尾实现：住在实例自己的数据目录（`config.dataDir`，即 `ARENA_DATA_DIR` 跟着走的那棵树；WI-40 隔离纪律），
  *   **不进** `config.notebook.workDir`（那是真人的笔记工作区）。删除返回"删净与否"，调用方把它落成一条错误/断言
@@ -352,7 +359,7 @@ const previewOf = (text: string): string => JSON.stringify(text.length <= READ_P
 /** "整段读不成 notebook JSON"那一支的话。两支话（这一支与"缺 cells"那一支）不许合并：合并就抹掉了两种坏法的区分。 */
 function unreadableNotebookError(text: string, reason: unknown, tried: string): Error {
   return new Error(
-    `这份文本读不出来是"执行后的 notebook JSON"（${tried}）⇒ 原报错：${clip(describeError(reason), 200)}。` +
+    `这份文本读不出来（不是"执行后的 notebook JSON"）（${tried}）⇒ 原报错：${clip(describeError(reason), 200)}。` +
       `文本共 ${text.length} 字符，开头是：${previewOf(text)}。` +
       '⚠ 这句话只判"这份文本读不成 notebook JSON"这一件事，**不判** kernel 坏没坏、nbconvert 有没有正常结束 —— ' +
       '那是 `nbconvertCrashEvidence` 按进程 error 说的另一句话（不同对象、不同职权，混着说就是本仓库记过的"指错方向的报错"）。' +
