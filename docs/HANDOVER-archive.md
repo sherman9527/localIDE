@@ -6,6 +6,91 @@
 > 由 `server/test/regression/memory-file-ratchet.test.ts` 按**并集**判住（搬移中性、删内容会红）。
 > 排序：按条目正文里出现的日期倒序，与 `HANDOVER.md` 同一规则，所以两份接起来是一条完整的时间线。
 
+- [x] WI-87 IDE 的依赖环境：命令窗口 + 用户包清单 + reset（2026-09-26 用户提，2026-09-27 交付；分支 `ide-deps`，15 commit）
+  ｜设计文档 `docs/superpowers/specs/2026-09-26-ide-dependency-environment-design.md`、
+  实施计划 `docs/superpowers/plans/2026-09-26-ide-dependency-environment.md`（9 个任务，TDD 顺序）。
+  ｜**范围**：用户当场圈死"只说 IDE，不说做题可以现装依赖"，所以三条红线里最硬的一条是
+  "IDE 环境绝不注入判题"（判题可复现 = 重建镜像即可复现，`docker/BUILDINFO.md` 那条承诺不能破）。
+  ｜落地：`ide/env.ts`（环境对象，按**运行时家族**分不是按语言 id —— js/ts 共用一份 node_modules）、
+  `env-command.ts`（argv 白名单，`shell:false`；`pip3 install X` 改写成 `<venv python> -m pip install X`）、
+  `env-inventory.ts`（清单只读环境本身 + venv 基线相减）、`reset.ts`（先停该家族活会话再删再重建）、
+  三个路由（清单 GET / 命令 SSE / reset POST）、`web/src/components/IdeEnvPanel.tsx`（挂右栏）。
+  ｜**这条闸门是在容器里跑红之后才修对的**：compose 必须设 `ARENA_IDE_ENV_DIR`（venv 在 bind mount 上
+  创建要 87.2s vs `/opt` 1.76s），而判题子进程 `{...process.env}` 会继承它 ⇒ 修在 `config.ts`"读一次就摘掉"，
+  不在判题层过滤（那要求判题层知道 IDE 有这套东西）；闸门补了 **B2**（验"摘掉"这个动作本身，
+  否则 B 只是赌"这台机器没设过变量"）。破坏性：删掉 `delete` ⇒ 容器模拟红 4 条、宿主红 B2 一条。
+  ｜同一轮还抓到两个"验证自己骗人"（都修了，见 memo 里程碑 AY）：
+  ① `./start.sh --verify` 验的是**上一个镜像里的源码**（`compose exec` 进的是当前容器）⇒
+  两个启动脚本都改成先 build + `up -d` 再 exec；
+  ② `.dockerignore` 排掉 `.git` ⇒ 镜像里 `git ls-files` fatal，发布闸门把容器档撞红
+  ⇒ 改 `it.skipIf` + 一条常驻断言解释"为什么会是 null"（必须是镜像，不能是宿主仓库坏了）。
+  ｜界面那处也修了：Java 面板原先挂着一个 placeholder 写 `pip3 install requests` 的输入框（前端按
+  `supported` 自己猜的），而 Java 没有安装器 ⇒ "开不开命令窗口"收回后端一处（清单里的 `commandWindow`），
+  关着的时候给"为什么 + 该怎么做"（把 `lib` 的绝对路径说给用户），reset 与它解耦。
+  ｜验证：宿主 `npm run verify:fast` ✅ EXIT=0；容器 `./start.sh --verify` ✅ EXIT=0 且判题矩阵
+  **443 passed / 444 total**、`[matrix] 158 道代码题全部可判、跳过（栈不可用）0 道`；
+  宿主 `npm run e2e` ✅ **53 passed**（`ide-env.spec.ts` 8 条）；
+  真浏览器 ✅ console **0 error / 0 warning**（含两次换语言 + 一次真 `pip3 show pip`，日志里能看到改写成
+  `/opt/arena-ide-env/python/bin/python -m pip show pip`）、换语言后面板实例数恒为 1、停顿 45s 后服务仍在。
+  ｜**已知边界**（都写进了 README / JUDGING / ARCHITECTURE）：pyspark 不开环境（解释器在与判题共用的池里）、
+  c/cpp 只能 apt、mysql/redis 的"依赖"是服务本身；Java/Scala 的 jar 在容器里只能
+  `docker cp` 进命名卷 `arena-ide-env`。⇒ 出题要用第三方包 = 改镜像，不能靠用户现装。
+
+- [x] WI-72 判题沙箱偶发" harness 半路消失"：隐患已堵，根因未定（2026-09-24 交付档位那轮唯一的一条红）
+  ｜**2026-09-25 主动证伪了两条候选（不再等复发）**，结论都是量出来的：
+  ① **fd 压力 ⇒ 排除**。容器 `ulimit -n` 是 1,048,576；把它压到 160，`react-vitest.test.ts` 仍然
+     10/10 全过，压到 64 / 48 时报的是 `Error: spawn /usr/local/bin/node EMFILE`（**spawn 阶段硬错**），
+     不是 `Could not resolve …/vitest.config.mjs` —— 症状形状不同，不是同一条路。
+  ② **启动清扫误删活沙箱 ⇒ 机制真实，但对那次红不成立**。机制确认：清扫只看目录 mtime，
+     **"有进程开着句柄"根本挡不住删除**（Windows 与 Linux 都量过：Node 打开文件默认带
+     `FILE_SHARE_DELETE`，POSIX 本来就不挡）⇒ 唯一防线是那道 1h 时限。
+     不成立的原因很朴素：那次红发生在一轮不到 1h 的 verify 里，而新建的 harness 目录 mtime 就是当下。
+     ⇒ 所以它是**潜在隐患**而非凶手：把"时限必须大于任何沙箱的最长寿命"钉成测试
+     （`RUNNER_TIMEOUT_CAP_MS` / `IDE_LIMITS.maxTimeoutMs` / `idleMs + stopGraceMs` 三者取大，还要留两倍余量），
+     并把机制本身写成断言。破坏性：把 `idleMs` 抬到 65 分钟 ⇒ 那条不变量当场红，
+     消息直接给出两个数（`3600000 必须大于最长寿命 3902000`）。
+  ⇒ 两条候选都关掉之后，**剩下的唯一已知机制**就是 AO 那轮堵掉的"同目录并发测试互相删"（`maxAgeMs: 0`）。
+     根因仍未定，但下次复发不用再猜：看 `data/logs` 里 `react-scaffold-missing`（从来没写成）
+     与 `react-resolve-failed`（跑一半被删）哪个出现。
+  症状：`server/test/judge/react-vitest.test.ts` 的"参考解全部用例通过…"报
+  `Could not resolve /app/data/judge/fe-react-harness-0001-XXXX/vitest.config.mjs`（445ms 就挂，
+  单跑 10/10 全过）。当天同一份 verify 里其余 406 条全过、题库矩阵（含 23 道 react-vitest 题）也全过。
+  ｜已做：把 `server/test/judge-workspace.test.ts` 里那条 `sweepStaleWorkspaces({ maxAgeMs: 0 })`
+  挪进临时目录 —— `maxAgeMs: 0` 的语义是"一个都不放过"，打在**共享的** `data/judge` 上
+  等于允许一个测试删掉并发 worker 正在用的沙箱，这是仓库里唯一能对"兄弟 harness 消失"给出
+  机械解释的路径。改完断言变强（`toBe(1)` + 目录被删、普通文件留着），3 tests 全过。
+  ｜**没做到的**：三次"前端矩阵 + runner 自检"并发复现都不红，所以**没证明它就是这次的凶手**，
+  也没排除另外两条：`sweepStaleWorkspaces({ maxAgeMs: HOUR })` 在启动时删掉一个"一小时没写过
+  但还活着"的长任务沙箱；esbuild 在 fd 压力下把读不到报成 "Could not resolve"。
+  ｜**2026-09-24（里程碑 AO）落了取证钩子**（原先列的"下次再红前该做的第③件事"）：
+  react-vitest 在 spawn **之前** stat 一遍脚手架 —— 缺就返回一条写清"这不是你提交内容的问题"的 error
+  并打 `react-scaffold-missing`；vitest 报 `Could not resolve` 时再 stat 一次打 `react-resolve-failed`。
+  这两条日志之差就是"从来没写成"vs"跑一半被删"，而那正是根因至今没定的原因。
+  配套测试两条（探测器本身 + **接线**：stat 必须在最后一次 `ws.write(` 之后、`runProcess(` 之前，两处 `logWarn` 都在），
+  删掉 stat 那段 → 接线断言立刻红（已验证）。**根因仍未定，别当 flaky 关掉**；
+  下次复发先看 `data/logs` 里那两个事件名，再按上面 ①② 取证。
+  ｜顺带抓到一个跨环境的坑（修这条测试时自己撞上的）：`maxAgeMs: 0` 在容器里绿、在宿主上红 ——
+  Windows 上刚建目录的 mtime 可以比 `Date.now()` 晚几十毫秒，于是"一个都不放过"变成"一条都没删"。
+  改成注入 `SweepOptions.now` 断言才不赌时钟（宿主 3 passed、容器 3 passed）。
+  ｜下次再红时的取证顺序：① 立刻 `docker exec daily-arena ls -la /app/data/judge`（看还剩谁）；
+  ② 抓 boot 的 `judge-workspace-sweep` 日志行与容器启动时间对比；③ 把 `react-vitest.test.ts`
+  改成"spawn 前先 stat 一次 config、失败重试一次并打日志"，这样至少能区分"文件从来没写过"
+  与"写过后被删"。**别把它当 flaky 关掉**——本仓库有过三个"断言下全绿的静默降级"。
+  ｜**2026-10-11 收口（用当初为它装的那对取证钩子量的，不是等复发）**：
+  ① 钩子都在、且不是装饰 —— `react-scaffold-missing` / `react-resolve-failed` 住在
+     `react-vitest.ts:260/285`，结构判据在 `judge-workspace.test.ts:122-123`（删掉调用点就红），
+     所以"零命中"不等于"没接线"。
+  ② 17 天负证据：`data/logs` 166 个文件（09-19 → 10-11，含多次全量容器验证，每次判题 158 道）里
+     **两个钩子各 0 次命中**；`errorKind":"sandbox"` 共 21 条，**全部落在 09-19 ~ 09-24**，此后为 0。
+  ③ **当初调查没有的新数据点**：那 21 条里有 4 条是 **mysql** 题（`sql-mysql-0011`×2、`-0015`、`-0002`，
+     09-22/23）。mysql 的 `sandbox` 只可能是"底座还没就绪"，不可能是"沙箱被半路删" ⇒
+     这一族的共同形状更早可能是 bring-up 期没就绪，而不是 react 特有的删除竞态。
+  ⇒ 结论按实说：**根因仍未定**（那一次红没有留下能区分两种机制的读数），但两条候选都已被量掉、
+     判别钩子已接上且 17 天零命中、日志行本身仍带着能区分它们的字段。
+     **"下次复发不用再猜"这一条今天成立** —— 所以这条工作项剩下的部分不是调查，是观察；
+     而 ③ 查出来的真问题另开 **WI-111**（`errorKind=sandbox` 被两种互不相干的故障共用，
+     读者从日志分不出是哪一种 —— 那正是这条收口之后唯一还留着的可行动信息）。
+
 - [x] WI-44 N-01 收尾：把"自适应题量"带来的**文档失真**与**界面口径**一起对齐（代码在 `ebf021a` —— 压缩前的号，
   对象已不可解析：那一版历史已被 2026-09-25 的 orphan 压成 `15fd5ab`，代码还在它的树里，号本身不再单独存在）
   ① README 的"主栈 2 道"补上 1..3 微调；② `daily-challenge` spec 原来把 2 道写死在 Requirement 里（不改就是又一条"spec 比现实更让人放心"的假话），

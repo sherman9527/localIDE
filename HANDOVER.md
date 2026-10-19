@@ -11,15 +11,78 @@
 
 ## 速览（先读这一段，再决定要不要展开）
 
-- **现在能跑什么**：单镜像起服务端 + 题库（258 题）+ IDE（Python/Java/JS/SQL…）+ 判题 + Jupyter（一个内核：`arena-pyspark`）。
-- **三档验证的当前读数**：`npm run verify:fast` EXIT=0（宿主 ~2.5 分）；`./start.sh --verify` EXIT=0（容器：单测 642 passed / 10 skipped，判题矩阵 158 可判 / 跳过 0，教程档 17 passed / 0 skipped）；`npm run e2e` 74 passed。
+- **现在能跑什么**：单镜像起服务端 + 题库（258 题）+ IDE（Python/Java/JS/SQL…）+ 判题 + Jupyter。
+  Jupyter 现在是**两条 kernel**（2026-10-20 WI-91b 接入；此前这里写的是"一个内核：arena-pyspark"）：
+  `arena-pyspark`（与 IDE 共用 venv）与 `arena-scala-toree`（Toree，镜像里独立 JVM、不碰 venv；
+  Scala 侧还没有教程 notebook，账在需求池 N-20）。
+- **三档验证的当前读数**（2026-10-20，WI-91b Task 5 同批镜像 `534dfeff1599`/2.58GB）：`npm run verify:fast` EXIT=0（宿主 ~2.5 分）；`./start.sh --verify` EXIT=0（容器：单测 672 passed / 11 skipped，判题矩阵 158 可判 / 跳过 0，教程档 17 passed / 0 skipped，**Scala 档 11 passed / 0 skipped**）；`npm run e2e` 74 passed。
 - **最近这批最要紧的四条**：WI-113 `.env` 的权限抄写改走 .NET（这台机器上 `Get-Acl` 因 PS 7 污染根本不可用）；WI-114 整轮 verify 里"仓库真 `.env` 没被动过"有了哨兵；WI-93 Jupyter 掉了会自己回来（有上限的重启循环）；N-18 题库"只增不减"的基线在容器里从"死"改成走镜像烤入的清单。
 - **`## TODO` 是空的**：待办要么做完、要么进"已决定"。新想法进 `## 新增需求池`，别在 TODO 挂长期项（WI-56 就是这么收回来的）。
-- **历史在哪**：本格只留最近 20 条；更早的 88 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
+- **历史在哪**：本格只留最近 20 条；更早的 90 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
 
 ## COMPLETED
 
-> 最近 20 条（按条目正文里出现的日期倒序）。更早的 88 条整条在 `docs/HANDOVER-archive.md`。
+> 最近 20 条（按条目正文里出现的日期倒序）。更早的 90 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
+
+- [x] WI-100 **把 Toree 接成第五页可用的 Scala kernel（= WI-91 探索胜出路径 B；执行窗口 = WI-91b 计划五任务）**（`c6db718`+`4289a99` T1 量具、`b327d2a`+`aa79fc5` T2 镜像工件、`9cee1b5`+`b0ead20` T3 注册表（还 WI-96）、`035a7e4`+`596ef2a` T4 容器档闸门、Task 5 本轮（`e991ce4` 页面/工件/闸门/文档 + 本发记忆板，2026-10-20））
+  ｜**这条曾在 2026-10-16 被用户点头推迟**（当时的理由与计划约束见下面随迁的原文），重启条件是"留一个完整执行窗口、不停在半程" —— WI-91b 正是那一轮：五个任务一批落地，页面、注册表、闸门、镜像同批换字节，main 上**从未出现过**"界面写着两个内核都能选、镜像里只有一个"的半程谎。
+  ｜**Task 5 的交付形状（页面与文档说实话）**：边界块 5→7 段、summary 同步「7 条边界」，三层（页面 DOM / 单元层 `boundarySentences` 13 串逐字 / e2e 计数+名词）同批走 ——
+  ①Scala kernel 是判题池之外的**又一个** Spark JVM，量级按工件实写 `-Xmx2g -Dspark.master=local[2]`（读自 `docker/jupyter/kernels/arena-scala-toree/kernel.json`；Python 侧保留 `--master local[2] --driver-memory 512m`，两组数不许互抄）；
+  ②报错形状原话上屏："报错有，但堆栈帧没有，能看的那句话在错误消息里"+ `Unknown Error`（容器档实测 106 字符 / traceback 0 项）；
+  ③`language_info.version`（自报 2.12.15、实载 2.12.18）**页面上一个都不显示** —— 核查后确认没有任何组件渲染 `language_info`，要求转成判据：单元档三态判 textContent+innerHTML 无 `2.12.x`，镜像档判 `display_name` 不含版本号（破坏性：往页头塞 `2.12.15` ⇒ 红，读数在 task-5-report.md §4）；
+  ④补全/悬浮文档/中断明写**不支持**，中断的证据 = Task 4 §9 的 SIGINT 首测（3/3、handler 抛错、不落成 cell error、掐不掉执行）。
+  ｜构建上下文三处假话同批改事实（裁决 T5-5）：`display_name` 「Scala (Toree, WI-91 探索)」→ 交付名 `Scala (Toree)`；`arena_spike_status`（"不是交付/没登记进 NOTEBOOK_KERNELS" —— `9cee1b5` 之后就是用户可见假话）**整键移除**，换成 `arena_kernel_status`（交付状态+缺陷清单+红线①接口），SIGINT 实测落进新键 `arena_interrupt_reading`，`arena_unmeasured_risk` 只剩 setSecurityManager 一条；`docker/BUILDINFO.md` 两处与 `docker/Dockerfile` 三处注释改回事实；新闸门 `notebook-image.test.ts` 钉"标签不含探索字样/不含 2.12.x、spike 键缺席、SIGINT 读数在场"。改名**没有牵动任何测试字面量**（Task 3 的"从工件读 display_name"纪律兑现：status.test 29 passed、web 36 passed 一次没改）。
+  ｜顺带修掉同族假话：`README.md` kernel 段按 kernel 分家、`docs/JUDGING.md` 超时段写两个 JVM、`docs/ARCHITECTURE.md` 七段边界 + 两份 kernelspec 条目 + "容器档那三组阶段"补 Scala 阶段、A1 设计文档 ②"至今没落地"划线订正、页头那句「kernel 用的是网页 IDE 那份环境」按 kernel 点名。
+  ｜验证（三档 + 破坏性，退出码都被看到；详表 `.superpowers/sdd/2026-10-10-scala-kernel-integration-wi91b/task-5-report.md`）：
+  `npm run verify:fast` → `VERIFY_FAST_EXIT=0`（单元 458 passed / 36 skipped；游戏+web `517/3`；IDE `120/67`；`.env` 哨兵"未被改动"）；
+  `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --rebuild` → `REBUILD_EXIT=0`，**整镜像 --no-cache 冷构建**（T4 没证的半程这轮补上），新镜像 `534dfeff1599` **2.58GB**；容器内 `kernel.json` md5 == 工作树（`93b39fc8…`）、读回的 `display_name` == `Scala (Toree)`、烤入的前端 bundle 里 `Unknown Error`/`完全不碰 IDE 那份 venv` 各命中 —— "跑着的是这轮字节"是量的不是推的；
+  `MIRROR_APT=… ./start.sh --verify` → **`VERIFY_EXIT=0`、✓ verify 全部通过**；矩阵 `158 道可判 / 跳过（栈不可用）0 道`（六栈全 true）；五个 notebook 阶段**各恰好出现 1 次**（grep 计数 1/1/1/1/1），`教程 notebook：17 passed / 0 skipped / 17 total ✓`、`Scala kernel：11 passed / 0 skipped / 11 total ✓`、判题矩阵 `555 passed / 11 skipped / 566 total`（比 T4 轮多的 2 条就是本轮 notebook-image 的两条新 it）；`grep -c scala-kernel.test.ts` = 0（--exclude 真生效，专门阶段只跑那一次）；`.env` 未被改动（absent）；
+  宿主 `npm run e2e` → **`E2E_EXIT=0`、74 passed (3.3m)**（`notebook-page.spec.ts` 三条全绿，跑的就是本轮改过的 7 段计数 + `Unknown Error` 名词判据 —— 真浏览器、独立 e2e 实例、不占 7799）；破坏性三串（页面 version 判据、kernel.json 闸门、SIGINT 单因归因）全部实测红后 md5 还原（日志 `destructive-task5-*.log`）。
+  ⚠ **完成判据第 1 条"真浏览器里选得到且跑得过"由控制端按 task-5-report.md §7 清单执行中** —— 三档绿不等于界面被看过，这一条在浏览器读数回来之前仍是敞的。
+  ｜2026-10-16 的推迟决定（两句，逐字随迁）：
+- **WI-100 / WI-96（Toree 接成第五页的 Scala kernel）—— 2026-10-16 用户点头：这一版先不接。**
+  ｜理由当场核过，不是推测：`shared/src/notebook.ts:108` 是 `NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' }`，只一条，界面照注册表给 ⇒ 现在**没有谎**；而这版计划要同时动镜像、量具、判据与界面，**停在半程恰好会造出**"界面写着两个内核都能选、镜像里只有一个"那种谎。所以留一个完整执行窗口再做（计划：`docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，5 个任务，Task 1 是先把量具改对）。WI-96 是同一族账，接入时一并还。
+  ｜原文（立项全文，一字未改）：
+  [ ] WI-100 **把 Toree 接成第五页可用的 Scala kernel**（= WI-91 探索的胜出路径，**接入是另一版计划**）：
+  ｜**2026-10-16 用户点头：这一版先不接**（当前镜像与文档自洽 —— Scala 在界面上没被承诺过），留一个完整执行窗口再做，理由是"中途停在半程会让镜像处于只有 Python 能用、界面却写着两个都能用"的状态。
+  `docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，五个任务：① **先改量具**
+  （Toree 把两行注册表打到 stdout，混在 `nbconvert --stdout` 的 JSON 前面 ⇒ 现成的 `JSON.parse(整个 stdout)` 会抛，
+  而抛出来与"kernel 坏了"无法区分）；② 镜像产物从 `.superpowers/sdd/…/path-B-toree/` 落回工作树并证离线可复现；
+  ③ kernel id 进 `NOTEBOOK_KERNELS` + **`ready` 判据改成按-kernel 带数据（还 WI-96 的账，不许加 `||` 分支）**；
+  ④ Scala smoke 走**独立容器档阶段**（不复用题闸门那三条 Python 形状的判据，尤其"末 cell 必须 `spark.stop()`"
+  在 Toree 上会炸收尾）并接 `assert-ran --require-no-skips`；⑤ 页面说实话（第二个 JVM、`ename` 恒为 `Unknown Error`、
+  `language_info.version` 报 2.12.15 而实载 2.12.18 ⇒ 不许显示这个 version、补全/悬浮/中断不支持）。
+  ⚠ **两条探索档明确"没证过"的东西，接入档必须单独量**（都写在归档 `kernel.json` 的 metadata 里）：
+  ① `interrupt_mode: signal` —— SIGINT 给 JVM 的默认结果是**整个进程下去**，Toree 为此提供 `--alternate-sigint`，
+  而三条判据都不碰中断 ⇒ 现在没有任何读数；界面上那个"停止"按钮按下去会怎样，未知。
+  ② Toree 启动时调 `System.setSecurityManager`（JDK 17 已打 terminally deprecated 警告）⇒ 对判题侧无影响（独立 JVM），
+  但它是"未来换 JDK 的到期日"。
+
+- [x] WI-96 **"这条 kernel 要不要 IDE 那份 venv"从按 id 猜改成注册表自带数据**（T3 `9cee1b5` + 评审轮 `b0ead20` 落地，2026-10-20 随 WI-100 同批收口）
+  ｜还账形状：`NOTEBOOK_KERNELS` 条目带 `{ id, needsVenv }`（`shared/src/notebook.ts`）；`status.ts` 按 id 查表，**按 id 相等的比较链被判据明令禁止**（`status.test.ts` 有 `not.toMatch(/const needsVenv = id ===/)`）；
+  两态各有用例：venv 缺席 ⇒ blocked **恰好**是 needsVenv 那条（scala `needsVenv:false` 照旧 ready，牵连不许发生）；reason 里"登记在册的其余条目"**逐条从注册表派生**（散文里写死"另一条是 Scala"就是下一处漂移，评审 Important-1 修的就是它）。
+  前端夹具（`arenaKernels()`/`VENV_BAKED_IDS`）同样派生自注册表 —— 加第三条 kernel 时页面、横幅、按钮显隐不用改一个字（Task 3 评审轮已验：注册表长出一条后旧夹具会"顺带挂 rebuild 横幅"那种假警报，被反向对照判住了）。
+  ｜验证：`npx vitest run server/test/notebooks/status.test.ts` → `29 passed`；`npx vitest run web/test/notebook.test.tsx` → `36 passed`（夹具派生）；两态覆盖都在容器档 `VERIFY_EXIT=0` 同批跑过（见 WI-100 那行的三档读数控格）。
+  ｜原文（2026-10-08 立项 + 2026-10-10 订正 + 披露局限，一字未改）：
+  [ ] WI-96 "这条 kernel 要不要 IDE 那份 venv"是**按 id 猜**的，A2 会把 I-1 刚关掉的洞再挖开一次（收尾轮记账，2026-10-08，**本轮只记不做**）：
+  `server/src/notebooks/status.ts` 里那句 `const needsVenv = id === NOTEBOOK_KERNELS.pyspark;` 是那个问题的**唯一**答案来源，
+  而它判的是 id 相等 —— 于是 A2 新加的 `arena-scala` 一进来就恒为 `needsVenv: false` ⇒ `ready: true`、没有 `reason`、
+  不给「准备环境」按钮，**没有任何一道闸门会问一句"它要不要 venv"**。
+  ⚠ **2026-10-10 按 WI-91 的实测订正**：这条括号原来写的是"scala 的 argv 同样指向那个懒创建的 venv"，**那是错的** ——
+  A/B 两条探索 kernel 的 argv 都是绝对路径 `/usr/bin/java`（Toree 那份见归档的 `kernel.json`），**根本不碰 IDE venv**。
+  ⇒ 洞的性质不变（"要不要 venv"这件事没有判据、只有 id 相等在猜），但**猜错的方向是反的**：
+  真接入之后 scala 那条会拿到 `needsVenv:false`，而那**恰好是对的** —— 于是这个洞今天不咬人，
+  等下一条"确实需要某个懒创建环境"的 kernel 进来才咬。**别因为它暂时不咬就当它不存在。**。
+  这与刚被终审 I-1 关掉的"ready 在生产里恒为 true"是**结构上同一个洞**：区别只是那次有人来看，这次没有人被强制来看。
+  ｜修法归 A2：把"要哪一份环境"做成 `NOTEBOOK_KERNELS` 的字段（例如 `requiresEnv: 'ide-venv' | 'image'`），
+  `status.ts` 按字段判 ⇒ 新增一条 kernel 时**漏掉这个字段就是类型错误**，问题在编译期被回答，而不是等下一轮评审发现。
+  配套判据（同归 A2）：`status.test.ts` 里给 scala 那一行加"venv 缺失 ⇒ ready:false + reason 点名解释器路径"的用例，
+  并按 `runner-coverage` 那条"每个 judgeKind 都有双向往返"的先例，加一条"每个 kernel 都被问过要不要 venv"的覆盖判据。
+  ｜同一条里记一处**已披露的局限**（不是 bug，别当缺陷修）：`server/test/regression/ide-env-isolation.test.ts:52` 的
+  `CREDENTIAL_KEY_RE` 是一条**后缀** allowlist（只认大写键名以 `_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_KEY` 结尾），
+  所以 `ARENA_X_APIKEY`、`ARENA_X_DSN`、任何小写键名、以及经 `env_file:` 投递的 secret 都不在它眼里。
+  D1 判的是"下一个**长成这个样子**的凭据"（本轮实测：给 arena 的 `environment:` 加一行
+  `ARENA_PROBE_NEXT_TOKEN: x` ⇒ 只有 D1 红、且红在**点名那个键**）。要扩就先扩正则，并同步那条破坏性探针。
 
 - [x] WI-56 公司扩充（长期项）—— 目标达成：六家全部 ≥30（2026-10-19 收口）｜原目标 **每家 25-30 题**（2026-09-22 用户拍板，取代 commit `2b71a0d`
   （压缩前的号，对象已不可解析，见本板 WI-55）消息里那句"6 家各 ≥50"；2026-09-23 追到 30）。
@@ -432,91 +495,6 @@
   `reflog expire` + `gc --prune=now` 真正回收，等用户点头（不可反悔）；验收按上次那套：
   逐对象 `cat-file -e` 报缺失、`fsck` 无 dangling、扫**全部可达对象**命中 0。
 
-- [x] WI-87 IDE 的依赖环境：命令窗口 + 用户包清单 + reset（2026-09-26 用户提，2026-09-27 交付；分支 `ide-deps`，15 commit）
-  ｜设计文档 `docs/superpowers/specs/2026-09-26-ide-dependency-environment-design.md`、
-  实施计划 `docs/superpowers/plans/2026-09-26-ide-dependency-environment.md`（9 个任务，TDD 顺序）。
-  ｜**范围**：用户当场圈死"只说 IDE，不说做题可以现装依赖"，所以三条红线里最硬的一条是
-  "IDE 环境绝不注入判题"（判题可复现 = 重建镜像即可复现，`docker/BUILDINFO.md` 那条承诺不能破）。
-  ｜落地：`ide/env.ts`（环境对象，按**运行时家族**分不是按语言 id —— js/ts 共用一份 node_modules）、
-  `env-command.ts`（argv 白名单，`shell:false`；`pip3 install X` 改写成 `<venv python> -m pip install X`）、
-  `env-inventory.ts`（清单只读环境本身 + venv 基线相减）、`reset.ts`（先停该家族活会话再删再重建）、
-  三个路由（清单 GET / 命令 SSE / reset POST）、`web/src/components/IdeEnvPanel.tsx`（挂右栏）。
-  ｜**这条闸门是在容器里跑红之后才修对的**：compose 必须设 `ARENA_IDE_ENV_DIR`（venv 在 bind mount 上
-  创建要 87.2s vs `/opt` 1.76s），而判题子进程 `{...process.env}` 会继承它 ⇒ 修在 `config.ts`"读一次就摘掉"，
-  不在判题层过滤（那要求判题层知道 IDE 有这套东西）；闸门补了 **B2**（验"摘掉"这个动作本身，
-  否则 B 只是赌"这台机器没设过变量"）。破坏性：删掉 `delete` ⇒ 容器模拟红 4 条、宿主红 B2 一条。
-  ｜同一轮还抓到两个"验证自己骗人"（都修了，见 memo 里程碑 AY）：
-  ① `./start.sh --verify` 验的是**上一个镜像里的源码**（`compose exec` 进的是当前容器）⇒
-  两个启动脚本都改成先 build + `up -d` 再 exec；
-  ② `.dockerignore` 排掉 `.git` ⇒ 镜像里 `git ls-files` fatal，发布闸门把容器档撞红
-  ⇒ 改 `it.skipIf` + 一条常驻断言解释"为什么会是 null"（必须是镜像，不能是宿主仓库坏了）。
-  ｜界面那处也修了：Java 面板原先挂着一个 placeholder 写 `pip3 install requests` 的输入框（前端按
-  `supported` 自己猜的），而 Java 没有安装器 ⇒ "开不开命令窗口"收回后端一处（清单里的 `commandWindow`），
-  关着的时候给"为什么 + 该怎么做"（把 `lib` 的绝对路径说给用户），reset 与它解耦。
-  ｜验证：宿主 `npm run verify:fast` ✅ EXIT=0；容器 `./start.sh --verify` ✅ EXIT=0 且判题矩阵
-  **443 passed / 444 total**、`[matrix] 158 道代码题全部可判、跳过（栈不可用）0 道`；
-  宿主 `npm run e2e` ✅ **53 passed**（`ide-env.spec.ts` 8 条）；
-  真浏览器 ✅ console **0 error / 0 warning**（含两次换语言 + 一次真 `pip3 show pip`，日志里能看到改写成
-  `/opt/arena-ide-env/python/bin/python -m pip show pip`）、换语言后面板实例数恒为 1、停顿 45s 后服务仍在。
-  ｜**已知边界**（都写进了 README / JUDGING / ARCHITECTURE）：pyspark 不开环境（解释器在与判题共用的池里）、
-  c/cpp 只能 apt、mysql/redis 的"依赖"是服务本身；Java/Scala 的 jar 在容器里只能
-  `docker cp` 进命名卷 `arena-ide-env`。⇒ 出题要用第三方包 = 改镜像，不能靠用户现装。
-
-- [x] WI-72 判题沙箱偶发" harness 半路消失"：隐患已堵，根因未定（2026-09-24 交付档位那轮唯一的一条红）
-  ｜**2026-09-25 主动证伪了两条候选（不再等复发）**，结论都是量出来的：
-  ① **fd 压力 ⇒ 排除**。容器 `ulimit -n` 是 1,048,576；把它压到 160，`react-vitest.test.ts` 仍然
-     10/10 全过，压到 64 / 48 时报的是 `Error: spawn /usr/local/bin/node EMFILE`（**spawn 阶段硬错**），
-     不是 `Could not resolve …/vitest.config.mjs` —— 症状形状不同，不是同一条路。
-  ② **启动清扫误删活沙箱 ⇒ 机制真实，但对那次红不成立**。机制确认：清扫只看目录 mtime，
-     **"有进程开着句柄"根本挡不住删除**（Windows 与 Linux 都量过：Node 打开文件默认带
-     `FILE_SHARE_DELETE`，POSIX 本来就不挡）⇒ 唯一防线是那道 1h 时限。
-     不成立的原因很朴素：那次红发生在一轮不到 1h 的 verify 里，而新建的 harness 目录 mtime 就是当下。
-     ⇒ 所以它是**潜在隐患**而非凶手：把"时限必须大于任何沙箱的最长寿命"钉成测试
-     （`RUNNER_TIMEOUT_CAP_MS` / `IDE_LIMITS.maxTimeoutMs` / `idleMs + stopGraceMs` 三者取大，还要留两倍余量），
-     并把机制本身写成断言。破坏性：把 `idleMs` 抬到 65 分钟 ⇒ 那条不变量当场红，
-     消息直接给出两个数（`3600000 必须大于最长寿命 3902000`）。
-  ⇒ 两条候选都关掉之后，**剩下的唯一已知机制**就是 AO 那轮堵掉的"同目录并发测试互相删"（`maxAgeMs: 0`）。
-     根因仍未定，但下次复发不用再猜：看 `data/logs` 里 `react-scaffold-missing`（从来没写成）
-     与 `react-resolve-failed`（跑一半被删）哪个出现。
-  症状：`server/test/judge/react-vitest.test.ts` 的"参考解全部用例通过…"报
-  `Could not resolve /app/data/judge/fe-react-harness-0001-XXXX/vitest.config.mjs`（445ms 就挂，
-  单跑 10/10 全过）。当天同一份 verify 里其余 406 条全过、题库矩阵（含 23 道 react-vitest 题）也全过。
-  ｜已做：把 `server/test/judge-workspace.test.ts` 里那条 `sweepStaleWorkspaces({ maxAgeMs: 0 })`
-  挪进临时目录 —— `maxAgeMs: 0` 的语义是"一个都不放过"，打在**共享的** `data/judge` 上
-  等于允许一个测试删掉并发 worker 正在用的沙箱，这是仓库里唯一能对"兄弟 harness 消失"给出
-  机械解释的路径。改完断言变强（`toBe(1)` + 目录被删、普通文件留着），3 tests 全过。
-  ｜**没做到的**：三次"前端矩阵 + runner 自检"并发复现都不红，所以**没证明它就是这次的凶手**，
-  也没排除另外两条：`sweepStaleWorkspaces({ maxAgeMs: HOUR })` 在启动时删掉一个"一小时没写过
-  但还活着"的长任务沙箱；esbuild 在 fd 压力下把读不到报成 "Could not resolve"。
-  ｜**2026-09-24（里程碑 AO）落了取证钩子**（原先列的"下次再红前该做的第③件事"）：
-  react-vitest 在 spawn **之前** stat 一遍脚手架 —— 缺就返回一条写清"这不是你提交内容的问题"的 error
-  并打 `react-scaffold-missing`；vitest 报 `Could not resolve` 时再 stat 一次打 `react-resolve-failed`。
-  这两条日志之差就是"从来没写成"vs"跑一半被删"，而那正是根因至今没定的原因。
-  配套测试两条（探测器本身 + **接线**：stat 必须在最后一次 `ws.write(` 之后、`runProcess(` 之前，两处 `logWarn` 都在），
-  删掉 stat 那段 → 接线断言立刻红（已验证）。**根因仍未定，别当 flaky 关掉**；
-  下次复发先看 `data/logs` 里那两个事件名，再按上面 ①② 取证。
-  ｜顺带抓到一个跨环境的坑（修这条测试时自己撞上的）：`maxAgeMs: 0` 在容器里绿、在宿主上红 ——
-  Windows 上刚建目录的 mtime 可以比 `Date.now()` 晚几十毫秒，于是"一个都不放过"变成"一条都没删"。
-  改成注入 `SweepOptions.now` 断言才不赌时钟（宿主 3 passed、容器 3 passed）。
-  ｜下次再红时的取证顺序：① 立刻 `docker exec daily-arena ls -la /app/data/judge`（看还剩谁）；
-  ② 抓 boot 的 `judge-workspace-sweep` 日志行与容器启动时间对比；③ 把 `react-vitest.test.ts`
-  改成"spawn 前先 stat 一次 config、失败重试一次并打日志"，这样至少能区分"文件从来没写过"
-  与"写过后被删"。**别把它当 flaky 关掉**——本仓库有过三个"断言下全绿的静默降级"。
-  ｜**2026-10-11 收口（用当初为它装的那对取证钩子量的，不是等复发）**：
-  ① 钩子都在、且不是装饰 —— `react-scaffold-missing` / `react-resolve-failed` 住在
-     `react-vitest.ts:260/285`，结构判据在 `judge-workspace.test.ts:122-123`（删掉调用点就红），
-     所以"零命中"不等于"没接线"。
-  ② 17 天负证据：`data/logs` 166 个文件（09-19 → 10-11，含多次全量容器验证，每次判题 158 道）里
-     **两个钩子各 0 次命中**；`errorKind":"sandbox"` 共 21 条，**全部落在 09-19 ~ 09-24**，此后为 0。
-  ③ **当初调查没有的新数据点**：那 21 条里有 4 条是 **mysql** 题（`sql-mysql-0011`×2、`-0015`、`-0002`，
-     09-22/23）。mysql 的 `sandbox` 只可能是"底座还没就绪"，不可能是"沙箱被半路删" ⇒
-     这一族的共同形状更早可能是 bring-up 期没就绪，而不是 react 特有的删除竞态。
-  ⇒ 结论按实说：**根因仍未定**（那一次红没有留下能区分两种机制的读数），但两条候选都已被量掉、
-     判别钩子已接上且 17 天零命中、日志行本身仍带着能区分它们的字段。
-     **"下次复发不用再猜"这一条今天成立** —— 所以这条工作项剩下的部分不是调查，是观察；
-     而 ③ 查出来的真问题另开 **WI-111**（`errorKind=sandbox` 被两种互不相干的故障共用，
-     读者从日志分不出是哪一种 —— 那正是这条收口之后唯一还留着的可行动信息）。
-
 ## IN PROGRESS
 
 （无 —— 正在做的条目才写这里；长期项要么写清达标线，要么进需求池。）
@@ -530,47 +508,12 @@
 > 这一节不是待办，是**结论**：留在这里是为了让下一个人不必重新发现一遍"为什么不做"。
 > 与 `## TODO` 的差别只有一条 —— 这里每条都写清了"谁、哪天、依据什么、决定不做什么"。原文整条附在下面，一字未改。
 
-- **WI-100 / WI-96（Toree 接成第五页的 Scala kernel）—— 2026-10-16 用户点头：这一版先不接。**
-  ｜理由当场核过，不是推测：`shared/src/notebook.ts:108` 是 `NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' }`，只一条，界面照注册表给 ⇒ 现在**没有谎**；而这版计划要同时动镜像、量具、判据与界面，**停在半程恰好会造出**"界面写着两个内核都能选、镜像里只有一个"那种谎。所以留一个完整执行窗口再做（计划：`docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，5 个任务，Task 1 是先把量具改对）。WI-96 是同一族账，接入时一并还。
+（WI-100 / WI-96 已于 2026-10-20 由 WI-91b 整轮交付 ⇒ 见 COMPLETED 顶部两条；2026-10-16 的推迟决定与原文**随条目整段搬过去**，这里只留结论指针。）
 - **WI-101（自包 `IMain` kernel，路径 C）—— 条件账，当前"不适用"。** 只有 WI-100 落地后、Toree 那三条已知毛病（`ename` 恒为 `Unknown Error`、空 `traceback`、版本常量报 2.12.15 而实载 2.12.18）里有任意一条在真界面上变成产品问题才做。WI-100 既推迟，本条自动不适用 —— 写在这里免得被读成待办。
+  ｜**2026-10-20 修订（WI-91b Task 5）**：上面那句"WI-100 既推迟，本条自动不适用"随 WI-100 落地**过期**了 —— 条件从今天起**可实际评估**。当前判定：**未触发**。三条毛病全部按真实形状写进了页面边界块（补全/悬浮/中断明写"不支持"、编译错误明写 `Unknown Error` + 空堆栈帧 + 可用文本在错误消息里、`language_info.version` 页面与选择器标签都不显示，判据分别钉在 `web/test/notebook.test.tsx` 与 `notebook-image.test.ts`），界面不再假装这些能力存在 ⇒ "变成产品问题"的前提不成立。什么时候回来做：真有人被这三条里的某一条实际卡住（例：用户真的需要 Scala 编译错误的堆栈帧，而不是"知道它没有"），重开前先读边界块措辞与 WI-91b Task 4 §9 的 SIGINT 实测，再决定。
 - **WI-38（JDK 21 与 Spark 并存）—— 2026-09-20 用户拍板：暂不做。**
 
 原文（未改动，便于下一轮直接接手）：
-
-  [ ] WI-100 **把 Toree 接成第五页可用的 Scala kernel**（= WI-91 探索的胜出路径，**接入是另一版计划**）：
-  ｜**2026-10-16 用户点头：这一版先不接**（当前镜像与文档自洽 —— Scala 在界面上没被承诺过），留一个完整执行窗口再做，理由是"中途停在半程会让镜像处于只有 Python 能用、界面却写着两个都能用"的状态。
-  `docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，五个任务：① **先改量具**
-  （Toree 把两行注册表打到 stdout，混在 `nbconvert --stdout` 的 JSON 前面 ⇒ 现成的 `JSON.parse(整个 stdout)` 会抛，
-  而抛出来与"kernel 坏了"无法区分）；② 镜像产物从 `.superpowers/sdd/…/path-B-toree/` 落回工作树并证离线可复现；
-  ③ kernel id 进 `NOTEBOOK_KERNELS` + **`ready` 判据改成按-kernel 带数据（还 WI-96 的账，不许加 `||` 分支）**；
-  ④ Scala smoke 走**独立容器档阶段**（不复用题闸门那三条 Python 形状的判据，尤其"末 cell 必须 `spark.stop()`"
-  在 Toree 上会炸收尾）并接 `assert-ran --require-no-skips`；⑤ 页面说实话（第二个 JVM、`ename` 恒为 `Unknown Error`、
-  `language_info.version` 报 2.12.15 而实载 2.12.18 ⇒ 不许显示这个 version、补全/悬浮/中断不支持）。
-  ⚠ **两条探索档明确"没证过"的东西，接入档必须单独量**（都写在归档 `kernel.json` 的 metadata 里）：
-  ① `interrupt_mode: signal` —— SIGINT 给 JVM 的默认结果是**整个进程下去**，Toree 为此提供 `--alternate-sigint`，
-  而三条判据都不碰中断 ⇒ 现在没有任何读数；界面上那个"停止"按钮按下去会怎样，未知。
-  ② Toree 启动时调 `System.setSecurityManager`（JDK 17 已打 terminally deprecated 警告）⇒ 对判题侧无影响（独立 JVM），
-  但它是"未来换 JDK 的到期日"。
-
-  [ ] WI-96 "这条 kernel 要不要 IDE 那份 venv"是**按 id 猜**的，A2 会把 I-1 刚关掉的洞再挖开一次（收尾轮记账，2026-10-08，**本轮只记不做**）：
-  `server/src/notebooks/status.ts` 里那句 `const needsVenv = id === NOTEBOOK_KERNELS.pyspark;` 是那个问题的**唯一**答案来源，
-  而它判的是 id 相等 —— 于是 A2 新加的 `arena-scala` 一进来就恒为 `needsVenv: false` ⇒ `ready: true`、没有 `reason`、
-  不给「准备环境」按钮，**没有任何一道闸门会问一句"它要不要 venv"**。
-  ⚠ **2026-10-10 按 WI-91 的实测订正**：这条括号原来写的是"scala 的 argv 同样指向那个懒创建的 venv"，**那是错的** ——
-  A/B 两条探索 kernel 的 argv 都是绝对路径 `/usr/bin/java`（Toree 那份见归档的 `kernel.json`），**根本不碰 IDE venv**。
-  ⇒ 洞的性质不变（"要不要 venv"这件事没有判据、只有 id 相等在猜），但**猜错的方向是反的**：
-  真接入之后 scala 那条会拿到 `needsVenv:false`，而那**恰好是对的** —— 于是这个洞今天不咬人，
-  等下一条"确实需要某个懒创建环境"的 kernel 进来才咬。**别因为它暂时不咬就当它不存在。**。
-  这与刚被终审 I-1 关掉的"ready 在生产里恒为 true"是**结构上同一个洞**：区别只是那次有人来看，这次没有人被强制来看。
-  ｜修法归 A2：把"要哪一份环境"做成 `NOTEBOOK_KERNELS` 的字段（例如 `requiresEnv: 'ide-venv' | 'image'`），
-  `status.ts` 按字段判 ⇒ 新增一条 kernel 时**漏掉这个字段就是类型错误**，问题在编译期被回答，而不是等下一轮评审发现。
-  配套判据（同归 A2）：`status.test.ts` 里给 scala 那一行加"venv 缺失 ⇒ ready:false + reason 点名解释器路径"的用例，
-  并按 `runner-coverage` 那条"每个 judgeKind 都有双向往返"的先例，加一条"每个 kernel 都被问过要不要 venv"的覆盖判据。
-  ｜同一条里记一处**已披露的局限**（不是 bug，别当缺陷修）：`server/test/regression/ide-env-isolation.test.ts:52` 的
-  `CREDENTIAL_KEY_RE` 是一条**后缀** allowlist（只认大写键名以 `_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|_KEY` 结尾），
-  所以 `ARENA_X_APIKEY`、`ARENA_X_DSN`、任何小写键名、以及经 `env_file:` 投递的 secret 都不在它眼里。
-  D1 判的是"下一个**长成这个样子**的凭据"（本轮实测：给 arena 的 `environment:` 加一行
-  `ARENA_PROBE_NEXT_TOKEN: x` ⇒ 只有 D1 红、且红在**点名那个键**）。要扩就先扩正则，并同步那条破坏性探针。
 
   [ ] WI-101 **条件账：自包 `IMain` kernel（路径 C）** —— **只有**当 WI-100 落地后 B 的
   `Unknown Error` / 空 `traceback` / 版本常量这三条里任何一条在真界面上变成产品问题才做。
@@ -661,3 +604,5 @@ N-15 `/api/bank` 瘦身（WI-79）、N-16 端口绑回环（WI-78）、N-13 出�
 下一步若没有新需求，就是**日常使用 + 按使用中发现的问题回头修**，而不是继续堆功能（需求堆里没有一条还没被证伪为"用户不需要"）。
 
 - **N-19 再加一家公司的扩充（从 WI-56 拆出来的持续项，2026-10-19）**：六家 ≥30 的目标已达成并收口成 WI-56，"继续扩"这件事需要一个不误导的位置 —— 前置是**先补公司向素材**（JD / 面经 / 业务语境），不是先出题；达标线与报数方式沿用 `content.test.ts` 的"公司维度"那条。
+
+- **N-20 教程期望的 kernel 要做成注册表自带字段（Scala 教程 notebook 的前置账，2026-10-20 记自 WI-91b 计划 §9）**：`tutorials.test.ts` 的执行层今天钉的是"kernel 必须是 `arena-pyspark`" —— 一句**全集断言**，Scala 教程一存在就会撞红。账的内容：把"每篇期望哪条 kernel"做成注册表自带字段（落在 `tutorial-claims.ts` 还是 notebook metadata，做的时候定一处真相，不许两处各写），**不许就地放宽成"pyspark 或 scala"** —— 放宽那一瞬间，"写成镜像自带的 `python3` 照样跑绿"这个红线①的洞就回来了（这正是探索档点名过的那条）。前置条件：`content/notebooks/` 里今天**没有** Scala 教程（Scala kernel 已选得到、跑得动、有容器档闸门，但教程是另一件事）；这条账在那一天到来时才要动。

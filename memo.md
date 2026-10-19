@@ -4014,3 +4014,83 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
 - Toree（WI-100/96/101）仍是"下次单独开一轮"，理由与原文都在板的"已决定"段里，不必重新发现。
 - `/opt/arena-bank-baseline.txt` 是**构建期**的快照：如果将来出现"镜像很旧而 content 很新"的用法，它会把基线放低
   （不会误报，只会少判）—— 这是选择，不是疏漏，已写在 Dockerfile 与脚本注释里。
+
+## 里程碑 BM：WI-91b 整轮 —— Toree 成了页面第二条 kernel，页面/工件/文档/板子四方说实话（2026-10-20）
+
+用户批准执行 `docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`（= 板上 WI-100 的重启窗口）。
+五个任务全部落地：T1 量具、T2 镜像工件、T3 注册表唯一真相（还 WI-96）、T4 容器档闸门、**T5 页面与文档说实话（本档）**。
+红线①全程零触碰：`server/src/exec/**` 与 `server/src/**` 一字未动。
+
+### 做了什么
+
+- **T1**（`c6db718`+`4289a99`）：Toree 把两行解释器注册表打进 stdout、混在 `nbconvert --stdout` 的 JSON 前面 ⇒
+  量具改读**落盘的 executed notebook**（`notebook-evidence.ts`），"读法坏了"与"kernel 坏了"从此是两种红；
+  `scalaKernelProbe.ts` + 正/负两份夹具。（简报文件里那句 `2026-01-10-...` 的路径笔误也在这轮被现场纠正为 `2026-10-10-...`。）
+- **T2**（`b327d2a`+`aa79fc5`）：Toree 0.5.0-incubating 走被 git 跟踪的**清单**（`docker-cache/toree/0.5.0-incubating/toree-artifacts.tsv`，
+  dist 行 sha512+sha256、extract 行 sha256）构建期取件；GATE 1（`unzip -l` 实读条目数 >0 才算，空读数不许冒充通过）/
+  GATE 2（与 /opt/spark/jars 无同名 jar）/ GATE 3（类路径顺序）两侧各判；镜像 2.55→**2.58GB**（+30MB）。
+- **T3**（`9cee1b5`+`b0ead20`）：`NOTEBOOK_KERNELS` 长成 `{ id, needsVenv }`；allow-list、ready、`missingSpecIds`、
+  前后端夹具全部派生自注册表；**按 id 相等的比较链被 `status.test.ts` 判据明令禁止**（WI-96 的账）。
+- **T4**（`035a7e4`+`596ef2a`）：独立容器档阶段「Scala kernel 真跑（WI-91b Task 4）」+ assert-ran `--require-no-skips`。
+  实测：正例 `ok=true cells=4 elapsed=12s`，`doubled=42 / alive=42 / rows=6` 全绿；负例 `cell 1: Unknown Error`，
+  `evalueLen=106`、`traceback=数组 0 项`。副产品：SIGINT handler 首测（3/3、落 nbconvert stderr、不落成 cell error）。
+- **T5（本档）**：
+  ① 页面边界块 5→7 段（summary「7 条边界」、单元层 `boundarySentences` 7→13 串、e2e `toHaveCount(5)→(7)` + 新名词判据
+  `Unknown Error`）——"共用环境 / pip / CPU"三句全部按 kernel 点名，页头那句「kernel 用的是网页 IDE 那份环境」同步改；
+  ② Scala 的 JVM 量级按 `kernel.json` 实写 `-Xmx2g -Dspark.master=local[2]`（不抄 Python 的 `local[2] --driver-memory 512m`）；
+  ③ 报错形状原话进 DOM："报错有，但堆栈帧没有，能看的那句话在错误消息里"（106 字符 / 0 帧）；
+  ④ `language_info.version`：核查确认**没有任何组件渲染它** ⇒ 要求转成判据（单元档三态 textContent+innerHTML 无 `2.12.x`；
+  镜像档 `display_name` 无版本号），破坏性=往页头塞 `2.12.15` 必红；
+  ⑤ 补全/悬浮/中断明写不支持（中断证据 = T4 §9 SIGINT 读数）；
+  ⑥ 构建上下文三处假话改事实：`display_name`「Scala (Toree, WI-91 探索)」→ `Scala (Toree)`、`arena_spike_status` 整键移除
+  换 `arena_kernel_status`、SIGINT 读数落 `arena_interrupt_reading`；`BUILDINFO.md` 两处 + `Dockerfile` 三处注释回事实；
+  新闸门 `notebook-image.test.ts`（标签不含探索字样/不含 2.12.x、spike 键缺席、SIGINT 读数在场）。
+  改名没牵动任何测试字面量 —— T3 的"从工件读 display_name"纪律当场兑现。
+  ⑦ 同族假话顺带清：`README.md` kernel 段按 kernel 分家、`docs/JUDGING.md` 超时段两个 JVM 两组数、
+  `docs/ARCHITECTURE.md` 七段边界 + 两份 kernelspec + "容器档那三组阶段"、A1 设计文档 ②「A2 至今没落地」划线订正。
+- **板**：WI-100/WI-96 进 COMPLETED（推迟决定与原文逐字随迁）；WI-101 条件账原地修订（"不适用"→"可评估、当前未触发"+触发判据）；
+  需求池新增 N-20（每篇教程期望哪条 kernel = 注册表字段，不许放宽成"pyspark 或 scala"）；WI-87/WI-72 整条搬进归档。
+
+**A（Almond 0.15.0）被否 —— 完整证据链（探索档 WI-91 + 里程碑 BF，这是整轮里最值钱的否定）**：
+1. 正例三条判据全绿：跨 cell 状态 `alive=42`、`println` 走 stream、活的 SparkSession `rows=6`；一遍 10.5s；+70MB（93 个 jar 闭包）；断网复测 EXIT=0。
+2. 死于**负例夹具**：编译期错误的 iopub `error` 消息**缺 `traceback` 字段**；
+3. `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 对缺失字段没有兜底（直接下标 KeyError）⇒ 负例夹具**根本跑不了**，
+   `nbclient` 的 `allow_errors=True` 绕不过（坏在格式层，不在执行层）；
+4. **真界面同样是产品事故**：Jupyter 前端自己报 `Kernel message validation error: Missing property 'traceback'`
+   ⇒ 用户写坏代码时看不到报错；
+5. 排序规则①（三条判据成立 + 负例夹具必须可被执行）当场否决；且这件缺陷住在**别人的代码**里，我们改不动；
+6. 对照：B（Toree）负例 `ename/evalue/traceback` 三件齐（`NEGF_EXIT=0`）才胜出 —— 代价是它的四条毛病必须靠我们的
+   工具（T1）与页面（T5）说实话，这轮就是去付那笔代价的；
+7. C（自包 `IMain`）不试（Ruling(W4)）：B 已过①②③，C 只能赢④的体积，代价是自研+长期维护一个 ZMQ kernel；
+   但它唯一结构性优势恰是 A 的死因（error 消息发什么字段我们说了算）⇒ 留条件账 WI-101，触发条件已随 WI-100 落地变为
+   可评估（当前未触发 —— 三条毛病现在都按真实形状写进了页面边界块）。
+
+### 验证表（三档 + 破坏性；退出码全部被看到，没有管道吃码）
+
+| 档 | 命令 | 读数 |
+| --- | --- | --- |
+| 宿主 | `npm run verify:fast` | **`VERIFY_FAST_EXIT=0`**、✓ verify 全部通过（单元 458/36sk、游戏+web 517/3、IDE 120/67、`.env` 哨兵"未被改动"）。诚实记账：首跑在「网页 IDE」红过两条 CDP 用例（`WebSocket 连接失败`），单跑与本阶段重跑都绿 —— 本机负载瞬态，改动不含 `server/src/ide/**`；若复发按 WI-72 纪律取证不当 flaky 关 |
+| 重建 | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --rebuild` | **`REBUILD_EXIT=0`**；整镜像 `--no-cache` 冷构建（T4 §7 没证的半程这轮补上）；新镜像 `534dfeff1599` **2.58GB**；容器内 kernel.json md5==工作树 `93b39fc8…`、display_name 读回 `Scala (Toree)`、烤入 bundle 命中 `Unknown Error` —— 字节是被比的不是被假设的 |
+| 容器 | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` | **`VERIFY_EXIT=0`**、✓ verify 全部通过；矩阵 `158 可判 / 跳过（栈不可用）0`（六栈全 true）；五个 notebook 阶段**各恰好 1 次**；`教程 17 passed / 0 skipped`、`Scala kernel：11 passed / 0 skipped / 11 total ✓`、判题矩阵 `555/11/566`（比 T4 轮 +2 = 本轮 notebook-image 的两条新 it）；`grep -c scala-kernel.test.ts`=0（--exclude 真生效）；`.env` absent 未动 |
+| E2E | `npm run e2e` | **`E2E_EXIT=0`、74 passed (3.3m)**；`notebook-page.spec.ts` 三条全绿（跑的是本轮的 7 段计数与 `Unknown Error` 名词判据；独立 e2e 实例，不占 7799） |
+| 破坏性 | 页面塞 `2.12.15` / kernel.json 三点回坏 / 只删 `arena_interrupt_reading` | 依次 `1 failed (36)`、`2 failed (8)`（点名探索字样与 spike 键）、`1 failed (8)`（SIGINT 单因）；还原 md5 复核；全程未用 `git checkout --` |
+| 棘轮 | `npx vitest run server/test/regression/memory-file-ratchet.test.ts` | 5 passed；COMPLETED 并集 108→110；行级守恒比对 HEAD：丢失 3 行 = 速览三行**有意**替换（一个内核→两条 kernel、88→90 两处计数），历史原文 0 丢失 |
+
+### 已知问题
+
+- 真浏览器验收（完成判据第 1 条）**由控制端执行**：清单在 `task-5-report.md` §7；在它回来之前，三档全绿不等于界面被看过。
+- memo 的追加位置有规矩冲突：`SKILL.md` 与派发词说"顶部（最新在上）"，本文件首行写"最新在下"且 4000 行实践一致 ——
+  本轮随文件自身；统一与否是记忆纪律的账，不在 WI-91b 里顺手改。
+- `99-probe-scala.ipynb` markdown 头里"今天镜像里只有 arena-pyspark 满足它"随接入成历史陈述；夹具文本被形状判据按字节
+  管着，本轮**故意未动**（动它要连带复核 RUN_PLAN 判据，超出射程）。`scalaKernelProbe.ts:10`"探索期一结束就删掉或转正"
+  同批未动（转正已发生，注释作为历史动机仍自洽）。
+- A1 设计文档 §C6 里 Toree 那行写的是 `0.5.0-preview2` 与"没人接"的否决理由 —— 那是被探索档实测推翻的纸面判断，
+  已在文档头部订正块随 A2 一条指回探索档；不再逐句重写历史文档。
+- WI-95 的账没有变：两个 kernel JVM 依旧在仲裁之外（页面与 JUDGING 只是把数说实），CPU 仲裁/空闲回收仍等用户点头。
+
+### 下一步
+
+- 控制端跑 §7 浏览器清单 → 读数回填 task-5-report.md 与板上"敞着的那半条"。
+- Scala 教程 notebook 到来前先做 **N-20**（教程 kernel 声明进注册表）；**不许**就地放宽执行层判据。
+- WI-101（路径 C）仅在 B 的②③④任一变成产品问题时重开；重开先读边界块与 T4 §9。
+- CDP 两条瞬态红若复发：按 WI-72 的取证钩子纪律处理，不当 flaky 关。
