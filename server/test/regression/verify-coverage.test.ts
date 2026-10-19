@@ -1,4 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { config } from '../../src/config.js';
@@ -11,6 +12,10 @@ import { config } from '../../src/config.js';
  * 它判的全是"认领"，所以**认领的反义词也归它判**（WI-103）：一条阶段说 `--exclude X` 的时候，
  * 守卫必须听得见"排除"这半句 —— 把它当成"这条阶段跑了 X"就等于让守卫替坏人说谎。
  * 下面每条判据都走 `stageClaims`（路径命中 **且** 没被这条阶段自己排除），不留旁路。
+ *
+ * **Ruling T4-7 补的最后一档**：文件末尾还判一次"被认领所依赖的闸门工具自己"——
+ * `assert-ran.mjs --require-no-skips` 的语义（合成报告喂进去，红绿两个方向各判一次）。
+ * 判它之前这个开关从没被任何东西跑过，而教程与 Scala kernel 两条阶段都靠它兜"整片 skip 仍 exit 0"。
  */
 
 const ROOT = config.repoRoot;
@@ -492,5 +497,83 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
         '⇒ 改法是**删掉那行申报**（那条阶段设了变量，env 判据本来就过，不需要作者认账），' +
         '**不是**把变量从阶段命令行上摘掉 —— 后者会让这一档真的不再跑',
     ).toEqual([]);
+  });
+});
+
+// ──────────── Ruling T4-7：`assert-ran.mjs --require-no-skips` 自己的**行为**判据 ────────────
+
+/**
+ * 上面全部判"认领与配对"（json 有活着的生产者、env 门控被设了变量的阶段认领），这一档判**被依赖的工具本身**：
+ * `--require-no-skips` 那条分支到底做不做它承诺的事 ——
+ * "含 skip 的报告喂进去 ⇒ 非 0 退出；不含 skip 的 ⇒ 0 退出"。
+ * 判它之前，全仓没有任何东西**执行过这个脚本并检查它的行为**（`verify-coverage` 判配对、
+ * `scala-kernel.test.ts` 判命令行上挂没挂，都不看它做什么）：那条分支坏掉（条件写反、
+ * 没读 skips、退出码丢了），教程与 Scala 两条阶段的"整片 skip 兜底"会一起变成装饰，
+ * 而没有任何东西红，直到下一次真故障。
+ * ⚠ **射程**：判的是脚本语义，不是"每条 env 门控阶段都必须挂这个开关"——
+ *   kernel / embed 那两条阶段压根不产 json，无差别规则会先把它们撞红（这正是"挂没挂"那张回执
+ *   住在 `scala-kernel.test.ts` 而不在这里的原因）。
+ * 喂的是**合成**的 vitest-json（只带脚本真读的字段），落在 `data/test-tmp/` 下的一次性目录里
+ * （隔离纪律照 `status.test.ts` / `notebook-api.test.ts`：先建父目录、每条用例自己 `mkdtemp`、判完就收）。
+ * 绝不读 `data/verify-*.json` 那几份活报告 —— 它们是上一条阶段的遗留，拿它们当判据对象等于判一份会过期的快照。
+ */
+describe('assert-ran.mjs --require-no-skips 的行为判据（Ruling T4-7：开关自己也要被门禁）', () => {
+  /**
+   * 合成一份 vitest json reporter 的报告。字段表是从 `assert-ran.mjs` 的读取点抄的：
+   * `numTotalTests` / `numPassedTests` / `numPendingTests` / `numFailedTests` /
+   * `testResults[].assertionResults[].{status, fullName}` —— 多一个字段都不要，
+   * 判据依赖的字段名与脚本真实读的要一致，否则"脚本改了读法而这条没跟着"会看起来像通过。
+   */
+  function synthReport(passed: number, skipped: number): string {
+    return JSON.stringify({
+      numTotalTests: passed + skipped,
+      numPassedTests: passed,
+      numPendingTests: skipped,
+      numFailedTests: 0,
+      testResults: [
+        {
+          assertionResults: [
+            ...Array.from({ length: passed }, (_, i) => ({ status: 'passed', fullName: `常驻判据 ${i + 1}`, title: `常驻判据 ${i + 1}` })),
+            ...Array.from({ length: skipped }, (_, i) => ({ status: 'skipped', fullName: `容器组判据 ${i + 1}`, title: `容器组判据 ${i + 1}` })),
+          ],
+        },
+      ],
+    });
+  }
+
+  /** 在 `data/test-tmp/` 的一次性目录里跑脚本；退出码与两段输出都是**读数**（非 0 退出不是这里的失败，是被判的对象）。 */
+  function runAssertRan(reportJson: string, extraArgs: string[]): { code: number; stdout: string; stderr: string } {
+    // mkdtemp 不建父目录：`data/test-tmp/` 在新克隆与容器里都不存在（status.test.ts 记过的同一课）。
+    const parent = join(ROOT, 'data', 'test-tmp');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'assert-ran-'));
+    const report = join(dir, 'synthetic-report.json');
+    writeFileSync(report, reportJson, 'utf8');
+    try {
+      const stdout = execFileSync(process.execPath, ['scripts/assert-ran.mjs', report, '合成档', ...extraArgs], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      return { code: 0, stdout, stderr: '' };
+    } catch (err) {
+      const e = err as { status?: number; stdout?: unknown; stderr?: unknown };
+      return { code: e.status ?? -1, stdout: typeof e.stdout === 'string' ? e.stdout : '', stderr: typeof e.stderr === 'string' ? e.stderr : '' };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('含 skip 的报告：带 --require-no-skips ⇒ 非 0 退出且点名被跳条目；不带开关 ⇒ 同一份退 0（红绿对照才证明牙在开关上）', () => {
+    // 8 passed / 3 skipped 是 `scala-kernel.test.ts` 容器组整片被跳掉时的形状（常驻 8 + 容器 3）。
+    const withSkips = synthReport(8, 3);
+    const gated = runAssertRan(withSkips, ['--require-no-skips']);
+    expect(gated.code, '--require-no-skips 对含 skip 的报告退了 0 ⇒ 开关是装饰，"容器组整片被跳掉"的最后一道防线没了（教程与 Scala 两条阶段都靠它）。去查 assert-ran.mjs 的 noSkips 分支，不是把这条判据删掉').not.toBe(0);
+    expect(gated.stderr, '非 0 只是必要条件；消息必须说得出"有 skip、是哪几条"，否则读容器档日志的人仍要自己复跑一遍才知道跳了什么').toMatch(/--require-no-skips/);
+    expect(gated.stderr, '被跳条目的名字要在红话里（`names` 那段枚举不许坏掉）').toContain('容器组判据 1');
+    const ungated = runAssertRan(withSkips, []);
+    expect(ungated.code, '同一份"跑到过 8 条"的报告在**默认判据**（total-skipped>0 即过）下必须退 0 —— 这一半是对照组：少了它，上面那条红可能来自"字段读法漂了"或"整片 skip 那一支被误触发"，而不是开关').toBe(0);
+  });
+
+  it('不含 skip 的报告：带 --require-no-skips ⇒ 退 0 并打印读数（闸门不许把正常路径误红）', () => {
+    const clean = runAssertRan(synthReport(11, 0), ['--require-no-skips']);
+    expect(clean.code, '0 skip 的报告被 --require-no-skips 拒了 ⇒ 判据条件写反；那种闸门会把容器档**永远**撞红，而红久了的闸门等于没有闸门（下一句"先看是不是真故障"就没人信它了）').toBe(0);
+    expect(clean.stdout, '绿路径那句"N passed / M skipped / total ✓"是 verify 日志里给人读的那一行，不许静默消失').toContain('11 passed / 0 skipped');
   });
 });

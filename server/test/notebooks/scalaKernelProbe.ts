@@ -63,8 +63,12 @@ const SPARK_MARKER = 'rows=6';
  * 第一次起 SparkSession（JVM + Spark 的 2.12.18 那套 jar）比 Python 侧更慢，而这里要给三条路径同一个数 ——
  * "这条路太慢所以被判死"与"预算给小了"必须能分开，所以预算是参数而不是散在三处的字面量。
  * cell 级超时按同一个数推导（秒），与 `tutorials.test.ts` 那对常量的推导方式同形。
+ * ⚠ **这个默认值只兜"没显式传 `timeoutMs` 的调用方"**：`scala-kernel.test.ts` 的三处 probe 跑全部显式传它自己的
+ * `RUN_TIMEOUT_MS`（先例是 `tutorials.test.ts` M2 那一课 —— 预算要由调用方传进去，报成别人的数字等于把人赶去查隔壁文件），
+ * 所以它被 export 出去是为了让那边能把"两个数同数"钉成判据（评审 Important 1：这句话曾经只是注释），
+ * 而不是因为那边的行为依赖这个默认值。**别把它改得大于那边的 vitest 预算** —— 那条闸门现在会红。
  */
-const DEFAULT_TIMEOUT_MS = 240_000;
+export const DEFAULT_TIMEOUT_MS = 240_000;
 
 /** 夹具当前的形状：1 个 markdown + 3 个 code。漂了说明夹具被动过，而三处判据的含义也跟着变了。 */
 const EXPECTED_CELLS = 4;

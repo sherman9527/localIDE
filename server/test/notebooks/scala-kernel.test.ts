@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
 import { config } from '../../src/config.js';
-import { formatProbeResult, probeScalaKernel } from './scalaKernelProbe.js';
+import { DEFAULT_TIMEOUT_MS, formatProbeResult, probeScalaKernel } from './scalaKernelProbe.js';
 import { executedNotebookScratchPath, nbconvertCrashEvidence, nbconvertExecuteToFileArgv, readExecutedNotebookFile, removeExecutedNotebookScratch, type ExecutedNotebook } from './notebook-evidence.js';
 
 /**
@@ -32,16 +32,21 @@ import { executedNotebookScratchPath, nbconvertCrashEvidence, nbconvertExecuteTo
  *
  * ① `alive=42` 在 stdout（整行相等，不是子串）⇒ 跨 cell 状态活着；
  * ② `rows=6` 在 stdout ⇒ 真起了一个活的 SparkSession 并且数出 6 行（`rows=60` 不许过）；
- * ③ 负例夹具（摘掉定义那一格）必须报 `error` 且 `alive=42` **不许**出现；
+ * ③ 负例夹具（摘掉定义那一格）必须报 `error` 且 `alive=42` **不许**出现；第一条 error 还必须落在
+ *    `cell 1: ` 上（引用 `doubled` 的那一格就在 0 基下标 1）—— 把失败报到别的 cell（如整本级错误落在 cell 0）
+ *    正是"整本一次性编译再按 cell 切输出"的假 kernel 的形状，负例夹具的存在理由就是抓它；
  * ④ 负例那次报错的 `evalue` 必须是非空字符串 —— 这是 T4-2 补的，理由不是审美：
  *    Toree 缺陷 ② 是 `ename` 恒为 `Unknown Error`、`traceback` 恒为 `[]`，于是 `evalue` 是用户唯一
  *    **能行动**的文本。Task 5 要把"编译错误没有 traceback，有用的文本在 evalue 里"这句话放上页面，
  *    而一句没有闸门垫着的页面话正是本仓库被烧过的那种形状。
  *    ⚠ 这一条要读**原始 notebook**（`notebookEvidence()` 只往上抛 `ename`），所以它是一次**聚焦的**
  *    `readExecutedNotebookFile`，不是第二个提取器；提取器仍是唯一那份。
- * ⑤ 真跑过一次之后，夹具目录 / 仓库根 / 真人笔记目录里不许多出 `metastore_db` / `derby.log` /
- *    `spark-warehouse` —— 本轮实测的 kernel CWD 就是**夹具目录**，所以"今天没落"是当前装配的事实
- *    （catalog 是 in-memory、没开 `enableHiveSupport()`），不是保证。钉成判据的理由写在 `SPARK_SCRATCH_NAMES` 上方。
+ * ⑤ 真跑过一次之后，三个根（夹具目录 / 仓库根 / 真人笔记 seedDir）的**第一层条目**里不许多出
+ *    `metastore_db` / `derby.log` / `spark-warehouse`（扫描只看这三处的顶层 —— 那正是这三样跟着 kernel CWD
+ *    长出来的层级）；并且夹具目录在**跑之前**就必须是干净的 —— 差分判据只判"不许多出"，"本来就有"会被永远
+ *    豁免，而只在负例那两次跑里长出来的泄漏要靠这条绝对判据下一轮才接得住。本轮实测的 kernel CWD 就是
+ *    **夹具目录**，所以"今天没落"是当前装配的事实（catalog 是 in-memory、没开 `enableHiveSupport()`），
+ *    不是保证。钉成判据的理由写在 `SPARK_SCRATCH_NAMES` 上方。
  *
  * ## 门控（T4-3）
  *
@@ -67,20 +72,29 @@ const NOTEBOOK_SERVICE = process.env.ARENA_NOTEBOOK_SERVICE === '1';
 const SCALA_KERNEL_ID = NOTEBOOK_KERNELS.scala.id;
 
 /**
- * 一次真跑的预算（**毫秒**，给 `execFileSync` 的 `timeout`）。与 `scalaKernelProbe.ts` 的默认值同数：
+ * 一次真跑的预算（**毫秒**，给 `execFileSync` 的 `timeout`）。本文件三处 probe 跑（①③ 走探针、④ 走裸
+ * `execFileSync`）全部**显式把它传进去**，没有一处靠探针的默认值 —— 先例是 `tutorials.test.ts` M2 那一课：
+ * 预算要由调用方传进去，报成别人的数字就等于把人赶去查隔壁文件。它与 `scalaKernelProbe.ts` 导出的
+ * `DEFAULT_TIMEOUT_MS` 同数，而"同数"这句话从本轮起**有判据**（常驻那条预算判据直接比这两个数），不再是注释。
  * Scala kernel 冷启动 + 第一次起 SparkSession 比 Python 侧慢，而"这条路太慢所以被判死"与
  * "预算给小了"必须分得开 ⇒ 预算是一个常量，不是散在三处的字面量。
  * cell 级超时按同一个数推导（秒），与 `tutorials.test.ts` 那对常量的推导方式同形。
  */
 const RUN_TIMEOUT_MS = 240_000;
 /**
- * vitest 那一层的预算**必须大于** `execFileSync` 的预算（常驻组判这条不等式）。
+ * vitest 那一层的预算**必须大于真正发出去的 execFileSync 预算**。常驻组判它的方式本轮改了（评审 Important 1：
+ * 旧写法 `IT_TIMEOUT_MS > RUN_TIMEOUT_MS` 是自证 —— IT 就**定义**成 RUN + 60_000，永远不可能红）：现在钉的是
+ * `IT_TIMEOUT_MS > DEFAULT_TIMEOUT_MS`（右边是隔壁文件的独立常量）外加"两者同数"那条相等判据，两个方向都真能红。
  * 反过来的形状是真实的坑：`vitest.config.ts` 的 `testTimeout` 是 60s，照默认值写，一次**正常偏慢**的
  * 冷启动会先被 vitest 打死，报出来的是 `Test timed out in 60000ms` 而不是 `nbconvertCrashEvidence()`
  * 那句"先想超时"（那条函数存在的意义就是把超时说清）。
  */
 const IT_TIMEOUT_MS = RUN_TIMEOUT_MS + 60_000;
-/** cell 级超时（**秒**，nbclient 那层按秒算）；与探针里 `Math.max(30, …)` 那一式同形。 */
+/**
+ * cell 级超时（**秒**，nbclient 那层按秒算）；与探针里 `Math.max(30, …)` 那一式同形。
+ * ⚠ clamp 是运行时的保底护栏，**不许拿它当判据的对象**（评审 Important 1：`Math.max` 会把"RUN 被写成 240"
+ * 这种秒/毫秒写错压成"30，看起来正常"）—— 常驻那条预算判据按**不 clamp 的推导式**判，见下面那条用例。
+ */
 const CELL_TIMEOUT_S = Math.max(30, Math.floor(RUN_TIMEOUT_MS / 1000));
 
 /** 「Scala kernel 真跑」那条阶段的标签与 assert-ran 的打印标签、以及那份 json 报告的相对路径（常驻组按这些回指 `verify.sh`）。 */
@@ -162,11 +176,6 @@ function rawErrorOutputs(nb: ExecutedNotebook): Array<{ index: number; ename: un
   return out;
 }
 
-/** 一次负例真跑的**实测记录**（报告要贴真读数，不是"应该长这样"；这一档一次只有一行，不是日志转储）。 */
-function describeErrorOutputs(errors: Array<{ index: number; ename: unknown; evalue: unknown; traceback: unknown }>): string {
-  return errors.map((e) => `cell ${e.index}: ename=${JSON.stringify(e.ename)} evalueLen=${typeof e.evalue === 'string' ? e.evalue.length : '非字符串'} traceback=${Array.isArray(e.traceback) ? `数组 ${e.traceback.length} 项` : JSON.stringify(e.traceback)}`).join('\n  ');
-}
-
 /**
  * Spark / Derby 那些"跟着 JVM 的 CWD 走"的落盘产物名（本轮 T4-5 ② 实测：Toree 那个 JVM 的 CWD 就是
  * **夹具所在的目录** `/app/server/test/notebooks/fixtures`，因为 nbclient 用 notebook 的目录当 kernel 的 cwd）。
@@ -179,7 +188,11 @@ function describeErrorOutputs(errors: Array<{ index: number; ename: unknown; eva
  */
 const SPARK_SCRATCH_NAMES = ['metastore_db', 'derby.log', 'spark-warehouse'];
 
-/** 三个根（夹具目录 = 实测的 kernel CWD、仓库根、真人笔记的 seedDir）里那些名字的命中。 */
+/**
+ * 三个根（夹具目录 = 实测的 kernel CWD、仓库根、真人笔记的 seedDir）里那些名字的命中。
+ * ⚠ **射程**：只看三个根的**顶层条目**，不递归 —— 这三样产物跟着 kernel CWD 就长在这一层，
+ * 而递归扫仓库根会把整棵 `content/**` 拖进每次真跑。判据的话只说"第一层"，不许说成"整个仓库都没有"。
+ */
 function sparkScratchEntries(): string[] {
   const roots = [FIXTURE_DIR, config.repoRoot, config.notebook.seedDir];
   const found: string[] = [];
@@ -224,9 +237,10 @@ interface VitestStage {
  * 把 `verify.sh` 里的 vitest 阶段拆成"跑哪些路径 / 排除哪些 / 设了哪些变量"。
  * ⚠ **主守卫是 `server/test/regression/verify-coverage.test.ts`**（孤儿文件、`--exclude` 要有别人接、
  * env 门控必须被"设了那个变量"的阶段认领 —— 它判所有文件）。这里重复一份窄解析不是为了取代它，
- * 而是因为 `verify-coverage` **不看** `--require-no-skips`：全仓 grep 过，那个开关今天只有
- * `assert-ran.mjs` 自己与被测阶段命令行认识它 ⇒ "摘掉 `--require-no-skips`" 这一串在所有既有守卫里
- * 一个都不红（Task 4 破坏性验证 ② 的实测就是它）。所以本文件自己收一张回执，红话由这里说。
+ * 而是因为 `verify-coverage` 判的是**认领与配对**，不判"我们这条阶段的命令行上挂没挂 `--require-no-skips`"
+ * ⇒ "摘掉这一个开关"在所有既有守卫里一个都不红（Task 4 破坏性验证 ② 的实测就是它）。
+ * （开关**本身的语义**从 Ruling T4-7 起由 `verify-coverage` 的行为判据钉住了 —— 合成报告喂脚本、两个方向各判一次；
+ * 但那条判据看不见 `verify.sh`，"挂没挂"这张回执仍然只能由本文件自己收，红话由这里说。）
  */
 function vitestStages(script: string): VitestStage[] {
   const out: VitestStage[] = [];
@@ -278,18 +292,25 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('Scala kernel 在容器里�
    */
   it('默认夹具：alive=42 与 rows=6 都在（整行相等），且零 error', async () => {
     const scratchBefore = sparkScratchEntries();
-    const r = await probeScalaKernel(SCALA_KERNEL_ID);
-    console.log(`[scala-kernel] 默认夹具读数：\n${formatProbeResult(r)}`);
+    // 绝对事前判据（评审 Minor 3 补）：差分判据（下面 ⑤）只判"不许多出"，"本来就有"会被它永远豁免；
+    // 而 ③④ 那两次负例跑**同样起 SparkSession**，只在负例里长出来的泄漏要等**下一轮**落进 scratchBefore
+    // 才有人接 —— 接住它的就是这一行。夹具目录是实测的 kernel CWD，它的顶层在跑之前就必须是干净的。
+    const beforeFixture = scratchBefore.filter((p) => p.startsWith(FIXTURE_DIR));
+    expect(beforeFixture, `跑之前就有一样 Spark/Derby 的落盘产物躺在**夹具目录顶层**（实测的 kernel CWD）：${JSON.stringify(beforeFixture)} ⇒ 这说的不是"这次泄漏了"，是"这里已经脏了，而差分判据从此对它豁免"。` + '查是哪一档把它写出来的（本档 ③④ 的负例跑同样起 SparkSession），修法同下面 ⑤：给那条 kernel 的装配指 `-Dderby.system.home=` 与 warehouse 到 data 下，并把脏的东西手动清掉 —— **不是**把名字从名单里划掉').toEqual([]);
+    // 预算**显式传进去**（评审 Important 1，先例是 tutorials.test.ts 的 M2）：不传 = 吃探针私有的默认值，
+    // "这条路到点说的是谁的秒数"就取决于隔壁文件那一行有没有动过。
+    const r = await probeScalaKernel(SCALA_KERNEL_ID, undefined, RUN_TIMEOUT_MS);
     expect(r.stateSurvived, `stdout 里没有**整行等于** alive=42 的条目 ⇒ 跨 cell 状态没活过来（"编译一段跑一段"那种分段编译器就长这样）。读数：\n${formatProbeResult(r)}`).toBe(true);
     expect(r.sparkSession, `stdout 里没有**整行等于** rows=6 的条目 ⇒ 没有真起一个活的 SparkSession 并数出 6 行（rows=60 不算，那条把 range 的 id 之和与行数混掉的坏法就是这么放过去的）。读数：\n${formatProbeResult(r)}`).toBe(true);
     expect(r.errors, `有 cell 抛异常/前提不成立（cell N: … 是数据，probe: … 是这一档的接线坏了 —— 后者不要去处查 Scala）：\n${formatProbeResult(r)}`).toEqual([]);
     // 结构读数：落盘那份**整本** notebook 的 cell 数。它判的是"这次真跑的就是这把尺子"，不是探针的 ok 公式
     // （`ok` 由上面三条决定，再判它一次是一条永远不会红的装饰 —— 本仓库管那种形状叫"装饰性判据"）。
     expect(r.cells, `执行后的 notebook 读出 ${r.cells} 个 cell，不是 4 ⇒ 要么夹具变了，要么落盘/读法只拿到半本 —— 上面那两条 marker 的含义跟着漂。读数：\n${formatProbeResult(r)}`).toBe(4);
-    // ⑤ 落点（T4-5 ② 钉成的判据）：真起过一次 SparkSession 之后，源码树/夹具目录/真人笔记目录里不许多出
-    // Spark 的那三样产物。跑之前先记一份、跑之后比一份 —— 比"只查事后"多一层：它把"本来就有"与"这次长出来的"分开。
+    // ⑤ 落点（T4-5 ② 钉成的判据）：真起过一次 SparkSession 之后，三个根的**第一层**里不许多出 Spark 的那三样
+    // 产物（扫描不递归，射程写在 `sparkScratchEntries` 上）。跑之前先记一份、跑之后比一份 —— 比"只查事后"多一层：
+    // 它把"本来就有"与"这次长出来的"分开；而"本来就有"那一半由上面那条绝对判据兜，两条合起来才封死。
     const scratchAfter = sparkScratchEntries();
-    expect(scratchAfter, `Scala kernel 真跑过一次之后，这几个根里出现了 Spark/Derby 的落盘产物：${JSON.stringify(scratchAfter)}（跑之前是 ${JSON.stringify(scratchBefore)}）` + ' ⇒ 实测的 kernel CWD 就是夹具目录，所以 metastore_db / derby.log 会落在**源码树**里（dev 容器还把源码 bind 出去 = 直接落进工作树）。' + '改的是那条 kernel 的装配（照 arena-pyspark 那份 kernel.json 的写法给 `-Dderby.system.home=` 指到 data 下，并把 warehouse 指到 config.notebook.warehouseDir），**不是**把这三个名字从名单里划掉').toEqual(scratchBefore);
+    expect(scratchAfter, `Scala kernel 真跑过一次之后，三个根（夹具目录 / 仓库根 / seedDir）的**顶层**出现了 Spark/Derby 的落盘产物：${JSON.stringify(scratchAfter)}（跑之前是 ${JSON.stringify(scratchBefore)}）` + ' ⇒ 实测的 kernel CWD 就是夹具目录，所以 metastore_db / derby.log 会落在**源码树**里（dev 容器还把源码 bind 出去 = 直接落进工作树）。' + '改的是那条 kernel 的装配（照 arena-pyspark 那份 kernel.json 的写法给 `-Dderby.system.home=` 指到 data 下，并把 warehouse 指到 config.notebook.warehouseDir），**不是**把这三个名字从名单里划掉').toEqual(scratchBefore);
   }, IT_TIMEOUT_MS);
 
   /**
@@ -298,12 +319,16 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('Scala kernel 在容器里�
    * （单看这一份的红什么都证明不了 —— 一条连 Scala 都不认的 kernel 也红）。
    * ⚠ `errors` 里要的是 `cell N: …` 那一族。`probe: …` 那一族说的是**判据的前提**不成立
    * （nbconvert 没跑起来 / 落盘结果读不出 / scratch 没删净），那种红去处查接线，不是查 Scala。
+   * ⚠ 还有一条**下标**判据（评审 Important 2 补的）：第一条 error 必须落在 `cell 1: ` 上 ——
+   *   "有一条 error"不挑位置的话，一条把整本级错误报在 cell 0 的 kernel（正是假 kernel 的形状：
+   *   一次性编译整本、错误归不到"引用未定义符号的那一格"）会照样绿。常驻那条"引用 doubled 的
+   *   code cell 在 0 基下标 1"的判据回指的就是这里。
    */
   it('负例夹具（摘掉定义那一格）：必须报 error，且 alive=42 不许出现', async () => {
-    const r = await probeScalaKernel(SCALA_KERNEL_ID, NEGATIVE_FIXTURE);
-    console.log(`[scala-kernel] 负例夹具读数：\n${formatProbeResult(r)}`);
+    const r = await probeScalaKernel(SCALA_KERNEL_ID, NEGATIVE_FIXTURE, RUN_TIMEOUT_MS);
     expect(r.errors.length, `负例一条 error 都没有 ⇒ 要么 kernel 把"未定义符号"吞成了 warning/正常输出，要么它压根没在执行这份夹具。读数：\n${formatProbeResult(r)}`).toBeGreaterThan(0);
     expect(r.errors.filter((e) => e.startsWith('probe: ')), `这一档的**前提**不成立（下面这些是接线故障，不是 Scala 的结果；先查 kernel 注册与落盘读法，再谈这份负例）。读数：\n${formatProbeResult(r)}`).toEqual([]);
+    expect(r.errors[0], `第一条 error 不是落在 \`cell 1: \` 上（实际第一条：${JSON.stringify(r.errors[0])}）⇒ kernel 把"未定义符号"的失败报到**别的 cell** 去了：整本级错误落在 cell 0、或错误归到无关的格 —— "摘掉定义那一格"的失败按 cell 归不出位置，正是"整本一次性编译再按 cell 切输出"的假 kernel 的形状（本里程碑唯一不能放过的那一种，负例夹具的存在理由就是抓它）。另一种坏法是有人往夹具里插了格/改了引用格的位置 —— 常驻那条"引用 doubled 的 code cell 在 0 基下标 1"会同时红，两处红说的是同一件事，先查夹具。读数：\n${formatProbeResult(r)}`).toMatch(/^cell 1: /);
     expect(r.stateSurvived, `负例里居然打出了 alive=42 ⇒ 这份 notebook 的历史里从没绑定过 doubled，能做到这件事的只有"整本一次性编译再按 cell 切输出"的假 kernel（本里程碑唯一不能放过的那一种）。读数：\n${formatProbeResult(r)}`).toBe(false);
   }, IT_TIMEOUT_MS);
 
@@ -313,8 +338,9 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('Scala kernel 在容器里�
    * 参数、选址、收尾删除全部走 `./notebook-evidence.ts` 的同一套公共件 —— 不写第二个读取器。
    * ⚠ 这一条**故意不判**"traceback 必须是空数组"：那是 Toree 缺陷 ② 的现状，不是本仓库要的不变量
    *    —— 哪天上游把 traceback 补上了，页面那句话要跟着改，但"evalue 里有可用文本"仍然成立。
-   *    现状的读数（`ename` / `evalue` 长度 / traceback 项数）由下面那行 `console.log` 记进验证日志，
-   *    是**证据**而不是判据。
+   *    现状的读数（`ename` / `evalue` 长度 / traceback 项数）**不在闸门里打印**（评审 Minor 6：绿路径要安静，
+   *    判据是 `tutorials.test.ts` 那档的形状 —— 它绿跑一行 `console.log` 都没有；红了各条消息自带现场读数）。
+   *    要一份现状读数时用一次性脚本走同一套公共件收集，别为它把日志转储常驻进每次容器档。
    */
   it('负例的 error 必须带非空 evalue（页面那句"有用的文本在 evalue 里"不许是空话）', () => {
     const executedPath = executedNotebookScratchPath('wi91b-task4-evalue');
@@ -333,13 +359,16 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('Scala kernel 在容器里�
       scratchLeft = !removeExecutedNotebookScratch(executedPath);
     }
     // 断言在 try/finally **之外**（形状照 embed.test.ts 的收尾删除判据）：finally 里的断言会盖掉 try 里真正的坏点。
-    if (crash !== null) throw new Error(`nbconvert 没跑起来 ⇒ evalue 这一条判据没有对象。${crash}`);
-    if (nb === null) throw new Error('nbconvert 退了 0 但落盘的执行结果读不出来 ⇒ evalue 这一条没有对象（那一层的接线话由 readExecutedNotebookFile 自己说，这里不替它编）。');
+    // ⚠ 而 crash 也不许反过来盖掉泄漏（评审 Minor 5）：旧写法里 throw 排在 expect(scratchLeft) 前面，
+    //   "崩了且漏了"只会报崩，泄漏那半永远说不出话。探针自己的形状是**无条件**把 `probe: scratch 没删净`
+    //   推进 errors（scalaKernelProbe.ts 末尾那段）—— 这里对齐它：crash 路若同时有泄漏，两句话都在，先因后果。
+    const scratchComplaint = scratchLeft ? `另外：scratch 没删净，${executedPath} 还留在实例的数据目录里（WI-40 隔离纪律；先查它为什么删不掉，别把它读成"这条 kernel 不行"）。` : '';
+    if (crash !== null) throw new Error(`nbconvert 没跑起来 ⇒ evalue 这一条判据没有对象。${scratchComplaint}${crash}`);
+    if (nb === null) throw new Error(`nbconvert 退了 0 但落盘的执行结果读不出来 ⇒ evalue 这一条没有对象（那一层的接线话由 readExecutedNotebookFile 自己说，这里不替它编）。${scratchComplaint}`);
     expect(scratchLeft, `scratch 没删净：${executedPath} 还留在实例的数据目录里（WI-40 隔离纪律）。先去查它为什么删不掉（权限/句柄），别把它读成"这条 kernel 不行"`).toBe(false);
 
     const errors = rawErrorOutputs(nb);
     expect(errors.length, '负例这份执行后的 notebook 里没有 `output_type === "error"` 的条目 ⇒ 这一条判据没有对象。上面那条负例用例判的是"必须有 error"，两条都红说的是同一件事').toBeGreaterThan(0);
-    console.log(`[scala-kernel] 负例 evalue 实测（证据，不是判据）：\n  ${describeErrorOutputs(errors)}`);
     for (const e of errors) {
       expect(typeof e.evalue, `cell ${e.index} 的 evalue 不是字符串（实际类型 ${typeof e.evalue}，值 ${JSON.stringify(e.evalue)?.slice(0, 120)}）⇒ 页面那句"有用的文本在 evalue 里"在这里是假话，Task 5 的文案要改，不是把这条判据删掉`).toBe('string');
       expect((e.evalue as string).trim() !== '', `cell ${e.index} 的 evalue 是空串/全空白 ⇒ 用户拿到的是"Unknown Error + 空 evalue + 空 traceback"三件套，那一句页面文案就是空话。修的是 kernel 的报错通路（或改文案），不是删这条判据`).toBe(true);
@@ -435,6 +464,9 @@ describe('Scala kernel 闸门的常驻判据（宿主也跑）', () => {
    * 并且就住在 `nb.cells` 的 0 基下标 1 上。判下标不是为了好看：这份文件是**反面**判据的载体
    * （"摘掉定义那一格"是它相对主夹具唯一的差异），有人再插一格进去，它就变成了另一份 notebook，
    * 而容器组那条"负例必须报 error"的含义会跟着换对象 —— 那种坏法在容器里可能照样红、照样绿，只有这里说得清。
+   * ⚠ 下面那条下标判据（`refIndex` 必须为 1）**现在有了第二个判者**：容器组 ③ 直接判"第一条 error 落在
+   *   `cell 1: `"（评审 Important 2 补的 —— 在它落地之前，本条的消息曾引用一条不存在的容器档判据）。
+   *   两处红互相回指、说的是同一件事：下标变了，容器那条的期望要跟着这里一起改。
    */
   it('负例夹具还在，且它确实"引用 doubled 而全本没定义过"（一次性编译的假 kernel 没有退路）', () => {
     expect(existsSync(NEGATIVE_FIXTURE), `负例夹具不在 ${NEGATIVE_FIXTURE} ⇒ 判据 ③④ 没有对象`).toBe(true);
@@ -445,7 +477,7 @@ describe('Scala kernel 闸门的常驻判据（宿主也跑）', () => {
     expect(cells.some((c) => c.source.includes('val doubled')), '负例夹具里出现了 `val doubled` ⇒ 它不再是负例：主夹具与它给出同样的读数，"不是整本一次性编译"这句话就没有对照了').toBe(false);
     const refIndex = cells.findIndex((c) => c.cellType === 'code' && c.source.includes('doubled'));
     expect(refIndex, '负例夹具里没有引用 doubled 的 code cell ⇒ 这份文件与主夹具的差异已经不是"摘掉定义"').toBeGreaterThan(-1);
-    expect(refIndex, '引用 doubled 的那个 code cell 不在 0 基下标 1 ⇒ 容器组那条"第一条 error 落在 cell 1"的含义变了，跟着这里一起改').toBe(1);
+    expect(refIndex, '引用 doubled 的那个 code cell 不在 0 基下标 1 ⇒ 容器组 ③ 那条"第一条 error 落在 `cell 1: `"的下标判据的含义变了（两处必须一起改；那条判据在容器组里，红在真 Toree 上，这条红在盘上字节）').toBe(1);
     expect(cells[refIndex]!.source.includes('alive='), '引用 doubled 的那一格不打 alive ⇒ 判据 ③（alive=42 不许出现）在这份夹具上没有对象').toBe(true);
   });
 
@@ -467,19 +499,37 @@ describe('Scala kernel 闸门的常驻判据（宿主也跑）', () => {
     ).toEqual([]);
   });
 
-  /** 预算的两层关系（形状照 `tutorials.test.ts` 那条参数形状判据）。 */
-  it('本档的预算：vitest 那一层大于 execFileSync 那一层，cell 级超时由毫秒预算按秒推导且落在合理区间', () => {
-    expect(IT_TIMEOUT_MS, `vitest 的预算（${IT_TIMEOUT_MS}）必须大于 execFileSync 的（${RUN_TIMEOUT_MS}），否则先打死的是 vitest，报出来的是 "Test timed out"（说不到那句"先想超时"）`).toBeGreaterThan(RUN_TIMEOUT_MS);
-    const seconds = CELL_TIMEOUT_S;
-    expect(seconds >= 30 && seconds <= 600, `cell 级超时推导出来是 ${seconds} 秒，不在 30~600 之间 ⇒ 单位写错或 RUN_TIMEOUT_MS 的量级漂了（它是毫秒）`).toBe(true);
+  /**
+   * 预算的层层关系（评审 Important 1 重写；形状照 `tutorials.test.ts` 那条参数形状判据，先例是它 M2 的
+   * "预算要由调用方传进去"）。旧版两条都有同一个病，这里逐条说清换成了什么：
+   * ① `IT_TIMEOUT_MS > RUN_TIMEOUT_MS` 是**自证** —— IT 就定义成 RUN + 60_000，这条永远不可能红。
+   *    现在钉的是 `IT_TIMEOUT_MS > DEFAULT_TIMEOUT_MS`：右边是隔壁文件导出的**独立常量**，
+   *    探针默认漂高超过 vitest 预算 ⇒ 红（旧版这种改动全绿，而报出来的会是 vitest 的 "Test timed out"，
+   *    正是它红话里声称要防的形状）；RUN 与 DEFAULT 的**相等**另判一条（注释里那句"同数"从此有判据）。
+   * ② `CELL_TIMEOUT_S` 的区间判据被 `Math.max(30, …)` 的 clamp 压住了**低方向** —— 把 RUN_TIMEOUT_MS 写成
+   *    240（那条红话自己点名的秒/毫秒写错）推出 30、IT 推 300，旧版两条全绿。现在按**不 clamp 的推导式**
+   *    `Math.floor(RUN_TIMEOUT_MS / 1000)` 判区间（写成 240 推出 0 ⇒ 红；写成 240_000_000 推出 240000 ⇒ 红），
+   *    外加一条"实际发给 nbconvert 的秒数必须等于那个不 clamp 的推导值"—— clamp 若悄悄吞掉错推导，
+   *    发出的数与推导的数当场分家。clamp 本体留在 `CELL_TIMEOUT_S` 当运行时护栏（与探针同形），只是不再当判据对象。
+   */
+  it('本档的预算：量级、跨文件同数、vitest 层大于探针默认、实发秒数等于不 clamp 的推导 —— 四个都能红', () => {
+    const derivedSeconds = Math.floor(RUN_TIMEOUT_MS / 1000);
+    expect(derivedSeconds >= 30 && derivedSeconds <= 600, `RUN_TIMEOUT_MS 是**毫秒**预算，不 clamp 推导出的秒数是 ${derivedSeconds}，不在 30~600 之间 ⇒ 单位写错（把它写成 240 想表达 240 秒就是这种红）或量级漂了（×1000 是另一个方向）。` + '⚠ 这里故意**不判 CELL_TIMEOUT_S**：Math.max(30, …) 会把同一种错压成"30，看起来正常"（旧版就是被这条 clamp 挡掉了低方向）').toBe(true);
+    expect(DEFAULT_TIMEOUT_MS, `scalaKernelProbe.ts 导出的默认预算是 ${DEFAULT_TIMEOUT_MS}，本文件的 RUN_TIMEOUT_MS 是 ${RUN_TIMEOUT_MS} ⇒ 注释里那句"同数"成了假话。` + '本档的行为**不依赖**这个默认值（三处 probe 跑都显式传 RUN_TIMEOUT_MS，先例是 tutorials.test.ts 的 M2），所以两个数分家不会被跑出来发现 —— 只能靠这条判据发现。改法是**带着理由**把两处一起对齐，不是留一个孤儿数').toBe(RUN_TIMEOUT_MS);
+    expect(IT_TIMEOUT_MS, `vitest 层预算（${IT_TIMEOUT_MS}）必须大于探针默认（${DEFAULT_TIMEOUT_MS}）：反过来的形状就是 "vitest 先把测试打死、报出来的是别人的数字"（Test timed out，说不到 nbconvertCrashEvidence 那句"先想超时"）。` + '这条不是自证：右边是隔壁文件的独立常量，谁漂了谁红').toBeGreaterThan(DEFAULT_TIMEOUT_MS);
+    const argv = nbconvertExecuteToFileArgv(DEFAULT_FIXTURE, '/tmp/wi91b-budget-shape-only.ipynb', CELL_TIMEOUT_S, SCALA_KERNEL_ID);
+    const sent = argv.filter((a) => a.startsWith('--ExecutePreprocessor.timeout='));
+    expect(sent, '本档共用的 argv 构造器不再发 `--ExecutePreprocessor.timeout=` ⇒ cell 级预算退成 nbclient 默认的 30s，上面那些推导全部空转（这条与 `tutorials.test.ts` 的参数形状判据同一族）').toHaveLength(1);
+    expect(Number(sent[0]!.split('=')[1]), `实际发给 nbconvert 的 cell 超时（${sent[0]}）与不 clamp 的推导（${derivedSeconds}s）不相等 ⇒ 要么 RUN_TIMEOUT_MS 的量级错了被 clamp 吞掉，要么 CELL_TIMEOUT_S 不再是那个推导式 —— 两种都要在常驻档就红，不等容器里跑一次真 Toree 才发现`).toBe(derivedSeconds);
   });
 
   /**
    * `verify.sh` 的认领回执（T4-3/T4-4）。四种坏法各红一条：
    * ① 专门阶段整条没建（本文件不在任何阶段的**位置参数**里）；
    * ② 建了但命令行上没设那两个门控变量（容器里"整片 skip 仍 exit 0"）；
-   * ③ 建了、变量也设了，但没配 `assert-ran … --require-no-skips`（**全仓今天没有任何一条既有守卫看这个开关**，
-   *    所以这一条是本文件自己收的账 —— 破坏性验证 ② 的实测就是它）；
+   * ③ 建了、变量也设了，但没配 `assert-ran … --require-no-skips` —— 那个开关**本身的语义**从 Ruling T4-7 起
+   *    已由 `verify-coverage` 的行为判据钉住（合成报告喂脚本，有跳必非 0、无跳必须 0），但那条判据判的是脚本，
+   *    看不见 `verify.sh` ⇒ "我们这条阶段挂没挂它"仍是本文件自己收的账（破坏性验证 ② 的实测就是它）；
    * ④ 建了专门阶段却忘了在容器分支 `--exclude` 本文件（于是"单元测试"阶段扫目录时**再起一次**真 Toree JVM）。
    * ⚠ 主守卫是 `regression/verify-coverage.test.ts`（它判所有文件的孤儿/排除/env 三件事）；这里只收本文件这张回执，
    *    解析器因此写得很窄，不许长成第二份通用实现。
@@ -502,7 +552,7 @@ describe('Scala kernel 闸门的常驻判据（宿主也跑）', () => {
     const companions = assertRanCommands(VERIFY_SH).filter((c) => c.includes(RAN_REPORT));
     expect(companions.length, `${RAN_REPORT} 这份报告没有被任何一条 assert-ran 阶段引用 ⇒ "整片 skip 仍 exit 0"这件事没人判`).toBe(1);
     const companion = companions[0]!;
-    expect(companion, '那条 assert-ran 没带 --require-no-skips ⇒ 本文件的常驻组在容器里也绿，"容器组整片被跳掉"会看起来像 10 passed / 4 skipped 而 vitest exit 0（摘掉这一个开关今天不会红在任何既有守卫上，红只能红在这里）').toContain('--require-no-skips');
+    expect(companion, '那条 assert-ran 没带 --require-no-skips ⇒ 本文件的常驻组在容器里也绿，"容器组整片被跳掉"会看起来像 8 passed / 3 skipped / 11 total（本文件的形状：常驻 8 条 + 容器 3 条）而 vitest exit 0。' + '摘掉这一个开关仍只会红在这里：`verify-coverage` 那条新判据（Ruling T4-7）钉的是开关本身的语义，它不看 verify.sh 挂没挂').toContain('--require-no-skips');
     expect(companion, `那条 assert-ran 的打印标签里没有「${ASSERT_RAN_LABEL}」⇒ 报告里那一句认不出是哪一档`).toContain(ASSERT_RAN_LABEL);
 
     const excluded = stages.filter((s) => s.excludes.includes(THIS_FILE_REL));
