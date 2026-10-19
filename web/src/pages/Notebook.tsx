@@ -254,7 +254,7 @@ export default function Notebook() {
 
       {/* 横幅区：状态行之外所有"此刻还有话要说"的都堆在这一个壳里，空则整块不渲染（Group 的规矩）。
           open 解释句 / guardRefused（原 tokenless，WI-98 改了含义没让话消失）/ down / 两条 error /
-          missingSpec / blocked 那句原因 / prepareLog / seedError —— 每条各修一件不同的事，
+          missingSpecIds / blocked 那句原因 / prepareLog / seedError —— 每条各修一件不同的事，
           合并即"有一件事没人说"；逐句措辞由测试钉着。（原 `nolink` 那条随状态删除，见文件顶注释。） */}
       <Group>
         {/* 逃生链接的解释句：原来贴在按钮旁边，按钮上工具条后话留在原地（"这把/上面那把"指的就是

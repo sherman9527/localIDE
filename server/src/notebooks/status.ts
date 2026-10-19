@@ -302,10 +302,10 @@ export async function notebookStatus(input: {
      * 这一页是**入口**不是 Jupyter 本身，它没有义务替 Jupyter 转发一份它自己的全局清单。
      *
      * "那要是我们自己的 kernel 没注册了呢"——不靠"全列"发现：`Notebook.tsx` 的
-     * `missingSpec`（探到的表里缺了注册表里的**哪条就点哪条** ⇒ `notebook-spec-missing` 那条横幅，
+     * `missingSpecIds`（探到的表里缺了注册表里的**哪条就点哪条** ⇒ `notebook-spec-missing` 那条横幅，
      * 文案是"多半是镜像没按 Dockerfile 重建 ⇒ ./start.sh --rebuild"）正是为那一件事准备的。
-     * ⚠ 过滤让它变准的是**徽标那一排**，不是 `missingSpec`（收尾轮 N7 更正过这句）：
-     * `missingSpec` 判的是"注册表条目在不在探到的表里"这一件事（WI-91b Task 3 之前它只 key 在
+     * ⚠ 过滤让它变准的是**徽标那一排**，不是 `missingSpecIds`（收尾轮 N7 更正过这句）：
+     * `missingSpecIds` 判的是"注册表条目在不在探到的表里"这一件事（WI-91b Task 3 之前它只 key 在
      * pyspark 一条上，此后逐条点名，半接入的镜像不会再少点一条的名）；过滤掉别的条目不改它的真假；
      * 真正被过滤修好的是——以前镜像自带的 python3 挂着绿徽标，那张表看着像"有 kernel 可用"，
      * 而它正是红线①要拦在判题环境外面的那个解释器。
@@ -345,6 +345,16 @@ export async function notebookStatus(input: {
       const needsVenv = ARENA_KERNELS_BY_ID.get(id)!.needsVenv;
       const kernel: NotebookKernel = { id, label: v.spec?.display_name ?? id, ready: !needsVenv || venvReady };
       if (needsVenv && !venvReady) {
+        /**
+         * ⚠ 评审 Important-1：这半句里的"别的登记条目"**必须从注册表派生**，不许写死"另一条是 Scala（Toree）、
+         * 它跑不了 Python"。理由不是文风：这段话住在**通用**分支（`needsVenv && !venvReady`）里，说的却是
+         * "整张注册表长什么样"——注册表长出第三条、或把 scala 那条改名/删掉，写死的那句立刻变谎，
+         * 而钉它的旧断言（`toMatch(/Scala/)`，钉的是**一个词**）跟着假绿：漂移没人看得见。
+         * 于是这里只声明"对任意注册表内容都为真"的事：其余条目各是独立的一条 kernel，切过去既变不出
+         * 这份 venv、也修不了这一条的没就绪。配套判据：`server/test/notebooks/status.test.ts` 的期望值
+         * 逐条点名 `NOTEBOOK_KERNELS` 里除被测这条之外的每一条目（派生，不是钉字符串）。
+         */
+        const otherRegistered = ARENA_KERNEL_IDS.filter((other) => other !== id);
         kernel.reason =
           `环境还没建：这条 kernel 的解释器指向 IDE 那份 venv（${venvInterpreter}），而它还不存在 —— ` +
           'venv 是**懒创建**的，镜像里从来不含它，所以"服务在跑"与"能跑代码"是两件事。' +
@@ -352,7 +362,9 @@ export async function notebookStatus(input: {
           '在那之前**别拿别的解释器兜底**：这一页只列 arena 登记过的 kernel，' +
           '镜像自带的那个系统解释器已被 allow-list 滤掉、压根不会出现在表里 —— ' +
           '它才是 `!pip3 install` 会把包装进判题那套环境（红线①）的那一个；' +
-          '而登记在册的另一条 kernel 是 Scala（Toree），它跑不了 Python。';
+          (otherRegistered.length
+            ? `而这一条之外登记在册的还有 ${otherRegistered.join('、')}：它们各是独立的条目，切过去既变不出这份 venv，也修不了这一条的"没就绪"。`
+            : '而注册表里除这一条之外没有别的条目：这一页压根没有第二条 kernel 可以"兜底"。');
       }
       return kernel;
     });

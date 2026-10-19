@@ -86,6 +86,28 @@ const SHIPPED_KERNEL_SPEC = JSON.parse(readFileSync(SHIPPED_KERNEL_FILE, 'utf8')
   env?: Record<string, string>;
   metadata?: Record<string, unknown>;
 };
+/**
+ * 评审 Minor-5：scala 那条的标签**同样只有一份真相** —— `docker/jupyter/kernels/<id>/kernel.json`。
+ * 本文件与 `web/test/notebook.test.tsx` 过去各抄了一份手打的 `display_name`，而且**已经抄劈过**
+ * （这边写 'Scala (Toree, WI-91 探索)'、那边写 'Scala (Toree)'）：夹具抄错不会让任何断言红，
+ * 它只会让"标签是从 spec.display_name 解出来的"那条判据去判一个镜像里根本不存在的字符串。
+ * 读工件 = 漂移只能发生在工件那一处（`display_name` 的改名归 Task 5，本文件不碰）。
+ */
+const SCALA_KERNEL_FILE = join(config.repoRoot, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.scala.id, 'kernel.json');
+if (!existsSync(SCALA_KERNEL_FILE)) {
+  throw new Error(
+    `${SCALA_KERNEL_FILE} 不存在 ⇒ NOTEBOOK_KERNELS.scala.id（当前值 '${NOTEBOOK_KERNELS.scala.id}'）` +
+      '与 docker/jupyter/kernels/ 下的目录名分叉了：改常量要同时改目录（和 Dockerfile 的 COPY 目标）。',
+  );
+}
+const SCALA_KERNEL_SPEC = JSON.parse(readFileSync(SCALA_KERNEL_FILE, 'utf8')) as {
+  argv: string[];
+  display_name: string;
+  language: string;
+  interrupt_mode?: string;
+  env?: Record<string, string>;
+  metadata?: Record<string, unknown>;
+};
 const KERNELSPECS_BODY = {
   default: 'python3',
   kernelspecs: {
@@ -211,7 +233,7 @@ describe('notebookStatus', () => {
     ).not.toContain('python3');
     expect(res.kernels.map((k) => k.id)).toEqual([NOTEBOOK_KERNELS.pyspark.id]);
     // 反向对照（别把 filter 写成"什么都不放过"）：我们自己的那条必须在，而且带标签。
-    // 少了这两句，"返回空表"那种坏法也算通过 —— 而那恰好会让 missingSpec 横幅误报成
+    // 少了这两句，"返回空表"那种坏法也算通过 —— 而那恰好会让 missingSpecIds 横幅误报成
     // 「kernel 没注册 ⇒ ./start.sh --rebuild」，也就是让人去拆一个能用的镜像（status.ts 里记着那次谎）。
     expect(res.kernels).toHaveLength(1);
     expect(res.kernels[0]!.label, '标签不许在过滤时丢掉（徽标显示的是它，不是 id）').toBe('PySpark (arena)');
@@ -239,7 +261,11 @@ describe('notebookStatus', () => {
                   [NOTEBOOK_KERNELS.pyspark.id]: KERNELSPECS_BODY.kernelspecs['arena-pyspark'],
                   [NOTEBOOK_KERNELS.scala.id]: {
                     name: NOTEBOOK_KERNELS.scala.id,
-                    spec: { display_name: 'Scala (Toree, WI-91 探索)', language: 'scala', interrupt_mode: 'signal' },
+                    // 标签读工件（评审 Minor-5），与上面 arena-pyspark 那一支同一个来源纪律。
+                    spec: {
+                      ...SCALA_KERNEL_SPEC,
+                      kernel_protocol_version: '',
+                    },
                     resources: {},
                   },
                 },
@@ -256,7 +282,12 @@ describe('notebookStatus', () => {
     expect(ids, '清单变长之后红线①那一半不许跟着松：系统解释器仍然不许到得了界面').not.toContain('python3');
     const scala = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.scala.id);
     expect(scala, `注册表登记了 ${NOTEBOOK_KERNELS.scala.id}，表里却没有它 ⇒ allow-list 的派生退化成旧的那一份`).toBeTruthy();
-    expect(scala!.label, 'scala 那条的标签同样要从 spec.display_name 解出来').toBe('Scala (Toree, WI-91 探索)');
+    expect(
+      SCALA_KERNEL_SPEC.display_name,
+      '夹具若把标签抄成 id 本身，下面那条"标签要从 spec.display_name 解出来"就退化成自证（评审 Minor-5 的非空转判据）',
+    ).not.toBe(NOTEBOOK_KERNELS.scala.id);
+    // 期望值派生自那份工件（Minor-5：过去这里手打一份，与 web 那侧手打的另一份已经不一样了）
+    expect(scala!.label, 'scala 那条的标签同样要从 spec.display_name 解出来').toBe(SCALA_KERNEL_SPEC.display_name);
   });
 
   /**
@@ -271,12 +302,16 @@ describe('notebookStatus', () => {
     const src = readFileSync(join(config.repoRoot, 'server', 'src', 'notebooks', 'status.ts'), 'utf8');
     expect(src, 'filter 的输入必须是 Object.values(NOTEBOOK_KERNELS).map((k) => k.id)，否则加一条 kernel 要改两处')
       .toMatch(/const ARENA_KERNEL_IDS[^=]*=\s*Object\.values\(NOTEBOOK_KERNELS\)\.map\(\(k\) => k\.id\)/);
-    expect(src, 'status.ts 里不该再写死 kernel 的名字（它只有 NOTEBOOK_KERNELS 这一个来源）')
-      .not.toMatch(/=\s*'arena-pyspark'/);
+    expect(src, 'status.ts 里不许出现任何被引号包住的 arena kernel 名字字面量（唯一真相是 NOTEBOOK_KERNELS；散文里写死也算）')
+      .not.toMatch(/['"]arena-[a-z0-9-]+['"]/);
     expect(src, 'needsVenv 不许按 id 相等硬判（WI-96）：就绪判据住在注册表条目里，要按 id 查出来')
       .not.toMatch(/const needsVenv = id ===/);
     expect(src, 'ready 判据必须来自注册表查找（ARENA_KERNELS_BY_ID.get(id)），不是现场比较 kernel 名字')
       .toMatch(/ARENA_KERNELS_BY_ID\.get\(id\)/);
+    // 评审 Important-1：reason 那句"别拿别的 kernel 兜底"住在**通用**分支里，却说不出注册表的形状 ——
+    // 它必须**过滤 ARENA_KERNEL_IDS** 来表达"除这条之外还有谁"，否则第三条 kernel 一登记那句话就变谎。
+    expect(src, 'reason 里"其余登记条目"必须派生自 ARENA_KERNEL_IDS.filter(...)（评审 Important-1：写死的名字会随注册表变谎）')
+      .toMatch(/const otherRegistered = ARENA_KERNEL_IDS\.filter\(/);
   });
 
   it('探不到 ⇒ running:false，且 reason 能区分"没起"与"超时"（修的是不同东西）', async () => {
@@ -700,7 +735,8 @@ describe('venv 在不在决定 arena-pyspark 的 ready（I-1：用受控临时�
                 default: ids[0],
                 kernelspecs: Object.fromEntries(ids.map((id) => [id, {
                   name: id,
-                  spec: { display_name: id === NOTEBOOK_KERNELS.pyspark.id ? 'PySpark (arena)' : 'Scala (Toree, WI-91 探索)' },
+                  // 两支标签都读工件（评审 Minor-5），本文件不再手打任何 display_name
+                  spec: { display_name: id === NOTEBOOK_KERNELS.pyspark.id ? SHIPPED_KERNEL_SPEC.display_name : SCALA_KERNEL_SPEC.display_name },
                   resources: {},
                 }])),
               }) }
@@ -743,9 +779,22 @@ describe('venv 在不在决定 arena-pyspark 的 ready（I-1：用受控临时�
       expect(reason).toMatch(/几十秒|分钟/);
       // ③ 为什么不能拿别的解释器兜底（红线①就踩在这一步上：!pip3 落进系统解释器）。
       expect(reason, '没提"别用系统解释器兜底" ⇒ 用户下一步就是 !pip3 install，而那是判题那套环境').toMatch(/红线|判题/);
-      // ④（Task 3 / T3-3）兜底那句话在两条 arena kernel 之后必须**换成语义不变的实话**：
-      //    系统解释器是被 allow-list 滤掉的那一个，而表里真会出现的"另一条"是 Scala —— 它跑不了 Python。
-      expect(reason, '兜底警告必须点名"另一条登记在册的 kernel 是 Scala（跑不了 Python）"，否则旧那句"另一条=系统解释器"就成了谎').toMatch(/Scala/);
+      // ④（Task 3 / T3-3，评审 Important-1 修后）兜底那句话在两条 arena kernel 之后必须**换成语义不变的实话**：
+      //    系统解释器是被 allow-list 滤掉的那一个，而"表里还登记着谁"要**从注册表派生**——
+      //    旧断言 `toMatch(/Scala/)` 钉的是**一个词**：注册表长出第三条 kernel 时，写死"另一条是 Scala（Toree）"
+      //    那句立刻变成谎，而它照样绿（静默漂移正是这一族缺陷的形状）。现在期望值逐条点名注册表里
+      //    除被测这条之外的每一条目 ⇒ 加一条 kernel，这句话必须跟着长，否则本条红。
+      const otherRegistered = Object.values(NOTEBOOK_KERNELS)
+        .map((k) => k.id)
+        .filter((x) => x !== NOTEBOOK_KERNELS.pyspark.id);
+      expect(
+        otherRegistered.length,
+        '这条判据的意义是"除 pyspark 之外注册表里还有条目"；注册表若只剩一条，请连这条判据一起改写，不许让它空转',
+      ).toBeGreaterThan(0);
+      for (const otherId of otherRegistered) {
+        expect(reason, `兜底警告必须点名登记在册的另一条 kernel（${otherId}）⇒ 期望值派生自注册表，写死的名字在这里判不住`)
+          .toContain(otherId);
+      }
       expect(reason, '旧文案"别拿另一条 kernel 兜底：那是镜像自带的系统解释器"在有两条 arena kernel 后是谎话（表里另一条是 Scala）')
         .not.toMatch(/另一条 kernel 兜底/);
       // 反向对照：这条用例本身要能红 —— 把 ready 写回 true 的人必须被这一条抓到（上面那句判的就是它）。
@@ -789,7 +838,10 @@ describe('venv 在不在决定 arena-pyspark 的 ready（I-1：用受控临时�
       const res = await statusWithIdeEnvIds(root, [NOTEBOOK_KERNELS.pyspark.id, NOTEBOOK_KERNELS.scala.id]);
       const blocked = res.kernels.filter((k) => !k.ready).map((k) => k.id);
       expect(blocked, 'blocked 集合是「准备环境」按钮的唯一判据 ⇒ 空集就是 I-1 那个不可达态').toEqual([NOTEBOOK_KERNELS.pyspark.id]);
-      expect(res.kernels.every((k) => k.id === NOTEBOOK_KERNELS.pyspark.id || k.ready), '把不属于 venv 的 kernel 也判成没就绪 = 整页不可用').toBe(true);
+      // 评审 Minor-4：这里原来还挂着一句 `k.id === pyspark.id || k.ready` 的按-id `||` 比较 ——
+      // 生产代码已经把它删了（就绪判据是条目数据），而上面的 toEqual 在数学上已经包含它
+      // （blocked 恰好等于 [pyspark] ⇔ 这一条没就绪、其余每条都就绪）。留着一条被完全涵盖的
+      // `||` 形状判据，等于在门禁里再养一份"按 id 硬判"的旧形状（下面那条 needsVenv 用例判它的两态）。
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

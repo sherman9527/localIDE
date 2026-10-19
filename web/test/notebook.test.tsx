@@ -45,7 +45,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *    重启一遍 Jupyter 页面，那是功能故障，不是审美问题）。
  *
  * 顺带一条被删掉的东西：内核徽章那一排（`notebook-kernels`）没了，但 `blocked`（「准备环境」）与
- * `missingSpec`（该 `--rebuild`）两条诊断必须还在 —— 它们修的是两件不同的事。
+ * `missingSpecIds`（该 `--rebuild`）两条诊断必须还在 —— 它们修的是两件不同的事。
  *
  * ## 2026-10-10 用户点名的布局简化（这一档删的是容器，不是话）
  *
@@ -113,6 +113,71 @@ beforeEach(() => {
 const treeLinesSpeaking = (): string[] =>
   screen.queryAllByTestId(/^notebook-tree-(error|unread|stale|empty)$/).map((el) => el.getAttribute('data-testid') ?? '?');
 
+/**
+ * 工作树根的绝对路径。不用 `new URL('../src/App.tsx', import.meta.url)`：jsdom 下那个 url 没有 file:
+ * 协议，readFileSync 直接 "The URL must be of scheme file"。而两种跑法（仓库根 `npx vitest run web/test`
+ * 与 `npm test -w @arena/web`）的 cwd 差一层，所以按候选根找，找不到就把原因说出来。
+ * 原来这份住在「打包与路由形状」那个 describe 里；现在夹具也要读盘上的镜像工件（见 `kernelLabel`）
+ * ⇒ 提到模块级共用，**不在两处各抄一份**（"两处各写一遍"的账见
+ * `server/test/regression/notebook-contract.test.ts` 里那条同族判据）。
+ */
+const repoFile = (rel: string): string => {
+  for (const base of [process.cwd(), join(process.cwd(), '..')]) {
+    const candidate = join(base, rel);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`找不到 ${rel}（cwd=${process.cwd()}）⇒ 这条判据没在读你要改的那份工作树文件`);
+};
+
+/**
+ * kernel 的 `display_name` **读镜像工件** `docker/jupyter/kernels/<id>/kernel.json` ——
+ * 与 `server/test/notebooks/status.test.ts` 里 `SHIPPED_KERNEL_SPEC` 同一条来源纪律（评审 Minor-5：
+ * 这一度是手抄的，而且和 server 那侧抄的**不一致**：这里 'Scala (Toree)'、那边
+ * 'Scala (Toree, WI-91 探索)'）。夹具抄错不会让任何断言红，它只会让判据去判一个镜像里根本不存在的
+ * 字符串 —— 而 `display_name` 本体的改名归 Task 5（它在镜像构建上下文里），本档不碰。
+ */
+const kernelLabel = (id: string): string => {
+  const rel = join('docker', 'jupyter', 'kernels', id, 'kernel.json');
+  let file: string;
+  try {
+    file = repoFile(rel);
+  } catch {
+    // 分叉时报"哪个名字对不上"，不要只丢一句"找不到文件"让人去猜是哪一侧改的
+    // （notebook-image.test.ts / notebook-contract.test.ts 里同一条判据、同一句解释）
+    throw new Error(
+      `${rel} 不存在 ⇒ NOTEBOOK_KERNELS 登记的 '${id}' 与 docker/jupyter/kernels/ 下的目录名分叉了：` +
+        '改常量要同时改目录（和 Dockerfile 的 COPY 目标）。',
+    );
+  }
+  return (JSON.parse(readFileSync(file, 'utf8')) as { display_name?: string }).display_name ?? id;
+};
+
+/**
+ * 注册表里"解释器住在那份**懒创建** venv 里"的那几条（`needsVenv` 是条目数据，WI-96 的账）。
+ * 只有它们能合法地以 `ready:false` 出现在夹具里 —— 上面文件头那条纪律（"夹具写成不可能的形状，
+ * 判出来的绿就只对不可能的输入成立"）在这里靠这份派生来保证，不是靠人记得。
+ */
+const VENV_BAKED_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS).filter((k) => k.needsVenv).map((k) => k.id);
+
+/** 「准备环境」修得了的那一态里，后端给的原因原话（前端只做逐条拼接，不改写）。 */
+const MISSING_VENV_REASON = '解释器不存在：/opt/arena-ide-env/python/bin/python';
+
+/**
+ * 后端列出的那张 kernel 表（夹具=**输入**，允许出现镜像里的目录名；**期望值**一律另派生）。
+ * `venvMissing` 的两个语义各自独立于注册表有几条：**整张注册表都在场**是这一族的默认，
+ * 因为评审 Important-2 抓到的正是"只列 pyspark 一条"的旧夹具在新注册表形状下会
+ * **顺带**触发 `notebook-spec-missing`（"探到的表里缺了注册表那条 ⇒ ./start.sh --rebuild"）——
+ * 那与那些用例判的事（按钮、seedError、iframe src、点一次重读一遍…）毫无关系，
+ * 却把"没有失败却不点名才是假警报"这类用例的前提自己涂掉了。
+ * 派生自注册表 ⇒ 以后多一条 kernel，这里不必改一个字也仍然代表"全都注册了"。
+ */
+const arenaKernels = (venvMissing = false): Array<{ id: string; label: string; ready: boolean; reason?: string }> =>
+  Object.values(NOTEBOOK_KERNELS).map((k) =>
+    venvMissing && VENV_BAKED_IDS.includes(k.id)
+      ? { id: k.id, label: kernelLabel(k.id), ready: false, reason: MISSING_VENV_REASON }
+      : { id: k.id, label: kernelLabel(k.id), ready: true },
+  );
+
 const up = {
   running: true,
   url: TREE,
@@ -120,15 +185,11 @@ const up = {
   localPeer: true,
   // ⚠ 清单里**只有 arena 自己注册的那几条**（终审 I-4）：后端会把 Jupyter 列出的
   // `Python 3 (ipykernel)` 滤掉，所以"服务端回了 python3"这种形状在这一档里是不存在的。
-  // 下面那几条 `ready:false` 的夹具因此也都写成 arena-pyspark —— 夹具写成不可能的形状，
+  // 下面那几条 `ready:false` 的夹具因此一律走 `arenaKernels(true)` —— 夹具写成不可能的形状，
   // 判出来的"前端接得住这一态"就只对不可能的输入成立（本项目要的反面正是这种绿）。
-  // ⚠ WI-91b Task 3 之后这份"一切正常"的基准必须**两条注册表 kernel 都在场**：
-  //   missingSpec 判的是"注册表缺哪条点哪条"，基准夹具少一条就把横幅态当成了健康态。
-  //   （夹具是**输入**，允许写镜像里的目录名字面量；**期望值**一律从注册表派生。）
-  kernels: [
-    { id: 'arena-pyspark', label: 'PySpark (arena)', ready: true },
-    { id: 'arena-scala-toree', label: 'Scala (Toree)', ready: true },
-  ],
+  // ⚠ WI-91b Task 3 + 评审 Important-2：这份"一切正常"的基准 = **整张注册表都在场且都就绪**，
+  //   少一条就把"横幅态"（该 rebuild）当成了健康态；表本身与标签都由 `arenaKernels()` 派生。
+  kernels: arenaKernels(),
   notebooks: [{ file: '00-smoke-pyspark.ipynb', seeded: true }],
 };
 
@@ -146,10 +207,11 @@ describe('Notebook 第五页', () => {
     // 整页 DOM 文本都不许出现 token 串（真浏览器层另有一条同判据，e2e）
     expect(screen.getByTestId('notebook-page').textContent ?? '', '页面上任何一处出现 token 串都算泄漏（含内嵌、链接、横幅回显）').not.toContain('token');
     // 徽章那一排删了 ⇒ 那句 label 在 DOM 上再没有任何来源。留着这条断言不是为了"徽章没了"这口气，
-    // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpec 两块还靠它。
+    // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpecIds 两块还靠它。
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
-    // Task 3：两条注册表 kernel 都在探到的表里（`up` 就是这份基准）⇒ "没注册"横幅**不许**无中生有。
-    // 这一句是 missingSpec 改造成"逐条点名"后的反向对照：只点缺的，不点在场的。
+    // Task 3：整张注册表都在探到的表里（`up` 就是这份基准）⇒ "没注册"横幅**不许**无中生有。
+    // 这一句是 missingSpecIds 改造成"逐条点名"后的反向对照：只点缺的，不点在场的。
+    // ⚠ 它只覆盖"一切就绪"那一态；反向对照的完整版本（含 blocked 那一态）在下面那组循环用例。
     expect(screen.queryByTestId('notebook-spec-missing'), '表里两条都在却挂"没注册"横幅 ⇒ 叫人去 rebuild 一个没坏的镜像（新版的静默降级形状）').toBeNull();
     expect(screen.getByTestId('notebook-page').textContent).not.toContain('PySpark (arena)');
     // 「这次铺了什么」那份清单整块删掉了（用户点名，2026-10-10）：这里原来断的是"open 态列得出
@@ -159,6 +221,28 @@ describe('Notebook 第五页', () => {
     // 反向也要判：全都就绪时不许挂一个"准备环境"按钮（给了就是让人白点）
     expect(screen.queryByTestId('notebook-prepare')).toBeNull();
   });
+
+  /**
+   * 反向对照的**总判据**（评审 Important-2）：原来"注册表全在场 ⇒ 不挂 rebuild 横幅"只在 `up`
+   * 那一态判过一次，而那句话的适用面是"任何把整张注册表列出来的状态"——包括**有 kernel 起不来**那一态。
+   * 两轴是正交的：`notebook-spec-missing` 判"注册表条目在不在探到的表里"，`blocked` 判"这条就绪没有"，
+   * 只在一切就绪时判"不报警"，等于让"blocked 那一态顺带叫用户 rebuild 一个没坏的镜像"这种假警报
+   * 没有任何判据看着（而那正是旧夹具的形状）。列表派生自注册表 ⇒ 加一条 kernel 这里不必改一个字。
+   */
+  const fullRegistryStates: Array<[string, Array<{ id: string; label: string; ready: boolean; reason?: string }>]> = [
+    ['整张注册表都在且都就绪', arenaKernels()],
+    ['整张注册表都在、needsVenv 那条缺 venv', arenaKernels(true)],
+  ];
+  for (const [label, kernels] of fullRegistryStates) {
+    it(`注册表全在场 ⇒「spec 没注册」横幅不出现（${label}）`, async () => {
+      status.mockResolvedValue({ running: true, url: TREE, localPeer: true, kernels, notebooks: [] });
+      render(<Notebook />);
+      await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
+      expect(screen.queryByTestId('notebook-spec-missing'), `${label}：整张注册表都在场却挂"没注册"横幅 ⇒ 假警报，叫人 rebuild 一个没坏的镜像`).toBeNull();
+      // 那句操作也不许以别的形式漏出去（横幅是它唯一的载体；页面文本层再判一次，防"换个壳继续喊"）
+      expect(screen.getByTestId('notebook-page').textContent ?? '', `${label}：横幅没了但那句 ./start.sh --rebuild 还挂在别处`).not.toContain('./start.sh --rebuild');
+    });
+  }
 
   /**
    * **横幅区不许出现空的分组壳。** 这一条是 Step 3 第 8 条（真浏览器截图）暴露出来的缺陷，
@@ -496,26 +580,38 @@ describe('Notebook 第五页', () => {
   // 同源纪律的另一半（"running:false 不许有 iframe"）由上面那条守着，一行没松。
 
   /**
-   * 删掉的只有徽章那一排。`blocked`（venv 没建 ⇒ 「准备环境」修得了）与 `missingSpec`
-   * （表里没有 arena-pyspark ⇒ 镜像级注册，得 `--rebuild`）是两件不同的事，
+   * 删掉的只有徽章那一排。`blocked`（venv 没建 ⇒ 「准备环境」修得了）与 `missingSpecIds`
+   * （探到的表里缺了注册表里**哪几条** ⇒ 镜像级注册，得 `--rebuild`）是两件不同的事，
    * 删错任何一个就是删掉一条真实的诊断路径。
+   * ⚠ 评审 Important-2：这条判的是"两件事分得开"，那夹具就得**每半只坏一件事** ——
+   * 上一半"注册表全在场、venv 没建"（rebuild 横幅必不出现），下一半"表整个是空的"（按钮必不出现）。
+   * 旧形状里上一半只列 pyspark 一条，于是它同时坏两件事，"分清"那句只是注释里的声称。
    */
   it('内核徽章那一排没了，但「准备环境」与「spec 没注册」两条还在（前者修 venv，后者修镜像）', async () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
       localPeer: true,
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      // 整张注册表都在场、只有 needsVenv 那条起不来 ⇒ 这一态**只**该说"准备环境"那一件事
+      kernels: arenaKernels(true),
       notebooks: [],
     });
     const first = render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-prepare')).toBeTruthy());
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
+    // 评审 Important-2：这一半的 premise 是"blocked 与 spec-missing 是**两件不同的事**"。
+    // 于是"venv 没建"这一态必须**只**说前者：整张注册表都在场时那条 rebuild 横幅必不出现 ——
+    // 旧夹具只列 arena-pyspark 一条，注册表长出 scala 之后页面就在这里顺带挂上横幅，
+    // 这条用例上半句混着说两件事、下半句再"分清两件事"，它自己的前提被自己的夹具拆了。
+    expect(screen.queryByTestId('notebook-spec-missing'), 'venv 没建 ≠ spec 没注册：整张注册表都在场却叫人 ./start.sh --rebuild').toBeNull();
     first.unmount();
 
     status.mockResolvedValue({ running: true, url: TREE, localPeer: true, kernels: [], notebooks: [] });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
+    // 反向那一半（同一条"两件事"的判据）：表整个是空的 ⇒ blocked 是空表 ⇒「准备环境」按钮必不出现，
+    // 否则这一态与上面那态在 DOM 上就没差别了，"分清"也就无从判起。
+    expect(screen.queryByTestId('notebook-prepare'), '整张表都没注册时给「准备环境」= 让人白点：建 venv 不会多出 kernelspec').toBeNull();
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
   });
 
@@ -566,8 +662,9 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel；Task 3 之后"那几条"= **整张注册表** ⇒ 夹具派生自注册表，
+      // 谁 blocked 由条目数据 `needsVenv` 决定（评审 Important-2：只列 pyspark 会顺带挂上 rebuild 横幅）
+      kernels: arenaKernels(true),
       notebooks: [],
     });
     render(<Notebook />);
@@ -587,8 +684,9 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel；Task 3 之后"那几条"= **整张注册表** ⇒ 夹具派生自注册表，
+      // 谁 blocked 由条目数据 `needsVenv` 决定（评审 Important-2：只列 pyspark 会顺带挂上 rebuild 横幅）
+      kernels: arenaKernels(true),
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: true });
@@ -605,8 +703,9 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel；Task 3 之后"那几条"= **整张注册表** ⇒ 夹具派生自注册表，
+      // 谁 blocked 由条目数据 `needsVenv` 决定（评审 Important-2：只列 pyspark 会顺带挂上 rebuild 横幅）
+      kernels: arenaKernels(true),
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: false, reason: 'venv 创建超时' });
@@ -626,8 +725,9 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      // I-4 之后后端只会列 arena 自己那几条 kernel ⇒ 这一态的夹具必须是 arena-pyspark
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: false, reason: '解释器不存在：/opt/arena-ide-env/python/bin/python' }],
+      // I-4 之后后端只会列 arena 自己那几条 kernel；Task 3 之后"那几条"= **整张注册表** ⇒ 夹具派生自注册表，
+      // 谁 blocked 由条目数据 `needsVenv` 决定（评审 Important-2：只列 pyspark 会顺带挂上 rebuild 横幅）
+      kernels: arenaKernels(true),
       notebooks: [],
     });
     prepare.mockResolvedValue({ ok: true });
@@ -657,7 +757,7 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      kernels: arenaKernels(),
       notebooks: [],
       seedError: '示例没能铺进工作目录（这一条与 Jupyter 在不在跑无关）：EEXIST: file already exists, mkdir',
     });
@@ -673,18 +773,24 @@ describe('Notebook 第五页', () => {
 
   /** 对照的那一态：没有 seedError 时不许凭空报"铺不进去"（假警报那一半的判据）。
    *  这条原来等的是 `notebook-files-empty` 必现 —— 那句与"这次铺了什么"那块一起按用户批的范围删了，
-   *  所以搬家后的判据只剩"不许有假警报"；真报的那一半由上一条守着。两半合起来才是互斥。 */
+   *  所以搬家后的判据只剩"不许有假警报"；真报的那一半由上一条守着。两半合起来才是互斥。
+   *  ⚠ 评审 Important-2：判"假警报"的用例自己**不许**在喂一份会触发别的警报的夹具 ——
+   *  旧夹具只列 arena-pyspark 一条，注册表长出 scala 之后它一边断"没有失败却不点名才是假警报"、
+   *  一边让页面顺带挂上 rebuild 那条横幅。现在夹具是整张注册表（`arenaKernels()`），
+   *  并把"这一态一条警报都不许响"判满。 */
   it('没有 seedError 时不许报"铺不进去"（对照态：没有失败却不点名，才是假警报）', async () => {
     status.mockResolvedValue({
       running: true,
       url: TREE,
       localPeer: true,
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      kernels: arenaKernels(),
       notebooks: [],
     });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-open')).toBeTruthy());
     expect(screen.queryByTestId('notebook-seed-error'), '没有失败却报一句失败 = 最响的假警报').toBeNull();
+    expect(screen.queryByTestId('notebook-spec-missing'), '对照态自己挂着"spec 没注册"横幅 ⇒ 判假警报的用例就在报假警报').toBeNull();
+    expect(screen.queryByTestId('notebook-prepare'), '全都就绪的对照态出现「准备环境」= 让人白点，也是另一种假警报').toBeNull();
   });
 
   /**
@@ -760,7 +866,7 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      kernels: [{ id: NOTEBOOK_KERNELS.pyspark.id, label: kernelLabel(NOTEBOOK_KERNELS.pyspark.id), ready: true }],
       notebooks: [],
     });
     const first = render(<Notebook />);
@@ -774,7 +880,7 @@ describe('Notebook 第五页', () => {
       running: true,
       url: TREE,
       localPeer: true,
-      kernels: [{ id: 'arena-scala-toree', label: 'Scala (Toree)', ready: true }],
+      kernels: [{ id: NOTEBOOK_KERNELS.scala.id, label: kernelLabel(NOTEBOOK_KERNELS.scala.id), ready: true }],
       notebooks: [],
     });
     render(<Notebook />);
@@ -821,18 +927,7 @@ describe('Notebook 第五页', () => {
  * 78.5KB/84KB —— 所以盯住它的确实是包含判据而不是预算）。源码形状 + 产物包含，两把尺子各管一段。
  */
 describe('Notebook 的打包与路由形状', () => {
-  /**
-   * 不用 `new URL('../src/App.tsx', import.meta.url)`：jsdom 下那个 url 没有 file: 协议，
-   * readFileSync 直接 "The URL must be of scheme file"。而两种跑法（仓库根 `npx vitest run web/test`
-   * 与 `npm test -w @arena/web`）的 cwd 差一层，所以按候选根找，找不到就把原因说出来。
-   */
-  const repoFile = (rel: string): string => {
-    for (const base of [process.cwd(), join(process.cwd(), '..')]) {
-      const candidate = join(base, rel);
-      if (existsSync(candidate)) return candidate;
-    }
-    throw new Error(`找不到 ${rel}（cwd=${process.cwd()}）⇒ 这条形状判据没在读你要改的那份源码`);
-  };
+  /** `repoFile` 现在住在模块顶层（夹具读镜像工件时也要它），这里直接用那一份，不再本地抄第二份。 */
   const app = readFileSync(repoFile(join('web', 'src', 'App.tsx')), 'utf8');
 
   it('App.tsx 里 Notebook 是 lazy 那一片，且没有被静态 import 拉回首屏', () => {
