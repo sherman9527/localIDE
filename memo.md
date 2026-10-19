@@ -4005,7 +4005,8 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
 | 破坏性 | 删掉 Dockerfile 烤清单那段 / 把"皆空必红"改回 `exit 0` | 分别红在"容器档的 C5 基线回到三路皆空"与"闸门又静默空转"；都还原 |
 | 守恒 | 逐行比对 HEAD 与现在（板 + 归档） | 条目行 107 → 108（多的那条是新收口的 WI-56），丢失 0 |
 | 题库 | `node scripts/check-bank.mjs --count-only` | 宿主：`258 题，基线 258（来源：git）`；容器：`来源：image` |
-| 容器 / E2E | `./start.sh --verify`、`npm run e2e` | 本批收尾时补跑，读数写进提交信息 |
+| 容器 | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` | **`VERIFY_EXIT=0`**：单测档 `648 passed / 11 skipped`、判题矩阵 `158 可判 / 跳过 0`、教程档 `17 passed / 0 skipped`；`memory-file-ratchet` 在容器里 `1 passed / 4 skipped`（三份记忆文件都被 .dockerignore 排掉 ⇒ 只有那条"缺席必须是被声明过的"永远跑的判据在判，正是设计形状）|
+| 宿主 E2E | `npm run e2e` | **74 passed（3.8m）/ EXIT=0** |
 
 ### 已知问题 / 还欠的
 
