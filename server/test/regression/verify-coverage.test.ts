@@ -407,7 +407,7 @@ describe('verify.sh 覆盖到每一个测试文件', () => {
     const produced = new Set(all.flatMap((s) => s.outputs));
     // 判据对象的守卫要数 **assert-ran 阶段本身**有几条 —— 不是数 orphans：orphans 为空既可能是"全都有生产者"
     // （好），也可能是"一条都没解析出来"（判据空转）。把两者混在一个数上，空转就长得像通过。
-    expect(calls.length, 'verify.sh 里一条 assert-ran 阶段都没解析出来 ⇒ 这条判据没有对象（解析器或脚本漂了）。' + '今天有两条（判题矩阵、教程闸门）；真要撤 assert-ran 那套，连带把这条判据改掉并在 memo 记账').toBeGreaterThan(0);
+    expect(calls.length, 'verify.sh 里一条 assert-ran 阶段都没解析出来 ⇒ 这条判据没有对象（解析器或脚本漂了）。' + '今天有三条（判题矩阵、教程闸门、WI-91b Task 4 的 Scala kernel 闸门）；真要撤 assert-ran 那套，连带把这条判据改掉并在 memo 记账').toBeGreaterThan(0);
     const orphans = calls.filter((c) => !produced.has(c.report));
     expect(
       orphans,

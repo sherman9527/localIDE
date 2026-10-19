@@ -96,7 +96,10 @@ if [ "$NB_SERVICE" = "1" ]; then
   # 而且这一档每一篇教程都要真起一次 Spark（`kernel.test.ts` 那条注释写的 40–90s 是同一件事）。
   # 它常驻那一组（清单完整性 / 注册表形状 / 参数形状 / 门控本身）不会因此没人跑：
   # 专门那条阶段点名的是**整个文件**，宿主档则走 else 分支照常扫这个目录。
-  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts --exclude server/test/notebooks/embed.test.ts --exclude server/test/notebooks/tutorials.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
+  # WI-91b Task 4：`scala-kernel.test.ts`（Scala kernel 的 smoke）**同一条路** —— 同一个合取门控，
+  # 不排除它 = "单元测试"阶段扫目录时与下面那条专门阶段**各起一次**真 Toree JVM（一次冷启动约一分半，
+  # 而 Toree 那边还欠一笔 shutdown hook 的账：探索档记的缺陷 ④ —— Scala 侧 spark.stop() 会在收尾炸）。
+  run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run --exclude server/test/notebooks/kernel.test.ts --exclude server/test/notebooks/embed.test.ts --exclude server/test/notebooks/tutorials.test.ts --exclude server/test/notebooks/scala-kernel.test.ts shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 else
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 fi
@@ -114,6 +117,9 @@ run "网页 IDE（执行内核与解耦边界）" npx vitest run server/test/ide
 # `notebook-compose.test.ts` ⑦（compose 那一侧每天在宿主跑，标记漂移在那里红，不用等一次 --verify）。
 # WI-90 那条「教程 notebook 可运行」阶段接的是 assert-ran.mjs 且带 `--require-no-skips`（下面），
 # 因为那一档的常驻组与容器组在同一个文件里，"整片 skip"在报告里长得像"跑过了"。
+# WI-91b Task 4 的「Scala kernel 真跑」是**同一个形状**（常驻组 + 容器组同文件）⇒ 它也必须带
+# `--require-no-skips`；少带这一个开关今天不会红在任何既有守卫上（`verify-coverage.test.ts` 不看它），
+# 红只会红在 scala-kernel.test.ts 自己那张"认领回执"上 —— 破坏性验证实测过这一点。
 # 门控写在**文件里**（describe.skipIf 的合取）而不是只写在这个 if 上：上面那条"单元测试"阶段本来就扫
 # server/test/notebooks/，宿主与 dev / tools 一样会跑到这个文件 —— 只靠阶段名点是挡不住的（评审 T10-1）。
 # 两个变量在阶段命令里都显式设一遍不是冗余：verify-coverage.test.ts 那条"env 门控的闸门必须被
@@ -137,8 +143,22 @@ if [ "$NB_SERVICE" = "1" ]; then
   # 而默认那一支报"10 passed / 4 skipped / 14 total ✓"）。这一档在容器里没有"合法跳过"这个东西 ⇒ 判据是 0 skipped。
   run "教程 notebook 可运行（结论层）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/tutorials.test.ts --reporter=json --outputFile=data/verify-tutorials.json
   run "教程闸门确实跑到了" node scripts/assert-ran.mjs data/verify-tutorials.json "教程 notebook" --require-no-skips
+  # WI-91b Task 4：Scala kernel（Apache Toree）的 smoke —— **独立阶段**，不复用 `tutorials.test.ts` 那三条
+  # 按 Python 形状写的判据（`kernelspec.name === arena-pyspark`、末 cell 必须 `spark.stop()`、marker 单元
+  # 必须有语句级 `assert`）：Toree 缺陷 ④ 说 `spark.stop()` 在 Scala 侧会在收尾炸一个 shutdown hook，
+  # 把那三条搬过来得到的是一条永远红或永远不判的判据。这里判的是四件事：跨 cell 状态活着（`alive=42`，
+  # 整行相等）、真起了活的 SparkSession（`rows=6`，`rows=60` 不算）、负例夹具（摘掉定义那一格）必须报
+  # error 且 `alive=42` 不出现、负例那条 error 的 `evalue` 必须是非空字符串（Task 5 要往页面上写
+  # "编译错误没有 traceback，有用的文本在 evalue 里" —— 一句没有闸门垫着的页面话正是本仓库被烧过的形状）。
+  # kernel 名从 `NOTEBOOK_KERNELS.scala.id` 取（测试源码里不许出现那条 id 的字面量，常驻组判住）。
+  # 排在教程那两条**之后**不是随意：那一条的 beforeAll 会把 IDE venv 建出来，Scala 这条自己不需要 venv
+  # （注册表里 `needsVenv:false`），但同一个容器里少一次"前置条件不成立"的冤红机会就少一次。
+  # 两个变量在命令行上显式设一遍 + `--require-no-skips`：见上面那两条同样的理由（verify-coverage 读的是
+  # 阶段命令文本，而本文件的常驻组在容器里也绿 ⇒ "容器组整片被跳掉"长得像"跑过了"）。
+  run "Scala kernel 真跑（WI-91b Task 4）" env ARENA_IN_CONTAINER=1 ARENA_NOTEBOOK_SERVICE=1 npx vitest run server/test/notebooks/scala-kernel.test.ts --reporter=json --outputFile=data/verify-scala-kernel.json
+  run "Scala 闸门确实跑到了" node scripts/assert-ran.mjs data/verify-scala-kernel.json "Scala kernel" --require-no-skips
 else
-  printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\n（WI-90 Task 1 同一条路上一起跳过的还有「教程 notebook 可运行（结论层）」：宿主档只跑它那一组常驻判据（清单完整性 / 注册表形状 / nbconvert 参数形状 / 门控本身），真执行那两层要等容器档）\033[0m\n'
+  printf '\n\033[33m跳过 notebook kernel 真跑（这一档不在"那个跑着 notebook 服务的容器"里：宿主既无 arena-pyspark kernel 也无 Jupyter；dev / tools 是容器但按设计没有 ARENA_NOTEBOOK_SERVICE；镜像若早于 kernels COPY，连有标记的 arena 也不会有那个文件）—— 容器档必须补跑：./start.sh --verify\n（WI-90 Task 1 同一条路上一起跳过的还有「教程 notebook 可运行（结论层）」：宿主档只跑它那一组常驻判据（清单完整性 / 注册表形状 / nbconvert 参数形状 / 门控本身），真执行那两层要等容器档）\n（WI-91b Task 4 同一条路上一起跳过的还有「Scala kernel 真跑（WI-91b Task 4）」—— server/test/notebooks/scala-kernel.test.ts 走的是同一个合取门控：宿主档只跑它那一组常驻判据（门控本身 / kernel id 来自注册表 / 两份夹具的形状 / verify.sh 的认领回执 / 预算不等式），真起一条 Toree JVM 的那三条要等容器档）\033[0m\n'
 fi
 
 if [ "${SKIP_JUDGE:-0}" != "1" ]; then
