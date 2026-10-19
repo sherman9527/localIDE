@@ -156,8 +156,15 @@ export default function Notebook() {
   const view = viewOf(data, error);
   const kernels = data?.kernels ?? [];
   const blocked = kernels.filter((k) => !k.ready);
-  /** 探到的 kernel 表里压根没有那个 pyspark 档：镜像级注册没了，「准备环境」修不了它 ⇒ 得说清区别。 */
-  const missingSpec = data?.running === true && !kernels.some((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+  /**
+   * 探到的 kernel 表里缺了**注册表里的哪几条**就点哪条（WI-91b Task 3）：镜像级注册没了，
+   * 「准备环境」修不了它 ⇒ 得说清区别。旧实现只 key 在 pyspark 一条上，scala 接入后
+   * "半接入的镜像"（只 COPY 了一条 kernelspec）会被它读成"没问题"—— 那正是静默降级那一族。
+   */
+  const missingSpecIds: string[] =
+    data?.running === true
+      ? Object.values(NOTEBOOK_KERNELS).map((k) => k.id).filter((id) => !kernels.some((k) => k.id === id))
+      : [];
   /**
    * WI-98：这一族从"链接里没有 token"（`!url.includes('token=')`）改成**读后端的 `localPeer`**。
    * 旧判据在新形状下会把每一台本机连接都误报成"非本机"（链接里本来就从来没有 token）——
@@ -293,9 +300,9 @@ export default function Notebook() {
           </p>
         ) : null}
 
-        {missingSpec ? (
+        {missingSpecIds.length > 0 ? (
           <p className="banner banner-warning" data-testid="notebook-spec-missing">
-            探到的 kernel 表里没有 <span className="mono">{NOTEBOOK_KERNELS.pyspark}</span> —— 那是镜像级的注册，
+            探到的 kernel 表里没有 <span className="mono">{missingSpecIds.join('、')}</span> —— 那是镜像级的注册，
             「准备环境」修不了它。多半是镜像没按 Dockerfile 重建：跑一次 <span className="mono">./start.sh --rebuild</span>。
           </p>
         ) : null}

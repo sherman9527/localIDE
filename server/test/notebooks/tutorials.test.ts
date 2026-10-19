@@ -208,10 +208,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('教程 notebook 容器里�
         const kernelspec = (JSON.parse(raw) as { metadata?: { kernelspec?: { name?: string } } }).metadata?.kernelspec?.name;
         expect(
           kernelspec,
-          `${file} 跑在内核 ${kernelspec} 上而不是 ${NOTEBOOK_KERNELS.pyspark} ⇒ 它可能在**镜像自带的系统解释器**上跑，` +
+          `${file} 跑在内核 ${kernelspec} 上而不是 ${NOTEBOOK_KERNELS.pyspark.id} ⇒ 它可能在**镜像自带的系统解释器**上跑，` +
             '教程里 `!pip3 install` 装进去的就是判题子进程看得见的那套 site-packages（红线①）。' +
-            `改的是 notebook 的 metadata.kernelspec.name（要写成 ${NOTEBOOK_KERNELS.pyspark}），不是这条断言`,
-        ).toBe(NOTEBOOK_KERNELS.pyspark);
+            `改的是 notebook 的 metadata.kernelspec.name（要写成 ${NOTEBOOK_KERNELS.pyspark.id}），不是这条断言`,
+        ).toBe(NOTEBOOK_KERNELS.pyspark.id);
 
         // ② 结论层：正向（注册表里每条都必须出现）
         const missing: string[] = [];

@@ -102,10 +102,22 @@ export interface NotebookFilesResponse {
 }
 
 /**
- * kernel id 的唯一真相：镜像里的 kernelspec 目录名、entrypoint、后端探活、前端默认选择、
- * 测试断言全指向这里。写死字符串会漂移，而漂移的表现不是报错，是"下拉框里那个 kernel 永远 ready:false"。
+ * kernel id 的唯一真相 **连同每条 kernel 的就绪判据**（WI-96 还掉的账）：
+ * 镜像里的 kernelspec 目录名、entrypoint、后端探活、前端默认选择、测试断言全指向这里。
+ * 写死字符串会漂移，而漂移的表现不是报错，是"下拉框里那个 kernel 永远 ready:false"。
+ *
+ * 每个条目自带数据，消费方**按条目读、不许按 id 猜**（`status.ts` 旧那句
+ * `needsVenv = id === NOTEBOOK_KERNELS.pyspark` 就是这条纪律的反面教材）：
+ * - `id`：kernelspec 目录名（`docker/jupyter/kernels/<id>/`，allow-list 由全部条目的 id 派生）；
+ * - `needsVenv`：这条 kernel 的解释器是否住在**懒创建**的 IDE venv 里。
+ *   `true` ⇒ venv 缺席时 `ready:false` 并带一句"怎么修"的 reason；
+ *   `false` ⇒ 解释器随镜像就位，venv 在不在与它无关（`arena-scala-toree` 是 Java 进程）。
+ * 以后每条新的就绪判据（比如"要某个命名卷"）继续加字段，不加 `||` 分支。
  */
-export const NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' } as const;
+export const NOTEBOOK_KERNELS = {
+  pyspark: { id: 'arena-pyspark', needsVenv: true },
+  scala: { id: 'arena-scala-toree', needsVenv: false },
+} as const;
 
 /**
  * WI-94：同源反代的前缀**唯一真相**（`/jupyter`）。

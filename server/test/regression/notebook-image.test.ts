@@ -24,30 +24,61 @@ import { config } from '../../src/config.js';
 
 const root = config.repoRoot;
 /**
- * kernel 目录名从 `NOTEBOOK_KERNELS.pyspark` 派生，不写字面量：本闸门验的就是"只有一份真相"，
- * 而它自己再抄一份的话，常量改了这条闸门反而看不见（还绿在旧目录上），
+ * kernel 目录名从注册表（`NOTEBOOK_KERNELS` 各条目的 `id`）派生，不写字面量：本闸门验的就是
+ * "只有一份真相"，而它自己再抄一份的话，常量改了这条闸门反而看不见（还绿在旧目录上），
  * 反过来把字面量当真相又会让"常量 ↔ 镜像工件"的分叉无人看管。
+ * ⚠ WI-91b Task 3（裁定 T3-4）：读**注册表全体**，不许只读 pyspark —— 新登记的
+ * `arena-scala-toree` 的 kernel.json 与它的 Dockerfile COPY 行必须落在同一份真相的管辖下。
  */
-const KERNEL_DIR = join(root, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.pyspark);
-const SPEC_FILE = join(KERNEL_DIR, 'kernel.json');
-// 分叉时报"哪个名字对不上"，不要只丢一句 ENOENT 让人去猜是哪一侧改的
-// （notebook-contract.test.ts 里有同一条判据、带同一句解释；这里再挡一次是因为本文件读得更深）。
-if (!existsSync(SPEC_FILE)) {
-  throw new Error(
-    `${SPEC_FILE} 不存在 ⇒ NOTEBOOK_KERNELS.pyspark（当前值 '${NOTEBOOK_KERNELS.pyspark}'）与 docker/jupyter/kernels/ 下的目录名分叉了：` +
-      '改常量要同时改目录（和 Dockerfile 的 COPY 目标），否则前端的 kernel 永远 ready:false',
-  );
-}
-const kernel = JSON.parse(readFileSync(SPEC_FILE, 'utf8')) as {
+interface KernelSpecJson {
   argv: string[];
   display_name: string;
+  language?: string;
   env?: Record<string, string>;
   metadata?: Record<string, string>;
-};
+}
+const SPECS_BY_ID: Record<string, KernelSpecJson> = {};
+for (const k of Object.values(NOTEBOOK_KERNELS)) {
+  const specFile = join(root, 'docker', 'jupyter', 'kernels', k.id, 'kernel.json');
+  // 分叉时报"哪个名字对不上"，不要只丢一句 ENOENT 让人去猜是哪一侧改的
+  // （notebook-contract.test.ts 里有同一条判据、带同一句解释；这里再挡一次是因为本文件读得更深）。
+  if (!existsSync(specFile)) {
+    throw new Error(
+      `${specFile} 不存在 ⇒ NOTEBOOK_KERNELS 登记的 '${k.id}' 与 docker/jupyter/kernels/ 下的目录名分叉了：` +
+        '改常量要同时改目录（和 Dockerfile 的 COPY 目标），否则前端的 kernel 永远 ready:false',
+    );
+  }
+  SPECS_BY_ID[k.id] = JSON.parse(readFileSync(specFile, 'utf8')) as KernelSpecJson;
+}
+/** pyspark 那一条的深度判据（argv/venv/SUBMIT_ARGS）沿用这份 —— 它们只对该 kernel 成立。 */
+const kernel = SPECS_BY_ID[NOTEBOOK_KERNELS.pyspark.id]!;
 const compose = readFileSync(join(root, 'compose.yml'), 'utf8');
 const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8');
 
-describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
+/**
+ * 注册表逐条的镜像工件闸门（Task 3 / T3-4）：每条登记的 kernel 都要有
+ * ① 工作树里的 kernelspec 目录（上面模块级已响亮地判过存在，这里是可报告的断言层）、
+ * ② Dockerfile 把它 COPY 进**镜像级** `/usr/local/share/jupyter/kernels/<id>/` 的行。
+ * 派生自注册表 ⇒ 加一条 kernel 忘了落工件，这里红；反过来工件在、注册表没登记，
+ * `notebook-contract.test.ts` 那份钉死的 id 清单红。两向合起来才是"一份真相"。
+ */
+describe('注册表逐条：每条 kernel 的 kernelspec 都被 Dockerfile COPY 进镜像级目录', () => {
+  for (const k of Object.values(NOTEBOOK_KERNELS)) {
+    it(`${k.id}：kernelspec 工件在场且被 COPY`, () => {
+      expect(
+        existsSync(join(root, 'docker', 'jupyter', 'kernels', k.id, 'kernel.json')),
+        `${k.id} 在工作树 docker/jupyter/kernels/ 下没有 kernel.json ⇒ 注册表说它有这条 kernel，工件却不在`,
+      ).toBe(true);
+      const kernelLines = dockerfile.split('\n').filter((l) => /jupyter\/kernels/.test(l));
+      expect(
+        kernelLines.some((l) => /^COPY\s/.test(l) && l.includes(`/usr/local/share/jupyter/kernels/${k.id}/`)),
+        `Dockerfile 没有把 ${k.id} 的 kernelspec 放进 /usr/local/share/jupyter/kernels/${k.id}/ 的 COPY 行 ⇒ 镜像里没有它，页面会永远报"没注册"`,
+      ).toBe(true);
+    });
+  }
+});
+
+describe(`${NOTEBOOK_KERNELS.pyspark.id} kernelspec`, () => {
   it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
     // 旧判据只吃三处（arena / dev / e2e 三个服务块里各自的 `ARENA_IDE_ENV_DIR:` 那一行 ——
     // 按服务名定位，不写行号：行号会漂，上一轮这里就漂成了 `:44/:134/:173` 那种"今天对、下轮错"的引用）
@@ -110,8 +141,8 @@ describe(`${NOTEBOOK_KERNELS.pyspark} kernelspec`, () => {
     // 现在两刀都换成对**全体相关行**的判定。
     const kernelLines = dockerfile.split('\n').filter((l) => /jupyter\/kernels/.test(l));
     expect(
-      kernelLines.some((l) => /^COPY\s/.test(l) && l.includes(`/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/`)),
-      `Dockerfile 没有把 kernelspec 放进 /usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/ 的 COPY 行`,
+      kernelLines.some((l) => /^COPY\s/.test(l) && l.includes(`/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark.id}/`)),
+      `Dockerfile 没有把 kernelspec 放进 /usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark.id}/ 的 COPY 行`,
     ).toBe(true);
     expect(
       kernelLines.filter((l) => /arena-ide-env/.test(l)),

@@ -114,10 +114,10 @@ function fakeUp(seenUrls: string[] = []) {
       ? {
           status: 200,
           json: async () => ({
-            default: NOTEBOOK_KERNELS.pyspark,
+            default: NOTEBOOK_KERNELS.pyspark.id,
             kernelspecs: {
-              [NOTEBOOK_KERNELS.pyspark]: {
-                name: NOTEBOOK_KERNELS.pyspark,
+              [NOTEBOOK_KERNELS.pyspark.id]: {
+                name: NOTEBOOK_KERNELS.pyspark.id,
                 spec: { display_name: 'PySpark (arena)' },
                 resources: {},
               },
@@ -192,22 +192,35 @@ describe('notebook 契约与配置', () => {
     expect(injected.notebook.seedDir).toBe(join(config.repoRoot, 'content', 'notebooks'));
   });
 
+  /**
+   * WI-91b Task 3 之后这一份清单**钉死为字面量集合**（控制方裁定 T3-4）：注册表里少一条、多一条、
+   * id 漂移，都会在这里红 —— 而"派生自注册表"的那些闸门（allow-list、镜像工件、Dockerfile COPY）
+   * 红在它们自己那一侧。两边合起来才排除"第二份清单悄悄接管"的坏法：
+   * 这一条判注册表自己，那几条判"别人确实读的是注册表"。
+   */
   it('kernel id 只有一份真相（entrypoint、镜像、前端、测试都用这个常量）', () => {
-    expect(NOTEBOOK_KERNELS.pyspark).toBe('arena-pyspark');
+    expect(
+      Object.values(NOTEBOOK_KERNELS).map((k) => k.id).sort(),
+      'NOTEBOOK_KERNELS 的 id 集合变了 ⇒ 这一条钉的清单与镜像工件要一起改（Task 3 裁定：这里就是那份钉住的清单）',
+    ).toEqual(['arena-pyspark', 'arena-scala-toree']);
   });
 
   /**
    * 上面那条用例的名字写着"镜像也用这个常量"，但只比字符串本身是**自证**：改常量、不改
    * `docker/jupyter/kernels/` 的目录名，它照样绿，而界面上的 kernel 会永远 ready:false。
    * 这条把名字与工件钉在一起 —— 判据是"按常量拼出来的路径存在"，纯读文件，宿主可跑（不需要 Docker）。
+   * ⚠ Task 3（T3-4）：循环**注册表全体**，不许只查 pyspark 那一条 —— 否则新登记的 scala
+   * 与它的 kernelspec 目录的分叉没人看管，"一份真相"对第二条 kernel 只是说说。
    */
   it('常量与镜像里的 kernelspec 目录同名（否则"一份真相"只是说说）', () => {
-    const specFile = join(config.repoRoot, 'docker', 'jupyter', 'kernels', NOTEBOOK_KERNELS.pyspark, 'kernel.json');
-    expect(
-      existsSync(specFile),
-      `${NOTEBOOK_KERNELS.pyspark} 在 docker/jupyter/kernels/ 下没有同名目录 ⇒ 常量与镜像工件分叉了：` +
-        'kernelspec 改名的话要同时改 shared/src/notebook.ts，否则前端列不出可用 kernel',
-    ).toBe(true);
+    for (const k of Object.values(NOTEBOOK_KERNELS)) {
+      const specFile = join(config.repoRoot, 'docker', 'jupyter', 'kernels', k.id, 'kernel.json');
+      expect(
+        existsSync(specFile),
+        `${k.id} 在 docker/jupyter/kernels/ 下没有同名目录 ⇒ 常量与镜像工件分叉了：` +
+          'kernelspec 改名的话要同时改 shared/src/notebook.ts，否则前端列不出可用 kernel',
+      ).toBe(true);
+    }
   });
 
   /**

@@ -47,7 +47,7 @@ import { executedNotebookEvidence, nbconvertCrashEvidence, realExecError } from 
  */
 
 /** kernel 落在镜像级目录（不是 venv 里）—— 见 Dockerfile 那条 COPY 与 notebook-image.test.ts。 */
-const KERNEL_FILE = `/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark}/kernel.json`;
+const KERNEL_FILE = `/usr/local/share/jupyter/kernels/${NOTEBOOK_KERNELS.pyspark.id}/kernel.json`;
 const TOKEN_KEY = 'ARENA_JUPYTER_TOKEN';
 /**
  * ⚠ 这两个标识符的**大小写是承重的**（评审 I-4）：`verify-coverage.test.ts` 的 `gateVars()` 用
@@ -592,10 +592,10 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     ).toBe(true);
     // 只压 id/label：把 res.kernels 整份打印是安全的，把 res 整份打印会连带打印 url（里面是 token）。
     const received = res.kernels.map((k) => `${k.id}=${k.label}`);
-    const hit = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark);
+    const hit = res.kernels.find((k) => k.id === NOTEBOOK_KERNELS.pyspark.id);
     expect(
       hit,
-      `kernels 里没有 ${NOTEBOOK_KERNELS.pyspark}（真 Jupyter 这次被解出来 ${received.length} 条：${JSON.stringify(received)}）` +
+      `kernels 里没有 ${NOTEBOOK_KERNELS.pyspark.id}（真 Jupyter 这次被解出来 ${received.length} 条：${JSON.stringify(received)}）` +
         '⇒ **解析的键与 Jupyter 实际回话不一致 ⇒ 界面会说 kernel 没注册，而它其实在**（容器档刚用它跑通 Spark），' +
         '而那句谎给的操作是 ./start.sh --rebuild —— 让人拆掉一个能用的镜像。' +
         '实测真相：/api/kernelspecs 的顶层是 {default, kernelspecs}，**没有 kernels 这个键**；' +
@@ -605,7 +605,7 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     const label = (hit?.label ?? '').trim();
     expect(
       label,
-      `${NOTEBOOK_KERNELS.pyspark} 的 label 是空的 ⇒ display_name 没解出来（spec 那一层没取到，连 ?? id 的兜底都没生效）` +
+      `${NOTEBOOK_KERNELS.pyspark.id} 的 label 是空的 ⇒ display_name 没解出来（spec 那一层没取到，连 ?? id 的兜底都没生效）` +
         '⇒ 界面上那个 badge 是一片空白，读的人只知道"有一条 kernel"，不知道是哪套环境',
     ).not.toBe('');
     /**
@@ -647,7 +647,7 @@ describe.skipIf(!IN_CONTAINER || !NOTEBOOK_SERVICE)('arena-pyspark kernel 在容
     ).toBe(true);
     expect(
       label,
-      `${NOTEBOOK_KERNELS.pyspark} 解析出来的 label（${JSON.stringify(label)}）与容器里那份 kernel.json 的 ` +
+      `${NOTEBOOK_KERNELS.pyspark.id} 解析出来的 label（${JSON.stringify(label)}）与容器里那份 kernel.json 的 ` +
         `display_name（${JSON.stringify(displayNameOnDisk ?? '')}）不是同一个串⇒ ` +
         '`spec` 那一层没取到，`?? id` 的兜底把"解析坏掉"伪装成"拿到了名字"（界面上那枚徽标会显示成 ' +
         '`arena-pyspark` 这种机器名，读的人看不出差别）。改的是 server/src/notebooks/status.ts 里 ' +

@@ -493,7 +493,7 @@ describe('GET /api/notebook/status', () => {
     const res = await app.inject({ method: 'GET', url: '/api/notebook/status', remoteAddress: '127.0.0.1', headers: { host: '127.0.0.1:7788' } });
     expect(res.statusCode).toBe(200);
     const ids = ((res.json() as NotebookStatusResponse).kernels ?? []).map((k) => k.id);
-    expect(ids, '假 Jupyter 明明列了两条 ⇒ 这一条判的确实是过滤，不是解析').toEqual([NOTEBOOK_KERNELS.pyspark]);
+    expect(ids, '假 Jupyter 明明列了两条 ⇒ 这一条判的确实是过滤，不是解析').toEqual([NOTEBOOK_KERNELS.pyspark.id]);
     expect(JSON.stringify(res.json()), 'Python 3 (ipykernel) 这个标签一旦出去，界面上就是一个可用的绿色 kernel').not.toMatch(/ipykernel/i);
   });
 });

@@ -74,7 +74,7 @@ vi.mock('../src/api', () => ({
 }));
 
 import Notebook from '../src/pages/Notebook';
-import { JUPYTER_BASE_URL, NOTEBOOK_TREE_PATH, notebookDocPath } from '@arena/shared';
+import { JUPYTER_BASE_URL, NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, notebookDocPath } from '@arena/shared';
 
 /**
  * 夹具里那份"后端给的链接"。**WI-98 之后它就是同源常量 `NOTEBOOK_TREE_PATH`** ——
@@ -122,7 +122,13 @@ const up = {
   // `Python 3 (ipykernel)` 滤掉，所以"服务端回了 python3"这种形状在这一档里是不存在的。
   // 下面那几条 `ready:false` 的夹具因此也都写成 arena-pyspark —— 夹具写成不可能的形状，
   // 判出来的"前端接得住这一态"就只对不可能的输入成立（本项目要的反面正是这种绿）。
-  kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+  // ⚠ WI-91b Task 3 之后这份"一切正常"的基准必须**两条注册表 kernel 都在场**：
+  //   missingSpec 判的是"注册表缺哪条点哪条"，基准夹具少一条就把横幅态当成了健康态。
+  //   （夹具是**输入**，允许写镜像里的目录名字面量；**期望值**一律从注册表派生。）
+  kernels: [
+    { id: 'arena-pyspark', label: 'PySpark (arena)', ready: true },
+    { id: 'arena-scala-toree', label: 'Scala (Toree)', ready: true },
+  ],
   notebooks: [{ file: '00-smoke-pyspark.ipynb', seeded: true }],
 };
 
@@ -142,6 +148,9 @@ describe('Notebook 第五页', () => {
     // 徽章那一排删了 ⇒ 那句 label 在 DOM 上再没有任何来源。留着这条断言不是为了"徽章没了"这口气，
     // 是为了**这一排的删除没有顺手把 kernels 这个数据源一起搬走**：blocked / missingSpec 两块还靠它。
     expect(screen.queryByTestId('notebook-kernels')).toBeNull();
+    // Task 3：两条注册表 kernel 都在探到的表里（`up` 就是这份基准）⇒ "没注册"横幅**不许**无中生有。
+    // 这一句是 missingSpec 改造成"逐条点名"后的反向对照：只点缺的，不点在场的。
+    expect(screen.queryByTestId('notebook-spec-missing'), '表里两条都在却挂"没注册"横幅 ⇒ 叫人去 rebuild 一个没坏的镜像（新版的静默降级形状）').toBeNull();
     expect(screen.getByTestId('notebook-page').textContent).not.toContain('PySpark (arena)');
     // 「这次铺了什么」那份清单整块删掉了（用户点名，2026-10-10）：这里原来断的是"open 态列得出
     // 00-smoke-pyspark.ipynb" —— 判的对象没了，断言随块搬家成"它必不出现"，专门那条见
@@ -724,13 +733,54 @@ describe('Notebook 第五页', () => {
    * 「kernel 表里没有 arena-pyspark」与「kernel 没就绪」是两种坏法，修的是不同东西：
    * 前者是镜像级的 kernelspec 注册（要 `./start.sh --rebuild`），后者缺的是 IDE 那份 venv（按钮修得了）。
    * 混在一起的症状是用户对着「准备环境」点了半天，而缺的那一层根本不在 venv 里 —— 界面必须说破区别。
+   * ⚠ WI-91b Task 3：横幅改成"注册表里缺哪条点哪条"（旧实现只 key 在 pyspark 上，
+   * 半接入的镜像会少点一条的名 = 静默）。三态各判一次：全缺 ⇒ 两条都点名；只缺 scala ⇒ 只点 scala；
+   * 只缺 pyspark ⇒ 只点 pyspark。期望的 id 一律从 `NOTEBOOK_KERNELS` 派生。
    */
   it('kernel 表里没有 arena-pyspark：说清"准备环境修不了它"，并且不给那个按钮', async () => {
     status.mockResolvedValue({ running: true, url: TREE, localPeer: true, kernels: [], notebooks: [] });
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-spec-missing')).toBeTruthy());
-    expect(screen.getByTestId('notebook-spec-missing').textContent).toContain('./start.sh --rebuild');
+    const banner = screen.getByTestId('notebook-spec-missing');
+    expect(banner.textContent).toContain('./start.sh --rebuild');
+    // 表整个是空的 ⇒ 注册表里**每一条**都缺，逐条点名（点名清单派生自注册表，不写死）
+    for (const id of Object.values(NOTEBOOK_KERNELS).map((k) => k.id)) {
+      expect(banner.textContent, `探到的表里缺了 ${id} 却不点它的名 ⇒ "半接入"被读成"没问题"（Task 3）`).toContain(id);
+    }
     expect(screen.queryByTestId('notebook-prepare'), '建 venv 不会多出那个 spec ⇒ 给按钮就是让人白点').toBeNull();
+  });
+
+  /**
+   * Task 3 的两态对照（派发词点名要加的）："表里有没有"从**一条**变成**逐条**之后，
+   * 横幅不许再把在场的条目一起点名 —— 那会把用户支去 rebuild 一个其实只少一条的镜像，
+   * 也不许把缺的那条咽下去 —— 那正是"半接入"的静默形状。
+   */
+  it('spec-missing 只点缺的那条：只注册 pyspark ⇒ 点 scala 的名；只注册 scala ⇒ 点 pyspark 的名（各自都不点在场那条）', async () => {
+    status.mockResolvedValue({
+      running: true,
+      url: TREE,
+      localPeer: true,
+      kernels: [{ id: 'arena-pyspark', label: 'PySpark (arena)', ready: true }],
+      notebooks: [],
+    });
+    const first = render(<Notebook />);
+    const b1 = await screen.findByTestId('notebook-spec-missing');
+    expect(b1.textContent, '表里没有 scala ⇒ 必须点它的名，否则"镜像只注册了一半"就静默了').toContain(NOTEBOOK_KERNELS.scala.id);
+    expect(b1.textContent, 'pyspark 明明在场，不许连它一起点名（那是叫人 rebuild 一个没坏的注册）').not.toContain(NOTEBOOK_KERNELS.pyspark.id);
+    expect(b1.textContent).toContain('./start.sh --rebuild');
+    first.unmount();
+
+    status.mockResolvedValue({
+      running: true,
+      url: TREE,
+      localPeer: true,
+      kernels: [{ id: 'arena-scala-toree', label: 'Scala (Toree)', ready: true }],
+      notebooks: [],
+    });
+    render(<Notebook />);
+    const b2 = await screen.findByTestId('notebook-spec-missing');
+    expect(b2.textContent, '表里没有 pyspark ⇒ 必须点它的名（旧实现只 key 在 scala 缺席这一侧）').toContain(NOTEBOOK_KERNELS.pyspark.id);
+    expect(b2.textContent, 'scala 在场，不许被顺带点名').not.toContain(NOTEBOOK_KERNELS.scala.id);
   });
 
   /**

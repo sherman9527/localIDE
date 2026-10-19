@@ -5,10 +5,19 @@ import { venvPythonPath } from '../ide/env.js';
 import { JUPYTER_BASE_URL, NOTEBOOK_KERNELS, NOTEBOOK_TREE_PATH, type NotebookKernel, type NotebookStatusResponse } from '@arena/shared';
 
 /**
- * 页面上允许出现的 kernel（终审 I-4）。从 `NOTEBOOK_KERNELS` 派生 ⇒ A2 加 `arena-scala`
+ * 页面上允许出现的 kernel（终审 I-4）。从 `NOTEBOOK_KERNELS` 派生 ⇒ 加一条 kernel
  * 只需要在那一处加一条，这里自动跟着长（"第四处字面量"是本仓库反复付学费的形状）。
+ * WI-91b Task 3（WI-96）之后注册表条目不再是裸字符串，派生取每条的 `id`。
  */
-const ARENA_KERNEL_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS);
+const ARENA_KERNEL_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS).map((k) => k.id);
+/**
+ * 就绪判据按 id 查这张表，**不写 `id === ...` 的比较链**（WI-96 的债本体就是那句比较链：
+ * 它让第二条 kernel 的 ready 只能靠"再补一个 `||`"来表达，而补出来的不是数据，是下一个分叉点）。
+ * 与 `ARENA_KERNEL_IDS` 同源于 `NOTEBOOK_KERNELS` ⇒ allow-list 放行的每条必在这张表里有数据。
+ */
+const ARENA_KERNELS_BY_ID = new Map<string, { readonly needsVenv: boolean }>(
+  Object.values(NOTEBOOK_KERNELS).map((k) => [k.id, { needsVenv: k.needsVenv }] as const),
+);
 
 /**
  * 「这条连接过不过服务端守卫」—— 终审 C-1 定下它是**合取**，两半都要点头。
@@ -293,10 +302,11 @@ export async function notebookStatus(input: {
      * 这一页是**入口**不是 Jupyter 本身，它没有义务替 Jupyter 转发一份它自己的全局清单。
      *
      * "那要是我们自己的 kernel 没注册了呢"——不靠"全列"发现：`Notebook.tsx` 的
-     * `missingSpec`（表里没有 `NOTEBOOK_KERNELS.pyspark` ⇒ `notebook-spec-missing` 那条横幅，
+     * `missingSpec`（探到的表里缺了注册表里的**哪条就点哪条** ⇒ `notebook-spec-missing` 那条横幅，
      * 文案是"多半是镜像没按 Dockerfile 重建 ⇒ ./start.sh --rebuild"）正是为那一件事准备的。
      * ⚠ 过滤让它变准的是**徽标那一排**，不是 `missingSpec`（收尾轮 N7 更正过这句）：
-     * `missingSpec` 只 key 在"`arena-pyspark` 在不在表里"这一件事上，过滤掉别的条目不改它的真假；
+     * `missingSpec` 判的是"注册表条目在不在探到的表里"这一件事（WI-91b Task 3 之前它只 key 在
+     * pyspark 一条上，此后逐条点名，半接入的镜像不会再少点一条的名）；过滤掉别的条目不改它的真假；
      * 真正被过滤修好的是——以前镜像自带的 python3 挂着绿徽标，那张表看着像"有 kernel 可用"，
      * 而它正是红线①要拦在判题环境外面的那个解释器。
      */
@@ -310,9 +320,12 @@ export async function notebookStatus(input: {
      * 后果不是"少一个按钮"：`arena-pyspark` 的 argv 指的是**懒创建**的 IDE venv
      * （`docker/jupyter/kernels/arena-pyspark/kernel.json` 里那条解释器路径 —— 镜像从来不含它，
      * `ARENA_IDE_ENV_DIR` 那个命名卷在首次显式创建之前是空的）。于是**全新卷**上这一页写着
-     * 「运行中」+ 绿徽标、README 说"选它然后 Run All"，用户按下去起不来；而这时如果用页面上
-     * 另一条 kernel（镜像自带的系统解释器）兜底，`!pip3 install` 就装进**判题那套**环境 ——
-     * 红线①正好在被 entrypoint 那段警告为它而写的状态下踩掉。
+     * 「运行中」+ 绿徽标、README 说"选它然后 Run All"，用户按下去起不来；而这时如果拿**镜像自带的
+     * 系统解释器**兜底（I-4 之前它还在页面上，现在被 allow-list 滤掉了），`!pip3 install` 就装进
+     * **判题那套**环境 —— 红线①正好在被 entrypoint 那段警告为它而写的状态下踩掉。
+     * ⚠ WI-96 之后"谁需要这份 venv"是**每条 kernel 自带的数据**（`NOTEBOOK_KERNELS` 的 `needsVenv`），
+     * 按 id 查表得到，不许再写 `id === ...` 的比较链或 `||` 分支：`arena-scala-toree` 是 Java 进程，
+     * venv 在不在与它无关 —— 把它牵连进来就是"整页不可用"那种坏法。
      *
      * 判的是**解释器在不在**（一次本地 stat），不是"本进程有没有跑过 ensureIdeEnv"那种内存状态：
      * 那个状态跨不过重启，而这个读接口随时可能被重放（刷新按钮 / 重进页面）。路径一律从 `venvPythonPath(config.ideEnvDir)` 派生 ——
@@ -327,14 +340,19 @@ export async function notebookStatus(input: {
     const venvInterpreter = venvPythonPath(config.ideEnvDir);
     const venvReady = existsSync(venvInterpreter);
     kernels = listed.map(([id, v]) => {
-      const needsVenv = id === NOTEBOOK_KERNELS.pyspark;
+      // `!` 不是敷衍：listed 刚按 ARENA_KERNEL_IDS 滤过，而那张清单与这张表**同源于同一个
+      // Object.values(NOTEBOOK_KERNELS)** ⇒ 走到这里的每个 id 必在表里有数据。
+      const needsVenv = ARENA_KERNELS_BY_ID.get(id)!.needsVenv;
       const kernel: NotebookKernel = { id, label: v.spec?.display_name ?? id, ready: !needsVenv || venvReady };
       if (needsVenv && !venvReady) {
         kernel.reason =
           `环境还没建：这条 kernel 的解释器指向 IDE 那份 venv（${venvInterpreter}），而它还不存在 —— ` +
           'venv 是**懒创建**的，镜像里从来不含它，所以"服务在跑"与"能跑代码"是两件事。' +
           '现在选它只会得到"起不来"。按「准备环境」建一次（第一次几十秒到两分钟，建在命名卷上、跨重启保留）。' +
-          '在那之前**别拿另一条 kernel 兜底**：那是镜像自带的系统解释器，`!pip3 install` 装进去的包会落到判题那套环境里（红线①）。';
+          '在那之前**别拿别的解释器兜底**：这一页只列 arena 登记过的 kernel，' +
+          '镜像自带的那个系统解释器已被 allow-list 滤掉、压根不会出现在表里 —— ' +
+          '它才是 `!pip3 install` 会把包装进判题那套环境（红线①）的那一个；' +
+          '而登记在册的另一条 kernel 是 Scala（Toree），它跑不了 Python。';
       }
       return kernel;
     });

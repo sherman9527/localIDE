@@ -224,7 +224,7 @@ function exitEvidence(exitCode: string, from: 'status' | 'code', budget?: Nbconv
     `nbconvert 以 code=${exitCode} 非 0 退出（这个数取自 error 的 \`${from}\` 键 —— **进程自己的退出码**，不是 node 的错误名）⇒ ` +
     '这**不是**「某个 cell 抛了异常」：那种情况 --ExecutePreprocessor.allow_errors=True 会让它退 0、错误落成 output_type=error，' +
     '由「执行时抛异常的 cell」那条结构化断言报出 cell 号与异常名。非 0 退出说的是这一档跑不起来：' +
-    `${NOTEBOOK_KERNELS.pyspark} 没注册 / venv 解释器缺失（这一档容器组第一条用例判的就是这个前提）、` +
+    `${NOTEBOOK_KERNELS.pyspark.id} 没注册 / venv 解释器缺失（这一档容器组第一条用例判的就是这个前提）、` +
     // 枚举里必须有**这一条自己**：到点时被 SIGTERM 杀掉，退出码一样是空的 ——
     // 它过去不在列出的原因里，于是最常见的坏法被印成"几条此刻并不成立的原因"（函数上方那段警告说的同一件事）。
     'DeadKernelError（Spark 崩在半路）、stdout 撑破了 maxBuffer（那一种 node 通常带 ENOBUFS + SIGTERM，会落到上面那一支；' +
