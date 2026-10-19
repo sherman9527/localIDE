@@ -65,7 +65,7 @@ import { expect, test, type Page } from '@playwright/test';
  * 卡壳（`notebook-status-card`）、标题「运行时」、"这次铺了什么"那块（`notebook-files`）按批的范围
  * 整片删掉，三把按钮并入 page-head 工具条。判据随之搬家：`notebook-status-card` 由"count 1"变
  * "count 0"（缺席判据，第一例）、`notebook-files` 由"列得出 smoke"变 count 0（同例），并新增
- * 「运行时」标题必不出现。逐字没动的：状态话、五段边界话、横幅措辞；按钮显隐的判据一条没少
+ * 「运行时」标题必不出现。逐字没动的：状态话、边界话（当时五段）、横幅措辞；按钮显隐的判据一条没少
  * （down 态 `notebook-open` / `notebook-prepare` 依旧 count 0 —— 它们现在住在工具条里，这条 e2e
  * 恰好是最真的验证，因为这个实例**永远**是 down）。
  */
@@ -118,16 +118,16 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
 
   // 三句边界话在这一态也得常驻（用户最该看见它们的时刻正是状态最难看的时候）。
   // 但**逐字的文案契约只该有一份**：那份在单元层 —— `web/test/notebook.test.tsx` 里的
-  // `boundarySentences` × `boundaryCases`（在跑 / 没在跑 / 链接坏掉这三态各跑一遍，7 句逐字）。
+  // `boundarySentences` × `boundaryCases`（在跑 / 没在跑 / 非本机连接这三态各跑一遍，13 句逐字）。
   // 这里原来把最长那句整句抄了一遍，于是改个标点会红的是 E2E 而不是单测（评审 minor）——
   // 那类红教人的是"两处都得改"，不是"这里真坏了"。
   // ⇒ 最长那句换成 testid + 结构判据：`notebook-boundary` 那一块可见，里面每个 <p> 是一句边界话
   //   （少一句就是这里红），且其中恰好一条提到 `127.0.0.1` —— 那是**契约事实**
   //   （宿主侧两个发布端口只绑回环，`compose-ports.test.ts` 钉着），不是措辞。
-  // ⚠ 段落数今天不是 3 而是 **5**：`db08cf8`（终审 I-5）把"环境共用"那一句拆成了两句
-  //   （判题用的是另一套解释器 / 绝对路径拦不住 + CPU 不在这页管辖内），而这条计数判据
-  //   一直排在两句字面判据**之后**，字面先红 ⇒ 计数从来没跑到过，没人看见它也已经过期。
-  //   （原 finding 写的是"恰好三个 <p>"，按 `Notebook.tsx` 现场更正为 5。）
+  // ⚠ 段落数的历史：原稿"恰好三个 <p>"更正为 5（`db08cf8` 把"环境共用"拆成两句），
+  //   WI-91b Task 5 又长到 **7**（接入第二条 kernel：新增 Scala 报错形状与"三样不支持"两段，
+  //   且"共用环境 / pip / CPU"改成按-kernel 点名）。计数判据两头都咬：少一段（删话）与多一段
+  //   （话与契约分家）都会红 —— 它必须与 boundarySentences、summary 里的"7 条边界"同批改。
   // 剩下两句**不抄整句、只钉住那句里搬不走的名词**，两个判据各自拦一件具体的事。
   // 顺序也有讲究：这两条排在结构判据**之前**，为的是"少哪一句就报哪一句"——
   // 计数判据谁先红都只会说"少了一段"，读的人还得自己回去数是哪一句没了。
@@ -141,17 +141,20 @@ test('打开 #/notebook：状态文案上屏，而这个没有 Jupyter 的实例
   //    所以这个词在页面上是唯一的 ⇒ 删掉那一句它当场消失，换成"这里不构成安全边界"它不动。
   expect(pageText, '那句"判题用的是另一套解释器"没了 ⇒ 页面又把共用环境写成了一道保证').toContain('另一套解释器');
   expect(pageText, '那句"这不是安全边界"没了 ⇒ 参考答案的可读性被静默写成了保密性').toContain('安全边界');
+  // ③ WI-91b Task 5 新增：`Unknown Error` 是协议里的字面量（不是中文措辞，抄它不算抄文案），
+  //    钉的是"Scala 报错形状那段边界话还在"——整段删掉它当场消失，改写措辞它不动。
+  expect(pageText, 'Scala 的报错形状那段（ename 恒为 Unknown Error）没了 ⇒ 页面又开始用 Python 的经验许诺 Scala').toContain('Unknown Error');
   // ⚠ WI-94 Task 6 之后这块折进了 `<details>`：**先展开再断**。
   // 顺序是刻意的：`.click()` 排在任何边界判据之前，因为折叠状态下
-  // `toHaveCount(5)` 与 `textContent()` 都**照样成立**（折叠不删 DOM），于是"忘了展开"这一种
+  // `toHaveCount(7)` 与 `textContent()` 都**照样成立**（折叠不删 DOM），于是"忘了展开"这一种
   // 故障只能由下面那句 `toBeVisible()` 抓到 —— 而它必须在展开之后跑，否则它抓的是"没展开"这件事
   // 本身，红得没有信息量。破坏性验证（本轮实测）：删掉这次 `.click()` ⇒ 本文件红的恰是可见性那句。
   const boundary = page.getByTestId('notebook-boundary');
   await expect(boundary).toBeVisible();
   await page.getByText('这页跟判题有什么关系').click();
-  await expect(boundary.locator('p'), '边界块少了一段 ⇒ 有人整句删掉了边界话（这一态共 5 段）').toHaveCount(5);
+  await expect(boundary.locator('p'), '边界块段数不是 7 ⇒ 有人整句删掉了边界话，或让 DOM 与 boundarySentences 契约分家（这一态共 7 段）').toHaveCount(7);
   await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' }), '那一块里没有提到回环地址的那句 ⇒ 三种说法之一被删了').toHaveCount(1);
-  // 展开之后这五段是真的**看得见**，不是只是挂在 DOM 上（折叠时它们对读者等于不存在）
+  // 展开之后这七段是真的**看得见**，不是只是挂在 DOM 上（折叠时它们对读者等于不存在）
   await expect(boundary.locator('p').filter({ hasText: '127.0.0.1' })).toBeVisible();
 
   // 2026-10-10 用户点名的布局简化 —— 删没删要靠判据而不是人眼。这一态（running:false）正是

@@ -134,11 +134,22 @@ curl 则不带这个头 —— 三种都放行，别的页面想嵌它判 `cross
 （手机 / iPad 明确不支持，是决定不是漏配）。同一个 `Host` 判据还管着**整个 API**（外来 Host ⇒ 403，
 因为这个服务没有鉴权、一直靠"只绑宿主回环"活着），但它**不替代**绑回环：Host 谁都写得出来。
 
-- **kernel 就是网页 IDE 那份环境**：`PySpark (arena)` 的 argv 指向 `/opt/arena-ide-env/python/bin/python`，
+- **kernel 有两条，"共用环境"对它们是相反的两件事**（WI-91b 接入 `Scala (Toree)` 后，这句必须按 kernel 点名）：
+  **`PySpark (arena)`** 的 argv 指向 `/opt/arena-ide-env/python/bin/python` —— 就是网页 IDE 那份 venv，
   所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。**这条同时是判题那条红线的第二个入口**
   —— 默认装进的是 IDE 那套 site-packages，判题器读不到；**但那是默认，不是这一页能给的保证**：
   entrypoint 那道 PATH 前置只管裸命令，写成 `!/usr/local/bin/pip3 install X` 装进去的就是判题那个解释器，
   闸门与页面都拦不住这种写法（红线①的可复现性靠**镜像 + 闸门**，见 `docs/JUDGING.md` 红线①最后两段）。
+  **`Scala (Toree)`**（`arena-scala-toree`）是镜像里独立的 Java 进程（`/usr/bin/java` 起 Toree，
+  `-Xmx2g -Dspark.master=local[2]`），**完全不碰 IDE 那份 venv** —— venv 在不在与它无关，「准备环境」
+  修不了它也不需要修它。它的已知边界都写在页面边界块里且一句没美化：编译错误 `ename` 恒为
+  `Unknown Error`、堆栈帧为空（可用的那句话只在错误消息里，容器档实测 106 字符）；kernel 自报的
+  `language_info.version`（2.12.15）与实载（2.12.18）对不上 ⇒ 界面不显示版本；补全、悬浮文档、
+  中断不支持（中断有实测：SIGINT 进 JVM 后处理器直接抛错，掐不掉正在跑的代码）。跨 cell 状态与
+  活的 SparkSession 有容器档闸门真跑着（`./start.sh --verify` 的「Scala kernel 真跑（WI-91b Task 4）」
+  阶段，配 `assert-ran --require-no-skips`）。**Scala 侧还没有教程 notebook** —— 现有的 `00-smoke` +
+  四篇教程声明的都是 `arena-pyspark`；每篇教程期望哪条 kernel 要做成注册表自带字段，账在
+  `HANDOVER.md` 需求池 N-20。
 - **示例**在 `content/notebooks/*.ipynb`（进 git、可 diff）。启动时"缺失才复制"进 `data/notebooks/`，
   **绝不覆盖你改过的那份**；铺不进去（只读挂载 / 磁盘满）会单独说成一句话，不伪装成"没有示例"。
   里面是 `00-smoke-pyspark.ipynb`（环境自检，`kernel.test.ts` 真跑它）加**四篇 senior 级 PySpark 教程**

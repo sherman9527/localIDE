@@ -48,15 +48,21 @@ import { Loading } from '../components/AsyncState';
  *    ⚠ 布局简化没有碰这一维：Jupyter 没起时右边那棵树**渲染不出来**，所以状态话与横幅区必须留着 ——
  *    把"少一块 UI"做成"把话也删掉"，页面就只剩一张边界卡，那正是 WI-94 修掉的"空白 iframe 就是说谎"。
  *
- * 那几句边界话常驻，不随状态切换收起（IDE 那边同一课）：①环境共用（判题用的是另一套解释器，
- * 绝对路径拦不住）、②CPU 不在这页管辖内、③答案可读不是安全边界、
- * ④只在本机打得开。用户在"要装包"和"要撞墙"的两个时刻都需要它们，而那正是状态最难看的时候。
- * （`db08cf8` 把第一句拆成了两句，所以这里今天是 5 段 = 上面 4 件事；逐字契约在
- * `web/test/notebook.test.tsx` 的 `boundarySentences`，浏览器层只钉名词：`tests/e2e/notebook-page.spec.ts`。）
- * WI-94 Task 6 按用户批的范围把这五段**折进一个 `<details>`**：措辞一字不改、DOM 里常驻，
- * 只是默认收成一行 —— 判据分两层：单元层钉"是 `<details>` 且默认折着 + 五段逐字仍在 DOM"，
- * 浏览器层钉"展开之后那五段真的可见"（折叠着的元素在 Playwright 里 `textContent` 照样读得到，
+ * 那几句边界话常驻，不随状态切换收起（IDE 那边同一课）：①环境共用（**按 kernel 分开说**：
+ * Python 那条与判题用的是另一套解释器、Scala 那条连 IDE venv 都不碰；绝对路径拦不住）、
+ * ②CPU 不在这页管辖内（两条 kernel 各起一个判题池之外的 Spark JVM，量级各写各的）、
+ * ③Scala 侧的报错形状（`Unknown Error` + 空堆栈帧）与不支持三样（补全/悬浮/中断）、
+ * ④答案可读不是安全边界、⑤只在本机打得开。用户在"要装包"和"要撞墙"的两个时刻都需要它们，
+ * 而那正是状态最难看的时候。
+ * （`db08cf8` 把第一句拆成了两句，那是 5 段的起点；WI-91b Task 5 接入第二条 kernel 后长到 7 段 ——
+ * 逐字契约在 `web/test/notebook.test.tsx` 的 `boundarySentences`，浏览器层只钉名词：
+ * `tests/e2e/notebook-page.spec.ts`。）
+ * WI-94 Task 6 按用户批的范围把边界块**折进一个 `<details>`**（当时 5 段，那次措辞一字不改、只加折叠）：
+ * DOM 里常驻，只是默认收成一行 —— 判据分两层：单元层钉"是 `<details>` 且默认折着 + 七段逐字仍在 DOM"，
+ * 浏览器层钉"展开之后这七段真的可见"（折叠着的元素在 Playwright 里 `textContent` 照样读得到，
  * 所以只数段落数抓不到"忘了展开"，那一半必须由可见性判据负责）。
+ * WI-91b Task 5 改的是**措辞契约本身**（5→7 段 + 按 kernel 点名），三层（页面 / 单元逐字 / e2e 计数）
+ * 同批一起走，改一边另两边红 —— 折叠纪律那一条没动。
  *
  * 还有一条**与上面几态正交**的诊断：`seedError`（示例铺不进去，评审 I-1）。它不许并进状态那几句里 ——
  * 并进去就把"磁盘/挂载的事"说成"服务的事"了；状态那一行此刻照旧说实话。它原来挂在示例那一块里，
@@ -209,7 +215,7 @@ export default function Notebook() {
     <div data-testid="notebook-page">
       <div className="page-head">
         <h2>Notebook</h2>
-        <span className="muted small">本机 Jupyter · kernel 用的是网页 IDE 那份环境</span>
+        <span className="muted small">本机 Jupyter · Python kernel 用的是网页 IDE 那份环境；Scala kernel 是镜像里独立的 JVM，不碰那份环境</span>
         <span className="spacer" />
         {/* 三把按钮并进这条工具条（用户点名"按钮合并到下面"；档位全是既有 .btn 系，不引新样式类）。
             「在新标签页打开」只在 open 态渲染：给一条点开就是浏览器报错的死链比不给更坏（静默降级），
@@ -427,25 +433,29 @@ export default function Notebook() {
 
       <section className="card" data-testid="notebook-boundary">
         {/* WI-94 Task 6 按用户批的范围把这块折起来一行（判的是可见性，不是删除）：
-            summary 用 .card-title 保住原来那颗标题的视觉档位；五段话**逐字**搬进来，
-            措辞由 `web/test/notebook.test.tsx` 的 `boundarySentences` 钉着，不要顺手改写。 */}
+            summary 用 .card-title 保住原来那颗标题的视觉档位；边界话逐字由
+            `web/test/notebook.test.tsx` 的 `boundarySentences` 钉着，不要顺手改写。
+            WI-91b Task 5 把它从 5 段长到 7 段："共用环境 / pip 装哪套"两句改成**按 kernel 点名**
+            （arena-pyspark 共用 IDE venv、arena-scala-toree 是镜像里独立的 Java 进程，方向相反），
+            CPU 那句带上 Scala 侧真实的 JVM 量级（读自 docker/jupyter/kernels/arena-scala-toree/kernel.json），
+            再补 Scala 侧两件（报错形状 ename=Unknown Error 且空堆栈帧；补全/悬浮/中断不支持）。都不许美化。 */}
         <details className="nb-boundary-details">
-          <summary className="card-title">这页跟判题有什么关系（5 条边界，点开看）</summary>
+          <summary className="card-title">这页跟判题有什么关系（7 条边界，点开看）</summary>
           <div className="col small">
             <p>
-              notebook 的 kernel 与 IDE 共用同一份环境，判题用的是另一套解释器 —— <strong>这是默认，不是这道页面上的强制</strong>。
+              两条 kernel 的「共用环境」不是同一件事：<strong>Python kernel</strong>（arena-pyspark）与 IDE 共用同一份环境，判题用的是另一套解释器 —— <strong>这是默认，不是这道页面上的强制</strong>；<strong>Scala kernel</strong>（arena-scala-toree）跑的是镜像里独立的 Java 进程，<strong>完全不碰 IDE 那份 venv</strong> —— venv 在不在与它无关，「准备环境」那把按钮也修不到它头上。
             </p>
             <p>
-              <span className="mono">!pip3 install</span> 命中哪个 pip 由 <span className="mono">PATH</span> 决定：
-              服务那边把 IDE 那份 venv 前置在 PATH 上，所以默认装进的是 notebook 自己的环境。但绝对路径拦不住 ——{' '}
-              <span className="mono">!/usr/local/bin/pip3 install X</span> 装进的就是判题那套解释器，
-              改的是你之后每道题的判题结果（红线①的承诺由闸门守着，不由这一页守着）。
+              <span className="mono">!pip3 install</span> 命中哪个 pip 由 <span className="mono">PATH</span> 决定 —— 这句只对 <strong>Python kernel</strong> 成立：服务那边把 IDE 那份 venv 前置在 PATH 上，所以默认装进的是 notebook 自己的环境。但绝对路径拦不住 —— <span className="mono">!/usr/local/bin/pip3 install X</span> 装进的就是判题那套解释器，改的是你之后每道题的判题结果（红线①的承诺由闸门守着，不由这一页守着）。
             </p>
             <p>
-              这一页也管不住 <strong>CPU</strong>：kernel 自带{' '}
-              <span className="mono">--master local[2] --driver-memory 512m</span>，
-              那是判题池之外的第二个 Spark JVM —— 「判题优先、IDE 排队、不抢占」那套安排看不见它，
-              笔记本里跑重活时，被判题的那道 Spark 题可能被推向超时。
+              这一页也管不住 <strong>CPU</strong>：<strong>Python kernel</strong> 自带 <span className="mono">--master local[2] --driver-memory 512m</span>，那是判题池之外的第二个 Spark JVM；<strong>Scala kernel</strong> 另起一个 <span className="mono">-Xmx2g -Dspark.master=local[2]</span> 的 JVM。「判题优先、IDE 排队、不抢占」那套安排看不见这两个，笔记本里跑重活时，被判题的那道 Spark 题可能被推向超时。
+            </p>
+            <p>
+              <strong>Scala kernel</strong> 的报错形状与 Python 那条不同：编译错误的 <span className="mono">ename</span> 恒为 <span className="mono">Unknown Error</span>，而且<strong>没有堆栈帧</strong> —— 报错有，但堆栈帧没有，能看的那句话在错误消息里（容器档负例夹具实测：错误消息 106 个字符、堆栈帧 0 条）。
+            </p>
+            <p>
+              <strong>Scala kernel</strong> 这三样不支持，界面不许把它们说成有：<strong>补全</strong>、<strong>悬浮文档</strong>、<strong>中断</strong>。中断有实测读数：信号送进那条 JVM 后 kernel 自己的中断处理器直接抛错（容器档 3/3 次），既不落成一条 cell 报错、也掐不掉正在跑的代码 —— 那个按钮不是可靠的刹车。
             </p>
             <p>
               notebook 里能读到题库的参考答案 —— <strong>这不是安全边界</strong>。工作目录只是让默认视图干净，

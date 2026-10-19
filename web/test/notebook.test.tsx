@@ -18,7 +18,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *    **WI-98 整块删除**：链接是编译期派生的同源路径，没有任何 env 能让它坏 ⇒ 这一态结构上
  *    不可能再发生，留着分支与用例就是装饰判据（"删判据必须说清判的对象为什么不存在了"—— 这就是说明；
  *    实现与后端用例里的同一段理由见 `server/src/notebooks/status.ts` 与 `status.test.ts`）。
- * 那几句边界话（共用环境 / 绝对路径拦不住 / CPU / 答案可读不是安全边界 / 只在本机打得开，
+ * 那几句边界话（共用环境——按 kernel 点名 / 绝对路径拦不住 / CPU 两个 JVM 的真实量级 /
+ * Scala 报错形状 / Scala 不支持补全·悬浮·中断 / 答案可读不是安全边界 / 只在本机打得开，
  * 逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
  *
  * ## WI-94 Task 6 加进来的那一维：notebook 现在**内嵌在这一页里**，不是"跳出去开一个标签页"
@@ -57,7 +58,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * 只测 open 态分不清"删掉了"与"恰好没数据"）；② 状态句两两互斥的**总判据**（原来散在各条用例的
  * 点名式 toBeNull，加第五、第六句时没人回头补得起来，这条一次顶满；WI-98 把 `nolink` 删掉后
  * 它从五句收成四句 —— 串与用例**同时**删，只删一边它自己就会红，那是设计如此）；
- * ③ seedError 横幅换家到横幅区后仍必现 —— 它是话，不是容器。状态行的话逐字未动，边界五段逐字未动
+ * ③ seedError 横幅换家到横幅区后仍必现 —— 它是话，不是容器。状态行的话逐字未动，边界话逐字未动
+ *（当时五段；WI-91b Task 5 接入第二条 kernel 后长到七段，逐字契约始终只有 `boundarySentences` 这一份）
  * （`boundarySentences` 契约原样）。
  */
 
@@ -631,20 +633,53 @@ describe('Notebook 第五页', () => {
   });
 
   /**
-   * 边界卡折成 `<details>`（用户批的第 4 件：措辞一字不动，只是收成一行）。
+   * 边界卡折成 `<details>`（用户批的第 4 件：措辞由本文件钉着，只是收成一行）。
    * 这里判两件事：折叠结构真的存在（有人顺手把 `<details>` 拆回常开会红），
-   * 而**默认是折着的**（默认展开就等于没折叠）。DOM 上五段话还在 —— jsdom 里折叠不影响
+   * 而**默认是折着的**（默认展开就等于没折叠）。DOM 上边界话还在 —— jsdom 里折叠不影响
    * `textContent`，所以上面那组 `boundarySentences` 用例照旧全过；"看不见"那一半归 e2e，
    * 由 `tests/e2e/notebook-page.spec.ts` 里"先展开再断可见"那条钉。
+   * ⚠ 段落数 5 → 7 是 WI-91b Task 5：接入 Scala kernel 后新增两段（报错形状、补全/悬浮/中断不支持），
+   * 且"共用环境 / pip / CPU"三段改成按-kernel 点名。计数判据**两头都咬**：少一段红（删话），
+   * 多一段也红（话与契约分家）—— 它必须跟着 boundarySentences 同批改，改一边这条就红。
    */
-  it('边界卡是折起来的 `<details>`，但五段话逐字仍在 DOM 上', async () => {
+  it('边界卡是折起来的 `<details>`，但七段话逐字仍在 DOM 上', async () => {
     status.mockResolvedValue(up);
     render(<Notebook />);
     await waitFor(() => expect(screen.getByTestId('notebook-boundary')).toBeTruthy());
     const details = screen.getByTestId('notebook-boundary').querySelector('details');
     expect(details, '边界卡不是 <details> ⇒ 用户批的"压成一行/折叠"这件没做').not.toBeNull();
     expect(details!.hasAttribute('open'), '默认展开 ⇒ 折叠这一态根本没生效').toBe(false);
-    expect(screen.getByTestId('notebook-boundary').querySelectorAll('p')).toHaveLength(5);
+    expect(screen.getByTestId('notebook-boundary').querySelectorAll('p')).toHaveLength(7);
+  });
+
+  /**
+   * WI-91b Task 5 ③（页面上不许出现 Scala 的 language_info.version）。
+   * 事实（探索档与 WI-91b 计划 §0 定案）：Toree 制品自报的 `language_info.version` 是它编译期的
+   * **2.12.15**，而镜像里真正加载的是 Spark 3.5.5 带的 **2.12.18**（类路径让 /opt/spark/jars 赢，
+   * 见 kernel.json 的 arena_classpath_note）。两个数**都不许**显示给这一页：
+   * 前者是 kernel 亲口说的谎，后者虽然是真的但来源不是这个自报字段 —— 放上去就是把一个
+   * "对不上任何协议读数"的版本号供成界面事实。今天页面上没有任何组件渲染 language_info，
+   * 所以这条判据钉的是"保持这样"：它是"不显示"这句话唯一能长牙的形式
+   *（破坏性验证：往 page-head 那句里塞一个 `2.12.15`，本条必须红 —— 读数在 task-5-report.md）。
+   */
+  it('页面上任何一态都不许出现 Scala 的 language_info.version（2.12.15 与 2.12.18 都不行）', async () => {
+    const versionStates: Array<[string, unknown]> = [
+      ['在跑', up],
+      ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
+      ['非本机连接', { running: true, url: TREE, localPeer: false, kernels: [], notebooks: [] }],
+    ];
+    for (const [label, value] of versionStates) {
+      status.mockResolvedValue(value);
+      const { container, unmount } = render(<Notebook />);
+      await waitFor(() => expect(screen.getByTestId('notebook-boundary')).toBeTruthy());
+      expect(
+        screen.getByTestId('notebook-page').textContent ?? '',
+        `${label} 态把 2.12.x 印给了用户 ⇒ language_info.version（谎报 2.12.15 / 实载 2.12.18）上了页面（Task 5 ③）`,
+      ).not.toMatch(/2\.12\.\d+/);
+      // 判 innerHTML 而不是只判文本：版本塞进 title/aria-label 这类 attribute 时 textContent 是瞎的
+      expect(container.innerHTML, `${label} 态的 DOM（含 attribute）里出现 2.12.x`).not.toMatch(/2\.12\.\d+/);
+      unmount();
+    }
   });
 
   it('没在运行：说清"做题不受影响"，并且不给死链接', async () => {
@@ -794,7 +829,8 @@ describe('Notebook 第五页', () => {
   });
 
   /**
-   * 每一句一条都不能省（Step 4；`db08cf8` 之后清单从 3 句长到 7 句，用例名里的"三句"就是这么留下的假话），
+   * 每一句一条都不能省（Step 4；`db08cf8` 之后清单从 3 句长到 7 句，WI-91b Task 5 接入第二条 kernel
+   * 后长到 13 句，用例名里的"三句"就是这么一路留下的假话 —— 名字不改是历史，清单与逐字判据必须跟上），
    * 而且**换一态再看**：
    * 只在"在跑"那态显示，等于在用户最该看见的时候（他要开始装包 / 开 notebook 了）把它收走。
    * 评审 Fix-1 的 Minor：一态一个 `it` —— 一个循环里三态共用一条用例名，红的时候只知道
@@ -807,10 +843,21 @@ describe('Notebook 第五页', () => {
     // 同理漏掉的第二件事是 CPU：kernel 自带 `--master local[2] --driver-memory 512m`，
     // 那是「判题优先、IDE 排队、不抢占」那套安排**看不见**的第二个 Spark JVM。
     // 所以这里换成"说是默认 + 说破拦不住 + 说破 CPU 不在这道页管辖内"的四句，一句都不许省。
+    // ⚠ WI-91b Task 5：接入第二条 kernel 之后，"共用环境"与"pip 装进哪套"两句**必须点名到 kernel**
+    //（arena-pyspark 与 IDE 共用 venv，arena-scala-toree 是镜像里的独立 Java 进程、压根不碰它），
+    // CPU 那句要带 Scala 侧**真实的 JVM 量级**（`-Xmx2g -Dspark.master=local[2]`，读自
+    // `docker/jupyter/kernels/arena-scala-toree/kernel.json`，不是把 Python 那两个数抄第二遍）；
+    // 再加 Scala 侧两件（报错形状 `Unknown Error`/空堆栈帧、补全·悬浮·中断三样不支持）。清单只增。
     '判题用的是另一套解释器',
     '这是默认，不是这道页面上的强制',
+    '完全不碰 IDE 那份 venv',
     '装进的就是判题那套解释器',
     '那是判题池之外的第二个 Spark JVM',
+    '-Xmx2g -Dspark.master=local[2]',
+    'Unknown Error',
+    '报错有，但堆栈帧没有，能看的那句话在错误消息里',
+    '这三样不支持',
+    '悬浮文档',
     'notebook 里能读到题库的参考答案',
     '这不是安全边界',
     '只在浏览器本机打开：地址是 127.0.0.1，手机 / iPad 访问不了',

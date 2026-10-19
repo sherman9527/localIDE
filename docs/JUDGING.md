@@ -175,10 +175,17 @@ env，它证明不了服务进程那一侧）。
 `!/usr/local/bin/pip3 install X` 装进的就是判题那个解释器，"重建镜像即可复现判题"当场作废。
 闸门拦不住这种写法（它判的是**服务自己那条 PATH 的前置**，不是 cell 里写的第二个词），界面也拦不住 ——
 红线①的可复现性靠**镜像 + 闸门**，不靠页面文案，页面现在说的就是这句话。
+（WI-91b 之后补一句适用面：这一整套"venv + PATH 前置 + pip"的账只属于 `arena-pyspark`；
+`arena-scala-toree` 不碰那份 venv，它对红线①的接口是另一件事 —— 它读的 `/opt/spark/jars`
+与判题侧同源但**只读**，判题 JVM 与 kernel JVM 互不派生。两侧的形状都写在页面边界块第 1、2 段。）
 
-**第二类影响不落在红线①上、落在超时上**：notebook 的 kernel 自带
-`--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的
-`PYSPARK_SUBMIT_ARGS`），那是判题池**之外**的第二个 Spark JVM。`docs/ARCHITECTURE.md` §3「常驻 worker 的排队」那套
-"判题优先于 IDE 且不抢占"排的是 `exec/spark-pool.ts` 里的 worker，notebook 这个 JVM 不在队列里 ——
+**第二类影响不落在红线①上、落在超时上**：notebook 的 kernel 起的是判题池**之外**的 Spark JVM，
+今天是**两条、各一个量级**（WI-91b 接入后这句必须按 kernel 点名）：
+`arena-pyspark` 自带 `--master local[2] --driver-memory 512m`
+（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的 `PYSPARK_SUBMIT_ARGS`）—— 第二个 JVM；
+`arena-scala-toree` 另起一个 `-Xmx2g -Dspark.master=local[2]` 的 JVM
+（`docker/jupyter/kernels/arena-scala-toree/kernel.json` 的 argv）—— 两个 JVM 都不在队列里。
+`docs/ARCHITECTURE.md` §3「常驻 worker 的排队」那套
+"判题优先于 IDE 且不抢占"排的是 `exec/spark-pool.ts` 里的 worker，notebook 这些 JVM 不在队列里 ——
 笔记本里跑重活会与被判题的 Spark 题抢宿主 CPU，把它推向超时。这条记为 **WI-95**（目前没有闸门，
-页面文案已说实话）。
+页面文案已说实话；页面边界块第 3 段现在写的就是这两组数）。

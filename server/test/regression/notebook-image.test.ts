@@ -78,6 +78,52 @@ describe('注册表逐条：每条 kernel 的 kernelspec 都被 Dockerfile COPY 
   }
 });
 
+/**
+ * WI-91b Task 5：`arena-scala-toree` 已登记进注册表 ⇒ 它的 `display_name` 是**用户现在就看得到**的
+ * Jupyter 选择器标签，`arena_spike_status` 那类"这不是交付"的自我描述也不再是内部注释而是假话。
+ * 这四条各拦一件（判据只增不减；改标签可以，改成"探索/spike/版本号"不行）：
+ * ① 标签不许再带探索期字样（'WI-91 探索' 被改名回去 ⇒ 红）；
+ * ② 标签不许带 2.12.x —— kernel 自报的 `language_info.version` 在说谎（2.12.15 vs 实载 2.12.18），
+ *    页面上不许显示（`web/test/notebook.test.tsx` 那条判页面），选择器标签是我们唯一还能控制的
+ *    第二个 surface，同样不许把这个数字供成界面事实；
+ * ③ spike 时代那份 `arena_spike_status` 必须整键消失（留键=留着一条"没登记进 NOTEBOOK_KERNELS"的
+ *    过期话在工件里，而那句话正是 Task 3 之后变假的三处之一）；
+ * ④ 中断的第一份实测读数（SIGINT → handler 抛错，WI-91b Task 4 §9）必须落在工件 metadata 里 ——
+ *    页面边界块那句"中断不支持"的证据链在镜像工件上要有下文，不许只活在某份报告里。
+ */
+describe(`${NOTEBOOK_KERNELS.scala.id} kernelspec（交付标签与缺陷记录）`, () => {
+  // `!` 与上面 pyspark 那份同源：模块级加载循环刚按注册表把每条都读进来并 existsSync 判过，
+  // 取不到的那条路在本文件 import 时就抛了（见 SPECS_BY_ID 的填充循环），这里不存在"静默 undefined"。
+  const scala = SPECS_BY_ID[NOTEBOOK_KERNELS.scala.id]!;
+  it('display_name 是交付名：不带探索期字样，也不带 language_info 那个会说谎的 2.12.x', () => {
+    expect(scala.display_name, '选择器标签必须能读出这是 Scala').toMatch(/Scala/);
+    expect(
+      scala.display_name,
+      `display_name（${JSON.stringify(scala.display_name)}）还带着探索期字样 ⇒ 这条 kernel 已登记进 NOTEBOOK_KERNELS，` +
+        '那字样就是 Jupyter 选择器里的用户可见假话（Task 5：改成交付名，别把"探索"改回去）',
+    ).not.toMatch(/探索|spike|WI-\d/i);
+    expect(
+      scala.display_name,
+      `display_name（${JSON.stringify(scala.display_name)}）带版本号 ⇒ language_info.version 谎报 2.12.15 而实载 2.12.18，` +
+        '界面（含选择器标签）不许把任何一个显示成事实（Task 5 ③ 的选择器那一半；页面那一半钉在 web/test/notebook.test.tsx）',
+    ).not.toMatch(/2\.12\.\d+/);
+  });
+
+  it('spike 时代的 arena_spike_status 必须已整键移除；中断实测读数（SIGINT）必须落在 metadata 里', () => {
+    expect(
+      scala.metadata?.arena_spike_status,
+      'arena_spike_status 还在 ⇒ 工件里躺着一句"不是交付/没登记进 NOTEBOOK_KERNELS"的过期话（Task 3 之后它就是假的）。' +
+        '要记录现状请写进交付状态那条 metadata，不许留这个键',
+    ).toBeUndefined();
+    const metaText = Object.entries(scala.metadata ?? {}).map(([k, v]) => `${k}:${v}`).join('\n');
+    expect(
+      metaText,
+      'metadata 里读不到 SIGINT/中断 的实测记录 ⇒ Task 4 容器档量到的第一份中断读数（3/3 次 handler 抛错）' +
+        '没有落进工件；页面边界块说"中断不支持"，证据链必须在镜像工件上闭环，不能只活在报告里',
+    ).toMatch(/SIGINT/);
+  });
+});
+
 describe(`${NOTEBOOK_KERNELS.pyspark.id} kernelspec`, () => {
   it('argv 指向 venv 解释器：compose 三处 ARENA_IDE_ENV_DIR 均为绝对路径且一致，PYSPARK_DRIVER_PYTHON 与 argv[0] 同值', () => {
     // 旧判据只吃三处（arena / dev / e2e 三个服务块里各自的 `ARENA_IDE_ENV_DIR:` 那一行 ——

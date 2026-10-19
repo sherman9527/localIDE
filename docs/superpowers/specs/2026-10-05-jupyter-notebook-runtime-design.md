@@ -12,6 +12,13 @@
 > ② **A2 至今没落地**：本文按"会有 `arena-scala` 这个 kernel"写的契约示例与错误表都是**纸面的**，
 > `NOTEBOOK_KERNELS`（`shared/src/notebook.ts`）今天只有 `pyspark` 一条；Scala 的探索结论与选型（Toree）
 > 在 `2026-10-10-scala-jupyter-kernel-spike-wi91.md`，接入计划是 `2026-10-10-scala-kernel-integration-wi91b.md`。
+> 　**↑ 这句"至今"到 2026-10-20 为止了（WI-91b 交付）**：A2 落地，但**不是按纸面形状** ——
+> 登记的 id 是 `arena-scala-toree`（不是设想的 `arena-scala`），注册表现为 `{ id, needsVenv }` 两条目，
+> `arena-scala-toree` 的 `needsVenv:false` 是实测事实；选择器标签 `Scala (Toree)`，
+> 契约示例里 `ready:false` + "还在 A2 阶段"那一态**从未成为交付形状**（这条 kernel 随镜像就位、直接 ready）。
+> 错误表的真相与页面对用户的说法以 `web/src/pages/Notebook.tsx` 边界块（7 段）与
+> `server/test/notebooks/scala-kernel.test.ts`（容器档真跑）为准 —— 那边说"没堆栈帧、不显示 version、
+> 补全/悬浮/中断不支持"，这里纸面的 Scala 错误形状就按那边读。
 > ③ **token 的放行判据是合取，不只按 socket 对端**：`isLocalPeer` ∧ `isLoopbackHostHeader`
 > （只看对端拦不住 DNS rebinding）—— 本文写"只按对端"的那几段按此读。
 > ④ 本文"现状"表里的**行号快照已漂移**（`docker/Dockerfile:66` 这类指针），要按符号名找，不要按行号。

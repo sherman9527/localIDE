@@ -117,7 +117,7 @@ RUN set -eux; \
     redis-server --version | grep -q "v=${REDIS_VERSION%.*}" \
       || { echo "[arena] Redis 版本不对：$(redis-server --version)"; tail -20 /tmp/redis-build.log; exit 1; }
 
-# ---------------- WI-91 探索（路径 B：Apache Toree Scala kernel）----------------
+# ---------------- WI-91b 交付（路径 B：Apache Toree Scala kernel；探索档是 WI-91）----------------
 # 位置与路径 A 那块同理（也排在 Redis 源码构建之后）：动这一块只作废它自己和下游的 manifest/app 层。
 # （路径 A **未落地**：仓库里没有 scripts/fetch-almond.sh、没有 arena-scala-almond kernelspec，别找；
 #  "A 那块/同形"指探索档 .superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-A-almond/，
@@ -162,9 +162,12 @@ RUN --mount=type=cache,target=/root/.cache/toree \
 # 自检按本文件惯例带具体原因（对齐 :42-45/:114/:120-121 的 `|| { echo; exit 1; }` 形状），
 # 三种故障要能读出三种差别：文件没 COPY 到 / jupyter 跑不动（stderr 直接进消息）/ jupyter 看不见这个 kernel。
 COPY docker/jupyter/kernels/arena-pyspark/kernel.json /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json
-# WI-91 探索期那条 Scala kernel（路径 B）。它**没有**登记进 shared/src/notebook.ts 的 NOTEBOOK_KERNELS，
-# 所以 status.ts 的 allow-list 会把它过滤掉、页面上看不见 —— 这是探索期的预期行为，不是漏接线；
-# 中性名 arena-scala 留给胜出那条路径的接入任务（那一条的闸门才要求它出现在 NOTEBOOK_KERNELS 里）。
+# arena-scala-toree（探索胜出路径 B，WI-91b 接入）。它**已登记**进 shared/src/notebook.ts 的
+# NOTEBOOK_KERNELS（Task 3，needsVenv:false —— 解释器是镜像里的 java，IDE 那份 venv 在不在与它无关），
+# status.ts 的 allow-list 按注册表放行它：页面 kernel 表与 Jupyter 选择器里都看得见、选得到，
+# 容器档每次交付验证真跑它（server/test/notebooks/scala-kernel.test.ts 独立阶段）。
+# 红线①与登记无关且照旧成立：exec/** 一行都不引用 toree，下面那条 kernelspec list 自检只判
+# "jupyter 看不看得见它"，不判判题侧（判题 JVM 与 kernel JVM 是两个互不经过的进程）。
 COPY docker/jupyter/kernels/arena-scala-toree/kernel.json /usr/local/share/jupyter/kernels/arena-scala-toree/kernel.json
 RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
       || { echo "[arena] kernel.json 没出现在镜像级 kernels 目录（COPY 行被删或路径写错？）"; exit 1; }; \
@@ -184,7 +187,7 @@ RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
     echo "${ks_list}" | grep -q arena-pyspark \
       || { echo "[arena] jupyter kernelspec list 里没有 arena-pyspark，输出：${ks_list}"; exit 1; }; \
     echo "${ks_list}" | grep -q arena-scala-toree \
-      || { echo "[arena] jupyter 看不见 arena-scala-toree kernel（探索期那条 Scala kernel），kernelspec list 输出：${ks_list}"; exit 1; }
+      || { echo "[arena] jupyter 看不见 arena-scala-toree kernel（已登记的 Scala kernel），kernelspec list 输出：${ks_list}"; exit 1; }
 
 # ---------------- 依赖层：只 COPY manifest，保证改代码不重刷 npm ----------------
 FROM stack AS deps

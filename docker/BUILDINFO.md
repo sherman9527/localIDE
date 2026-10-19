@@ -72,9 +72,9 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 构建时解析出的 apt 版本会写进镜像里的 **`/opt/arena-apt-resolved.txt`**（`docker run --rm daily-arena:0.1 cat /opt/arena-apt-resolved.txt`），
 所以"这次构建到底装了什么"是可查的，不用猜。
 
-## Toree 的可复现取件（WI-91 路径 B：镜像里的 Scala kernel）
+## Toree 的可复现取件（WI-91 探索 / WI-91b 接入：镜像里的 Scala kernel）
 
-notebook 页正在探索加一条 Apache Toree 的 Scala kernel（`arena-scala-toree`）。它不走 apt/pip，走
+第五页现在带有一条 Apache Toree 的 Scala kernel（`arena-scala-toree`，WI-91b 接入交付）。它不走 apt/pip，走
 Apache dist 的一份 24MB `.tar.gz`，里面解出的**唯一一个 26MB fat jar** 装进镜像 `/opt/toree/lib/`。
 
 | 项 | 值 |
@@ -118,12 +118,15 @@ apt/pip/maven/Redis 源码/junit jar 一致：**构建要有网**。
   刻意不把 cache mount 改指到 `docker-cache/toree/…`：那等于让构建结果取决于工作树里恰好有什么，
   与本文件的复现性承诺相反（`.gitignore`/`.dockerignore` 排载荷正是同一取向）。
 
-**红线①（kernel 永不进判题执行路径）**：`arena-scala-toree` 没有登记进 `shared/src/notebook.ts` 的
-`NOTEBOOK_KERNELS`（只 `pyspark: 'arena-pyspark'`），页面 `status.ts` 的 allow-list 会把它过滤掉；`server/src/exec/**`
-一行都不引用 toree。kernel.json 的 `argv[0]` 是绝对路径 `/usr/bin/java`（不经 shell、不看 PATH），类路径把
-`/opt/spark/jars/*`（判题侧共用的那份、且是指向 pip pyspark 的**只读**符号链接）排在 fat jar 前面；`fetch-toree.sh`
-末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 先断言 `unzip -l` **实读条目总数 > 0**
-（空读数不许冒充通过），再断言制品内 `org/apache/spark` 类计数为 0。
+**红线①（kernel 永不进判题执行路径）**：`arena-scala-toree` **已登记**进 `shared/src/notebook.ts` 的
+`NOTEBOOK_KERNELS`（`{ pyspark: {id:'arena-pyspark', needsVenv:true}, scala: {id:'arena-scala-toree', needsVenv:false} }`，
+WI-91b Task 3）⇒ 页面与 `status.ts` 的 allow-list 都看得见它、Jupyter 选择器里选得到它。**登记改变的是界面可见性，
+不是红线**：`server/src/exec/**` 到今天一行都不引用 toree（接入档重验过，没有继承探索档的结论），判题的 Spark
+与这条 kernel 的 Spark 是两个互不经过的 JVM 进程。kernel.json 的 `argv[0]` 是绝对路径 `/usr/bin/java`（不经 shell、
+不看 PATH），类路径把 `/opt/spark/jars/*`（判题侧共用的那份、且是指向 pip pyspark 的**只读**符号链接）排在 fat jar 前面；
+`fetch-toree.sh` 末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 先断言 `unzip -l` **实读条目总数 > 0**
+（空读数不许冒充通过），再断言制品内 `org/apache/spark` 类计数为 0。kernel 的缺陷与边界（`Unknown Error`、空堆栈帧、
+不许显示 version、补全/悬浮/中断不支持）由页面边界块对用户说实话，逐字契约钉在 `web/test/notebook.test.tsx`。
 
 ## 换 base 或升主版本时要做的事
 

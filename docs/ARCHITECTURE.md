@@ -294,7 +294,8 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
 原第五句「在跑，但地址给不出来」随 `nolink` 态删除 —— WI-98 后链接是同源常量，env 坏不了它）
 + 工具条三把
 （刷新状态 / 在新标签页打开 / 准备环境，后两把各按状态出现）+ 横幅区（空则整块不渲染；
-`seedError` 那句诊断住在里面）+ 五段常驻边界话（默认折进 `<details>`）+ 左栏树 + 右栏 iframe。
+`seedError` 那句诊断住在里面）+ 七段常驻边界话（默认折进 `<details>`；WI-91b Task 5 把"共用环境 / pip / CPU"
+改成按 kernel 点名并新增 Scala 两段——报错形状与"补全/悬浮/中断不支持"，逐字契约在 `boundarySentences`）+ 左栏树 + 右栏 iframe。
 2026-10-10 用户点名的简化删的是**容器不是话**：「运行时」卡壳与"这次铺了什么"示例清单
 （`notebook-files`）整块没了，五态那句逐字未动，删没删由缺席判据钉（单元层 + e2e 各一条）。
 **内嵌与逃生链接两路都不带凭据**（WI-98 把最后一处补齐：iframe 的 src 与 `notebook-open` 的 href 都是
@@ -338,12 +339,18 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
 - **"有人在听"与"接受这次请求"是两件事**。可达性那两条闸门把 403 **算作有监听**（403 恰恰证明包转到了、
   有 jupyter 在按 Host 做决定），而鉴权语义那一条不许把 403 当通过。这个决定第一次被真实场景验到是在破坏性
   证明里：`--ServerApp.local_hostnames=[]` 之下"DNAT 目标有人在听"照旧绿、"浏览器形状放行"那半红。
-- **kernel 注册在镜像级**（`/usr/local/share/jupyter/kernels/arena-pyspark/kernel.json`），argv 指向
-  IDE 那个命名卷 venv 的 python，所以 notebook 里 `!pip3 install` 下一格就能 import；**不注册进 venv** 是因为
+- **kernel 注册在镜像级，两份工件、各按条目数据判就绪**（WI-91b Task 3/5）：
+  **Python 那条**（`/usr/local/share/jupyter/kernels/arena-pyspark/kernel.json`）argv 指向
+  IDE 那个命名卷 venv 的 python，所以 notebook 里 `!pip3 install` 下一格就能 import；
+  **Scala 那条**（`arena-scala-toree/kernel.json`，选择器标签 `Scala (Toree)`）是镜像里独立的
+  `/usr/bin/java` 进程（`-Xmx2g -Dspark.master=local[2]`，类路径让 Spark 自带的 2.12.18 赢过 fat jar 里的
+  2.12.15），**完全不碰 IDE venv** —— `needsVenv:false` 是注册表条目自带的数据，`status.ts` 按条目查它，
+  不再按 id 猜（WI-96 还掉的账）。两条都**不注册进 venv** 是因为
   WI-87 的 reset 会删掉整个 venv 目录，那样"重置环境"会顺手删掉 kernel 而界面不解释为什么。
-  kernelspec 与 notebook 的 warehouse/Derby（`data/notebook-warehouse/`）都与判题侧分开。
+  kernelspec 与 notebook 的 warehouse/Derby（`data/notebook-warehouse/`，Scala 的 `HOME` 另指
+  `data/notebook-kernel-home`）都与判题侧分开。
 
-容器档那两个阶段判的是**真服务与真文件系统**，不是 mock：
+容器档那三组阶段判的是**真服务与真文件系统**，不是 mock：
 
 - **「Notebook 运行时（kernel 真跑）」**点名 `kernel.test.ts`（35 条：容器那一组 10 条 + 那条要真 `/proc`
   的发现，两者都在宿主档跳 ⇒ 宿主报 `35 tests | 11 skipped`）与 `embed.test.ts`（18 条：反代打在**真**Jupyter 上，
@@ -372,6 +379,16 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
   但会话、warehouse 与 Derby 都不是同一个（`data/notebook-warehouse/`）。
   ⚠ 这一档接的是 `assert-ran.mjs --require-no-skips`，**不是**矩阵那一支的默认判据：常驻那 10 条在任何机器都绿，
   于是"容器那一组整片被跳掉"报出来是 `10 passed / 4 skipped / 14 total` 而 vitest 仍 exit 0。
+- **「Scala kernel 真跑（WI-91b Task 4）」+「Scala 闸门确实跑到了」**：`scala-kernel.test.ts` 11 条里 3 条要真起
+  Toree JVM（常驻 8 条在宿主也跑 ⇒ 宿主报 `11 tests | 3 skipped`）。判据**不复用 Python 那三条形状**：
+  正例读"落盘的 executed notebook"（Toree 会把两行注册表打进 stdout，`nbconvert --stdout` 的 JSON 前缀垃圾
+  曾让旧量具把"kernel 坏了"与"读法坏了"混成同一种红 —— Task 1 修的就是这个），三读数 `doubled=42`/`alive=42`/
+  `rows=6`（默认夹具实测 12s 级）；负例（摘掉定义格的夹具）必须报 error 且落在引用未定义符号的那个 cell、
+  `alive=42` 不许出现 —— 那是"跨 cell 状态活"与"不是整本一次性编译"的对照本体；外加"负例的 error 必须带
+  非空 `evalue`"与"真跑之后夹具目录/仓库根/工作区不许多出 `metastore_db`/`derby.log`/`spark-warehouse`"。
+  assert-ran 同款 `--require-no-skips`：容器组整片被跳掉会看起来像 `8 passed / 3 skipped` 而 vitest exit 0。
+  页面上那几句 Scala 边界话（`Unknown Error`、空堆栈帧、不显示 version、补全/悬浮/中断不支持）逐条有
+  这份闸门的读数垫着 —— 它们不是转述上游文档，是这一档每轮交付验证都会重量的东西。
 
 `GET` 顺手铺示例是**故意**留在读路径上的（页面不做定时轮询 ⇒ 那点 `stat`/`copyFile` 只随点击发生，
 这是计划自查里挂给 Task 10 用数据判的那条，结论：保持现状）。
