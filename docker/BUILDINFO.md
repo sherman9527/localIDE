@@ -26,7 +26,7 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 | PySpark / 自带 Spark jars | `ARG SPARK_VERSION`（`pip install ==`） | 3.5.5 |
 | JUnit 控制台 standalone jar | `ARG JUNIT_VERSION`（URL 里带版本） | 1.11.4 |
 | Scala 编译器三件套 | `ARG SCALA_VERSION`（URL 里带版本） | 2.13.16 |
-| Apache Toree Scala kernel 制品 | `ARG TOREE_VERSION` + 构建期 `scripts/fetch-toree.sh` 按清单逐件校验（**sha512 + sha256 都验**） | 0.5.0-incubating（详见下面「Toree 的可复现取件」一节） |
+| Apache Toree Scala kernel 制品 | `ARG TOREE_VERSION` + 构建期 `scripts/fetch-toree.sh` 按清单逐件校验（dist 行 sha512+sha256、extract 行 sha256，见下） | 0.5.0-incubating（详见下面「Toree 的可复现取件」一节） |
 | Redis | `ARG REDIS_VERSION` + **构建后断言版本号** | 7.2.7（不是 7.x 就构建失败） |
 | JDK / MySQL | **主版本断言**（apt 点版本不钉，见下） | 17.0.20 / 8.0.46 |
 | npm 依赖 | `package-lock.json`（仓库跟踪） | — |
@@ -82,7 +82,7 @@ Apache dist 的一份 24MB `.tar.gz`，里面解出的**唯一一个 26MB fat ja
 | 版本 | **0.5.0-incubating**（`ARG TOREE_VERSION`，Dockerfile 紧邻块里） |
 | 制品清单（**被 git 跟踪的那一半**） | `docker-cache/toree/0.5.0-incubating/toree-artifacts.tsv` |
 | 载荷（jar / 下载缓存，**不跟踪**） | `docker-cache/toree/*/payload/`、`docker-cache/toree/*/download-cache/`（`.gitignore` 与 `.dockerignore` 各排一次） |
-| 校验尺子 | 清单每行钉 **sha512（Apache 官方 .sha512 发布值）+ sha256（本仓库自己钉的尺子）**，`fetch-toree.sh` 两个都验 |
+| 校验尺子 | **dist 行**（那份 tar）下载时 **sha512（Apache 官方 .sha512 发布值）+ sha256（本仓库自己钉的尺子）两个都验**；缓存命中的复验只重查 sha256（sha512 在当初下载那一次已经验过）。**extract 行**（tar 里的 fat jar）只验 **sha256** —— Apache 不为 tar 内成员单独发布 .sha512，清单那一列写 `-` |
 
 **源 URL（同一个相对路径、同一串字节，三条 base 按"实测能下完"排序，不按权威排序）**：
 
@@ -92,20 +92,38 @@ https://dlcdn.apache.org                     /incubator/toree/0.5.0-incubating/t
 https://archive.apache.org/dist              /incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
 ```
 
-（实测：`archive.apache.org` 从本机 ~50KB/s 且会在尾部断流，`downloads.apache.org` 要 6 分钟，`tuna` 十几秒
-到且 sha512 逐字节相等 ⇒ 列表顺序是可用性优先。三条都失败才算失败，不许静默拿半个文件。）
+（base 列表 = `fetch-toree.sh` 的 `TOREE_DIST_BASES` 默认值，顺序是可用性优先。读数分两层：
+**2026-10-20 本任务复测** —— tuna 整档 24MB 用时 1.0s、dlcdn 整档 3m19s，两份 `cmp` 逐字节相等且
+sha256/sha512 都等于清单，archive 当天只复核了 HEAD 200（**整档今天没重测**）；**探索档实测** ——
+archive 从本机 ~50KB/s 且会在尾部断流（下到 97% 被 reset），`downloads.apache.org`（dlcdn 同内容族的
+另一个 front，**不在**默认列表里）要 6 分钟，tuna 十几秒到且 sha512 逐字节相等。三条都失败才算失败，
+不许静默拿半个文件。）
 
 **为什么载荷不进仓库、而 clone 后仍能重建**：把 26MB jar 塞进仓库会把每个 clone 的代价推高，那是产品决定，
-不由一趟限时探索替它拍。所以仓库只带清单；构建期 `RUN --mount=type=cache,target=/root/.cache/toree` 里
-`fetch-toree.sh` 按清单去网络取件、逐件校验、只把清单列出的那一个成员解进 `/opt/toree`。前提与
-apt/pip/maven/Redis 源码/junit jar 一致：**构建要有网**。要手动离线重建（把载荷喂进工作树、下一次构建不走网）：
-`bash scripts/fetch-toree.sh`（默认落 `docker-cache/toree/<版本>/{payload,download-cache}`）。
+不由一趟限时探索替它拍。所以仓库只带清单 —— `docker-cache/toree/<版本>/toree-artifacts.tsv`（相对 URL +
+sha512/sha256 逐件钉死，见上表「校验尺子」那一行）。构建期 `RUN --mount=type=cache,target=/root/.cache/toree`
+里 `fetch-toree.sh` 按清单去网络取件、逐件校验、只把清单列出的那一个成员解进 `/opt/toree`。前提与
+apt/pip/maven/Redis 源码/junit jar 一致：**构建要有网**。
+
+这里有两句话要说清楚（本节第一版写的是"宿主跑 `fetch-toree.sh` 把载荷喂进工作树、下一次构建不走网"——
+**那个机制不存在**，下面是事实）：
+
+* 宿主 `bash scripts/fetch-toree.sh` 默认落 `docker-cache/toree/<版本>/{payload,download-cache}`，用途是
+  **宿主侧重验（`--verify-only`）与本地排障**；镜像构建**不读**这两个目录 —— `.dockerignore` 把它们排出
+  构建上下文，Dockerfile 只 COPY 清单 tsv 和脚本本身。把工作树喂满**不会**让下一次 `--build` 免网。
+* 构建自己的缓存是那条 **BuildKit cache mount**（构建机内 `/root/.cache/toree/<版本>`）：它机器本地、
+  可被 `docker builder prune` 回收，**不在 git、也不在工作树**。prune 之后的下一次构建会重新走网按清单
+  下载 —— 这是可接受的，因为每件制品都要过摘要校验（dist 行 sha512+sha256、extract 行 sha256，验不过
+  就地 die），**构建的可复现性靠的是清单这份契约（URL + 摘要 + fail-loud），不靠"哪几个文件恰好在机器上"**。
+  刻意不把 cache mount 改指到 `docker-cache/toree/…`：那等于让构建结果取决于工作树里恰好有什么，
+  与本文件的复现性承诺相反（`.gitignore`/`.dockerignore` 排载荷正是同一取向）。
 
 **红线①（kernel 永不进判题执行路径）**：`arena-scala-toree` 没有登记进 `shared/src/notebook.ts` 的
 `NOTEBOOK_KERNELS`（只 `pyspark: 'arena-pyspark'`），页面 `status.ts` 的 allow-list 会把它过滤掉；`server/src/exec/**`
 一行都不引用 toree。kernel.json 的 `argv[0]` 是绝对路径 `/usr/bin/java`（不经 shell、不看 PATH），类路径把
 `/opt/spark/jars/*`（判题侧共用的那份、且是指向 pip pyspark 的**只读**符号链接）排在 fat jar 前面；`fetch-toree.sh`
-末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 断言制品内 `org/apache/spark` 类计数为 0。
+末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 先断言 `unzip -l` **实读条目总数 > 0**
+（空读数不许冒充通过），再断言制品内 `org/apache/spark` 类计数为 0。
 
 ## 换 base 或升主版本时要做的事
 

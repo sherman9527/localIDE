@@ -6,6 +6,10 @@
 # 会不会把判题环境带坏"的闸门。
 #
 # 为什么形状与路径 A（scripts/fetch-almond.sh）不同，但纪律相同：
+#   ⚠ 路径 A **未落地**：跟踪树里没有 scripts/fetch-almond.sh，也没有 arena-scala-almond kernelspec，
+#   别在本仓库找这两个文件。它的实现只活在探索档
+#   `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-A-almond/`（该目录不被 git 跟踪，
+#   别的 clone 上未必有）。下文所有"路径 A / A 档"都指那份归档，不是仓库里可解析的路径。
 # * Almond 那条要自己解闭包（93 个 jar，还得按 coursier 语义钉版本），Toree 的公开制品就是**一个 26MB 的
 #   sbt-assembly fat jar**，依赖已经烤在里面 ⇒ 取件单位是"一份 tar + 一个成员"。
 # * A 档那条"与 /opt/spark/jars 同名的 artifact 让 Spark 那份赢"在这里**没有逐件丢弃这个旋钮**：
@@ -29,15 +33,30 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-VERSION="${TOREE_VERSION:-0.5.0-incubating}"
-MANIFEST="${TOREE_MANIFEST:-${REPO_ROOT}/docker-cache/toree/${VERSION}/toree-artifacts.tsv}"
-DEST="${TOREE_DEST:-${REPO_ROOT}/docker-cache/toree/${VERSION}/payload}"
-# 下载缓存：命中且校验通过就不重下（24MB 那份 tar）。默认落在 docker-cache/toree/<版本>/download-cache ——
-# 与 npm/pip/maven 缓存同一个"仓库内离线重建"的意思；构建期由 Dockerfile 覆盖成 --mount=type=cache 的目录。
-CACHE="${TOREE_CACHE:-${REPO_ROOT}/docker-cache/toree/${VERSION}/download-cache}"
-# Apache dist 的三条 base（同一个相对路径拼上去是同一串字节）。顺序 = 实测的可用顺序。
+VERSION="${TOREE_VERSION:-}"
+MANIFEST="${TOREE_MANIFEST:-}"
+DEST="${TOREE_DEST:-}"
+# 下载缓存：命中且校验通过就不重下（24MB 那份 tar）。宿主默认落在 docker-cache/toree/<版本>/download-cache ——
+# 那是**宿主侧重验（--verify-only）与本地排障的缓存**；镜像构建**不读这两处**（.dockerignore 把 payload/ 与
+# download-cache/ 排出上下文；构建期另有自己的 BuildKit cache mount，机器本地、可被 prune）。可复现契约只认
+# 清单（URL + sha512/sha256 + 逐件验不过就停），详见 docker/BUILDINFO.md「Toree 的可复现取件」。
+CACHE="${TOREE_CACHE:-}"
+# Apache dist 的三条 base（同一个相对路径拼上去是同一串字节）。顺序 = 可用性优先，2026-10-20 本机复测：
+# tuna 24MB 用时 1.0s；dlcdn 同一串字节（与 tuna 那份 cmp 逐字节相等）但 3m19s；archive 当天只复核了
+# HEAD 200，整档**今天没重测** —— 探索档实测它 ~50KB/s 且在尾部断流，留作最后兜底。三个都失败才算失败。
 DIST_BASES="${TOREE_DIST_BASES:-https://mirrors.tuna.tsinghua.edu.cn/apache https://dlcdn.apache.org https://archive.apache.org/dist}"
 VERIFY_ONLY=0
+
+# 版本相关的默认值必须**等参数解析完**再回填：第一版在这里就用 VERSION 插值出 MANIFEST/DEST/CACHE，
+# 而 --version 在其后的循环里才赋值 VERSION ⇒ --version 是死旋钮（Dockerfile 传的那次是 no-op；它同时
+# 显式传了 --manifest/--dest/--cache，构建才被这个坏法瞒住）。"默认值依赖版本"的变量，只能在版本
+# 定下来之后再 default。
+apply_version_defaults() {
+  [ -n "$VERSION" ] || VERSION="0.5.0-incubating"
+  [ -n "$MANIFEST" ] || MANIFEST="${REPO_ROOT}/docker-cache/toree/${VERSION}/toree-artifacts.tsv"
+  [ -n "$DEST" ] || DEST="${REPO_ROOT}/docker-cache/toree/${VERSION}/payload"
+  [ -n "$CACHE" ] || CACHE="${REPO_ROOT}/docker-cache/toree/${VERSION}/download-cache"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,7 +68,8 @@ while [ $# -gt 0 ]; do
     --dist-base=*) echo "[fetch-toree] --dist-base 要用空格分开值，不用等号：--dist-base \"url1 url2\"" >&2; exit 2 ;;
     --verify-only) VERIFY_ONLY=1; shift ;;
     -h|--help)
-      sed -n '1,12p' "$0"
+      apply_version_defaults   # 打印前先回填，否则 --version V 之后 -h 显示的仍是旧默认（死旋钮的同款坏法）
+      sed -n '1,18p' "$0"
       echo "用法：$0 [--version V] [--dest DIR] [--cache DIR] [--manifest TSV] [--dist-base \"URL1 URL2 …\"] [--verify-only]"
       echo "今天的默认值：VERSION=${VERSION} DEST=${DEST} MANIFEST=${MANIFEST}"
       echo "                CACHE=${CACHE}"
@@ -58,6 +78,8 @@ while [ $# -gt 0 ]; do
     *) echo "[fetch-toree] 不认识的参数：$1（-h 看用法）" >&2; exit 2 ;;
   esac
 done
+
+apply_version_defaults
 
 log() { printf '[fetch-toree] %s\n' "$*"; }
 die() { log "$@"; exit 1; }
@@ -77,9 +99,12 @@ mkdir -p "$DEST" "$DEST/lib"
 # ------------------------------------------------------------------ 读清单
 DIST_ROWS=""
 EXTRACT_ROWS=""
-while IFS=$'\t' read -r kind relpath sha256 name sha512; do
-  case "$kind" in ''|'#'*) continue ;; esac
-  [ -n "$name" ] || continue
+while IFS= read -r row; do
+  case "$row" in ''|'#'*) continue ;; esac
+  IFS=$'\t' read -r kind relpath sha256 name sha512 <<< "$row"
+  # 缺列的行第一版是 `[ -n "$name" ] || continue` 静默跳过 ⇒ 清单少一行 dist/extract，下游撞的是
+  # "dist 行应该有且只有 1 条"这种间接报错，或者 kernel 缺主制品还看起来装完了。畸形行必须当场停并点名。
+  { [ -n "$kind" ] && [ -n "$relpath" ] && [ -n "$sha256" ] && [ -n "$name" ]; } || die "清单里有畸形行：「${row}」⇒ 每行必须是 5 列（kind<TAB>相对路径<TAB>sha256<TAB>落盘名<TAB>sha512，无 sha512 写 -），前四列任何一列缺失都不许跳过、要改回来。"
   case "$kind" in
     dist)    DIST_ROWS="${DIST_ROWS}${relpath}"$'\t'"${sha256}"$'\t'"${name}"$'\t'"${sha512:-}"$'\n' ;;
     extract) EXTRACT_ROWS="${EXTRACT_ROWS}${relpath}"$'\t'"${sha256}"$'\t'"${name}"$'\t'"${sha512:-}"$'\n' ;;
@@ -116,24 +141,31 @@ get_dist() { # $1=relpath $2=sha256 $3=name $4=sha512
     #     真正的防线是下面的尺寸核对 + sha512 + sha256 三重校验，不是重试次数。
     #   --speed-limit/--speed-time：连接挂住（不断也不前进）时 60s 内切下一条 base，
     #     不然构建会挂在那儿看不到原因（A 档撞过 GitHub 那个 asset 的同类形状）。
-    rm -f "${target}.part"
-    if curl -fSL --retry 3 --retry-delay 2 --connect-timeout 20 --speed-limit 4096 --speed-time 60 \
-         -o "${target}.part" "$url" >/dev/null 2>&1; then
+    rm -f "${target}.part" "${target}.curl.log"
+    # curl 的输出落 .curl.log 而不是 /dev/null（-sS：去掉进度表、**保留报错**）：base 列表**就是**这里的
+    # 韧性机制，"哪条 base 死于什么"（DNS / 404/403 / TLS / 断流）是排查时唯一能读的证据。第一版把它丢进
+    # /dev/null、失败时统一猜一句"多半是断流"——那是猜不是读；Dockerfile 里 Redis/JUnit 的取件块失败时
+    # 都 tail 日志，同形。
+    if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 --speed-limit 4096 --speed-time 60 \
+         -o "${target}.part" "$url" >"${target}.curl.log" 2>&1; then
       got="$(sha_of "${target}.part")"
       if [ "$got" != "$want256" ]; then
         log "  ⇦ 字节不对（期望 sha256 ${want256}，实得 ${got}）⇒ 换下一条 base"
-        rm -f "${target}.part"; continue
+        rm -f "${target}.part" "${target}.curl.log"; continue
       fi
       if [ -n "$want512" ] && [ "$(sha512_of "${target}.part")" != "$want512" ]; then
         log "  ⇦ sha512 不对（Apache 官方发布的那把尺子）⇒ 换下一条 base"
-        rm -f "${target}.part"; continue
+        rm -f "${target}.part" "${target}.curl.log"; continue
       fi
       mv "${target}.part" "$target"
+      rm -f "${target}.curl.log"
       log "  ⇦ 拿到（sha256 与 sha512 都对上）：${target}"
       return 0
     fi
-    log "  ⇦ 下载失败（curl 非 0，多半是断流）：${url}"
-    rm -f "${target}.part"
+    log "  ⇦ 下载失败（curl 非 0）：${url}"
+    log "     curl 报错（最后 8 行；404/403=这一版不在这站上，Could not resolve/TLS=网络，transfer closed=断流）："
+    tail -8 "${target}.curl.log" | sed 's/^/       /' || true
+    rm -f "${target}.part" "${target}.curl.log"
   done
   log "三条 base 都没能取到 ${name}，试过的 URL："
   printf '%s\n' "$tried"
@@ -222,11 +254,28 @@ FILE_COUNT="$(find "$DEST" -type f | wc -l | tr -d ' ')"
 ASSEMBLY="$(find "$DEST/lib" -maxdepth 1 -type f -name 'toree-assembly-*.jar' | head -1)"
 [ -n "$ASSEMBLY" ] || die "${DEST}/lib 里没有 toree-assembly-*.jar ⇒ kernel.json 的 -cp 指着的就是它，起不来的那句话已经成立"
 if command -v unzip >/dev/null 2>&1; then
-  SPARK_CLASSES="$(unzip -l "$ASSEMBLY" 2>/dev/null | awk '{print $4}' | grep -c '^org/apache/spark/' || true)"
+  # 空读数不许冒充通过 —— 与下面 GATE 3 同一条判据，也与本文件头部那条"每样都是当场实测出来的坏法"同一条纪律。
+  # 第一版是 `unzip -l … 2>/dev/null | awk … | grep -c … || true`：unzip 在但中途失败（zip64 / 不支持的
+  # 压缩方法 / IO 错）时 stderr 被丢弃、stdout 为空、grep -c 打印 0、`|| true` 吃掉非 0 退出 ⇒ 这里会
+  # 打印"GATE 1 过"，配套的 scala 计数行读成"0 个"而不是 753 —— 一个空读数同时冒充了两件事。
+  # 现在：收 unzip 的**退出码与全部输出**，先断言"总条目数 > 0"（清单确实被读出来了），只有这时
+  # SPARK_CLASSES = 0 才是一个可信的读数，闸门才允许说"过"。
+  if ! UNZIP_LISTING="$(unzip -l "$ASSEMBLY" 2>&1)"; then
+    die "GATE 1 读不了制品清单：unzip -l ${ASSEMBLY} 非 0 退出 ⇒ 'org/apache/spark 类 0 个'这个读数**根本没发生**，不许当成 0。
+  unzip 的输出（stdout+stderr 合并）：
+${UNZIP_LISTING}
+  （zip64 / 不支持的压缩 / IO 坏都长这样。要么换能读这份 zip 的 unzip，要么停下来 —— 不能带着没验过的 jar 继续。）"
+  fi
+  # 条目行 = unzip -l 里第一列 Length 是纯数字的那些行（表头/分隔线/汇总行没有这个形状）。
+  ENTRY_NAMES="$(printf '%s\n' "$UNZIP_LISTING" | awk '$1 ~ /^[0-9]+$/ {print $4}')"
+  TOTAL_ENTRIES="$(printf '%s\n' "$ENTRY_NAMES" | grep -c '[^[:space:]]' || true)"
+  [ "$TOTAL_ENTRIES" -gt 0 ] || die "GATE 1 空读数：unzip -l 退 0 但一个条目都没列出（总条目 0）⇒ 这不是'没有 Spark 类'，是'什么都没读到'（空 zip、清单格式变了、unzip 版本差异都可能长这样）。闸门停在这里，人来判。"
+  SPARK_CLASSES="$(printf '%s\n' "$ENTRY_NAMES" | grep -c '^org/apache/spark/' || true)"
   [ "$SPARK_CLASSES" = "0" ] || die "制品里出现 ${SPARK_CLASSES} 个 org/apache/spark/** 类 ⇒ 这是一份**自带 Spark** 的发行物，和 /opt/spark/jars（判题侧共用的 3.5.5）会在同一条类路径上撞成两份 Spark。这一档不许用这种制品。"
-  log "GATE 1 过：制品内不含 org/apache/spark 类（Spark 只从 /opt/spark/jars 来，只读）"
-  # 顺带把"到底烤了什么进去"打进日志，换版本时这一行就是账（fat jar 里的 scala/** 类靠**类路径顺序**压住，见 GATE 3）
-  SCALA_CLASSES="$(unzip -l "$ASSEMBLY" 2>/dev/null | awk '{print $4}' | grep -c '^scala/' || true)"
+  log "GATE 1 过：清单实读 ${TOTAL_ENTRIES} 个条目，其中 org/apache/spark 类 0 个（Spark 只从 /opt/spark/jars 来，只读）"
+  # 顺带把"到底烤了什么进去"打进日志，换版本时这一行就是账（fat jar 里的 scala/** 类靠**类路径顺序**压住，见 GATE 3）。
+  # 有上面的总条目断言垫底，这一行读出 0 意味着"内容真的变了"，不再是"没读到"的伪装。
+  SCALA_CLASSES="$(printf '%s\n' "$ENTRY_NAMES" | grep -c '^scala/' || true)"
   log "  制品里 scala/** 类 ${SCALA_CLASSES} 个（Scala 2.12.15 编的）⇒ 必须让 /opt/spark/jars 排在前面，见 GATE 3"
 else
   log "GATE 1 跳过：这个环境里没有 unzip，无法读制品内部的类名（构建镜像里有；宿主 --verify-only 可能没有）"

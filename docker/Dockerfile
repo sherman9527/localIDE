@@ -119,6 +119,9 @@ RUN set -eux; \
 
 # ---------------- WI-91 探索（路径 B：Apache Toree Scala kernel）----------------
 # 位置与路径 A 那块同理（也排在 Redis 源码构建之后）：动这一块只作废它自己和下游的 manifest/app 层。
+# （路径 A **未落地**：仓库里没有 scripts/fetch-almond.sh、没有 arena-scala-almond kernelspec，别找；
+#  "A 那块/同形"指探索档 .superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-A-almond/，
+#  该目录不被 git 跟踪、别的 clone 上未必有。本块是当前唯一的 Scala kernel 取件块。）
 # ARG 写在紧邻位置而不是文件顶部：dockerfile-pins 那条闸门扫的是"每个 ARG 都有默认值"，与位置无关，
 # 而顶部那几行 ARG/ENV 一动就把 apt/pip/maven/Redis 那几层缓存全作废（见 BUILDINFO.md 第 4 条事实）。
 # 取件与校验的**真相在 scripts/fetch-toree.sh + docker-cache/toree/<版本>/toree-artifacts.tsv**：
@@ -126,7 +129,9 @@ RUN set -eux; \
 # 制品本身就一个 26MB 的 sbt-assembly fat jar（依赖烤在里面，Spark 是 provided 不含），所以这里不像路径 A
 # 那样解 93 个 jar 的闭包，而是"下一份 tar + 只取清单里那一个成员"。
 # jar 载荷不进构建上下文（.dockerignore 排掉了 docker-cache/toree/*/{payload,download-cache}），
-# 与 apt / pip / maven / Redis 源码 / junit jar 同一前提（构建要有网），sha512+sha256 钉死让结果与源是谁无关。
+# 与 apt / pip / maven / Redis 源码 / junit jar 同一前提（构建要有网），摘要钉死（dist 行 sha512+sha256、
+# extract 行 sha256）让结果与源是谁、与缓存是否存在无关。构建侧的缓存是 BuildKit mount（机器本地、可被
+# prune），不是工作树里的 payload/ 与 download-cache/ —— 详见 docker/BUILDINFO.md「Toree 的可复现取件」。
 ARG TOREE_VERSION=0.5.0-incubating
 COPY scripts/fetch-toree.sh /usr/local/bin/arena-fetch-toree
 # 这一行的源路径带 ${TOREE_VERSION}：换版本要**同时**有 docker-cache/toree/<新版本>/toree-artifacts.tsv，

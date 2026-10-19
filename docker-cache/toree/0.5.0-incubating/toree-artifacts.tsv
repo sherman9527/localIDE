@@ -18,12 +18,16 @@
 #     所以"能不能跟镜像里的 Spark 3.5.5 同一条类路径跑"这一问，唯一的答案来源是那一次 --execute 探针。
 #
 # URL 怎么来的：Toree 不发 GitHub Releases（`api.github.com/repos/apache/toree/releases/latest` 返回 tag_name=None），
-# 走 Apache 的 dist 站点。三条 base 都给出同一个相对路径与同一份字节（本机实测 sha512 一致）：
-#   https://archive.apache.org/dist/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
-#   https://downloads.apache.org/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+# 走 Apache 的 dist 站点。下面三条 base **就是 fetch-toree.sh 的 TOREE_DIST_BASES 默认值与顺序**（同一个
+# 相对路径拼上任意一条都是同一串字节；顺序 = 可用性优先，不按"权威"排）：
 #   https://mirrors.tuna.tsinghua.edu.cn/apache/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
-# sha512 那一列是 Apache 随制品发布的官方值（.sha512 文件），sha256 是本仓库自己钉的尺子 —— 两个都验。
-# 实测过的一条坑：archive.apache.org 从本机 ~50KB/s 且会在**尾部**断流（下到 97% 被 reset），
-# downloads.apache.org 也要 6 分钟；换 tuna 之后同一个 sha512 十几秒到 ⇒ base 列表按"能下完"排，不按"权威"排。
+#   https://dlcdn.apache.org/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+#   https://archive.apache.org/dist/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+# sha512 那一列是 Apache 随制品发布的官方值（.sha512 文件），sha256 是本仓库自己钉的尺子 —— **dist 行两个
+# 都验**（下载时 sha512+sha256，缓存命中复验只重查 sha256）；extract 行只验 sha256（Apache 不为 tar 内成员
+# 发布 .sha512，所以那一列写 `-`）。
+# base 可用性读数分两层：2026-10-20 本机复测 tuna 整档 1.0s、dlcdn 整档 3m19s（两份 cmp 逐字节相等、摘要
+# 都等于清单），archive 当天只复核 HEAD 200（整档没重测）；探索档实测 archive ~50KB/s 且会在**尾部**断流
+# （下到 97% 被 reset），`downloads.apache.org`（dlcdn 同内容族的另一个 front，**不在**默认列表里）要 6 分钟。
 dist	incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz	fef2a849cc576b2f2378a7e3e0d3aaa147cfda2884def467c97321b1c01e2f93	toree-0.5.0-incubating-bin.tar.gz	9e8a6a324f8a60ed32b34e17da0c92c17e70e39a14178ed989249e48148ca6c576a738ce0b014bf25fb2ffeb7cf15e15431029d7afd43303faf6de0e758535ba
 extract	toree-0.5.0-incubating/lib/toree-assembly-0.5.0-incubating.jar	5746a940070aacd57c0c5ba91db4877eb64e8feb05556e5b81b3602675621c0d	lib/toree-assembly-0.5.0-incubating.jar	-

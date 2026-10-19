@@ -36,9 +36,13 @@ docker-cache/npm/_logs/
 docker-cache/npm/_update-notifier-last-checked
 
 # WI-91 探索（路径 B）：Toree 的载荷 —— 24MB 的 .tar.gz 制品与解出来的 26MB fat jar —— 不提交，
-# 提交的是**清单** docker-cache/toree/*/toree-artifacts.tsv（URL + sha512 + sha256 逐条钉死）。
+# 提交的是**清单** docker-cache/toree/*/toree-artifacts.tsv（URL 与摘要逐件钉死：dist 行 sha512+sha256，
+# extract 行只有 sha256 —— Apache 不为 tar 内成员发布 .sha512）。
 # 理由与 almond 那批一样：把一份仓库的 clone 成本推到 26MB 是**产品决定**，不该由一趟限时探索替它拍。
-# 要离线重建就跑 scripts/fetch-toree.sh（它会落进这两处，下一次构建不再走网）。
+# 本地跑 scripts/fetch-toree.sh 会落进这两处 —— 那是**宿主侧重验（--verify-only）与排障用的缓存**；
+# 镜像构建**不读它们**（.dockerignore 把这两行排出上下文，构建期用的是自己的 BuildKit cache mount，
+# 机器本地、可被 prune ⇒ prune 后下一次构建会按清单重新走网并逐件验摘要，这正是"可复现"的形态）。
+# 复现契约的全文在 docker/BUILDINFO.md「Toree 的可复现取件」。
 docker-cache/toree/*/payload/
 docker-cache/toree/*/download-cache/
 
