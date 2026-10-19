@@ -35,6 +35,13 @@ blob-report/
 docker-cache/npm/_logs/
 docker-cache/npm/_update-notifier-last-checked
 
+# WI-91 探索（路径 B）：Toree 的载荷 —— 24MB 的 .tar.gz 制品与解出来的 26MB fat jar —— 不提交，
+# 提交的是**清单** docker-cache/toree/*/toree-artifacts.tsv（URL + sha512 + sha256 逐条钉死）。
+# 理由与 almond 那批一样：把一份仓库的 clone 成本推到 26MB 是**产品决定**，不该由一趟限时探索替它拍。
+# 要离线重建就跑 scripts/fetch-toree.sh（它会落进这两处，下一次构建不再走网）。
+docker-cache/toree/*/payload/
+docker-cache/toree/*/download-cache/
+
 # Python 编译缓存（spark_worker 的 .pyc 曾被提交进仓库）
 __pycache__/
 *.pyc

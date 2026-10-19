@@ -1,3 +1,11 @@
+# WI-91 探索（路径 B）：Toree 的载荷 —— 24MB 的 .tar.gz 制品与解出来的 26MB fat jar。清单
+#（toree-artifacts.tsv）**要**进上下文（Dockerfile 有 COPY 它那一行），载荷不要 —— 它们由构建期的
+# scripts/fetch-toree.sh 落到 /opt/toree。漏掉这两行的话，scripts/fetch-toree.sh 默认落盘的那 50MB
+# 会被 app 阶段的 COPY . . 抄进 /app/docker-cache，同一份字节在镜像里躺两遍，
+# Task 5 那条"镜像体积增量"就量成了打包形状的账而不是这条路的账。
+docker-cache/toree/*/payload
+docker-cache/toree/*/download-cache
+
 node_modules
 **/node_modules
 data

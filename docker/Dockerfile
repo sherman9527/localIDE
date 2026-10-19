@@ -117,6 +117,39 @@ RUN set -eux; \
     redis-server --version | grep -q "v=${REDIS_VERSION%.*}" \
       || { echo "[arena] Redis 版本不对：$(redis-server --version)"; tail -20 /tmp/redis-build.log; exit 1; }
 
+# ---------------- WI-91 探索（路径 B：Apache Toree Scala kernel）----------------
+# 位置与路径 A 那块同理（也排在 Redis 源码构建之后）：动这一块只作废它自己和下游的 manifest/app 层。
+# ARG 写在紧邻位置而不是文件顶部：dockerfile-pins 那条闸门扫的是"每个 ARG 都有默认值"，与位置无关，
+# 而顶部那几行 ARG/ENV 一动就把 apt/pip/maven/Redis 那几层缓存全作废（见 BUILDINFO.md 第 4 条事实）。
+# 取件与校验的**真相在 scripts/fetch-toree.sh + docker-cache/toree/<版本>/toree-artifacts.tsv**：
+# Toree 不走 GitHub Releases（api.github.com 那条 latest 返回 tag_name=null），走 Apache dist 的目录形状；
+# 制品本身就一个 26MB 的 sbt-assembly fat jar（依赖烤在里面，Spark 是 provided 不含），所以这里不像路径 A
+# 那样解 93 个 jar 的闭包，而是"下一份 tar + 只取清单里那一个成员"。
+# jar 载荷不进构建上下文（.dockerignore 排掉了 docker-cache/toree/*/{payload,download-cache}），
+# 与 apt / pip / maven / Redis 源码 / junit jar 同一前提（构建要有网），sha512+sha256 钉死让结果与源是谁无关。
+ARG TOREE_VERSION=0.5.0-incubating
+COPY scripts/fetch-toree.sh /usr/local/bin/arena-fetch-toree
+# 这一行的源路径带 ${TOREE_VERSION}：换版本要**同时**有 docker-cache/toree/<新版本>/toree-artifacts.tsv，
+# 否则 COPY 在这里就失败（"清单不存在"比"悄悄用旧清单装出半个 kernel"好读得多）。
+COPY docker-cache/toree/${TOREE_VERSION}/toree-artifacts.tsv /usr/local/share/arena-toree/toree-artifacts.tsv
+RUN --mount=type=cache,target=/root/.cache/toree \
+    set -eux; \
+    chmod +x /usr/local/bin/arena-fetch-toree; \
+    /usr/local/bin/arena-fetch-toree \
+      --version "${TOREE_VERSION}" \
+      --manifest /usr/local/share/arena-toree/toree-artifacts.tsv \
+      --dest /opt/toree \
+      --cache "/root/.cache/toree/${TOREE_VERSION}"; \
+    test -s "/opt/toree/lib/toree-assembly-${TOREE_VERSION}.jar" \
+      || { echo "[arena] /opt/toree/lib 里没有 toree-assembly-${TOREE_VERSION}.jar ⇒ 清单齐了但主制品没落盘，kernel 一定起不来"; exit 1; }; \
+    java -cp "/opt/spark/jars/*:/opt/toree/lib/toree-assembly-${TOREE_VERSION}.jar" org.apache.toree.Main --help >/dev/null \
+      || { echo "[arena] java -cp /opt/spark/jars/* + toree-assembly 起不了 org.apache.toree.Main ⇒ 这条类路径与镜像里的 Spark 3.5.5 撞了（--help 不需要连接文件，退 0 就证明装配得起来）"; exit 1; }
+
+# 上面那条 java … --help 不是"看着像就行"的形状检查：它**真的**用镜像里的 java 与镜像里那两条类路径起一次
+# Toree 的 Main（--help 不建 SparkContext、不绑 socket，退 0 就说明 fat jar 与 /opt/spark/jars 拼得起来）。
+# 为什么值得单独一条断言：2026-10-10 实测这条 kernel 的两种坏法（缺 --add-opens 的 InaccessibleObjectException、
+# 类路径混版的 NoClassDefFoundError）都发生在用户点开 notebook 之后，而构建期这两秒就能抓到第一类的一半。
+
 # kernel 的解释器是 venv（IDE 那份），但 kernelspec 本体必须在镜像级目录：
 # venv 会被 IDE 的「重置环境」整个删掉（server/src/ide/reset.ts），装在里面等于让用户一键删掉 kernel。
 # 这两行刻意放在 stack 段**末尾**（Redis 源码构建之后）：改 kernel.json 只重建它自己和下游
@@ -124,12 +157,29 @@ RUN set -eux; \
 # 自检按本文件惯例带具体原因（对齐 :42-45/:114/:120-121 的 `|| { echo; exit 1; }` 形状），
 # 三种故障要能读出三种差别：文件没 COPY 到 / jupyter 跑不动（stderr 直接进消息）/ jupyter 看不见这个 kernel。
 COPY docker/jupyter/kernels/arena-pyspark/kernel.json /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json
+# WI-91 探索期那条 Scala kernel（路径 B）。它**没有**登记进 shared/src/notebook.ts 的 NOTEBOOK_KERNELS，
+# 所以 status.ts 的 allow-list 会把它过滤掉、页面上看不见 —— 这是探索期的预期行为，不是漏接线；
+# 中性名 arena-scala 留给胜出那条路径的接入任务（那一条的闸门才要求它出现在 NOTEBOOK_KERNELS 里）。
+COPY docker/jupyter/kernels/arena-scala-toree/kernel.json /usr/local/share/jupyter/kernels/arena-scala-toree/kernel.json
 RUN test -s /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
       || { echo "[arena] kernel.json 没出现在镜像级 kernels 目录（COPY 行被删或路径写错？）"; exit 1; }; \
+    test -s /usr/local/share/jupyter/kernels/arena-scala-toree/kernel.json \
+      || { echo "[arena] arena-scala-toree 的 kernel.json 没进镜像级 kernels 目录"; exit 1; }; \
+    python3 -c "import json,sys; [json.load(open(p)) for p in sys.argv[1:]]" \
+      /usr/local/share/jupyter/kernels/arena-pyspark/kernel.json \
+      /usr/local/share/jupyter/kernels/arena-scala-toree/kernel.json \
+      || { echo "[arena] kernel.json 不是合法 JSON ⇒ jupyter kernelspec list 会整条命令报错，不是只少一个 kernel"; exit 1; }; \
+    cp_val="$(tr -d "\n\r" < /usr/local/share/jupyter/kernels/arena-scala-toree/kernel.json | grep -o "\"-cp\", *\"[^\"]*\"" | head -1)"; \
+    test -n "$cp_val" \
+      || { echo "[arena] 读不到 arena-scala-toree 的 -cp 那一项（空读数）⇒ argv 的写法变了或者文件不对。闸门不许把\"没读到\"当成\"通过\"：本档第一版就是这么把一条一行都没读到的 grep 打印成\"过\"的（2026-10-10 破坏性验证抓出来的）"; exit 1; }; \
+    cp_val="$(printf "%s" "$cp_val" | sed -e "s/^.*, *\"//" -e "s/\"$//")"; \
+    case "$cp_val" in "/opt/spark/jars/*:"*) ;; *) echo "[arena] arena-scala-toree 的 -cp 读到的是「${cp_val}」，不是以 /opt/spark/jars/*: 开头 ⇒ toree-assembly 里那份 Scala 2.12.15 会盖掉 Spark 3.5.5 的 2.12.18。fat jar 里的 scala/** 类删不掉，所以『同名 artifact 让 Spark 那份赢』这条纪律在这里只剩类路径顺序这一个表达方式，而混版的症状是 NoClassDefFoundError 而不是一个能读的报错。与 scripts/fetch-toree.sh 的 GATE 3 判的是同一件事（脚本那一份在宿主读得到、构建期读不到 kernel.json，这一份反过来）"; exit 1 ;; esac; \
     ks_list="$(jupyter kernelspec list 2>&1)" \
       || { echo "[arena] jupyter kernelspec list 跑不动（jupyter 未安装或不在 PATH？），stderr+stdout：${ks_list}"; exit 1; }; \
     echo "${ks_list}" | grep -q arena-pyspark \
-      || { echo "[arena] jupyter 看不见 arena-pyspark kernel，kernelspec list 输出：${ks_list}"; exit 1; }
+      || { echo "[arena] jupyter kernelspec list 里没有 arena-pyspark，输出：${ks_list}"; exit 1; }; \
+    echo "${ks_list}" | grep -q arena-scala-toree \
+      || { echo "[arena] jupyter 看不见 arena-scala-toree kernel（探索期那条 Scala kernel），kernelspec list 输出：${ks_list}"; exit 1; }
 
 # ---------------- 依赖层：只 COPY manifest，保证改代码不重刷 npm ----------------
 FROM stack AS deps

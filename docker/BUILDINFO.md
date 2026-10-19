@@ -26,6 +26,7 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 | PySpark / 自带 Spark jars | `ARG SPARK_VERSION`（`pip install ==`） | 3.5.5 |
 | JUnit 控制台 standalone jar | `ARG JUNIT_VERSION`（URL 里带版本） | 1.11.4 |
 | Scala 编译器三件套 | `ARG SCALA_VERSION`（URL 里带版本） | 2.13.16 |
+| Apache Toree Scala kernel 制品 | `ARG TOREE_VERSION` + 构建期 `scripts/fetch-toree.sh` 按清单逐件校验（**sha512 + sha256 都验**） | 0.5.0-incubating（详见下面「Toree 的可复现取件」一节） |
 | Redis | `ARG REDIS_VERSION` + **构建后断言版本号** | 7.2.7（不是 7.x 就构建失败） |
 | JDK / MySQL | **主版本断言**（apt 点版本不钉，见下） | 17.0.20 / 8.0.46 |
 | npm 依赖 | `package-lock.json`（仓库跟踪） | — |
@@ -70,6 +71,41 @@ apt/pip/maven 走 `docker/mirrors.sh` 配的国内源。换网络环境时这些
 
 构建时解析出的 apt 版本会写进镜像里的 **`/opt/arena-apt-resolved.txt`**（`docker run --rm daily-arena:0.1 cat /opt/arena-apt-resolved.txt`），
 所以"这次构建到底装了什么"是可查的，不用猜。
+
+## Toree 的可复现取件（WI-91 路径 B：镜像里的 Scala kernel）
+
+notebook 页正在探索加一条 Apache Toree 的 Scala kernel（`arena-scala-toree`）。它不走 apt/pip，走
+Apache dist 的一份 24MB `.tar.gz`，里面解出的**唯一一个 26MB fat jar** 装进镜像 `/opt/toree/lib/`。
+
+| 项 | 值 |
+| --- | --- |
+| 版本 | **0.5.0-incubating**（`ARG TOREE_VERSION`，Dockerfile 紧邻块里） |
+| 制品清单（**被 git 跟踪的那一半**） | `docker-cache/toree/0.5.0-incubating/toree-artifacts.tsv` |
+| 载荷（jar / 下载缓存，**不跟踪**） | `docker-cache/toree/*/payload/`、`docker-cache/toree/*/download-cache/`（`.gitignore` 与 `.dockerignore` 各排一次） |
+| 校验尺子 | 清单每行钉 **sha512（Apache 官方 .sha512 发布值）+ sha256（本仓库自己钉的尺子）**，`fetch-toree.sh` 两个都验 |
+
+**源 URL（同一个相对路径、同一串字节，三条 base 按"实测能下完"排序，不按权威排序）**：
+
+```
+https://mirrors.tuna.tsinghua.edu.cn/apache  /incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+https://dlcdn.apache.org                     /incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+https://archive.apache.org/dist              /incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+```
+
+（实测：`archive.apache.org` 从本机 ~50KB/s 且会在尾部断流，`downloads.apache.org` 要 6 分钟，`tuna` 十几秒
+到且 sha512 逐字节相等 ⇒ 列表顺序是可用性优先。三条都失败才算失败，不许静默拿半个文件。）
+
+**为什么载荷不进仓库、而 clone 后仍能重建**：把 26MB jar 塞进仓库会把每个 clone 的代价推高，那是产品决定，
+不由一趟限时探索替它拍。所以仓库只带清单；构建期 `RUN --mount=type=cache,target=/root/.cache/toree` 里
+`fetch-toree.sh` 按清单去网络取件、逐件校验、只把清单列出的那一个成员解进 `/opt/toree`。前提与
+apt/pip/maven/Redis 源码/junit jar 一致：**构建要有网**。要手动离线重建（把载荷喂进工作树、下一次构建不走网）：
+`bash scripts/fetch-toree.sh`（默认落 `docker-cache/toree/<版本>/{payload,download-cache}`）。
+
+**红线①（kernel 永不进判题执行路径）**：`arena-scala-toree` 没有登记进 `shared/src/notebook.ts` 的
+`NOTEBOOK_KERNELS`（只 `pyspark: 'arena-pyspark'`），页面 `status.ts` 的 allow-list 会把它过滤掉；`server/src/exec/**`
+一行都不引用 toree。kernel.json 的 `argv[0]` 是绝对路径 `/usr/bin/java`（不经 shell、不看 PATH），类路径把
+`/opt/spark/jars/*`（判题侧共用的那份、且是指向 pip pyspark 的**只读**符号链接）排在 fat jar 前面；`fetch-toree.sh`
+末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 断言制品内 `org/apache/spark` 类计数为 0。
 
 ## 换 base 或升主版本时要做的事
 

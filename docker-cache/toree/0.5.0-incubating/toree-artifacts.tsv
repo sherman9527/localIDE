@@ -1,0 +1,29 @@
+# WI-91 Task 3（路径 B：Apache Toree）—— 取件清单（**被 git 跟踪的那一半**，jar 载荷不跟踪）。
+# 列：kind <TAB> 源内相对路径 <TAB> sha256 <TAB> 落盘名 <TAB> sha512（没有就写 -）
+#   kind=dist    ：要下载的东西。相对路径拼在 --dist-base 后面（Apache dist 的目录形状见下），落进 --cache。
+#   kind=extract ：从那份 tar 里**只取这一条**列出的成员，放进 --dest。tar 里的其它东西（licenses/、
+#                  bin/run.sh、RELEASE_NOTES.md、VERSION）一律不落镜像 —— 我们的 kernel.json 用绝对路径
+#                  /usr/bin/java 直起 JVM，不经官方那个 shell launcher（理由见 kernel.json 的 metadata）。
+#
+# 为什么清单长这样、而路径 A 那张是 93 行：Toree 的公开制品**就是一个 26MB 的 fat jar**
+# （toree-assembly-0.5.0-incubating.jar，sbt-assembly 打的），依赖已经烤在里面，不需要像 almond 那样
+# 按 coursier 语义重解一遍闭包。代价是"同名 artifact 让 Spark 那份赢"这条纪律**没了逐件丢弃这个旋钮**
+# —— 里面那 753 个 scala/** 类（Scala 2.12.15 编的）删不掉，只能靠**类路径顺序**压住：
+# /opt/spark/jars/* 必须排在 fat jar 前面（镜像里 Spark 3.5.5 是 2.12.18 构建的）。
+# 这条顺序在 fetch-toree.sh 末尾与 Dockerfile 里各有一道闸门看着。
+#
+# 版本事实（读的是制品里的 toree-ivy.xml，不是 release note）：
+#   scala-library/compiler 2.12.15（conf=scala-tool）、spark-{core,sql,repl,...}_2.12 3.0.3（conf=**provided**）
+#   ⇒ Spark 那侧是 provided，制品里**一个 org/apache/spark 类都没有**（实测 unzip -l 计数 0，脚本里当闸门），
+#     所以"能不能跟镜像里的 Spark 3.5.5 同一条类路径跑"这一问，唯一的答案来源是那一次 --execute 探针。
+#
+# URL 怎么来的：Toree 不发 GitHub Releases（`api.github.com/repos/apache/toree/releases/latest` 返回 tag_name=None），
+# 走 Apache 的 dist 站点。三条 base 都给出同一个相对路径与同一份字节（本机实测 sha512 一致）：
+#   https://archive.apache.org/dist/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+#   https://downloads.apache.org/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+#   https://mirrors.tuna.tsinghua.edu.cn/apache/incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz
+# sha512 那一列是 Apache 随制品发布的官方值（.sha512 文件），sha256 是本仓库自己钉的尺子 —— 两个都验。
+# 实测过的一条坑：archive.apache.org 从本机 ~50KB/s 且会在**尾部**断流（下到 97% 被 reset），
+# downloads.apache.org 也要 6 分钟；换 tuna 之后同一个 sha512 十几秒到 ⇒ base 列表按"能下完"排，不按"权威"排。
+dist	incubator/toree/0.5.0-incubating/toree/toree-0.5.0-incubating-bin.tar.gz	fef2a849cc576b2f2378a7e3e0d3aaa147cfda2884def467c97321b1c01e2f93	toree-0.5.0-incubating-bin.tar.gz	9e8a6a324f8a60ed32b34e17da0c92c17e70e39a14178ed989249e48148ca6c576a738ce0b014bf25fb2ffeb7cf15e15431029d7afd43303faf6de0e758535ba
+extract	toree-0.5.0-incubating/lib/toree-assembly-0.5.0-incubating.jar	5746a940070aacd57c0c5ba91db4877eb64e8feb05556e5b81b3602675621c0d	lib/toree-assembly-0.5.0-incubating.jar	-
