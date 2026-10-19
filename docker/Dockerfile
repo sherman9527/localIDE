@@ -150,6 +150,16 @@ RUN npm run build \
     && mkdir -p data/judge \
     && node -e "require('node:sqlite'); console.log('node:sqlite ok')"
 
+# 题库"只增不减"（硬约束 C5）的**容器可用基线**（N-18）。上一版 scripts/check-bank.mjs 只认 git 跟踪数，
+# 而 `.dockerignore` 排掉了 `.git` ⇒ 交付档里 trackedQuestions() 返回 null、退到 gitignored 的 .bank-count、
+# 那个也不在镜像里 ⇒ baseline=0 ⇒ 这条闸门在容器里一行都不判，而 verify.sh 的阶段名还写着"基线取 git 跟踪数"。
+# 现在把**构建期这棵 content 树的题数**烤进镜像（与 /opt/arena-apt-resolved.txt 同一族做法：把构建期事实留在镜像里）。
+# 运行期 content 是 bind-mount ⇒ "比构建时少"照样判得住。排除的三个文件名必须与 check-bank.mjs 的
+# NON_QUESTION_FILES 一致 —— 这条一致性由 server/test/regression/bank-baseline.test.ts 判住，不许两边各改各的。
+RUN find /app/content/questions -type f -name '*.json' \
+        ! -name hidden.json ! -name schema.json ! -name package.json | wc -l > /opt/arena-bank-baseline.txt \
+    && cat /opt/arena-bank-baseline.txt
+
 EXPOSE 7788
 HEALTHCHECK --interval=20s --timeout=5s --start-period=40s --retries=5 \
   CMD curl -fsS http://127.0.0.1:7788/api/health || exit 1

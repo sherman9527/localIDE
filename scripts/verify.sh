@@ -100,7 +100,7 @@ if [ "$NB_SERVICE" = "1" ]; then
 else
   run "单元测试（shared + exec + regression + notebooks + server 根级）" npx vitest run shared server/test/exec server/test/regression server/test/notebooks server/test/*.test.ts
 fi
-run "题库只增不减（基线取 git 跟踪数）" node scripts/check-bank.mjs --count-only
+run "题库只增不减（基线：git → 镜像烤入清单 → 本机计数，皆空则响亮失败）" node scripts/check-bank.mjs --count-only
 # 整个 bank 目录都要在 FULL_GATE 下跑：只点名 content 的话，
 # bank/provenance.test.ts（skipIf ARENA_FULL_GATE）就永远只是"被跑过"而从未真跑。
 run "题库闸门（含覆盖度与出处审计）" env ARENA_FULL_GATE=1 npx vitest run server/test/bank
