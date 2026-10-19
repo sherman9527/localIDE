@@ -38,7 +38,17 @@
   `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --rebuild` → `REBUILD_EXIT=0`，**整镜像 --no-cache 冷构建**（T4 没证的半程这轮补上），新镜像 `534dfeff1599` **2.58GB**；容器内 `kernel.json` md5 == 工作树（`93b39fc8…`）、读回的 `display_name` == `Scala (Toree)`、烤入的前端 bundle 里 `Unknown Error`/`完全不碰 IDE 那份 venv` 各命中 —— "跑着的是这轮字节"是量的不是推的；
   `MIRROR_APT=… ./start.sh --verify` → **`VERIFY_EXIT=0`、✓ verify 全部通过**；矩阵 `158 道可判 / 跳过（栈不可用）0 道`（六栈全 true）；五个 notebook 阶段**各恰好出现 1 次**（grep 计数 1/1/1/1/1），`教程 notebook：17 passed / 0 skipped / 17 total ✓`、`Scala kernel：11 passed / 0 skipped / 11 total ✓`、判题矩阵 `555 passed / 11 skipped / 566 total`（比 T4 轮多的 2 条就是本轮 notebook-image 的两条新 it）；`grep -c scala-kernel.test.ts` = 0（--exclude 真生效，专门阶段只跑那一次）；`.env` 未被改动（absent）；
   宿主 `npm run e2e` → **`E2E_EXIT=0`、74 passed (3.3m)**（`notebook-page.spec.ts` 三条全绿，跑的就是本轮改过的 7 段计数 + `Unknown Error` 名词判据 —— 真浏览器、独立 e2e 实例、不占 7799）；破坏性三串（页面 version 判据、kernel.json 闸门、SIGINT 单因归因）全部实测红后 md5 还原（日志 `destructive-task5-*.log`）。
-  ⚠ **完成判据第 1 条"真浏览器里选得到且跑得过"由控制端按 task-5-report.md §7 清单执行中** —— 三档绿不等于界面被看过，这一条在浏览器读数回来之前仍是敞的。
+  **真浏览器读数（控制端 2026-10-20 按 `task-5-report.md` §7 清单逐条跑，宿主 Edge 打 `127.0.0.1:7788`；全程只数进程不打印命令行）**：
+  页头那句按 kernel 点名、徽标行确实没被恢复（`[data-testid="notebook-kernels"]` 为 null）；边界块 7 段、两组 JVM 数各归各的；
+  iframe 的 New 菜单列得出 `Scala (Toree)` 与 `PySpark (arena)`；`val x = 6 * 7` → `x = 42`，第二格 `doubled=84`（状态活）；
+  故意写坏 `println(bogusName)` → 界面出现 `Unknown Error: <console>:24: error: not found: value bogusName`，
+  输出 1 条、`<a>` 0、`<details>` 0（**没有堆栈帧在界面上是可证的**），且**没有** `Kernel message validation error` 红条 —— 那正是 A 路径的死因形状；
+  console 67 条**全部**来自 `/jupyter/static/notebook/*.js`，**我们自己的 bundle error 与 warning 各 0**；
+  换状态（点文件 → src 换成那本 notebook 且**是同一个 iframe 节点**，切回「文件管理」→ src 回 `/jupyter/`，没有残留面板）；
+  故意停 70 秒 → health 200、隧道 200、Toree 仍在，回来跑第四格 `alive=126`（会话与 websocket 都活着）；
+  收尾删 session 后 `toree=0`、`java=0`、`ipykernel=0`。
+  ｜**界面上没测的两样**（诚实记账）：Tab 补全与"停止"按钮的界面行为 —— 边界那句"中断不支持"目前只有容器档 3/3 那次读数撑着；
+  我这次打 `/jupyter/api/kernels/<id>/interrupt` 是在 session 已删之后，回 404 不算读数。
   ｜2026-10-16 的推迟决定（两句，逐字随迁）：
 - **WI-100 / WI-96（Toree 接成第五页的 Scala kernel）—— 2026-10-16 用户点头：这一版先不接。**
   ｜理由当场核过，不是推测：`shared/src/notebook.ts:108` 是 `NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' }`，只一条，界面照注册表给 ⇒ 现在**没有谎**；而这版计划要同时动镜像、量具、判据与界面，**停在半程恰好会造出**"界面写着两个内核都能选、镜像里只有一个"那种谎。所以留一个完整执行窗口再做（计划：`docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，5 个任务，Task 1 是先把量具改对）。WI-96 是同一族账，接入时一并还。
@@ -606,3 +616,5 @@ N-15 `/api/bank` 瘦身（WI-79）、N-16 端口绑回环（WI-78）、N-13 出�
 - **N-19 再加一家公司的扩充（从 WI-56 拆出来的持续项，2026-10-19）**：六家 ≥30 的目标已达成并收口成 WI-56，"继续扩"这件事需要一个不误导的位置 —— 前置是**先补公司向素材**（JD / 面经 / 业务语境），不是先出题；达标线与报数方式沿用 `content.test.ts` 的"公司维度"那条。
 
 - **N-20 教程期望的 kernel 要做成注册表自带字段（Scala 教程 notebook 的前置账，2026-10-20 记自 WI-91b 计划 §9）**：`tutorials.test.ts` 的执行层今天钉的是"kernel 必须是 `arena-pyspark`" —— 一句**全集断言**，Scala 教程一存在就会撞红。账的内容：把"每篇期望哪条 kernel"做成注册表自带字段（落在 `tutorial-claims.ts` 还是 notebook metadata，做的时候定一处真相，不许两处各写），**不许就地放宽成"pyspark 或 scala"** —— 放宽那一瞬间，"写成镜像自带的 `python3` 照样跑绿"这个红线①的洞就回来了（这正是探索档点名过的那条）。前置条件：`content/notebooks/` 里今天**没有** Scala 教程（Scala kernel 已选得到、跑得动、有容器档闸门，但教程是另一件事）；这条账在那一天到来时才要动。
+
+- **N-21 在嵌入的 iframe 里"新建 notebook"会跳到顶层新标签页（2026-10-20 控制端真浏览器读数里看见的）**：第五页左栏点已有文件 → iframe 的 `src` 换成那本 notebook，**编辑在内嵌里**（这条是好的，反向对照也做过）；但内嵌 Jupyter 自己的 `New → Scala (Toree)` 会开一个**顶层新标签页**（上游 Notebook app 的行为），于是"新建"这一步落在了我们的壳外面 —— 用户看到的是一个不带我们页头与边界说明的整屏 Jupyter。账的内容：要么把新建导流到我们自己的路径（例如左栏给"新建"入口、由服务端在 workDir 里按选定 kernel 建一本，iframe 再指过去），要么在界面上把这一点说实话（"新建会开新标签页，回到这一页继续用左栏切文件"）。**不是缺陷修复而是产品边界**：今天 Scala/Python 都选得到、都跑得动，只是"出生"这一步在壳外。前置：动它之前先确认逃生链接（`/jupyter/tree`）那条路仍然够用。
