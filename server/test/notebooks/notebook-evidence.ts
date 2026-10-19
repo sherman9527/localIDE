@@ -1,5 +1,8 @@
 import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { NOTEBOOK_KERNELS } from '@arena/shared';
+import { config } from '../../src/config.js';
 
 /**
  * notebook 执行证据的**三处提取**（前两件从 `server/test/notebooks/kernel.test.ts` 原样搬来，WI-90 Task 1 Step 2；
@@ -24,6 +27,31 @@ import { NOTEBOOK_KERNELS } from '@arena/shared';
  * 覆盖面由 `typecheck-coverage.test.ts` 那条"不存在没被任何 tsconfig 认领的测试文件"钉住。
  * 现在这个模块自己会 `execFileSync` 起子进程（只有 `realExecError` 用得到，判读那几件不碰它），
  * 所以**import 它不再有副作用**：模块加载时什么都不跑，起进程只在被调用时。
+ *
+ * ## WI-91b Task 1 起的**接口层**（名称与错误语义是给 Task 2..5 的契约，不是实现细节）
+ *
+ * 背景：Apache Toree 会把两行 interpreter 注册表打在 `jupyter nbconvert --stdout` 的 JSON **前面**，
+ * 旧读法（`JSON.parse(整个 stdout)`）抛的那句话与"kernel 真的坏了"长得一模一样。本层把两件事分开：
+ *
+ * - `readExecutedNotebook(text)` —— **严格**读法，返回 `ExecutedNotebook`。判"这份文本能不能读成执行后的
+ *   notebook"：整段 parse 不通时先试"从第一个 `{` 起切"（容忍实测的 Toree **前缀**形状；后缀不收，收它是
+ *   新判据要带新测试），切完仍不通、或读出来却没有 `cells` 数组 ⇒ **throw**。绝不静默返回 `{cells: []}`
+ *   —— 那会把"kernel 坏了"读成"这本 notebook 没有 cell"（派发词硬约束）。抛出的话只说"读不出这份文本"，
+ *   **不**替进程层编"跑不起来"（那句话的职权在 `nbconvertCrashEvidence`，它吃 execFileSync 的 error，这里吃文本）。
+ * - `readExecutedNotebookFile(executedNotebookPath)` —— **容器档入口**（R2 钉死的签名：吃执行后 notebook 的
+ *   **文件路径**，Task 4 复用）。读文件 + 交给 `readExecutedNotebook`；文件不在/读不动也 throw，话说"结果文件
+ *   这一层的接线坏了"这一层。
+ * - 主路径是 **(a)**（brief Step 3 的首选，裁决记录在此）：`nbconvertExecuteToFileArgv` 用
+ *   `--output-dir <目录> --output <文件名>` 把执行后的 notebook **落盘**，垃圾行留在 stderr，JSON 天生干净。
+ *   `readExecutedNotebook` 的前缀容忍是**第二道**（形状是 (b)，判据是 notebook-evidence.test.ts 的逐字污染夹具）
+ *   —— 它服务的是今天仍走 `--stdout` 的旧门（`kernel.test.ts` / `tutorials.test.ts`，本轮一个字没动它们）。
+ * - `executedNotebookScratchPath(tag)` / `removeExecutedNotebookScratch(path)` —— 落盘临时文件的**唯一**选址与
+ *   收尾实现：住在实例自己的数据目录（`config.dataDir`，即 `ARENA_DATA_DIR` 跟着走的那棵树；WI-40 隔离纪律），
+ *   **不进** `config.notebook.workDir`（那是真人的笔记工作区）。删除返回"删净与否"，调用方把它落成一条错误/断言
+ *   （形状照 `embed.test.ts` 的收尾删除判据：断言放 try/finally 之外，finally 只记账）。
+ * - `notebookEvidence(nb)` —— "只取 stdout 行与出错 cell 条目"的那份循环现在**只有一份**：宽松门
+ *   `executedNotebookEvidence(raw)`（语义不变：解析不了给有界 error 条目而不是 throw，`kernel.test.ts` 的常驻
+ *   判据钉着它）与严格门读出的 notebook 都走这一个提取器。两扇门两套真相是会漂的那种写法（WI-107 那一课）。
  */
 
 /** nbconvert 那份输出里，断言消息最多可以带走这么多字符（评审 minor：别把 32MB 打进报告）。 */
@@ -292,9 +320,175 @@ export function executedNotebookEvidence(raw: string): { stdout: string[]; error
   }
   const cells = (parsed as { cells?: unknown })?.cells;
   if (!Array.isArray(cells)) return { stdout: [], errors: [`notebook JSON 里没有 cells 数组：${raw.slice(0, EVIDENCE_CAP)}`] };
+  return notebookEvidence(parsed as ExecutedNotebook);
+}
+
+// ──────── WI-91b Task 1：执行后 notebook 的严格读法（接口层，见文件头） ────────
+
+/** 执行后 notebook 的 metadata 里今天被判的那两个字段；其余按原样过（索引签名收着，见文件头接口段）。 */
+export interface ExecutedNotebookMetadata {
+  kernelspec?: { name?: unknown; [k: string]: unknown };
+  language_info?: { name?: unknown; [k: string]: unknown };
+  [k: string]: unknown;
+}
+
+/**
+ * `readExecutedNotebook` / `readExecutedNotebookFile` 读出来的对象形状。
+ * `cells` 被读法**钉成数组**（nbformat 的不变量：空 notebook 也是 `[]`，所以"没有 cells 数组"与
+ * "`cells` 是空数组"是两种坏法，读法只放行后者）；这正是派发词那条硬约束的结构化表达。
+ */
+export interface ExecutedNotebook {
+  cells: unknown[];
+  metadata?: ExecutedNotebookMetadata;
+  [k: string]: unknown;
+}
+
+/** 抛错消息里带多少"原文开头"：要看得见症状（前缀是什么字符），又不许把整本 notebook 抄进报告。 */
+const READ_PREVIEW = 200;
+
+/** 预览：JSON.stringify 包一层，让换行/引号在报告里**显形**（裸拼会让下一个人把两行垃圾读成一行）。 */
+const previewOf = (text: string): string => JSON.stringify(text.length <= READ_PREVIEW ? text : `${text.slice(0, READ_PREVIEW)}…`);
+
+/** "整段读不成 notebook JSON"那一支的话。两支话（这一支与"缺 cells"那一支）不许合并：合并就抹掉了两种坏法的区分。 */
+function unreadableNotebookError(text: string, reason: unknown, tried: string): Error {
+  return new Error(
+    `这份文本读不出来是"执行后的 notebook JSON"（${tried}）⇒ 原报错：${clip(describeError(reason), 200)}。` +
+      `文本共 ${text.length} 字符，开头是：${previewOf(text)}。` +
+      '⚠ 这句话只判"这份文本读不成 notebook JSON"这一件事，**不判** kernel 坏没坏、nbconvert 有没有正常结束 —— ' +
+      '那是 `nbconvertCrashEvidence` 按进程 error 说的另一句话（不同对象、不同职权，混着说就是本仓库记过的"指错方向的报错"）。' +
+      '这里也**绝不**静默返回 `{cells: []}` —— 那会把"kernel 坏了"读成"这本 notebook 没有 cell"。',
+  );
+}
+
+/** "读出来的是合法 JSON，但不是执行后的 notebook"那一支的话。 */
+function notAnExecutedNotebookError(text: string): Error {
+  return new Error(
+    `读出来的是合法 JSON，但它不是"执行后的 notebook"：里面没有 cells 数组（nbformat 的不变量是 cells 恒为数组，空 notebook 也是 []）` +
+      `⇒ 文本共 ${text.length} 字符，开头是：${previewOf(text)}。` +
+      '这与"整段不是合法 JSON"是两种坏法，两句话不许合并；这一支同样不判 kernel 坏没坏（职权划分见 `readExecutedNotebook` 上方注释）。',
+  );
+}
+
+/**
+ * 把"执行后 notebook 的那份文本"读成 `ExecutedNotebook`，读不出就**抛**（语义契约在文件头）。
+ *
+ * 今天（WI-91b Task 1）的容忍形状：JSON 对象**之前**的垃圾行 —— Toree 实测在 `--stdout` 的 JSON 前先打两行
+ * interpreter 注册表（`(Scala,org.apache.toree.…@1015a4b9)`）。做法是"整段 parse 不通时，从第一个 `{` 起切再试一次"
+ * （形状 (b) 收在**读法**里当第二道防线；主路径是 (a) 落盘，见文件头与 `nbconvertExecuteToFileArgv`）。
+ * **后缀不收**：JSON 之后还有尾巴说明这份输出的形状根本不在本轮实测里，宽容它=猜它。
+ * ⚠ 已知边界：垃圾行里若自己带 `{`，第一个 `{` 就不是 JSON 的开头 ⇒ 两支都读不出时红话会给原文开头，
+ * 那不是谎报（它说的是"读不出"这个事实）。真撞上那种形状再收紧切法，别在这里顺手放宽。
+ */
+export function readExecutedNotebook(text: string): ExecutedNotebook {
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(text);
+  } catch (err) {
+    const start = text.indexOf('{');
+    if (start > 0) {
+      // 第二道防线（形状 (b)，判据是 notebook-evidence.test.ts 的逐字污染夹具）：整段 parse 不通时，
+      // 把**第一个 `{` 之前**的字节当前缀垃圾跳过再试一次 —— Toree 的注册表行就长在那个位置。
+      try {
+        candidate = JSON.parse(text.slice(start));
+      } catch (err2) {
+        throw unreadableNotebookError(text, err2, `从第一个 { （第 ${start} 字符）起切后仍失败，前缀那 ${start} 字符被跳过`);
+      }
+    } else {
+      // start 为 -1（整段没有 `{`）或 0（切了等于没切，整段 parse 已经试过了）：直接报，不假装努力过。
+      throw unreadableNotebookError(text, err, start < 0 ? '整段里连一个 { 都没有，前缀容忍帮不上' : '第一个 { 就在开头，切了等于没切');
+    }
+  }
+  const cells = (candidate as { cells?: unknown } | null)?.cells;
+  if (!Array.isArray(cells)) throw notAnExecutedNotebookError(text);
+  return candidate as ExecutedNotebook;
+}
+
+/**
+ * **容器档入口**（R2 钉死的签名）：执行后的 notebook 由 `--output` 落盘，这里吃**文件路径**。
+ * 文件读不动 ⇒ 抛，话说的是"结果文件这一层的接线"：那与"这份结果读不成 notebook"（`readExecutedNotebook` 的
+ * 两支）和"进程自己怎么坏的"（`nbconvertCrashEvidence`）是三句话，各判各的对象。
+ */
+export function readExecutedNotebookFile(executedNotebookPath: string): ExecutedNotebook {
+  let text: string;
+  try {
+    text = readFileSync(executedNotebookPath, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `读不到 nbconvert 该落盘的执行后 notebook：${executedNotebookPath} ⇒ 结果文件不在或读不动（命令没跑完整 / 路径算错 / scratch 目录被删）。` +
+        `原报错：${clip(describeError(err), 200)}。⚠ 这一句判的是"结果文件"这层接线；进程那边到底怎么坏的归 \`nbconvertCrashEvidence\`（吃 execFileSync 的 error），` +
+        '把两句混成一句就是"工具读不出"被读成"kernel 坏了"的又一次复发。',
+    );
+  }
+  return readExecutedNotebook(text);
+}
+
+/** scratch 落在 `config.dataDir` 下的子目录名（数据目录跟着 `ARENA_DATA_DIR` 走；不进 `config.notebook.workDir`，那是真人的笔记工作区）。 */
+const SCRATCH_SUBDIR = 'notebook-exec-scratch';
+
+/** 同一毫秒内的去重计数：pid+Date.now 在同一毫秒的两次调用会撞名（两条真跑互删的形状）。 */
+let scratchSeq = 0;
+
+/**
+ * 主路径 (a) 的落盘位置：**实例自己的数据目录**下的唯一 .ipynb（WI-40 隔离纪律 —— E2E/换实例时 `ARENA_DATA_DIR`
+ * 指到哪，scratch 就跟到哪，绝不落进源码树或系统 tmp）。目录顺手 `mkdir -p` 出来：不赌 nbconvert 会不会自己建
+ * `--output-dir`。调用方**必须**收尾 `removeExecutedNotebookScratch`（探针/Task 4 各有一条"残留即错"的判据）。
+ */
+export function executedNotebookScratchPath(tag: string): string {
+  const dir = join(config.dataDir, SCRATCH_SUBDIR);
+  mkdirSync(dir, { recursive: true });
+  scratchSeq += 1;
+  return join(dir, `${tag}-${process.pid}-${Date.now()}-${scratchSeq}.ipynb`);
+}
+
+/**
+ * 删掉落盘的执行结果并**回话删净与否**（`false` = 还在）。调用方把它落成一条 error/断言，
+ * 而不是在这里 throw —— finally 里 throw 会盖掉 try 里真正的坏点（`embed.test.ts` 实测过的那一课）。
+ * `maxRetries` 照 `kernel.test.ts` 常驻用例的教训：Windows 的索引/杀软会临时按住刚写出的文件句柄给 EPERM。
+ */
+export function removeExecutedNotebookScratch(executedPath: string): boolean {
+  try {
+    rmSync(executedPath, { force: true, maxRetries: 3, retryDelay: 100 });
+  } catch {
+    // 删失败的后果由返回值说（existsSync 还指着它在，就是没删净），这里不再往外抛第二次故障。
+  }
+  return !existsSync(executedPath);
+}
+
+/**
+ * 主路径 (a) 的 nbconvert 参数：执行后的 notebook **落盘**到 `executedPath`，不再走 `--stdout`。
+ * `--output` 只吃文件名、目录交给 `--output-dir`：nbconvert 跨版本对"--output 自己带路径"的语义不一致，
+ * 这对组合是稳的（形状判据在 notebook-evidence.test.ts，宿主就有牙）。
+ * `allow_errors=True` 的由来与 `tutorials.test.ts` / `kernel.test.ts` 同一课：少了它，cell 一报错整条路就 throw，
+ * 结构化证据（cell 号 + 异常名）一行都拿不到。
+ */
+export function nbconvertExecuteToFileArgv(notebookPath: string, executedPath: string, cellTimeoutS: number, kernelName?: string): string[] {
+  const argv = [
+    'nbconvert',
+    '--to',
+    'notebook',
+    '--execute',
+    '--output-dir',
+    dirname(executedPath),
+    '--output',
+    basename(executedPath),
+    '--ExecutePreprocessor.allow_errors=True',
+    `--ExecutePreprocessor.timeout=${cellTimeoutS}`,
+  ];
+  if (kernelName) argv.push(`--ExecutePreprocessor.kernel_name=${kernelName}`);
+  argv.push(notebookPath);
+  return argv;
+}
+
+/**
+ * 从**已读出的** notebook 取那两样证据（stdout 行 / 出错 cell 条目）。
+ * 这份循环现在只有这一个住处：宽松门 `executedNotebookEvidence` 与严格门 `readExecutedNotebook(…)` 的结果
+ * 都从这里过（"两扇门两套真相会漂"是 WI-107 记过的同一课）。逐行 trim、去空行、error 只留 cell 号与异常名，
+ * 语义与抽入前逐字一致。
+ */
+export function notebookEvidence(nb: ExecutedNotebook): { stdout: string[]; errors: string[] } {
   const stdout: string[] = [];
   const errors: string[] = [];
-  cells.forEach((cell, i) => {
+  nb.cells.forEach((cell, i) => {
     const outputs = (cell as { outputs?: unknown })?.outputs;
     if (!Array.isArray(outputs)) return;
     for (const entry of outputs) {

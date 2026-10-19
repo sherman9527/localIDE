@@ -48,7 +48,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { executedNotebookEvidence, nbconvertCrashEvidence } from './notebook-evidence.js';
+import { executedNotebookScratchPath, nbconvertCrashEvidence, nbconvertExecuteToFileArgv, notebookEvidence, readExecutedNotebookFile, removeExecutedNotebookScratch, type ExecutedNotebook } from './notebook-evidence.js';
 
 /** 探针夹具（判据本体）。从**本模块**的位置派生，不依赖 cwd：容器里这里是 `/app/server/test/notebooks/…`。 */
 const FIXTURE_URL = new URL('./fixtures/99-probe-scala.ipynb', import.meta.url);
@@ -91,12 +91,13 @@ export interface ProbeResult {
   kernelName: string;
   /** 执行后 notebook 的 cell 总数；夹具当前是 4。0 表示压根没拿到可解析的 notebook。 */
   cells: number;
-  /** notebook 里 `stream/stdout` 那些行（由 `executedNotebookEvidence()` 提取，已逐行 trim、去空行）。 */
+  /** notebook 里 `stream/stdout` 那些行（由 `notebookEvidence()` 从落盘读出的 notebook 里提取，已逐行 trim、去空行）。 */
   stdout: string[];
   /**
    * 两族条目，前缀分得很开：
    * - `cell <0 基下标>: <ename>` —— 某个 cell 抛了异常（`allow_errors=True` 保证这类是**数据**不是崩溃）；
-   * - `probe: <…>` —— 判据自己的前提不成立：nbconvert 没跑起来 / 拿的是假读数（kernel 身份不符）。
+   * - `probe: <…>` —— 判据自己的前提不成立：nbconvert 没跑起来 / 落盘的执行结果读不出 / scratch 没删净 /
+   *   拿的是假读数（kernel 身份不符）。
    * 读的人要看的是前缀：红在第二族时**不要**去查 Scala，要查 kernel 注册与这条探针的接线。
    */
   errors: string[];
@@ -139,33 +140,6 @@ function fixtureShapeProblem(notebookPath: string): string | null {
   return null;
 }
 
-
-/**
- * nbconvert 的参数形状。与 `tutorials.test.ts` 的 `nbconvertArgv()` 同一套，只多一条 `kernel_name` 覆盖。
- * 为什么不 import 那份：它是**测试文件里的私有函数**，而本仓库明写"不许从测试文件 import 测试文件"
- * （一被 import 就带着别人的 `describe.skipIf` 与 `beforeAll(ensureIdeEnv)` 在探针这一档跑一遍）。
- * 两处**共用**的那两件工具（提取与崩溃措辞）住在 `./notebook-evidence.ts`，这里就是从那儿 import 的。
- *
- * `allow_errors=True` 是**必带**的那一条（同一课在 `kernel.test.ts` 与 `tutorials.test.ts` 各趟过一次）：
- * 不带它，cell 一报错 nbclient 就抛、nbconvert 退非 0 ⇒ 三条判据里最要的"哪个 cell 怎么坏的"那半
- * 一行都拿不到，反面自测（Step 4）要的"三个 cell 各自怎么样"的完整读数也就没有形状。
- */
-function nbconvertArgv(kernelName: string, notebookPath: string, cellTimeoutS: number): string[] {
-  return [
-    'nbconvert',
-    '--to',
-    'notebook',
-    '--execute',
-    // 执行后的整本 notebook 落在这份 stdout 上；少了它，提取器读到的就是空串/别的文本。
-    '--stdout',
-    '--ExecutePreprocessor.allow_errors=True',
-    `--ExecutePreprocessor.timeout=${cellTimeoutS}`,
-    // 覆盖夹具声明的那条 kernelspec（实测：覆盖生效，但输出里的 metadata.kernelspec.name 不改写 —— 见文件顶部）。
-    `--ExecutePreprocessor.kernel_name=${kernelName}`,
-    notebookPath,
-  ];
-}
-
 /**
  * 把一次读数压成**一段可以直接贴进报告**的文本。三条路径共用它，理由与 `notebook-evidence.ts` 那段一样：
  * 每个任务各自手写一份打印 = 三份会漂的真相，而漂掉的那一份不会报错，只会在下一次故障里给出比不判更差的报告。
@@ -189,8 +163,9 @@ export function formatProbeResult(r: ProbeResult): string {
  *
  * 不抛异常的两类（它们都是**数据点**，不是调用错误）：
  * - 某个 cell 抛异常 → `errors` 里落成 `cell N: <ename>`（`allow_errors=True` 保证 nbconvert 退 0）；
- * - nbconvert 整档跑不起来（kernel 没注册 / DeadKernelError / 到点）→ `errors` 里落成一条 `probe:` 开头的
- *   `nbconvertCrashEvidence()` 消息，`cells=0`、`stdout=[]`。探索期一定撞得到这一类，所以它不许是 throw。
+ * - nbconvert 整档跑不起来（kernel 没注册 / DeadKernelError / 到点），或退 0 但**落盘的执行结果读不出**，
+ *   或 scratch 没删净 → `errors` 里落成一条 `probe:` 开头的消息（第一种带 `nbconvertCrashEvidence()` 的话），
+ *   `cells=0`、`stdout=[]`。探索期一定撞得到这一类，所以它不许是 throw。
  * 抛异常的一类：夹具不在 / 默认夹具形状与判据不符 —— 那是接线错误，报成"这条路径不行"是撒谎。
  */
 export async function probeScalaKernel(kernelName: string, notebookPath?: string, timeoutMs: number = DEFAULT_TIMEOUT_MS): Promise<ProbeResult> {
@@ -207,55 +182,83 @@ export async function probeScalaKernel(kernelName: string, notebookPath?: string
 
   /** 整档预算（毫秒）与 cell 级预算（秒）取自同一个参数：两处各写一份就是"报错说的秒数与实际发的秒数不是同一个数"。 */
   const cellTimeoutS = Math.max(30, Math.floor(timeoutMs / 1000));
-  let raw = '';
+  // WI-91b Task 1 主路径 (a)：执行后的 notebook 经 `--output` **落盘**，不再从 stdout 读整本 JSON。
+  // 参数与落盘位置都取自 `./notebook-evidence.ts` 这一个构造点（`nbconvertExecuteToFileArgv` /
+  // `executedNotebookScratchPath`：scratch 住实例自己的数据目录，WI-40 隔离纪律）——
+  // Toree 会把两行 kernel 注册表打在 `--stdout` 的 JSON 前面，旧读法（`JSON.parse(整个 stdout)`）把
+  // "工具读不出"与"kernel 坏了"抛成一模一样的话，那正是本 Task 根掉的形状。
+  // 不 import `tutorials.test.ts` 的私有 `nbconvertArgv()`：本仓库明写"不许从测试文件 import 测试文件"。
+  // `allow_errors=True` 仍在必带（`kernel.test.ts` 与 `tutorials.test.ts` 各趟过一次的那一课）：少了它，
+  // cell 一报错整条路就 throw，"哪个 cell 怎么坏的"那半一行都拿不到，反面自测要的完整读数没有形状。
+  const executedPath = executedNotebookScratchPath(`wi91b-probe-${kernelName.replace(/[^a-zA-Z0-9._-]+/g, '-')}`);
   let crash: string | null = null;
+  let nb: ExecutedNotebook | null = null;
+  let readFailure: string | null = null;
   try {
-    raw = execFileSync('jupyter', nbconvertArgv(kernelName, nbPath, cellTimeoutS), { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
-  } catch (err) {
-    // 直接把 `execFileSync` 抛出来的那个 error 递给公共件：`nbconvertCrashEvidence` 现在按**真形状**分支
-    // （退出码读 `status`、node 错误名读字符串 `code`、`signal` 为 `null` 不算"被信号终止" —— 提交 584c249），
-    // Task 1 这里那层 `evidenceShapedExecError` 字段映射因此变成冗余的，已删。
-    // 留着它的代价不是行数而是**判据的归属**：它替公共件决定了"哪一种坏法说哪一句话"，
-    // 而那句话的正确性由 kernel.test.ts 的「吃真 error 的四支判读」负责钉 —— 两边各决定一次，
-    // 漂移的时候读报告的人分不清是哪一侧错了。
-    crash = nbconvertCrashEvidence(err, { execTimeoutMs: timeoutMs, cellTimeoutS });
+    try {
+      // 返回的 stdout 文本（今天的 nbconvert 只剩运行日志）**故意不用**：执行结果全在落盘的那份文件里。
+      execFileSync('jupyter', nbconvertExecuteToFileArgv(nbPath, executedPath, cellTimeoutS, kernelName), { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024 });
+    } catch (err) {
+      // 直接把 `execFileSync` 抛出来的那个 error 递给公共件：`nbconvertCrashEvidence` 现在按**真形状**分支
+      // （退出码读 `status`、node 错误名读字符串 `code`、`signal` 为 `null` 不算"被信号终止" —— 提交 584c249），
+      // Task 1 这里那层 `evidenceShapedExecError` 字段映射因此变成冗余的，已删。
+      // 留着它的代价不是行数而是**判据的归属**：它替公共件决定了"哪一种坏法说哪一句话"，
+      // 而那句话的正确性由 kernel.test.ts 的「吃真 error 的四支判读」负责钉 —— 两边各决定一次，
+      // 漂移的时候读报告的人分不清是哪一侧错了。
+      crash = nbconvertCrashEvidence(err, { execTimeoutMs: timeoutMs, cellTimeoutS });
+    }
+    if (crash === null) {
+      // 崩溃时**不去读**落盘文件：文件多半压根没写出来，读失败只会再叠一条"结果文件读不到"，
+      // 而真正的原因 crash 那一句已经说了 —— 两句叠在一起就是把根因赶去查文件路径。
+      try {
+        nb = readExecutedNotebookFile(executedPath);
+      } catch (err) {
+        readFailure = err instanceof Error ? err.message : String(err);
+      }
+    }
+  } finally {
+    // 收尾无条件（红了也不把落盘产物留在实例的数据目录里）；finally 里**只删不断言** ——
+    // 那里的断言会盖掉 try 里真正的坏点（`embed.test.ts` 实测过的那一课），"删净没有"在下面判。
+    // `removeExecutedNotebookScratch` 内部 `force`+`maxRetries`：删不掉不二次 throw。
+    removeExecutedNotebookScratch(executedPath);
   }
+  const scratchLeft = existsSync(executedPath);
 
   const errors: string[] = [];
   const stdout: string[] = [];
   let cells = 0;
   if (crash !== null) {
-    // 崩溃时**不调**提取器：raw 是空串，喂进去只会得到一条"输出不是 notebook JSON"，
-    // 而真正的原因是 kernel 起不来 / 到点 —— 那句会把人从根因赶去查 JSON 格式。
     errors.push(`probe: nbconvert 没有跑起来 ⇒ ${crash}`);
+  } else if (nb === null) {
+    // 进程退 0 而结果读不出：这是"工具/接线"层的话（readExecutedNotebookFile 自己带界），
+    // 不许顺手升级成"kernel 坏了" —— 那是 crash 那一支的职权，这里它没有对象。
+    errors.push(`probe: nbconvert 退了 0，但落盘的执行 notebook 读不出来 ⇒ ${readFailure ?? '(没有原因)'}`);
   } else {
-    const evidence = executedNotebookEvidence(raw);
+    const evidence = notebookEvidence(nb);
     stdout.push(...evidence.stdout);
     errors.push(...evidence.errors);
-    // 两处结构读数（cell 总数、内核报上来的 language_info）。刻意不写成第三份"提取器"：
-    // 它判的不是证据，是"这份输出到底是不是那本 notebook"这一层前提。
-    try {
-      const nb = JSON.parse(raw) as { cells?: unknown; metadata?: { language_info?: { name?: unknown } } };
-      cells = Array.isArray(nb.cells) ? nb.cells.length : 0;
-      const lang = nb.metadata?.language_info?.name;
-      const observed = typeof lang === 'string' ? lang : null;
-      // **只在跑默认夹具时判**（两条判据管的是同一件事：这份读数是不是**这把尺子**的读数）：
-      // 调用方显式给 notebookPath 时（反面自测③会把一篇 Python 教程指进来）语义已经换了，
-      // 拿"Scala 尺子"的身份判据去判它就是把工具用错门，而不是故障。
-      if (usingDefaultFixture && observed && /^python/i.test(observed)) {
-        errors.push(
-          `probe: 请求的 kernel 是 ${kernelName}，而它在 kernel_info 回话里报自己的语言是 ${observed} ⇒ **这条 kernel 不是 Scala 的**` +
-            '。两种形状，按顺序排：' +
-            `①${kernelName} 本身是一条 Python kernel 换了个名字（本里程碑的"造假 kernel"就长这样：挂着 Scala 的名、` +
-            '内核是 IPython，于是 Scala 语法永远跑不通而"kernel 已注册"这条检查是全绿的）；' +
-            '②nbconvert 版本漂了、`--ExecutePreprocessor.kernel_name` 不再覆盖，整本静默跑在镜像自带的 python3 上' +
-            '（实测 7.17.1 的覆盖是生效的，但生效时**不会**改写输出里的 metadata.kernelspec.name，所以这一条只能靠 language_info 判）。' +
-            '先修身份这件事，再读 stateSurvived/sparkSession —— 此刻那两个 false 说的都是 python 的事实，不是那条 kernel 的',
-        );
-      }
-    } catch {
-      // 走到这里说明提取器已经给过一条"不是 notebook JSON"的 error（同一份 raw、同一个原因），不再重复。
+    // 两处结构读数（cell 总数、内核报上来的 language_info）从**同一份已读出**的对象上取，不再二次 parse。
+    // 刻意不写成第三份"提取器"：它判的不是证据，是"这份输出到底是不是那本 notebook"这一层前提。
+    cells = nb.cells.length;
+    const lang = nb.metadata?.language_info?.name;
+    const observed = typeof lang === 'string' ? lang : null;
+    // **只在跑默认夹具时判**（两条判据管的是同一件事：这份读数是不是**这把尺子**的读数）：
+    // 调用方显式给 notebookPath 时（反面自测③会把一篇 Python 教程指进来）语义已经换了，
+    // 拿"Scala 尺子"的身份判据去判它就是把工具用错门，而不是故障。
+    if (usingDefaultFixture && observed && /^python/i.test(observed)) {
+      errors.push(
+        `probe: 请求的 kernel 是 ${kernelName}，而它在 kernel_info 回话里报自己的语言是 ${observed} ⇒ **这条 kernel 不是 Scala 的**` +
+          '。两种形状，按顺序排：' +
+          `①${kernelName} 本身是一条 Python kernel 换了个名字（本里程碑的"造假 kernel"就长这样：挂着 Scala 的名、` +
+          '内核是 IPython，于是 Scala 语法永远跑不通而"kernel 已注册"这条检查是全绿的）；' +
+          '②nbconvert 版本漂了、`--ExecutePreprocessor.kernel_name` 不再覆盖，整本静默跑在镜像自带的 python3 上' +
+          '（实测 7.17.1 的覆盖是生效的，但生效时**不会**改写输出里的 metadata.kernelspec.name，所以这一条只能靠 language_info 判）。' +
+          '先修身份这件事，再读 stateSurvived/sparkSession —— 此刻那两个 false 说的都是 python 的事实，不是那条 kernel 的',
+      );
     }
+  }
+  if (scratchLeft) {
+    errors.push(`probe: scratch 没删净：${executedPath} 还在 ⇒ 探针在实例的数据目录里留了垃圾（WI-40 隔离纪律，形状照 embed.test.ts 的收尾删除判据）。先去查那个文件为什么删不掉（权限/句柄），别把它读成"这条 kernel 不行"`);
   }
 
   // 整行相等，不是子串：理由见文件顶部第 2 条（rows=6 与 rows=60）。
