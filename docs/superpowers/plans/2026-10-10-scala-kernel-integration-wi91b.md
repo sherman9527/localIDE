@@ -153,6 +153,11 @@ expect(readExecutedNotebook(polluted).cells).toEqual([]);
 
 **Files:**
 - Modify: `web/src/pages/Notebook.tsx`（边界块）、`README.md`、`docs/ARCHITECTURE.md`、`HANDOVER.md`、`memo.md`
+- Modify（Task 3 评审补进来的，**不是可选**）: `docker/jupyter/kernels/arena-scala-toree/kernel.json`
+  （`display_name` 现在写着 "Scala (Toree, WI-91 探索)"、`arena_spike_status` 写着"**不是**交付" ——
+  而 `9cee1b5` 之后这条 kernel 已经登记在册、页面上当"就绪"显示，那是**用户现在就看得到**的假话）；
+  `docker/BUILDINFO.md` 与 `docker/Dockerfile` 里"没登记进 `NOTEBOOK_KERNELS` ⇒ 页面上看不见它"那两句（同一 commit 让它变假）。
+  ⚠ 这三件都在**镜像构建上下文**里 ⇒ 必须与 Step 2 的 `--rebuild` 同批落地，改完不重建就等于没改。
 
 - [ ] **Step 1: 边界那几句必须写全四件事**（一条都不许美化）：
   ① Scala kernel 起的是**判题池之外的第二个 Spark JVM**（`-Xmx` 那个量级照实写，WI-95）；
