@@ -35,6 +35,32 @@ import { QUESTION_COMPANIES } from './taxonomy.js';
 export const TAG_ALIASES_SCHEMA_VERSION = 1;
 
 /**
+ * 标签**形状**判据（N-24）：一个词能不能当标签用。
+ *
+ * 为什么住在 `tagVocabulary.ts` 而不是 `api.ts`：`api.ts` 装的是**响应契约**（字段、下拉、阈值
+ * `TAG_FACET_MIN_COUNT` 在那里是因为界面要照它说话），而这条回答的是"词表这一层认哪种写法"，
+ * 与 `TAG_ERA_PREFIXES` / `TAG_META_PREFIXES` / `classifyOrphanTag` 同族 —— 它们都在判"一个标签是什么"。
+ * ⚠ 同一条正则此前抄在**七处**（`content.test.ts` ×2、`knowledge-matrix.test.ts`、`scripts/kb/kit.mjs`、
+ * `scripts/bank/kit.mjs`、`generate-with-cli.mjs`、`subjective_gen.py`），其中两处还在注释里自称"同一条"
+ * 而没有任何东西保证。现在 JS/TS 六处都读这里的 `isTagShaped`；Python 生成器 import 不动 shared，
+ * 那份抄本由 `server/test/bank/content.test.ts` 的源码对表判据钉住（逐字相等，抽不到就红）。
+ *
+ * 导出**字符串**而不是 RegExp 对象：常量可被逐字比对（Python 那份就是这么对的），
+ * 而 RegExp 一旦导出，消费方就会拿 `.test()` 去比"是不是同一个对象"，那个问题没有答案。
+ */
+export const TAG_SHAPE_PATTERN = '^[a-z0-9][a-z0-9:._-]*$';
+
+const TAG_SHAPE = new RegExp(TAG_SHAPE_PATTERN);
+
+/**
+ * 这个词是不是合法标签形状：小写开头，之后允许 `a-z 0-9 : . _ -`。
+ * 中文、空格、开头符号会让整库闸门变红（`content.test.ts` 那条），所以出题管线在入库前就按它筛。
+ */
+export function isTagShaped(tag: unknown): boolean {
+  return typeof tag === 'string' && TAG_SHAPE.test(tag);
+}
+
+/**
  * 一组同义写法。`canonical` 可以是题库里已有的标签（常态），
  * 也可以是只通过归并才出现的**新拼法** —— 那种情况必须在 `reason` 里说清为什么要另起一个名字。
  */
@@ -123,9 +149,11 @@ export function publicTagAliasGroups(groups: readonly TagAliasGroup[]): TagAlias
  * 时代标记前缀（N-17 第二次量出来的那一族）。
  *
  * `modern:` 标的是"这个考点在 2025-2026 又新了一遍"，**不是另一个考点**。仓库自己的另外两条读路径
- * 早就这么认了：`scripts/bank/kit.mjs` 的覆盖判定对 `x:tag` 做后缀匹配，`scripts/kb/compile-knowledge.mjs`
- * 直接剥 `modern:` —— 只有 facet 这一条不认，于是 `privacy-engineering`(2) 与 `modern:privacy-engineering`(10)
+ * 早就这么认了：`scripts/kb/compile-knowledge.mjs` 直接剥 `modern:`，`scripts/bank/kit.mjs` 的覆盖判定
+ * 对 `x:tag` 做**任意**后缀匹配 —— 只有 facet 这一条不认，于是 `privacy-engineering`(2) 与 `modern:privacy-engineering`(10)
  * 被拆成两个下拉项，各自都不到门槛。
+ * ⚠ 覆盖那条"任意后缀"是 N-24 修掉的洞：它对 `company:` 同样成立，于是出处标记能给考点记分。
+ * 现在它读的是这张表（`tagCoverageHit`），不再是"任何前缀都算"。
  *
  * 只列 `modern:`。`classic:` 今天题库里**一个都没有**（那个 `classic:true` 是测试夹具里的形状），
  * 语义上也不是同义词标记 —— 加进来就是"为了对称猜一条规则"，等真出现再说。
@@ -178,6 +206,41 @@ export function classifyOrphanTag(raw: string, rules: OrphanTagRules = {}): Orph
 /** 元标签 = 不是考点缺口。与 `classifyOrphanTag` 同一条判据，不留第二份"什么叫元标签"。 */
 export function isMetaOrphanTag(raw: string, rules: OrphanTagRules = {}): boolean {
   return classifyOrphanTag(raw, rules) !== 'point-gap';
+}
+
+/** 一次"考点被这道题覆盖了"的命中是**怎么**命中的：裸形精确，还是剥掉一层时代前缀。 */
+export type TagCoverageKind = 'exact' | 'era';
+
+/**
+ * 题目的这个标签，算不算覆盖了矩阵里那一行考点 `pointTag`（N-24 收窄的那半）。
+ *
+ * 只认两种：① 精确（大小写不敏感）；② 剥**一整段**时代前缀后精确（前缀表 = `TAG_ERA_PREFIXES`）。
+ * 其余一律不算 —— 包括 `company:airbnb` 覆盖考点 `airbnb` 这一形。
+ *
+ * 为什么要专门钉这一条不对称：`scripts/bank/kit.mjs` 里旧的写法是
+ * `v.includes(':') && v.endsWith(':' + needle)`，那条**通用后缀**匹配让任意前缀都算覆盖，
+ * 于是出处标记（"这道题来自哪家"）能给考点矩阵记分 —— `content/knowledge/INDEX.md` 里那个
+ * 覆盖率数字从此会有一档是假的。同一行还留着一条 `modern:${needle}` 死支（被通用式包含），
+ * 而那个字面量是 `TAG_ERA_PREFIXES` 的第四份抄本。两侧都钉：
+ * `modern:` 必须仍然折（N-17 的设计），`company:` 必须不折（N-11 的口径），
+ * 判据见 `shared/test/tagVocabulary.test.ts` 与 `server/test/regression/knowledge-index.test.ts`。
+ *
+ * `rules.eraPrefixes` 是注入面（与 `classifyOrphanTag` 同形状）：闸门用它证明"换一张表结论就变"，
+ * 也就是"这张表真的是判据"而不是注释。
+ */
+export function tagCoverageHit(
+  rawTag: string,
+  pointTag: string,
+  rules: OrphanTagRules = {},
+): TagCoverageKind | null {
+  const eraPrefixes = rules.eraPrefixes ?? TAG_ERA_PREFIXES;
+  const v = String(rawTag ?? '').toLowerCase();
+  const needle = String(pointTag ?? '').toLowerCase();
+  if (!v || !needle) return null;
+  if (v === needle) return 'exact';
+  const prefix = eraPrefixes.find((p) => v.startsWith(p.toLowerCase()));
+  if (prefix && v.slice(prefix.length) === needle) return 'era';
+  return null;
 }
 
 /** 时代折叠的结果：补完的组，以及**这一轮实际折了哪些**（给闸门与界面说实话用）。 */

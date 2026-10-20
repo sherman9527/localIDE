@@ -36,6 +36,17 @@ export async function loadShared() {
   }
 }
 
+/**
+ * 脚本侧那一份 shared 的**同步**句柄（N-24）。
+ *
+ * 为什么要有它：形状判据 `isTagShaped` 与时代前缀表 `TAG_ERA_PREFIXES` 只许住在 shared，
+ * 而 `parsePointCell` / `coveredQuestionIds` 这些解析函数是**同步**的 —— 每次调用去 await 一次
+ * 既不可能也不该做。于是这里在模块加载时 await 一次，全仓共用这一个句柄。
+ * 失败面与原状一样响亮：`loadShared()` 那句"先跑 npm run build -w shared"会在 import 本模块时抛出，
+ * 而不是等到跑了一半才在某个函数里冒出来（解析器不会"没有 shared 也能凑合"—— 那才是真的静默降级）。
+ */
+export const SHARED = await loadShared();
+
 function splitRow(line) {
   const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
   const cells = [];
@@ -88,7 +99,8 @@ function isSeparatorRow(cells) {
 /** 第 1 列 → { tag, label, hasExplicitTag }：`中文名（\`tag-id\`）` 或纯中文名。 */
 export function parsePointCell(cell) {
   const tags = [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter(Boolean);
-  const explicit = tags.find((t) => /^[a-z0-9][a-z0-9:._-]*$/.test(t) && !t.startsWith('http'));
+  // 形状判据读 shared 那一份（N-24：此前这一行抄了第七份正则，注释还自称"同一条"）
+  const explicit = tags.find((t) => SHARED.isTagShaped(t) && !t.startsWith('http'));
   const label = cell
     .replace(/`[^`]*`/g, '')
     .replace(/[（(]\s*[)）]/g, '')

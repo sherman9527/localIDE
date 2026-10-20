@@ -10,7 +10,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ROOT, classifyLocation } from '../jd/lib.mjs';
-import { loadShared } from '../kb/kit.mjs';
+import { loadShared, SHARED } from '../kb/kit.mjs';
 
 export const BANK_DIR = join(ROOT, 'content', 'questions');
 export const JD_CACHE_DIR = join(ROOT, 'content', 'jd-cache');
@@ -106,17 +106,30 @@ export function statsByCategory(questions) {
   return stats;
 }
 
-/** 供 INDEX.md 与生成器复用：某考点被哪些题目覆盖（含 modern: 前缀与 knowledgeRef 兜底）。 */
+/**
+ * 供 INDEX.md 与生成器复用：某一行考点被哪些题目的哪些**写法**命中（N-24 收窄）。
+ *
+ * 判据本身在 `shared/src/tagVocabulary.ts` 的 `tagCoverageHit`（精确 或 剥一层 `TAG_ERA_PREFIXES`），
+ * 这里只留"遍历题目"这一层。旧实现的两条毛病都在这条缝上修掉了：
+ * - `v.includes(':') && v.endsWith(':' + needle)` 让**任意前缀**算覆盖 ⇒ 一行考点 `airbnb`
+ *   会被题目上的 `company:airbnb`（出处标记，不是考点）判成已覆盖，报表里那个百分比就是说谎的数；
+ * - `modern:${needle}` 那条死支（被上一行的通用式包含）同时是时代前缀表的第四份字面量抄本。
+ * 命中用的**原词**一并返回：报表必须说得出"这一行是靠哪种写法算成已覆盖的"。
+ */
+export function coverageHits(point, questions) {
+  const hits = [];
+  for (const q of questions) {
+    for (const tag of q.tags ?? []) {
+      const kind = SHARED.tagCoverageHit(tag, point.tag);
+      if (kind) hits.push({ id: q.id, tag, kind });
+    }
+  }
+  return hits;
+}
+
+/** 某考点被哪些题目覆盖（`coverageHits` 的 id 视图，与收窄前同一个返回形状）。 */
 export function coveredQuestionIds(point, questions) {
-  const needle = point.tag.toLowerCase();
-  return questions
-    .filter((q) =>
-      q.tags.some((t) => {
-        const v = t.toLowerCase();
-        return v === needle || v === `modern:${needle}` || (v.includes(':') && v.endsWith(`:${needle}`));
-      }),
-    )
-    .map((q) => q.id);
+  return [...new Set(coverageHits(point, questions).map((h) => h.id))];
 }
 
 /** shared 里的类别↔判分方式映射，直接读常量而不是手抄，避免 prompt 与契约漂移。 */
@@ -163,18 +176,21 @@ export function jdRefFromEntry(entry) {
   };
 }
 
-/** 题库闸门（server/test/bank/content.test.ts）认的 tag 形状；中文/空格 tag 会让整库变红，必须挡在入库前。 */
-const TAG_RE = /^[a-z0-9][a-z0-9:._-]*$/;
+/**
+ * 题库闸门（server/test/bank/content.test.ts）认的 tag 形状；中文/空格 tag 会让整库变红，必须挡在入库前。
+ * 判据读 shared 的 `isTagShaped`（N-24：这里原来是那条正则的第七份抄本）。
+ */
+const isTagShaped = (tag) => SHARED.isTagShaped(tag);
 
 export function sanitizeTags(tags, { fallback = [] } = {}) {
   const kept = [];
   const dropped = [];
   for (const raw of Array.isArray(tags) ? tags : []) {
     const t = String(raw).trim().toLowerCase().replace(/\s+/g, '-');
-    (TAG_RE.test(t) ? kept : dropped).push(t || String(raw));
+    (isTagShaped(t) ? kept : dropped).push(t || String(raw));
   }
   const unique = [...new Set(kept)].slice(0, 6);
-  if (unique.length === 0) return { tags: [...new Set(fallback.map((t) => String(t).toLowerCase()))].filter((t) => TAG_RE.test(t)).slice(0, 3), dropped };
+  if (unique.length === 0) return { tags: [...new Set(fallback.map((t) => String(t).toLowerCase()))].filter((t) => isTagShaped(t)).slice(0, 3), dropped };
   return { tags: unique, dropped };
 }
 

@@ -32,6 +32,11 @@ interface AuditPoint {
   covered: boolean;
   matchedBy: 'explicit' | 'derived' | 'none';
   questionIds: string[];
+  /**
+   * N-24：命中这一行的**题目标签原词**（去重排序）。报表必须说得出"这一行是靠哪种写法算成已覆盖的"，
+   * 否则 `company:airbnb` 混进 `airbnb` 那一行的时候，数字与它的解释会一起变绿。
+   */
+  hitTags?: string[];
 }
 
 interface AuditCategory {
@@ -238,6 +243,92 @@ describe('仅派生 slug 命中那一档（N-11：为什么"看起来已覆盖"�
     expect(fe.ratio).toBe('100%');
     expect(fe.points[0]?.tag, '考点 tag 该是反引号里那个，而不是切出来的中文 slug').toBe('data-fetching');
     expect(fe.points[0]?.matchedBy).toBe('explicit');
+  });
+});
+
+/**
+ * N-24：覆盖判定的**不对称性**是设计本身，不是巧合 ——
+ * `modern:x` 覆盖考点 `x`（时代标记是同一个考点的新写法），`company:airbnb` 不覆盖考点 `airbnb`
+ * （那是出处标记，与"这道题考什么"无关）。旧实现用的是 `v.endsWith(':' + needle)` 那条通用后缀匹配，
+ * 于是**任何**前缀都算覆盖：矩阵里出现一行 `airbnb` 时，INDEX.md 会把两道"来自 Airbnb 的题"
+ * 报成"覆盖了 airbnb 这个考点"。两侧都要钉住，只钉一侧的话"全禁"与"全都行"都绿。
+ *
+ * 判据走的是与上面同一个只读缝 + 同一份真题库（夹具只换**矩阵**，题库一个字不动）：
+ * 因此红的是"生成器的覆盖判定"，不是测试里那份自己算的口径。
+ */
+describe('覆盖只认精确与时代前缀（N-24：任意前缀算覆盖 = 报表说谎）', () => {
+  /** 真题库 + 真矩阵那一份审计（与上面 describe 同一份口径，这里只是为了取 hot-interviews 的前提）。 */
+  const live = readAudit();
+  const MATRIX_HEAD = '| 考点 | senior 深度要点 | 可出题形式 | 建议 judgeKind |\n| --- | --- | --- | --- |\n';
+
+  /** 造一份只含指定几行考点的临时知识库根（未列出的类别按"缺 README"处理，不影响要判的那一类）。 */
+  function fixtureRows(entries: { category: string; cell: string }[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'arena-kb-prefix-probe-'));
+    for (const { category, cell } of entries) {
+      mkdirSync(join(dir, category), { recursive: true });
+      writeFileSync(join(dir, category, 'README.md'), `${MATRIX_HEAD}| ${cell} | 要点 | rubric | llm-rubric |\n`, 'utf8');
+    }
+    scratch.push(dir);
+    return dir;
+  }
+
+  /** 夹具审计退出 0 并取出指定类别那一条（夹具每类只有一行）。 */
+  function probeRow(kbDir: string, category: string): AuditCategory {
+    const r = runAudit(['--orphan-audit-json'], { ARENA_KB_DIR: kbDir });
+    expect(r.status, `夹具审计退出 ${r.status}：\n${r.stderr.slice(0, 600)}`).toBe(0);
+    const parsed = JSON.parse(r.stdout) as Audit;
+    const c = parsed.categories.find((x) => x.category === category);
+    expect(c, `夹具审计里没有 ${category}`).toBeDefined();
+    return c!;
+  }
+
+  it('反面（那条会说谎的匹配）：`company:airbnb` 不覆盖矩阵里一行考点 `airbnb`', () => {
+    // 前提必须先成立：真题库的 hot-interviews 里确实挂着 `company:airbnb`（否则 covered=0 只是"没题"）
+    const real = live.categories.find((c) => c.category === 'hot-interviews')!;
+    expect(real.orphans.some((o) => o.tag === 'company:airbnb'), '题库里已经没有 company:airbnb 了 ⇒ 这条判据在空转（要换一条真存在的出处标签，不许放宽判据）').toBe(true);
+
+    const probed = probeRow(fixtureRows([{ category: 'hot-interviews', cell: '来源公司高频考点（`airbnb`）' }]), 'hot-interviews');
+    expect(probed.explicitPoints, '夹具那一行的反引号 tag 没被认成显式').toBe(1);
+    expect(probed.covered, 'covered=1 ⇒ 出处标记 company:airbnb 被当成了考点覆盖（INDEX.md 那个百分比就是说谎的数）').toBe(0);
+    expect(probed.points[0]?.hitTags ?? [], '这一行的命中写法清单该是空的').toEqual([]);
+    expect(probed.ratio, '一行都没覆盖时覆盖率该是 0%，不是 —（— 的含义是"无法判定"）').toBe('0%');
+  });
+
+  it('正面：`modern:react19-actions` 覆盖矩阵里一行考点 `react19-actions`（时代标记是同一个考点）', () => {
+    const probed = probeRow(fixtureRows([{ category: 'frontend', cell: 'React 19 Actions 三件套（`react19-actions`）' }]), 'frontend');
+    expect(probed.covered, 'covered=0 ⇒ 时代折叠那一半被顺手禁掉了（modern: 就是为它立的表）').toBe(1);
+    const hitTags = probed.points[0]?.hitTags ?? [];
+    expect(hitTags.length, 'hitTags 没被报出来 ⇒ "靠哪种写法算成已覆盖"这件事报表里读不到').toBeGreaterThan(0);
+    for (const t of hitTags) {
+      expect(TAG_ERA_PREFIXES.some((p) => t.toLowerCase().startsWith(p.toLowerCase())), `命中写法 ${t} 既不是裸形也不是时代前缀形`).toBe(true);
+    }
+    console.log(`[覆盖命中写法] react19-actions 这一行靠 ${hitTags.join(', ')} 命中（时代前缀表 = ${[...TAG_ERA_PREFIXES].join('/') || '空'}）`);
+  });
+
+  it('真实题库的每一处覆盖命中都在允许集合里（测试自己按 shared 那张表重算一遍）', () => {
+    // 这一条不采信生成器的分类：它拿**报出来的原词**按 TAG_ERA_PREFIXES 重新推一遍"该不该算命中"。
+    // 上面两条夹具钉的是"换了矩阵就会红"，这一条钉的是"今天真题库的每一处命中都经得起复核"。
+    const offenders: string[] = [];
+    let prefixedOnlyRows = 0;
+    for (const c of live.categories) {
+      for (const p of c.points) {
+        if (!p.hasExplicitTag || !p.covered) continue;
+        expect(p.hitTags, `${c.category}/${p.tag}：覆盖命中却不报命中的写法 ⇒ 这一条在空转`).toBeDefined();
+        let hasExact = false;
+        for (const t of p.hitTags ?? []) {
+          const lower = t.toLowerCase();
+          const needle = p.tag.toLowerCase();
+          const eraPrefix = TAG_ERA_PREFIXES.find((x) => lower.startsWith(x.toLowerCase()));
+          const allowed = lower === needle || (eraPrefix !== undefined && lower.slice(eraPrefix.length) === needle);
+          if (!allowed) offenders.push(`${c.category}/${p.tag} ← ${t}（前缀不在 TAG_ERA_PREFIXES 里）`);
+          if (lower === needle) hasExact = true;
+        }
+        if (!hasExact) prefixedOnlyRows += 1;
+      }
+    }
+    expect(offenders, offenders.join('\n')).toEqual([]);
+    expect(prefixedOnlyRows, '没有任何一行是"仅靠带前缀的写法命中"的 ⇒ 正面那条夹具可能在空转').toBeGreaterThan(0);
+    console.log(`[覆盖命中的形状] 全库 ${prefixedOnlyRows} 行仅靠带前缀的写法命中，前缀全部在 TAG_ERA_PREFIXES 里`);
   });
 });
 

@@ -5,12 +5,15 @@ import {
   TAG_ALIASES_SCHEMA_VERSION,
   TAG_ERA_PREFIXES,
   TAG_META_PREFIXES,
+  TAG_SHAPE_PATTERN,
   buildTagAliasMap,
   canonicalTag,
   classifyOrphanTag,
   countQuestionsByCanonicalTag,
   foldEraTagGroups,
   isMetaOrphanTag,
+  isTagShaped,
+  tagCoverageHit,
   tagMatches,
   type OrphanTagRole,
   type TagAliasGroup,
@@ -257,5 +260,98 @@ describe('评审 C1：折叠的目标必须先过 alias 表（真题里 `inferen
     ];
     const { folded } = foldEraTagGroups(registry, ['modern:mysql8-window-functions', 'mysql8-window-functions']);
     expect(folded, '裸形出现了也不许把这条挂过去 —— 那等于改写手写裁决').toEqual([]);
+  });
+});
+
+/**
+ * N-24 第一半：**标签形状**判据只有这一份。
+ *
+ * 这条正则原本抄在七处（`content.test.ts` ×2、`knowledge-matrix.test.ts`、`scripts/kb/kit.mjs`、
+ * `scripts/bank/kit.mjs`、`generate-with-cli.mjs`、`subjective_gen.py`），其中两处还在注释里自称
+ * "同一条正则"而没有任何东西保证 —— 自称而不判，就是"下一次有人只改一处"的账。
+ * ⚠ 这里判**行为**不判字面量：把 `^[a-z0-9]…` 再抄一遍进测试就成了第八份抄本，
+ * 改一次形状要同时动八个地方，而"漏改一处"的代价从"红"变成"没人发现"。
+ * 字面量那一侧的对表在 `server/test/bank/content.test.ts`（Python 那条 import 不动 shared，只能用源码文本比）。
+ */
+describe('isTagShaped：标签形状判据（N-24）', () => {
+  it('接受题库与矩阵里真实存在的那几种形状（含带前缀的写法）', () => {
+    for (const t of [
+      'window-functions',
+      'modern:streaming-aqe',
+      'company:airbnb',
+      'classic:true',
+      'a',
+      'ts-strict-compilation',
+      'react19-actions',
+      'data.quality_v2-x:y1',
+      '0',
+    ]) {
+      expect(isTagShaped(t), `${t} 该是合法形状（题库里就这么写的）`).toBe(true);
+    }
+  });
+
+  it('拒绝会让整库变红的形状：大写、空格、中文、开头符号、空串', () => {
+    for (const t of ['', ' React', 'React Hooks', '中文标签', '-leading', '_leading', ':colon-first', 'has space', 'has/slash', 'tab\tinside']) {
+      expect(isTagShaped(t), `${JSON.stringify(t)} 不该被判成合法标签`).toBe(false);
+    }
+  });
+
+  it('判据不是"看起来宽松"：同一个串的接受/拒绝必须与 TAG_SHAPE_PATTERN 那条正则同源', () => {
+    // 这一条防的是"isTagShaped 里另写一份、常量只是摆设"的形状（导出常量却没人用它）
+    expect(new RegExp(TAG_SHAPE_PATTERN).source).toBe(TAG_SHAPE_PATTERN);
+    for (const t of ['window-functions', 'modern:x', 'React Hooks', '', '-x']) {
+      expect(isTagShaped(t), `${JSON.stringify(t)}：isTagShaped 与 TAG_SHAPE_PATTERN 说的不是同一件事`).toBe(new RegExp(TAG_SHAPE_PATTERN).test(t));
+    }
+  });
+});
+
+/**
+ * N-24 第二半：**考点覆盖**只认精确与时代前缀，不认任意前缀。
+ *
+ * 旧实现（`scripts/bank/kit.mjs:116`）用的是 `v.includes(':') && v.endsWith(':' + needle)`，
+ * 于是矩阵里一行考点标 `airbnb`，会被题目上的 `company:airbnb`（那是**出处**标记，不是考点）判成"已覆盖"
+ * —— 报表里那个覆盖率数字就此在说假话。同一行还留着一条 `modern:${needle}` 死支（被下一行的通用式包含），
+ * 而 `modern:` 这个字面量是该表(`TAG_ERA_PREFIXES`)的第四份抄本。
+ * 这一族不对称（`modern:` 折、`company:` 不折）在 `classifyOrphanTag` 那侧早就立好了，
+ * 覆盖这一侧以前只是没跟上。
+ */
+describe('tagCoverageHit：考点覆盖只认精确与时代前缀（N-24）', () => {
+  it('裸形精确命中算 exact', () => {
+    expect(tagCoverageHit('react19-actions', 'react19-actions')).toBe('exact');
+    expect(tagCoverageHit('React19-Actions', 'react19-actions'), '匹配是大小写不敏感的（读路径历来如此）').toBe('exact');
+  });
+
+  it('`modern:x` 覆盖考点 `x`（时代标记是同一个考点的新写法）', () => {
+    expect(tagCoverageHit('modern:streaming-aqe', 'streaming-aqe')).toBe('era');
+    expect(tagCoverageHit('MODERN:iceberg-v3', 'iceberg-v3'), '前缀匹配也要大小写不敏感').toBe('era');
+  });
+
+  it('反面（这一条就是那个会撒谎的数）：`company:airbnb` 不覆盖考点 `airbnb`', () => {
+    expect(tagCoverageHit('company:airbnb', 'airbnb'), '出处标记不是考点 —— 让它算覆盖，INDEX.md 的覆盖率就在说假话').toBeNull();
+    expect(tagCoverageHit('company:apple', 'apple')).toBeNull();
+    // 任意前缀一律不算：新加一个前缀不会自动获得"算覆盖"的资格（要算得先进 TAG_ERA_PREFIXES）
+    expect(tagCoverageHit('whatever:airbnb', 'airbnb')).toBeNull();
+    expect(tagCoverageHit('classic:airbnb', 'airbnb'), 'classic: 故意不在表里（题库今天一个都没有）').toBeNull();
+  });
+
+  it('时代前缀只剥**一层整段**：`modern:legacy:x` 不覆盖 `x`，但覆盖 `legacy:x`', () => {
+    expect(tagCoverageHit('modern:legacy:x', 'x'), '前缀里还藏着别的段就不是纯时代标记').toBeNull();
+    expect(tagCoverageHit('modern:legacy:x', 'legacy:x')).toBe('era');
+  });
+
+  it('不做子串命中：`x-y` 不覆盖 `x`，`x` 也不覆盖 `y:x`', () => {
+    expect(tagCoverageHit('airbnb-search-ranking', 'airbnb'), '公司名 + 考点是一条真考点，但它不等于那个公司名').toBeNull();
+    expect(tagCoverageHit('airbnb', 'company:airbnb'), '反方向同样不成立').toBeNull();
+  });
+
+  it('前缀表是判据的唯一出处：把表换空，`modern:x` 就不再覆盖 `x`（闸门要能证明这一点）', () => {
+    expect(tagCoverageHit('modern:x', 'x', { eraPrefixes: [] })).toBeNull();
+    expect(tagCoverageHit('modern:x', 'x', { eraPrefixes: ['modern:'] })).toBe('era');
+    expect(TAG_ERA_PREFIXES.length, '时代表空了 ⇒ 上面那条规则注入判据就是空转').toBeGreaterThan(0);
+  });
+
+  it('畸形输入不炸（报表生成器不能因为一道脏标签整个挂掉）', () => {
+    expect(tagCoverageHit('', 'x')).toBeNull();
+    expect(tagCoverageHit('x', '')).toBeNull();
   });
 });

@@ -6,10 +6,12 @@ import {
   QUESTION_COMPANIES,
   TAG_ERA_PREFIXES,
   TAG_FACET_MIN_COUNT,
+  TAG_SHAPE_PATTERN,
   buildTagAliasMap,
   canonicalTag,
   countQuestionsByCanonicalTag,
   foldEraTagGroups,
+  isTagShaped,
   publicBankRow,
   publicQuestion,
   tagMatches,
@@ -102,7 +104,7 @@ describe('题库结构（必须始终通过）', () => {
     for (const q of bank.questions) {
       expect(q.tags.length, `${q.id} 标签过多`).toBeLessThanOrEqual(6);
       for (const tag of q.tags) {
-        expect(/^[a-z0-9][a-z0-9:._-]*$/.test(tag), `${q.id} 标签不规范：${tag}`).toBe(true);
+        expect(isTagShaped(tag), `${q.id} 标签不规范：${tag}`).toBe(true);
       }
       expect(new Set(q.tags).size, `${q.id} 标签有重复`).toBe(q.tags.length);
     }
@@ -353,7 +355,6 @@ describe('标签词表的同义归并（N-17 的另一半：只在读时归并�
    * 两条出处指纹路径（`scripts/bank/drafts/check_provenance.py` 与 `server/src/bank/ingest.ts`）
    * 都只看题目文件，所以它既不改题目也不需要复核出处。这条判据本身也要被钉住（下面那条）。
    */
-  const TAG_RE = /^[a-z0-9][a-z0-9:._-]*$/;
   const groups = tagAliases;
   const map = buildTagAliasMap(groups);
 
@@ -374,13 +375,50 @@ describe('标签词表的同义归并（N-17 的另一半：只在读时归并�
     expect(filesInBankDir.map((e) => e.name), '题库目录根部出现了裸 JSON 文件，loader 会把它们当题目').toEqual([]);
   });
 
-  it('每条 canonical 与 alias 都过题目用的那张标签正则', () => {
+  it('每条 canonical 与 alias 都过题目用的那张标签正则（判据 = shared 的 isTagShaped）', () => {
     const bad: string[] = [];
     for (const g of groups) {
-      if (!TAG_RE.test(g.canonical)) bad.push(`${g.canonical}（canonical）`);
-      for (const a of g.aliases) if (!TAG_RE.test(a)) bad.push(`${a}（alias of ${g.canonical}）`);
+      if (!isTagShaped(g.canonical)) bad.push(`${g.canonical}（canonical）`);
+      for (const a of g.aliases) if (!isTagShaped(a)) bad.push(`${a}（alias of ${g.canonical}）`);
     }
     expect(bad, `不合法的词表项：${bad.join(', ')}`).toEqual([]);
+  });
+
+  /**
+   * N-24：同一条标签形状正则原本抄在**七处**，其中两处还在注释里自称"同一条正则"而没有任何东西保证。
+   * 自称不判 = 下一次有人只改一处，症状是"闸门放过一个题库会拒的写法"（或反过来，出题脚本写得出、闸门判不过）。
+   *
+   * 三条判据各有各的判法，因为要堵的三种坏法不同：
+   * ① JS/TS 那六处必须**引用 shared 的符号**（正向："必须出现 isTagShaped"，不是"不许出现什么"）；
+   * ② 全仓只有两份抄本：shared 那份 + Python 那份（它 import 不动 shared），别的文件一份都不许有；
+   *    判据的 needle 从 `TAG_SHAPE_PATTERN` 现推，不再抄第三遍；
+   * ③ Python 那份按**源码文本逐字相等**对表（正向"必须等于"，不是"不许长什么样"——后者能被换个写法绕过去）。
+   * ⚠ 这条只在 JS/TS 侧改引用方式时红；把 shared 那条常量改掉而 Python 没跟着改，它也会红 —— 那正是目的。
+   */
+  it('标签形状判据只有一份：JS/TS 那六处站点（在五个文件里）都读 shared，Python 那份用源码文本对表（N-24）', () => {
+    const read = (relPath: string) => readFileSync(join(config.repoRoot, relPath), 'utf8');
+    const jsSites = [
+      join('server', 'test', 'bank', 'content.test.ts'),
+      join('server', 'test', 'bank', 'knowledge-matrix.test.ts'),
+      join('scripts', 'kb', 'kit.mjs'),
+      join('scripts', 'bank', 'kit.mjs'),
+      join('scripts', 'bank', 'generate-with-cli.mjs'),
+    ];
+    const notReading = jsSites.filter((relPath) => !read(relPath).includes('isTagShaped'));
+    expect(notReading, `这些站点没有读 shared 的形状判据（自己抄了一份？)：${notReading.join(', ')}`).toEqual([]);
+
+    // ② 全仓扫描：那份字符类只许出现在 shared 与 Python 生成器里。
+    const needle = TAG_SHAPE_PATTERN.slice(TAG_SHAPE_PATTERN.indexOf('[') + 1, TAG_SHAPE_PATTERN.lastIndexOf(']'));
+    expect(needle.length, `从 TAG_SHAPE_PATTERN 里取不出字符类（常量形状变了？)：${JSON.stringify(needle)}`).toBeGreaterThan(4);
+    const copies = textFilesWith(needle);
+    const allowed = ['scripts/bank/drafts/alibaba/subjective_gen.py', 'shared/src/tagVocabulary.ts'];
+    expect(copies, `这些文件里还抄着那份形状判据（应当只剩 shared 那一份 + Python 那一份，Python 由下面的对表判据钉住）：\n${copies.join('\n')}`).toEqual(allowed);
+
+    // ③ Python 那份：从源码里**抽出来**再逐字比，抽出不到就是红（不许"抽不到就当通过"）。
+    const py = read(join('scripts', 'bank', 'drafts', 'alibaba', 'subjective_gen.py'));
+    const inline = /TAG_RE\s*=\s*re\.compile\(r"([^"]+)"\)/.exec(py);
+    expect(inline, 'subjective_gen.py 里那条 `TAG_RE = re.compile(r"…")` 不见了或换了写法 ⇒ 对表判据读不到东西（改成报错，不要跳过）').not.toBeNull();
+    expect(inline![1], `Python 那份抄本与 shared 的 TAG_SHAPE_PATTERN 分叉了（Python：${inline![1]}｜shared：${TAG_SHAPE_PATTERN}）`).toBe(TAG_SHAPE_PATTERN);
   });
 
   it('形状规矩：每组至少一条别名、至少一行 reason，且 alias 不重复', () => {
@@ -614,3 +652,37 @@ describe('交付出去的那份词表要整体合法（评审 C1：旧闸门只�
     }
   });
 });
+
+/**
+ * 扫出"文本里含有这段子串"的**源码**文件（N-24 的形状对表判据用）。
+ *
+ * 三条收窄都是判据的一部分：
+ * - 只扫代码会待的目录：`docs/`、`HANDOVER.md`、`memo.md` 里那些"引用这条正则讲教训"的文字不是抄本，
+ *   把它们算进来只会让下一个 session 因为写了段注释而红；
+ * - 跳过 `node_modules` 与 `dist`：镜像的 .dockerignore 把 dist 全族排掉，构建期由 `npm run build` 重建，
+ *   判据的输入必须是工作树源码，否则两档读到的文件集合不一样（本仓库为这类"换机器就不成立"红过）；
+ * - 只认代码扩展名（`.md` 里真会出现这种字符类，那是散文不是实现）。
+ */
+function textFilesWith(needle: string): string[] {
+  const roots = ['scripts', 'server', 'shared', 'web', 'tests', 'docker'];
+  const exts = new Set(['.ts', '.tsx', '.mjs', '.js', '.py', '.sh', '.json']);
+  const skipDirs = new Set(['node_modules', 'dist', 'coverage']);
+  const hits: string[] = [];
+  const walkDir = (abs: string, relPrefix: string): void => {
+    if (!existsSync(abs)) return;
+    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        walkDir(join(abs, entry.name), relPrefix ? `${relPrefix}/${entry.name}` : entry.name);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const dot = entry.name.lastIndexOf('.');
+      if (dot < 0 || !exts.has(entry.name.slice(dot))) continue;
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (readFileSync(join(abs, entry.name), 'utf8').includes(needle)) hits.push(relPath);
+    }
+  };
+  for (const root of roots) walkDir(join(config.repoRoot, root), root);
+  return hits.sort();
+}

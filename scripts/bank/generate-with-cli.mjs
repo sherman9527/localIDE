@@ -265,8 +265,8 @@ export async function generateDrafts(opts) {
   }
 
   const array = extractJsonArray(rawText);
-  const kebab = /^[a-z0-9][a-z0-9:._-]*$/;
-  const fallbackTags = [...points.map((p) => p.tag), category].filter((t) => kebab.test(String(t)));
+  // 形状判据读 shared（N-24）：这里原来是那条正则的又一份抄本，而 `shared` 就在手边
+  const fallbackTags = [...points.map((p) => p.tag), category].filter((t) => shared.isTagShaped(t));
   const drafts = [];
   const rejected = [];
   for (const [index, raw] of array.entries()) {

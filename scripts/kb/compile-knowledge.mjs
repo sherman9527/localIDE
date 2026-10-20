@@ -9,7 +9,9 @@
  *   - content/questions 题库（软删除题不计入"已出题"，但仍列进"历史去重池"）
  *   - content/jd-cache/skills.json（存在时用来指出"JD 很热但矩阵里没有对应考点"的缺口）
  *
- * 覆盖判定：题目的 tags[]（含元标签前缀）里出现考点 tag 即算覆盖。
+ * 覆盖判定：题目的 tags[] 里**精确**出现考点 tag，或剥掉**一整段时代前缀**（表 = shared 的 `TAG_ERA_PREFIXES`）
+ * 后精确，才算覆盖。其它前缀一律不算 —— `company:airbnb` 是出处标记、不是考点，它不许给矩阵记分（N-24）。
+ * 判据住在 `shared/src/tagVocabulary.ts` 的 `tagCoverageHit`，报表侧与出题侧共用同一份。
  * 只认**显式写在矩阵第 1 列反引号里的 tag**；没写 tag 的行无法机器判定，会单独统计并提示补 tag。
  * 第 1 列没写 tag 的行仍会拿"标签推出来的 slug"去撞一次题目 —— 但那类命中**单独报**
  * （`仅派生 slug 命中`）：中文名一改，"哪些考点已出题"就跟着悄悄换。
@@ -26,7 +28,7 @@
 import { join } from 'node:path';
 import { UsageError, isMain, parseArgs, rel, writeTextAtomic } from '../jd/lib.mjs';
 import { loadShared, readCategoryKnowledge, KNOWLEDGE_DIR } from './kit.mjs';
-import { SKILLS_FILE, loadQuestions, statsByCategory, coveredQuestionIds, isExecutable } from '../bank/kit.mjs';
+import { SKILLS_FILE, loadQuestions, statsByCategory, coverageHits, isExecutable } from '../bank/kit.mjs';
 import { readFile } from 'node:fs/promises';
 
 const CODE_FORM = 'code';
@@ -66,16 +68,20 @@ export async function computeKnowledgeReport({ knowledgeDir = process.env.ARENA_
     const derivedOnly = [];
     const auditPoints = [];
     for (const point of kb.points) {
-      const ids = coveredQuestionIds(point, catVisible);
+      const hits = coverageHits(point, catVisible);
+      const ids = [...new Set(hits.map((h) => h.id))];
+      // 命中的**原词清单**要一并进审计 JSON（N-24）：只报"覆盖了"而不报"靠哪种写法覆盖的"，
+      // 那么"任意前缀都算覆盖"那一类退化就只在数字里留下痕迹 —— 而数字看起来完全正常。
+      const hitTags = [...new Set(hits.map((h) => h.tag))].sort();
       if (!point.hasExplicitTag) {
         untrackable.push(point);
         // 派生 slug 的命中单独一档：它今天能把题目撞上来，改一次中文名就换了目标（报表必须说实话说它脆）
         if (ids.length > 0) derivedOnly.push({ point, ids });
-        auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: false, matchedBy: ids.length > 0 ? 'derived' : 'none', covered: false, questionIds: ids });
+        auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: false, matchedBy: ids.length > 0 ? 'derived' : 'none', covered: false, questionIds: ids, hitTags });
         continue;
       }
       (ids.length > 0 ? covered : uncovered).push({ point, ids });
-      auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: true, matchedBy: 'explicit', covered: ids.length > 0, questionIds: ids });
+      auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: true, matchedBy: 'explicit', covered: ids.length > 0, questionIds: ids, hitTags });
     }
     const s = stats.get(kb.category);
     const kinds = Object.entries(s?.kinds ?? {})
@@ -152,7 +158,7 @@ export function buildOrphanAudit(report) {
 
 /**
  * 题目带了 tag，但该类别矩阵里没有任何考点含这个 tag —— 题面与知识库脱钩。
- * 剥前缀只认 `TAG_ERA_PREFIXES` 那一份（时代折叠的同一张表），命中判定沿用 coveredQuestionIds 的口径。
+ * 剥前缀只认 `TAG_ERA_PREFIXES` 那一份（时代折叠的同一张表），命中判定沿用 `coverageHits` 的口径。
  * ⚠ 返回**三个数**而不是一个：元标签（时代/出处标记、纯公司名）本来就不该有考点行，
  * 只有 pointGaps 才是"该补一行矩阵"的可行动数。合成一个数报出去，报表就会长期催一件不存在的事。
  */
@@ -244,7 +250,8 @@ export function renderKnowledgeIndex({ rows, detail, jdGaps, parseErrors, hidden
     '> 由 `npm run kb:index`（`node scripts/kb/compile-knowledge.mjs`）生成。',
     `> 生成时间：${now}`,
     `> 输入：\`content/knowledge/<类别>/README.md\` 考点矩阵（${categories.length} 类）+ 题库 ${total} 题（其中软删除 ${hiddenCount} 题不计入"已出题"）。`,
-    '> 覆盖判定：题目 `tags[]`（去掉时代前缀，前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）命中矩阵第 1 列反引号里的 tag 即算已覆盖；',
+    '> 覆盖判定：题目 `tags[]` **精确**命中矩阵第 1 列反引号里的 tag，或剥掉**一整段**时代前缀（前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）后精确，才算已覆盖；',
+    '> ⚠ 其它前缀**不算**覆盖：`company:airbnb` 记的是这道题出自哪家，不是它考什么 —— 让它给考点记分，上面那一列百分比就不可信（判据 = `shared` 的 `tagCoverageHit`）。',
     '> 未写反引号 tag 的行列进「无显式 tag（无法判定）」单独统计，其中**靠标签派生 slug 撞上的**另列一档（改中文名就会变，脆）。',
     '> 脱钩标签分两个口径：**元标签**（只有 `company:*` 前缀与纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；⚠ 带 `modern:` 的脱钩**算缺口不算元**：剥掉前缀之后矩阵里仍然没有那一行，那就是一个真考点穿着标记的外衣（评审 I1）；',
     '> **考点缺口**才是"该给矩阵补一行"的可行动数 —— 只看合起来的 N 会被元标签撑到失真。',
