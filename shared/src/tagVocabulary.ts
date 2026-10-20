@@ -116,3 +116,68 @@ export function tagMatches(
 export function publicTagAliasGroups(groups: readonly TagAliasGroup[]): TagAliasGroupPublic[] {
   return groups.map((g) => ({ canonical: g.canonical, aliases: [...(g.aliases ?? [])] }));
 }
+
+/**
+ * 时代标记前缀（N-17 第二次量出来的那一族）。
+ *
+ * `modern:` 标的是"这个考点在 2025-2026 又新了一遍"，**不是另一个考点**。仓库自己的另外两条读路径
+ * 早就这么认了：`scripts/bank/kit.mjs` 的覆盖判定对 `x:tag` 做后缀匹配，`scripts/kb/compile-knowledge.mjs`
+ * 直接剥 `modern:` —— 只有 facet 这一条不认，于是 `privacy-engineering`(2) 与 `modern:privacy-engineering`(10)
+ * 被拆成两个下拉项，各自都不到门槛。
+ *
+ * 只列 `modern:`。`classic:` 今天题库里**一个都没有**（那个 `classic:true` 是测试夹具里的形状），
+ * 语义上也不是同义词标记 —— 加进来就是"为了对称猜一条规则"，等真出现再说。
+ */
+export const TAG_ERA_PREFIXES = ['modern:'] as const;
+
+/** 时代折叠的结果：补完的组，以及**这一轮实际折了哪些**（给闸门与界面说实话用）。 */
+export interface EraFoldResult {
+  groups: TagAliasGroup[];
+  folded: TagAliasGroupPublic[];
+}
+
+/**
+ * 把 `modern:x` 折进 `x`，**只在该裸形真的存在于题库时**。
+ *
+ * 为什么是条件式而不是一律剥前缀：全库 172 个 `modern:` 标签里只有 21 个有裸形同伴，
+ * 一律剥会把另外 151 个 facet 的**名字**改掉（`modern:iceberg-v3` → `iceberg-v3`）却什么也没合并 ——
+ * 那是拿用户看得见的标签去换一个不变的数字。
+ *
+ * 折出来的组与手写的词表走同一张表、同一个 `canonicalTag`，所以三条读路径（facet 求和、服务端筛选、
+ * 客户端筛选）自动同源。词表已经管过的写法**不越权改写**（手写的裁决优先）。
+ */
+export function foldEraTagGroups(groups: readonly TagAliasGroup[], tagsPresent: Iterable<string>): EraFoldResult {
+  const present = new Set<string>();
+  for (const t of tagsPresent) present.add(t.toLowerCase());
+  const base = buildTagAliasMap(groups);
+  /** canonical（小写）→ 词表里那组真正用的规范名：折出来的组要挂到同一个名字上。 */
+  const canonicalByLower = new Map<string, string>();
+  for (const g of groups) canonicalByLower.set(g.canonical.toLowerCase(), g.canonical);
+
+  const byTarget = new Map<string, string[]>();
+  for (const raw of present) {
+    const prefix = TAG_ERA_PREFIXES.find((x) => raw.startsWith(x));
+    if (!prefix) continue;
+    const bare = raw.slice(prefix.length);
+    if (!bare || !present.has(bare)) continue;
+    if (base.has(raw)) continue;
+    const canonical = canonicalByLower.get(bare) ?? bare;
+    if (canonical === raw) continue;
+    const bucket = byTarget.get(canonical);
+    if (bucket) bucket.push(raw);
+    else byTarget.set(canonical, [raw]);
+  }
+
+  const extra: TagAliasGroup[] = [];
+  const folded: TagAliasGroupPublic[] = [];
+  for (const [canonical, aliases] of [...byTarget.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const sorted = aliases.sort();
+    extra.push({
+      canonical,
+      aliases: sorted,
+      reason: `时代标记折叠：\`modern:\` 标的是"${canonical}"这个考点在 2025-2026 又新了一遍，不是另一个考点（规则见 shared/src/tagVocabulary.ts 的 TAG_ERA_PREFIXES）`,
+    });
+    folded.push({ canonical, aliases: sorted });
+  }
+  return { groups: [...groups, ...extra], folded };
+}

@@ -270,6 +270,13 @@ describe('题库页的同义归并筛选（客户端与服务端同一套语义�
     expect(hint.textContent).toContain('关键词');
   });
 
+  it('提示里那句"modern: 只是时代标记"必须在（下拉里同时出现裸形与带前缀的名字，用户会问为什么）', async () => {
+    await renderMerged();
+    const hint = screen.getByTestId('bank-tag-hint');
+    expect(hint.textContent).toContain('modern:');
+    expect(hint.textContent, '要说清"有裸形就并、没裸形就照原样"，否则像一律剥前缀').toMatch(/裸形/);
+  });
+
   it('词表为空时（没有登记任何同义组）退回精确匹配，且不许凭空承诺归并', async () => {
     await renderMerged(false);
     const titles = await titlesUnder('window-functions');

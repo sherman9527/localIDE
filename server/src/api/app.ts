@@ -10,6 +10,7 @@ import {
   JUDGE_KINDS,
   TAG_FACET_MIN_COUNT,
   buildTagAliasMap,
+  foldEraTagGroups,
   countQuestionsByCanonicalTag,
   detailFromGrade,
   detailFromJudge,
@@ -1022,7 +1023,13 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
      * N-17 的另一半：同义词表只在这里生效 —— **读侧聚合**，题目数据一字未动。
      * 判据全部来自 `@arena/shared` 的 tagVocabulary（客户端筛标签调的是同一个 `tagMatches`）。
      */
-    const aliasMap = buildTagAliasMap(aliasGroups);
+    /**
+     * 手写的词表之外还要叠一层**时代标记折叠**（`modern:x` → `x`，仅当裸形真的在库里）：
+     * 只有这里看得见**全库**，所以那条规则在这里落地。折出来的组与手写组走同一张表，
+     * 三条读路径（facet 求和、服务端筛选、客户端筛选）因此仍然同源 —— 客户端拿到的就是这份合起来的 tagGroups。
+     */
+    const { groups: effectiveGroups } = foldEraTagGroups(aliasGroups, pool.flatMap((q) => q.tags));
+    const aliasMap = buildTagAliasMap(effectiveGroups);
     // 筛选项按**全库**算：一搜索就把下拉里的选项筛掉，看起来像"题库少了一批标签"。
     // count 是"这一组写法合起来的**题数**"（一题挂了同组两种写法只数一次），见 countQuestionsByCanonicalTag。
     const tagCounts = countQuestionsByCanonicalTag(pool.map((q) => q.tags), aliasMap);
@@ -1053,7 +1060,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')),
       tagCount: rawTagCount,
       // 词表随响应出去，客户端才可能与服务端筛得一模一样（判据一份，读者两处）
-      tagGroups: publicTagAliasGroups(aliasGroups),
+      tagGroups: publicTagAliasGroups(effectiveGroups),
       companies: [...counts.entries()]
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')),

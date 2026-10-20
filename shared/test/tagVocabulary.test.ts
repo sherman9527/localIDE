@@ -6,6 +6,8 @@ import {
   buildTagAliasMap,
   canonicalTag,
   countQuestionsByCanonicalTag,
+  foldEraTagGroups,
+  TAG_ERA_PREFIXES,
   tagMatches,
   type TagAliasGroup,
 } from '../src/tagVocabulary.js';
@@ -123,5 +125,46 @@ describe('这一层的形状（shared 是三方共用的，形状本身就是判
     const src = readFileSync(fileURLToPath(new URL('../src/tagVocabulary.ts', import.meta.url)), 'utf8');
     expect(src, 'tagVocabulary.ts 里出现了 node: 内置模块导入').not.toMatch(/from\s+'node:/);
     expect(src, 'tagVocabulary.ts 里出现了读文件的动作').not.toMatch(/readFileSync\s*\(|createReadStream\s*\(/);
+  });
+});
+
+
+describe('foldEraTagGroups（时代标记折叠：modern:x 折进 x，但只在裸形真的存在时）', () => {
+  it('裸形存在才折：modern:x 进 x 的组；没有裸形同伴的 modern:y **一个字都不改**', () => {
+    const { groups, folded } = foldEraTagGroups([], ['privacy-engineering', 'modern:privacy-engineering', 'modern:iceberg-v3']);
+    expect(folded.map((f) => f.canonical), '只有有裸形同伴的那条该被折').toEqual(['privacy-engineering']);
+    expect(folded[0]?.aliases, '上一条已经断言只折出一条；这里用 ?. 让"根本没折到"也照样红').toEqual(['modern:privacy-engineering']);
+    const map = buildTagAliasMap(groups);
+    expect(canonicalTag('modern:iceberg-v3', map), '一律剥前缀会把 151 个 facet 的名字改掉却什么也没合并 —— 这条钉住"不做成那样"').toBe('modern:iceberg-v3');
+  });
+
+  it('手写词表优先：已经登记过的写法不被折叠改写，折出来的组挂到手写的那个 canonical 上', () => {
+    const registry: TagAliasGroup[] = [{ canonical: 'window-functions', aliases: ['window-function', 'modern:window-functions'], reason: '手写裁决' }];
+    const { groups, folded } = foldEraTagGroups(registry, ['window-functions', 'modern:window-functions']);
+    expect(folded, '这条写法词表已经管过，折叠不越权').toEqual([]);
+    const map = buildTagAliasMap(groups);
+    expect(canonicalTag('modern:window-functions', map)).toBe('window-functions');
+  });
+
+  it('折出来的组挂在既有的 canonical 上（裸形自己也是某个组的规范名时不另起名字）', () => {
+    const registry: TagAliasGroup[] = [{ canonical: 'llm-gateway', aliases: ['inference-gateway'], reason: '同义' }];
+    const { groups, folded } = foldEraTagGroups(registry, ['llm-gateway', 'modern:llm-gateway']);
+    expect(folded.map((f) => f.canonical)).toEqual(['llm-gateway']);
+    const map = buildTagAliasMap(groups);
+    // 三种写法互相命中同一个概念：手写的 alias、裸形、时代前缀形
+    expect(tagMatches(['modern:llm-gateway'], 'inference-gateway', map), '跨两条归并路径还该是同一个筛选项').toBe(true);
+  });
+
+  it('只认 modern: 这一个前缀；classic: 与其它带冒号的前缀一律不折', () => {
+    expect(TAG_ERA_PREFIXES).toEqual(['modern:']);
+    const { folded } = foldEraTagGroups([], ['company:airbnb', 'airbnb', 'classic:foo', 'foo']);
+    expect(folded, '非时代前缀不是同义词标记，折了就是猜').toEqual([]);
+  });
+
+  it('大小写与排序稳定：同一批标签折两次结果逐字相等（响应要进客户端缓存，顺序不该漂）', () => {
+    const tags = ['Modern:Beta', 'beta', 'Modern:Alpha', 'alpha'];
+    const a = foldEraTagGroups([], tags);
+    const b = foldEraTagGroups([], [...tags].reverse());
+    expect(JSON.stringify(b.folded)).toEqual(JSON.stringify(a.folded));
   });
 });

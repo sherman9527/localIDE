@@ -2,7 +2,16 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { TAG_FACET_MIN_COUNT, buildTagAliasMap, canonicalTag, countQuestionsByCanonicalTag, publicBankRow, publicQuestion } from '@arena/shared';
+import {
+  TAG_ERA_PREFIXES,
+  TAG_FACET_MIN_COUNT,
+  buildTagAliasMap,
+  canonicalTag,
+  countQuestionsByCanonicalTag,
+  foldEraTagGroups,
+  publicBankRow,
+  publicQuestion,
+} from '@arena/shared';
 import { loadBank } from '../../src/bank/loader.js';
 import { statementHash } from '../../src/bank/ingest.js';
 import { loadTagAliases } from '../../src/bank/tagAliases.js';
@@ -490,5 +499,62 @@ describe.skipIf(!FULL_GATE)('覆盖度闸门（最终验收）', () => {
     const classic = items.filter((q) => q.tags.includes('classic:true') || q.tags.includes('classic')).length;
     expect(items.length).toBeGreaterThan(0);
     expect(classic / items.length, `经典老题 ${(classic / items.length) * 100}%`).toBeLessThanOrEqual(0.15);
+  });
+});
+describe('时代标记折叠（N-17 第二次量出来的那一族：modern:x 与 x 是同一个考点）', () => {
+  const rawTags = new Set(bank.questions.flatMap((q) => q.tags));
+  const { groups: effective, folded } = foldEraTagGroups(tagAliases, rawTags);
+  const registryMap = buildTagAliasMap(tagAliases);
+  const foldedMap = buildTagAliasMap(effective);
+
+  it('真的折到了东西，且每一条都站得住：alias 在库里、带 modern:、裸形也在库里、词表没管过它', () => {
+    expect(folded.length, '一个都没折 ⇒ 要么规则坏了，要么题库形状变了（这条会替后者说话）').toBeGreaterThan(0);
+    const flat = folded.flatMap((f) => f.aliases.map((a) => [a, f.canonical] as const));
+    for (const [alias, canonical] of flat) {
+      expect(rawTags.has(alias), `折了题库里根本不存在的写法：${alias}`).toBe(true);
+      expect(alias.startsWith('modern:'), `只该折时代前缀，折到了 ${alias}`).toBe(true);
+      expect(rawTags.has(canonical), `目标规范名不在库里（${canonical}）：一律剥前缀就是改名，不是合并`).toBe(true);
+      expect(registryMap.has(alias), `词表已经登记过 ${alias}，折叠不该越权改写手写的裁决`).toBe(false);
+    }
+    console.log(`[时代折叠] 折了 ${flat.length} 对（如 ${flat.slice(0, 3).map(([a, c]) => `${a}→${c}`).join('，')}）`);
+  });
+
+  it('没有裸形同伴的 modern: 标签一个字都不改（一律剥前缀会白改一百多个用户看得见的名字）', () => {
+    const bareOf = (t: string) => t.slice('modern:'.length);
+    const lone = [...rawTags].filter((t) => t.startsWith('modern:') && !rawTags.has(bareOf(t)));
+    const withBare = [...rawTags].filter((t) => t.startsWith('modern:') && rawTags.has(bareOf(t)));
+    expect(lone.length, '题库里"只有 modern: 形"的标签数变成 0 了 ⇒ 下面这条要重定口径').toBeGreaterThan(0);
+    for (const t of lone) {
+      // 判的是"折叠这一层没动它"，不是"规范名等于原词"—— 手写词表本来就可以登记某个 modern: 写法
+      expect(canonicalTag(t, foldedMap), `没有裸形同伴的 ${t} 被折叠层改名了`).toBe(canonicalTag(t, registryMap));
+    }
+    console.log(`[时代折叠] modern: 标签共 ${lone.length + withBare.length} 个：有裸形同伴、真的被合并的 ${withBare.length} 个，保持原名的 ${lone.length} 个`);
+  });
+
+  it('只认 modern:：classic: 与 company: 这类前缀不是同义词标记，一个都不折；折完的规范名不再带前缀', () => {
+    expect(TAG_ERA_PREFIXES).toEqual(['modern:']);
+    for (const f of folded) {
+      for (const a of f.aliases) expect(a, `折到了非时代前缀 ${a}`).toMatch(/^modern:/);
+      expect(f.canonical.startsWith('modern:'), `规范名自己还带时代前缀（${f.canonical}）：折得不彻底`).toBe(false);
+    }
+  });
+
+  it('折叠让筛选项变多（这才是做它的理由），且不让任何已有项消失', () => {
+    const tagLists = bank.questions.map((q) => q.tags);
+    const facetsOf = (m: Map<string, number>) =>
+      new Set([...m.entries()].filter(([, c]) => c >= TAG_FACET_MIN_COUNT).map(([n]) => n));
+    const a = facetsOf(countQuestionsByCanonicalTag(tagLists, registryMap));
+    const b = facetsOf(countQuestionsByCanonicalTag(tagLists, foldedMap));
+    expect(b.size, `折叠后筛选项没有变多（${a.size} → ${b.size}）：这一族白折了`).toBeGreaterThan(a.size);
+    const cntA = countQuestionsByCanonicalTag(tagLists, registryMap);
+    const cntB = countQuestionsByCanonicalTag(tagLists, foldedMap);
+    for (const name of a) {
+      if (b.has(name)) continue;
+      // 消失只有一种合法原因：它是某个 modern: 写法，整族并进了裸形那一个名字（合并必然吃掉 alias 那一侧）
+      const into = canonicalTag(name, foldedMap);
+      expect(name.startsWith('modern:') && into !== name, `筛选项 ${name} 凭空消失（既不是被并进裸形，也不在折叠清单里）`).toBe(true);
+      expect(cntB.get(into), `${name}(${cntA.get(name)}) 并进 ${into} 时题数丢了`).toBeGreaterThanOrEqual(cntA.get(name) ?? 0);
+    }
+    console.log(`[时代折叠] 出现 ≥${TAG_FACET_MIN_COUNT} 次的筛选项：只用手写词表 ${a.size} 个 → 叠上时代折叠 ${b.size} 个`);
   });
 });

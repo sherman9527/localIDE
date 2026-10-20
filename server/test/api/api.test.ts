@@ -1132,3 +1132,62 @@ describe('GET /api/bank 的同义归并（词表只作用于读侧聚合，题�
     }
   });
 });
+
+describe('GET /api/bank 叠上时代标记折叠（词表为空也照样折：它是规则，不是数据）', () => {
+  const eraBank = () =>
+    new FakeBank([
+      makeQuestion({ id: 'alg-java-0201', category: 'algorithms', judgeKind: 'java-junit', tags: ['privacy-engineering'] }),
+      makeQuestion({ id: 'alg-java-0202', category: 'algorithms', judgeKind: 'java-junit', tags: ['modern:privacy-engineering'] }),
+      makeQuestion({ id: 'alg-java-0203', category: 'algorithms', judgeKind: 'java-junit', tags: ['modern:privacy-engineering'] }),
+      // 没有裸形同伴的那一种：折了就是白改用户看得见的名字
+      makeQuestion({ id: 'alg-java-0204', category: 'algorithms', judgeKind: 'java-junit', tags: ['modern:iceberg-v3'] }),
+      makeQuestion({ id: 'alg-java-0205', category: 'algorithms', judgeKind: 'java-junit', tags: ['modern:iceberg-v3'] }),
+      makeQuestion({ id: 'alg-java-0206', category: 'algorithms', judgeKind: 'java-junit', tags: ['modern:iceberg-v3'] }),
+    ]);
+
+  const get = async (app: Awaited<ReturnType<typeof buildApp>>) =>
+    ok<BankResponse>(await app.inject({ method: 'GET', url: '/api/bank' }));
+
+  it('有裸形同伴的：三种写法合起来才够门槛，下拉里只剩裸形那一个名字', async () => {
+    const app = await buildApp({ judge, grade, bank: eraBank(), store, clock, tagAliases: [] });
+    try {
+      const body = await get(app);
+      const pe = body.tags.find((t) => t.name === 'privacy-engineering');
+      expect(pe, `modern: 与裸形合起来到门槛就该进下拉，实际：${JSON.stringify(body.tags.map((t) => t.name))}`).toBeTruthy();
+      expect(pe!.count, '1 道裸形 + 2 道带前缀 = 3').toBe(3);
+      expect(body.tags.map((t) => t.name), 'alias 那一侧不再自己占位').not.toContain('modern:privacy-engineering');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('没有裸形同伴的：facet 名字保持 `modern:iceberg-v3` 原样（规则不是一律剥前缀）', async () => {
+    const app = await buildApp({ judge, grade, bank: eraBank(), store, clock, tagAliases: [] });
+    try {
+      const body = await get(app);
+      const ice = body.tags.find((t) => t.name === 'modern:iceberg-v3');
+      expect(ice, '3 道只写 modern: 形的题，筛选项必须还叫这个名字').toBeTruthy();
+      expect(body.tags.map((t) => t.name)).not.toContain('iceberg-v3');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('筛 `privacy-engineering` 与筛 `modern:privacy-engineering` 命中同一批题，且响应里带出的词表包含这一对', async () => {
+    const app = await buildApp({ judge, grade, bank: eraBank(), store, clock, tagAliases: [] });
+    try {
+      const byBare = await ok<BankResponse>(await app.inject({ method: 'GET', url: '/api/bank?tag=privacy-engineering' }));
+      const byEra = await ok<BankResponse>(await app.inject({ method: 'GET', url: '/api/bank?tag=modern%3Aprivacy-engineering' }));
+      const ids = (r: BankResponse) => r.rows.map((q) => q.id).sort().join(',');
+      expect(ids(byBare), '两种入口筛到的该是同一批').toBe(ids(byEra));
+      expect(byBare.rows.map((q) => q.id).sort(), '三道题都要在里面').toEqual(['alg-java-0201', 'alg-java-0202', 'alg-java-0203']);
+      const grp = byBare.tagGroups.find((g) => g.canonical === 'privacy-engineering');
+      expect(grp, '客户端要用同一份判据 ⇒ 折出来的组必须随响应出去').toBeTruthy();
+      expect(grp!.aliases).toContain('modern:privacy-engineering');
+      // 题目里的原词没被改：rows[].tags 还是各自存的那个写法
+      expect(byBare.rows.find((q) => q.id === 'alg-java-0202')!.tags, '徽章显示原词，数据没被改过').toContain('modern:privacy-engineering');
+    } finally {
+      await app.close();
+    }
+  });
+});
