@@ -16,6 +16,8 @@
  *
  * 只读的缝（不写文件；未知参数一律拒绝，绝不允许退化成"整份生成 + 写盘"）：
  *   node scripts/kb/compile-knowledge.mjs --orphan-audit-json     # 分口径的审计 JSON（闸门判它）
+ *   node scripts/kb/compile-knowledge.mjs --print-markdown [--timestamp <ISO>]   # 把"今天会写成什么"打到 stdout
+ *       （新鲜度闸门用它按提交里那个时间戳重算一遍，再与 `content/knowledge/INDEX.md` 逐字节比）
  *
  * 为什么不把这些规则写在脚本里而要从 @arena/shared 拿：`modern:` 曾经在这里被硬写成
  * `raw.replace(/^modern:/, '')`，于是"什么算时代标记"在仓库里有两份（第二份是 N-17 立的 `TAG_ERA_PREFIXES`）。
@@ -193,17 +195,27 @@ async function findJdGaps(knowledge, shared) {
   return { generatedAt: payload?.generatedAt, gaps };
 }
 
-/** 生成 = 算 + 渲染 + 写盘（写盘只有这一处；只读的缝走 computeKnowledgeReport / buildOrphanAudit）。 */
-export async function compileKnowledgeIndex() {
+/**
+ * 生成 = 算 + 渲染 + 写盘。**写盘只有这一处**，且只有"没有参数"这一条路会走到它。
+ * 渲染是纯函数（`renderKnowledgeIndex`），所以 `--print-markdown` 能在不碰文件的前提下
+ * 把"今天重新生成会写成什么样"整份打出来 —— 新鲜度闸门（`knowledge-index.test.ts`）判的就是这个。
+ * ⚠ 为什么需要那条缝：`npm run kb:index` 不在任何 `verify.sh` 阶段里，`INDEX.md` 是人手提交的，
+ * 于是"改了矩阵 README 忘了重跑"与"有人手改了报表"都不会红（历史上进过一次 `d01bdfc`）。
+ */
+export async function compileKnowledgeIndex({ now = new Date().toISOString() } = {}) {
   const report = await computeKnowledgeReport();
-  const markdown = renderMarkdown(report);
+  const markdown = renderKnowledgeIndex(report, { now });
   const out = join(KNOWLEDGE_DIR, 'INDEX.md');
   await writeTextAtomic(out, markdown);
   return { out, markdown, rows: report.rows, detail: report.detail, jdGaps: report.jdGaps, parseErrors: report.parseErrors };
 }
 
-function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total, categories }) {
-  const now = new Date().toISOString();
+/**
+ * 纯渲染：数据 + 一个时间戳 → 那份 markdown。**没有任何 I/O、没有 `new Date()`**。
+ * 时间戳做成参数而不是当场取，才有"按提交里那个时间重算一遍再逐字节比"这种判法；
+ * 留在函数里取的话，每一次重算都必然与文件不同，闸门只能要么放宽（=废掉）要么常红。
+ */
+export function renderKnowledgeIndex({ rows, detail, jdGaps, parseErrors, hiddenCount, total, categories }, { now }) {
   const lines = [
     '# 知识库索引（自动生成，请勿手改）',
     '',
@@ -327,8 +339,10 @@ function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total,
   return `${lines.join('\n')}\n`;
 }
 
-/** 脚本认识的全部参数；不在这里的就是打错了的。 */
-const KNOWN_FLAGS = ['orphan-audit-json'];
+/** 脚本认识的参数；不在这里的就是打错了的。`--timestamp` 是带值的（其余都是开关）。 */
+const BOOLEAN_FLAGS = ['orphan-audit-json', 'print-markdown'];
+const VALUE_FLAGS = ['timestamp'];
+const KNOWN_FLAGS = [...BOOLEAN_FLAGS, ...VALUE_FLAGS];
 
 /**
  * 参数解析单独一条判据：**未知参数一律拒绝**。
@@ -345,10 +359,21 @@ export function parseCliArgs(argv) {
     const name = token.slice(2).split('=')[0];
     if (!KNOWN_FLAGS.includes(name)) throw new UsageError(`未知参数：--${name}｜这条脚本只认 ${KNOWN_FLAGS.map((f) => `--${f}`).join(' / ')}（不忽略多余参数：忽略 = 打错的只读缝退化成"生成并写文件"）`);
   }
-  const args = parseArgs(argv, { booleans: KNOWN_FLAGS });
+  const args = parseArgs(argv, { booleans: BOOLEAN_FLAGS });
   const extra = args._ ?? [];
   if (extra.length > 0) throw new UsageError(`未知参数：${extra.map((u) => `"${u}"`).join(' ')}（这条脚本不收位置参数）`);
   return args;
+}
+
+/**
+ * `--timestamp` 校形状：必须是能被 `Date.parse` 认下来的 ISO 串。
+ * 判据方向：坏时间**报错退出**，不许"退回当场取一个" —— 闸门要的正是"按文件里那个时间重算"，
+ * 悄悄换一次时间会让比对永远对不上，而红话说的是"报表过期"（那是假指控）。
+ */
+function validTimestamp(raw) {
+  const t = Date.parse(String(raw));
+  if (!Number.isFinite(t)) throw new UsageError(`--timestamp 需要 ISO 时间，收到 "${raw}"`);
+  return new Date(t).toISOString();
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -358,6 +383,17 @@ export async function main(argv = process.argv.slice(2)) {
   if (args['orphan-audit-json']) {
     const report = await computeKnowledgeReport();
     process.stdout.write(`${JSON.stringify(buildOrphanAudit(report))}\n`);
+    return;
+  }
+
+  // 新鲜度闸门用的第二条只读缝：把"今天会写成什么样"打到 stdout，**不碰文件**。
+  // `--timestamp` 让调用方能拿提交那份里写着的生成时间重算一遍，从而做**逐字节**比对；
+  // 不给它一个可注入的时间，"重新生成"永远与文件差一行时间戳，比对就只能放宽成"忽略那一行" ——
+  // 而放宽之后，"有人手改了报表里另一个数"也跟着被忽略了。
+  if (args['print-markdown']) {
+    const now = args.timestamp ? validTimestamp(args.timestamp) : new Date().toISOString();
+    const report = await computeKnowledgeReport();
+    process.stdout.write(renderKnowledgeIndex(report, { now }));
     return;
   }
 

@@ -240,6 +240,67 @@ function readAuditAt(kbDir: string): AuditCategory {
 }
 
 /**
+ * **门禁自己也要被门禁**（`.qoder/rules/dev_verify_workflow.md` 第 3 条）。
+ * `npm run kb:index` 不在任何 `verify.sh` 阶段里 ⇒ `content/knowledge/INDEX.md` 是人手提交的，
+ * 于是"改了矩阵 README 忘了重跑"与"有人手改了报表里的某个数"都不会红
+ * （历史上真漏过一次：`d01bdfc`）。这条判据把"报表过期"从"没人看得见"变成"当天红"。
+ *
+ * ⚠ 不用 `git`：`.dockerignore` 排掉 `.git` ⇒ 任何 shelling out 到 git 的判据在容器档里必然空转。
+ * 这里比的两侧（重新渲染的结果 与 工作树里那份文件）在两档都存在，`content/` 是 bind mount。
+ */
+describe('INDEX.md 的新鲜度（重新生成必须逐字节等于提交的那份）', () => {
+  const FILE = join(config.repoRoot, 'content', 'knowledge', 'INDEX.md');
+  const committed = readFileSync(FILE, 'utf8');
+  const stamp = /^> 生成时间：(\S+)$/m.exec(committed)?.[1];
+
+  it('提交的那份里有一行可解析的「生成时间」（它是这条比对能成立的前提）', () => {
+    expect(stamp, '报表开头那句 `> 生成时间：…` 没了或改写了 ⇒ 比对没有基准，去改 renderKnowledgeIndex 的头部').toBeDefined();
+    expect(Number.isNaN(Date.parse(stamp!)), `生成时间 "${stamp}" 不是可解析的时间，重算时拿不到同一个字符串`).toBe(false);
+  });
+
+  it('按提交里那个时间重算 ⇒ 与文件逐字节相等（红话会指出差在哪一行）', () => {
+    const before = readFileSync(FILE, 'utf8');
+    const r = runAudit(['--print-markdown', '--timestamp', stamp!]);
+    expect(r.status, `--print-markdown 退出 ${r.status}：\n${r.stderr.slice(0, 600)}`).toBe(0);
+    expect(readFileSync(FILE, 'utf8'), '--print-markdown 写了文件 ⇒ 它会把自己判的这条闸门喂绿').toBe(before);
+    if (r.stdout === committed) return;
+    const a = r.stdout.split('\n');
+    const b = committed.split('\n');
+    const diff: string[] = [];
+    for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+      if (a[i] !== b[i]) diff.push(`第 ${i + 1} 行｜重新生成：${(a[i] ?? '(无)').slice(0, 120)}｜文件里：${(b[i] ?? '(无)').slice(0, 120)}`);
+    }
+    throw new Error(
+      `INDEX.md 与"按同一时间重新生成的那份"不一致（改了矩阵没重跑 kb:index，或有人手改了报表）：\n` +
+        `${diff.slice(0, 10).join('\n')}${diff.length > 10 ? `\n…另有 ${diff.length - 10} 行` : ''}`,
+    );
+  });
+
+  it('反面（对照，防"恒等"）：换一个时间重算 ⇒ 必然与文件不同，而且只差那一行', () => {
+    const r = runAudit(['--print-markdown', '--timestamp', '2000-01-01T00:00:00.000Z']);
+    expect(r.status, `退出 ${r.status}：\n${r.stderr.slice(0, 400)}`).toBe(0);
+    expect(r.stdout).not.toBe(committed);
+    const a = r.stdout.split('\n');
+    const b = committed.split('\n');
+    const diffIdx = a.map((line, i) => (line !== b[i] ? i : -1)).filter((i) => i >= 0);
+    expect(diffIdx, `换时间戳只该改动「生成时间」那一行，实际差了 ${diffIdx.length} 行 ⇒ 判据里"逐字节相等"的另一半没了保障`).toEqual([3]);
+    expect(a[3], '改动的那行必须是时间戳').toContain('生成时间：2000-01-01T00:00:00.000Z');
+  });
+
+  it('--timestamp 打非 ISO 要拒绝，不许悄悄退回 now()（那样比对永远"差一行时间戳"）', () => {
+    const r = runAudit(['--print-markdown', '--timestamp', '昨天下午']);
+    expect(r.status, '非法时间被吞掉并退 0 ⇒ 闸门拿到的其实是"此刻"的那份，比对会假红/假绿说不清').not.toBe(0);
+    expect(`${r.stdout}${r.stderr}`, '报错要点名是 timestamp 的问题').toMatch(/timestamp/);
+  });
+
+  it('这条缝也不许改动 INDEX.md（与 --orphan-audit-json 同一条纪律）', () => {
+    const before = readFileSync(FILE, 'utf8');
+    runAudit(['--print-markdown', '--timestamp', '2000-01-01T00:00:00.000Z']);
+    expect(readFileSync(FILE, 'utf8'), '--print-markdown 落盘了 ⇒ 它把"报表过期"这个自己该判的故障顺手修掉').toBe(before);
+  });
+});
+
+/**
  * 脚本源码，**去掉注释行**（判的是代码里那份抄本，不是注释里那段"以前抄过"的历史 ——
  * 后者会被保留下来正是本仓库的写法：教训要写在文件里，但不许因此被当成还在犯的错）。
  */
