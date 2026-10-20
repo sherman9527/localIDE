@@ -164,6 +164,12 @@ expect(readExecutedNotebook(polluted).cells).toEqual([]);
   ② 编译错误在界面上 `ename` 恒为 `Unknown Error`、**没有 traceback 帧**，有用的文本在 `evalue` 里；
   ③ `language_info.version` 报 2.12.15 而实载 2.12.18 ⇒ **页面上不许显示这个 version**；
   ④ 补全 / 悬浮文档 / 中断（`sigint`）在 Scala 侧**不支持**，不许被界面说成有。
+  **↑ 2026-10-20 修复轮订正（这一条是计划里唯一被实测推翻的要求）**：同一轮第二次真浏览器量到 ——
+  **补全会**（`val abcd = 123` 求值后新格敲 `abc` 按 Tab 出 `jp-Completer` 面板）、**悬浮文档不会**（两次 hover 无面板）、
+  界面那颗**中断可以按但没有可观察效果**（`Thread.sleep(60000)` 起跑 2 秒后按它，60 秒后照样出结果、`pgrep -fc '[o]rg\.apache\.toree\.Main'` 全程 1）
+  ⇒ "SIGINT 会把整个 JVM 带走"在界面这条路**不成立**，不许再写成"不是可靠的刹车"那种推断。
+  页面/文档/工件现在按**三条各自的真相**写，来源（"2026-10-20 真浏览器实测"）写在句子里；
+  读数与判据见 `.superpowers/sdd/2026-10-10-scala-kernel-integration-wi91b/task-5-report.md` §10。
 - [ ] **Step 2: 三档验证**：`npm run verify:fast` → 0；`./start.sh --verify` → `CV_EXIT=0` + 矩阵 `跳过 0` +
   notebook 那几条阶段各出现恰好 1 次且区间内 `skip` 为 0；宿主 `npm run e2e` → 0。
 - [ ] **Step 3: 真浏览器**：`#/notebook` 里 kernel 徽标两条、iframe 里能选到 Scala kernel、

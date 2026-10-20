@@ -138,7 +138,8 @@ const repoFile = (rel: string): string => {
  * 'Scala (Toree, WI-91 探索)'）。夹具抄错不会让任何断言红，它只会让判据去判一个镜像里根本不存在的
  * 字符串 —— 而 `display_name` 本体的改名归 Task 5（它在镜像构建上下文里），本档不碰。
  */
-const kernelLabel = (id: string): string => {
+type KernelSpecArtifact = { argv?: string[]; display_name?: string; env?: Record<string, string> };
+const readKernelSpec = (id: string): KernelSpecArtifact => {
   const rel = join('docker', 'jupyter', 'kernels', id, 'kernel.json');
   let file: string;
   try {
@@ -151,8 +152,70 @@ const kernelLabel = (id: string): string => {
         '改常量要同时改目录（和 Dockerfile 的 COPY 目标）。',
     );
   }
-  return (JSON.parse(readFileSync(file, 'utf8')) as { display_name?: string }).display_name ?? id;
+  return JSON.parse(readFileSync(file, 'utf8')) as KernelSpecArtifact;
 };
+
+const kernelLabel = (id: string): string => readKernelSpec(id).display_name ?? id;
+
+/**
+ * 两条 kernel 的 **JVM 量级同样只许来自工件**（评审 Important：Task 5 把 `-Xmx2g -Dspark.master=local[2]`
+ * 与 `--master local[2] --driver-memory 512m` 抄进了页面、单元契约、README、ARCHITECTURE、JUDGING 五处，
+ * 而**没有任何一处和 kernel.json 比过** —— 有人把 Scala 的堆调到 4g（WI-95 的邻居），三档验证全绿，
+ * 页面与三份文档一起携带一个旧数。那是本任务自己留下的"第四处字面量"，现在它派生化：
+ * 页面钉的、文档抄的都必须是这个函数吐出来的串。
+ * 形状各按各的 kernel：
+ * - Scala 的 `-Xmx…` / `-Dspark.master=…` 是 argv 里**自带值**的两项，按 argv 原序拼；
+ * - Python 的 `--master …` / `--driver-memory …` 是"下一项是值"的两项，按 `PYSPARK_SUBMIT_ARGS` 原序拼。
+ * 取不到就**抛**，不许回退成空串 —— `toContain('')` 恒真，闸门立刻变成装饰。
+ */
+const kernelJvmFlags = (id: string): string => {
+  const spec = readKernelSpec(id);
+  const tokens =
+    id === NOTEBOOK_KERNELS.scala.id ? (spec.argv ?? []) : (spec.env?.PYSPARK_SUBMIT_ARGS ?? '').trim().split(/\s+/);
+  const found: string[] = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const t = tokens[i] ?? '';
+    if (/^-Xmx\S+$/.test(t) || /^-Dspark\.master=\S+$/.test(t)) found.push(t);
+    else if ((t === '--master' || t === '--driver-memory') && /^\S+$/.test(tokens[i + 1] ?? '')) {
+      found.push(`${t} ${tokens[i + 1]}`);
+    }
+  }
+  if (found.length < 2) {
+    throw new Error(
+      `kernel.json（${id}）里派生不到两条 JVM 量级（只读到 ${JSON.stringify(found)}）⇒ 页面与文档钉的那两组数失去了真相来源：` +
+        '要么工件改了旗标形状（这个派生函数要跟着改），要么这条 kernel 不再限内存/MASTER —— 两种都不许静默放过',
+    );
+  }
+  return found.join(' ');
+};
+
+/**
+ * 工件里出现过的**每一个** `旗标=值` 对（`jvmFlagPairs` 抠出来的形状）。
+ * 下面那条"活文档里的数必须与工件同源"的负判据拿它当白名单：抄旧、抄错、自己发明一个，三种坏法都红。
+ */
+const kernelJvmFlagPairs = (id: string): string[] => {
+  const spec = readKernelSpec(id);
+  return jvmFlagPairs([...(spec.argv ?? []), ...Object.values(spec.env ?? {})].join(' '));
+};
+
+/** 页面/文档里会被认作"JVM 量级"的四个旗标名（Python 那条用后两个，Scala 那条用前两个）。 */
+const JVM_FLAG_NAMES = ['-Xmx', '-Dspark.master', '--master', '--driver-memory'] as const;
+
+/**
+ * 从**任意**文本里抠出 `旗标 值` 对并归一成 `旗标=值`。
+ * 值用严格字符集 `[0-9A-Za-z_.[]*:/-]`：markdown 的反引号与中文标点因此天然断开，
+ * "`-Xmx2g`" 与 "-Xmx2g " 抠出来都是 `-Xmx=2g` —— 同一个函数既读工件也读文档，**没有第二套规则**。
+ */
+function jvmFlagPairs(text: string): string[] {
+  const out: string[] = [];
+  for (const name of JVM_FLAG_NAMES) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const m of text.matchAll(new RegExp(`${esc}=?\\s*([0-9A-Za-z_.\\[\\]*:/-]+)`, 'g'))) {
+      out.push(`${name}=${m[1]}`);
+    }
+  }
+  return out;
+}
 
 /**
  * 注册表里"解释器住在那份**懒创建** venv 里"的那几条（`needsVenv` 是条目数据，WI-96 的账）。
@@ -165,6 +228,20 @@ const VENV_BAKED_IDS: readonly string[] = Object.values(NOTEBOOK_KERNELS).filter
 const MISSING_VENV_REASON = '解释器不存在：/opt/arena-ide-env/python/bin/python';
 
 /**
+ * 夹具里的 kernel 表**故意带着 version**（评审 Minor：旧夹具只有 `{id,label,ready}`，于是
+ * "页面上不许出现 Scala 的 version"那条判据在**最现实的泄漏路径**上是空判 —— 将来谁去渲染
+ * `language_info.version`，这一态根本没有东西可渲染，它必然绿）。
+ * 今天后端**不发**这个字段（`server/src/notebooks/status.ts` 只映射 id/label/ready），所以这两份值是
+ * **排练用的**：Scala 那条填 kernel 亲口说的谎（自报 2.12.15、实载 2.12.18），Python 那条填一个同形的真值。
+ * 判据只看一件事：**夹具里躺着的这些值，一个都不许上屏**（下面 version 那条用例按值逐条判，
+ * 并额外钉 `/2\.12\.\d+/`，所以"页面自己写死一个版本号"也红）。
+ */
+const KERNEL_FIXTURE_VERSIONS: Record<string, string> = {
+  [NOTEBOOK_KERNELS.scala.id]: '2.12.15',
+  [NOTEBOOK_KERNELS.pyspark.id]: '3.11.9',
+};
+
+/**
  * 后端列出的那张 kernel 表（夹具=**输入**，允许出现镜像里的目录名；**期望值**一律另派生）。
  * `venvMissing` 的两个语义各自独立于注册表有几条：**整张注册表都在场**是这一族的默认，
  * 因为评审 Important-2 抓到的正是"只列 pyspark 一条"的旧夹具在新注册表形状下会
@@ -172,12 +249,16 @@ const MISSING_VENV_REASON = '解释器不存在：/opt/arena-ide-env/python/bin/
  * 那与那些用例判的事（按钮、seedError、iframe src、点一次重读一遍…）毫无关系，
  * 却把"没有失败却不点名才是假警报"这类用例的前提自己涂掉了。
  * 派生自注册表 ⇒ 以后多一条 kernel，这里不必改一个字也仍然代表"全都注册了"。
+ * ⚠ 修复轮（评审 Minor）：每条都带上 `version`（值见 `KERNEL_FIXTURE_VERSIONS`）——
+ *   那不是"今天后端的形状"，那是**泄漏排练**：version 不许上屏这条判据要有可渲染的东西才判得动。
  */
-const arenaKernels = (venvMissing = false): Array<{ id: string; label: string; ready: boolean; reason?: string }> =>
+const arenaKernels = (
+  venvMissing = false,
+): Array<{ id: string; label: string; ready: boolean; reason?: string; version?: string }> =>
   Object.values(NOTEBOOK_KERNELS).map((k) =>
     venvMissing && VENV_BAKED_IDS.includes(k.id)
-      ? { id: k.id, label: kernelLabel(k.id), ready: false, reason: MISSING_VENV_REASON }
-      : { id: k.id, label: kernelLabel(k.id), ready: true },
+      ? { id: k.id, label: kernelLabel(k.id), ready: false, reason: MISSING_VENV_REASON, version: KERNEL_FIXTURE_VERSIONS[k.id] }
+      : { id: k.id, label: kernelLabel(k.id), ready: true, version: KERNEL_FIXTURE_VERSIONS[k.id] },
   );
 
 const up = {
@@ -194,6 +275,19 @@ const up = {
   kernels: arenaKernels(),
   notebooks: [{ file: '00-smoke-pyspark.ipynb', seeded: true }],
 };
+
+/**
+ * 后端能给的三种真实形状（在跑 / 没在跑 / 在跑但这条连接过不了守卫），**一份清单两处共用**
+ *（评审 Minor：它原先在 version 那条与"边界话三态常驻"那三条里各抄了一遍 —— 抄的那份会漂）。
+ * 每一态按**后端在这一态真会给的形状**写：只有 `running:false` 那一支回 `kernels: []`
+ *（`server/src/notebooks/status.ts` 的 `empty`），另两支都列得出整张注册表 ——
+ * 旧夹具把"非本机连接"那态也写成空表，等于亲手把 version 的泄漏面涂掉（见 `KERNEL_FIXTURE_VERSIONS`）。
+ */
+const backendStates: Array<[string, unknown]> = [
+  ['在跑', up],
+  ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
+  ['非本机连接', { ...up, localPeer: false }],
+];
 
 describe('Notebook 第五页', () => {
   it('服务在跑：给可点开的地址（同源），且内核徽章那一排已经没了（WI-94 Task 6）', async () => {
@@ -638,7 +732,7 @@ describe('Notebook 第五页', () => {
    * 而**默认是折着的**（默认展开就等于没折叠）。DOM 上边界话还在 —— jsdom 里折叠不影响
    * `textContent`，所以上面那组 `boundarySentences` 用例照旧全过；"看不见"那一半归 e2e，
    * 由 `tests/e2e/notebook-page.spec.ts` 里"先展开再断可见"那条钉。
-   * ⚠ 段落数 5 → 7 是 WI-91b Task 5：接入 Scala kernel 后新增两段（报错形状、补全/悬浮/中断不支持），
+   * ⚠ 段落数 5 → 7 是 WI-91b Task 5：接入 Scala kernel 后新增两段（报错形状、补全/悬浮文档/中断三样），
    * 且"共用环境 / pip / CPU"三段改成按-kernel 点名。计数判据**两头都咬**：少一段红（删话），
    * 多一段也红（话与契约分家）—— 它必须跟着 boundarySentences 同批改，改一边这条就红。
    */
@@ -661,23 +755,36 @@ describe('Notebook 第五页', () => {
    * "对不上任何协议读数"的版本号供成界面事实。今天页面上没有任何组件渲染 language_info，
    * 所以这条判据钉的是"保持这样"：它是"不显示"这句话唯一能长牙的形式
    *（破坏性验证：往 page-head 那句里塞一个 `2.12.15`，本条必须红 —— 读数在 task-5-report.md）。
+   * ⚠ 修复轮（评审 Minor）：旧版这里判的是"页面上没有 2.12.x"，而**夹具里没有 version 可渲染**
+   *（kernel 条目只有 `{id,label,ready}`）⇒ 将来谁加一行 `{kernel.version}`，这条判据照样绿，
+   * 因为它判的那个东西不存在。现在夹具按 `KERNEL_FIXTURE_VERSIONS` 带着那个谎值进来，
+   * 并额外钉一句**前提**：凡是后端列得出 kernel 的态，清单里每条都必须真的带 version ——
+   * 前提塌了（有人把排练用的字段删掉）这条当场红，而不是悄悄变回空判。
    */
   it('页面上任何一态都不许出现 Scala 的 language_info.version（2.12.15 与 2.12.18 都不行）', async () => {
-    const versionStates: Array<[string, unknown]> = [
-      ['在跑', up],
-      ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
-      ['非本机连接', { running: true, url: TREE, localPeer: false, kernels: [], notebooks: [] }],
-    ];
-    for (const [label, value] of versionStates) {
+    for (const [label, value] of backendStates) {
+      const listed = (value as { kernels?: Array<{ version?: string }> }).kernels ?? [];
+      // 前提判据：泄漏面必须真实存在（列得出 kernel 的态里每一条都带着排练用的 version）
+      expect(
+        listed.filter((k) => typeof k.version === 'string').length,
+        `${label} 态列出了 ${listed.length} 条 kernel 却有没带 version 的 ⇒ 这条判据在这一态没有可渲染的对象，"页面上没有它"就成了空判（评审 Minor）`,
+      ).toBe(listed.length);
       status.mockResolvedValue(value);
       const { container, unmount } = render(<Notebook />);
       await waitFor(() => expect(screen.getByTestId('notebook-boundary')).toBeTruthy());
+      const pageText = screen.getByTestId('notebook-page').textContent ?? '';
       expect(
-        screen.getByTestId('notebook-page').textContent ?? '',
+        pageText,
         `${label} 态把 2.12.x 印给了用户 ⇒ language_info.version（谎报 2.12.15 / 实载 2.12.18）上了页面（Task 5 ③）`,
       ).not.toMatch(/2\.12\.\d+/);
       // 判 innerHTML 而不是只判文本：版本塞进 title/aria-label 这类 attribute 时 textContent 是瞎的
       expect(container.innerHTML, `${label} 态的 DOM（含 attribute）里出现 2.12.x`).not.toMatch(/2\.12\.\d+/);
+      // 按**夹具里的值**逐条判（不是只判 2.12.x 那一个模式）：将来后端真的送出 version 字段时，
+      // 任何一条被渲染上屏都会红，包括 Python 那条那个"真值"——界面事实只能来自被钉住的那几项。
+      for (const version of listed.map((k) => k.version).filter((v): v is string => typeof v === 'string')) {
+        expect(pageText, `${label} 态把夹具里的 kernel version「${version}」印上了页面（Task 5 ③）`).not.toContain(version);
+        expect(container.innerHTML, `${label} 态的 DOM（含 attribute）里出现夹具送出的 version「${version}」`).not.toContain(version);
+      }
       unmount();
     }
   });
@@ -830,7 +937,8 @@ describe('Notebook 第五页', () => {
 
   /**
    * 每一句一条都不能省（Step 4；`db08cf8` 之后清单从 3 句长到 7 句，WI-91b Task 5 接入第二条 kernel
-   * 后长到 13 句，用例名里的"三句"就是这么一路留下的假话 —— 名字不改是历史，清单与逐字判据必须跟上），
+   * 后长到 13 句，评审修复轮把它长到 18 句，用例名里的"三句"就是这么一路留下的假话 ——
+   * 名字不改是历史，清单与逐字判据必须跟上），
    * 而且**换一态再看**：
    * 只在"在跑"那态显示，等于在用户最该看见的时候（他要开始装包 / 开 notebook 了）把它收走。
    * 评审 Fix-1 的 Minor：一态一个 `it` —— 一个循环里三态共用一条用例名，红的时候只知道
@@ -845,32 +953,35 @@ describe('Notebook 第五页', () => {
     // 所以这里换成"说是默认 + 说破拦不住 + 说破 CPU 不在这道页管辖内"的四句，一句都不许省。
     // ⚠ WI-91b Task 5：接入第二条 kernel 之后，"共用环境"与"pip 装进哪套"两句**必须点名到 kernel**
     //（arena-pyspark 与 IDE 共用 venv，arena-scala-toree 是镜像里的独立 Java 进程、压根不碰它），
-    // CPU 那句要带 Scala 侧**真实的 JVM 量级**（`-Xmx2g -Dspark.master=local[2]`，读自
-    // `docker/jupyter/kernels/arena-scala-toree/kernel.json`，不是把 Python 那两个数抄第二遍）；
-    // 再加 Scala 侧两件（报错形状 `Unknown Error`/空堆栈帧、补全·悬浮·中断三样不支持）。清单只增。
+    // CPU 那句要带**两条 kernel 各自**的 JVM 量级；再加 Scala 侧两件（报错形状 `Unknown Error`/空堆栈帧、
+    // 补全·悬浮文档·中断三样各自的真相）。清单只增。
+    // ⚠ 评审 Important（修复轮）：那两组数**不再手抄**。Task 5 把它们抄成五处字面量（页面、这份清单、
+    // README、ARCHITECTURE、JUDGING）却没有一处与 kernel.json 比过 ⇒ 有人调堆，三档全绿而界面带着旧数。
+    // 现在它们由 `kernelJvmFlags()` 从镜像工件派生，下面那条"活文档同源"的闸门用**同一个函数**判文档。
+    // ⚠ 评审 Minor（修复轮）：报错形状那句**不再带数字快照**（旧页面上写"106 个字符、堆栈帧 0 条"），
+    // 那是一次性读数、没有闸门守着，而 Task 4 明确拒绝把 `traceback === []` 冻成不变量。
+    // 数字住在报告与板上（带日期才是诚实的），页面只说**定性**的那件事。
     '判题用的是另一套解释器',
     '这是默认，不是这道页面上的强制',
     '完全不碰 IDE 那份 venv',
     '装进的就是判题那套解释器',
     '那是判题池之外的第二个 Spark JVM',
-    '-Xmx2g -Dspark.master=local[2]',
+    kernelJvmFlags(NOTEBOOK_KERNELS.pyspark.id),
+    kernelJvmFlags(NOTEBOOK_KERNELS.scala.id),
     'Unknown Error',
     '报错有，但堆栈帧没有，能看的那句话在错误消息里',
-    '这三样不支持',
-    '悬浮文档',
+    // 第七段（评审推翻了 Task 5 初稿的"三样都不支持"）：三条**各自**的真相 + 来源要在句子里。
+    '这三样各有各的真相',
+    '2026-10-20 真浏览器实测',
+    '补全有',
+    '悬浮文档没有',
+    '中断可以按，但没有可观察效果',
+    '既不掐停正在跑的 cell，也不会把 kernel 弄死',
     'notebook 里能读到题库的参考答案',
     '这不是安全边界',
     '只在浏览器本机打开：地址是 127.0.0.1，手机 / iPad 访问不了',
   ];
-  const boundaryCases: Array<[string, unknown]> = [
-    ['在跑', up],
-    ['没在跑', { running: false, reason: 'Jupyter 未在监听：ECONNREFUSED', kernels: [], notebooks: [] }],
-    // 第三态原来是「在跑但没链接」（nolink，env 配坏）—— WI-98 删掉了那一态（见上面那段说明）；
-    // 换成本档今天真实存在的第三形状：**在跑但这条连接过不了守卫**。边界话在它上面同样必须常驻
-    // （"只在浏览器本机打开"那一句与 localPeer 说的正是同一件事，缺席就是最响的谎）。
-    ['非本机连接', { running: true, url: TREE, localPeer: false, kernels: [], notebooks: [] }],
-  ];
-  for (const [label, value] of boundaryCases) {
+  for (const [label, value] of backendStates) {
     it(`三句边界话在「${label}」这一态都常驻`, async () => {
       status.mockResolvedValue(value);
       render(<Notebook />);
@@ -998,4 +1109,95 @@ describe('Notebook 的打包与路由形状', () => {
     // 导航第 5 项：写在 App.tsx 的 NAV 里，链接与页面名同源
     expect(app).toContain("{ href: '/notebook', label: 'Notebook', name: 'notebook' }");
   });
+});
+
+/**
+ * 活文档里的 JVM 量级与镜像工件同源（评审 Important：Task 5 把两组数抄进了页面、单元契约、
+ * `README.md`、`docs/ARCHITECTURE.md`、`docs/JUDGING.md` 五处，**五处互相之间没有比过，也没有和
+ * `docker/jupyter/kernels/<id>/kernel.json` 比过** —— 有人把 Scala 的堆调到 4g，三档验证全绿，
+ * 界面与三份文档一起带着旧数说假话）。
+ *
+ * 这一条把五处收成**一份真相、一个闸门**：期望值一律由模块顶层那对 `kernelJvmFlags()` /
+ * `kernelJvmFlagPairs()` 从工件派生（与上面 `boundarySentences` 用的是**同一个函数**，
+ * 所以这里不再另写一遍派生 —— 派生规则写两遍就是第三处真相）。判两件事：
+ * ① 每份文档都必须**同时**带着两组派生串（少一组 = 那条 kernel 的量级没了着落）；
+ * ② 文档里出现的**每一个** `-Xmx…` / `-Dspark.master=…` / `--master…` / `--driver-memory…`
+ *    的值都必须在工件给的值里 —— 抄旧、抄错、自己发明一个，三种坏法都红。
+ *
+ * ⚠ 为什么住在 web 这一侧而不进 `server/test/regression/notebook-image.test.ts`：派生函数与页面契约
+ * 在这里，把同一个派生抄进第二个文件正是本条要消灭的东西。`notebook-image.test.ts` 判的是
+ * "工件 ↔ Dockerfile/compose"，这里判的是"工件 ↔ 界面与文档"，两把尺子不重叠。
+ *
+ * ⚠ 镜像里 `docs/` 被 `.dockerignore` 排掉（与 memo/HANDOVER 同族）⇒ ②③那两条在容器里读不到文件。
+ * 跳过一律用 `it.skipIf`（报告会写 "1 skipped"），**并且**下面那条永远跑的判据负责解释"为什么会是空"：
+ * 缺席必须是 .dockerignore 声明过的排掉，不许是"宿主仓库少了两份文档"。
+ */
+const LIVE_DOCS_WITH_JVM_NUMBERS = ['README.md', 'docs/ARCHITECTURE.md', 'docs/JUDGING.md'];
+
+const docTextOrNull = (rel: string): string | null => {
+  for (const base of [process.cwd(), join(process.cwd(), '..')]) {
+    const candidate = join(base, rel);
+    if (existsSync(candidate)) return readFileSync(candidate, 'utf8');
+  }
+  return null;
+};
+
+describe('活文档里的 JVM 量级 = 镜像工件派生的那一组（一份真相，页面/文档同闸）', () => {
+  const scalaFlags = kernelJvmFlags(NOTEBOOK_KERNELS.scala.id);
+  const pythonFlags = kernelJvmFlags(NOTEBOOK_KERNELS.pyspark.id);
+  const artifactPairs = [
+    ...kernelJvmFlagPairs(NOTEBOOK_KERNELS.scala.id),
+    ...kernelJvmFlagPairs(NOTEBOOK_KERNELS.pyspark.id),
+  ];
+  const missingDocs = LIVE_DOCS_WITH_JVM_NUMBERS.filter((rel) => docTextOrNull(rel) === null);
+
+  it('"某份活文档读不到"必须是被 .dockerignore 声明过的排掉（闸门不许静默空转）', () => {
+    if (missingDocs.length === 0) {
+      expect(missingDocs, '宿主上这三份文档都该在场').toEqual([]);
+      return;
+    }
+    expect(process.env.ARENA_IN_CONTAINER, `${missingDocs.join(' / ')} 读不到却不在容器里 ⇒ 是宿主仓库坏了，不是镜像排掉`).toBe('1');
+    const di = readFileSync(repoFile('.dockerignore'), 'utf8');
+    for (const rel of missingDocs) {
+      const top = rel.split(/[\\/]/)[0]!;
+      expect(
+        di,
+        `${rel} 不在，但 .dockerignore 里没有排掉 ${top} ⇒ "它是被镜像排掉的"这个理由是编出来的`,
+      ).toMatch(new RegExp(`^${top.replace(/\./g, '\\.')}[/]?$`, 'm'));
+    }
+  });
+
+  it('工件派生出的两组量级都不是空派生（派生规则自己也要有牙）', () => {
+    // 上面两个 kernelJvmFlags() 取不到会直接抛；这里再钉一次"派生出来的形状确实带着两组数"，
+    // 免得有一天派生退化成 `''`，而 `toContain('')` 恒真把整条闸门变成装饰。
+    expect(scalaFlags.split(' ').length, `Scala 侧派生出的量级应该有**两项**（-Xmx… 与 -Dspark.master=…），实际：${scalaFlags}`).toBe(2);
+    expect(pythonFlags.split(' ').length, `Python 侧派生出的量级应该有**四项**（--master/值 与 --driver-memory/值），实际：${pythonFlags}`).toBe(4);
+    expect(artifactPairs.length, `工件里抠出的 旗标=值 对少于 4 组 ⇒ kernel.json 的形状变了，派生规则要跟着改：${artifactPairs.join(' | ')}`).toBeGreaterThanOrEqual(4);
+  });
+
+  it.skipIf(missingDocs.length > 0)(
+    'README / ARCHITECTURE / JUDGING 三处的数与 kernel.json 相等，且不含工件之外的数',
+    () => {
+      for (const rel of LIVE_DOCS_WITH_JVM_NUMBERS) {
+        const text = docTextOrNull(rel);
+        expect(text, `${rel} 读不到 ⇒ 本条的前提塌了（另一条用例正在判"为什么可以读不到"）`).not.toBeNull();
+        const doc = text!;
+        expect(
+          doc,
+          `${rel} 里没有 Scala 那条 kernel 的 JVM 量级「${scalaFlags}」（读自 ${NOTEBOOK_KERNELS.scala.id}/kernel.json）⇒ ` +
+            '页面改了文档没改，或者工件改了文档没跟着改：这里就是那份"界面与文档各说一套"的第二处真相',
+        ).toContain(scalaFlags);
+        expect(
+          doc,
+          `${rel} 里没有 Python 那条 kernel 的 JVM 量级「${pythonFlags}」（读自 ${NOTEBOOK_KERNELS.pyspark.id}/kernel.json）⇒ 两条 kernel 的数不许谁抄谁，也不许只留一条`,
+        ).toContain(pythonFlags);
+        const stray = [...new Set(jvmFlagPairs(doc))].filter((pair) => !artifactPairs.includes(pair));
+        expect(
+          stray,
+          `${rel} 里出现了工件给不出来的 JVM 数：${stray.join(' | ')}（工件只认 ${artifactPairs.join(' | ')}）` +
+            '⇒ 有人抄了旧数、抄错、或者自己写了一个：要么改文档，要么真的改了工件并同批改页面与派生规则',
+        ).toEqual([]);
+      }
+    },
+  );
 });

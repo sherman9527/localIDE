@@ -88,8 +88,12 @@ describe('注册表逐条：每条 kernel 的 kernelspec 都被 Dockerfile COPY 
  *    第二个 surface，同样不许把这个数字供成界面事实；
  * ③ spike 时代那份 `arena_spike_status` 必须整键消失（留键=留着一条"没登记进 NOTEBOOK_KERNELS"的
  *    过期话在工件里，而那句话正是 Task 3 之后变假的三处之一）；
- * ④ 中断的第一份实测读数（SIGINT → handler 抛错，WI-91b Task 4 §9）必须落在工件 metadata 里 ——
- *    页面边界块那句"中断不支持"的证据链在镜像工件上要有下文，不许只活在某份报告里。
+ * ④ 中断的实测读数必须落在工件 metadata 里，而且是**两条路各一条**（评审修复轮）：
+ *    容器档那条（SIGINT → handler 抛错，WI-91b Task 4 §9）与界面那条（真浏览器按『Interrupt the
+ *    kernel』→ 无可观察效果、不杀 kernel，2026-10-20）。页面边界话现在引用的是**后者**，
+ *    证据链要在镜像工件上闭环，不许只活在某份报告里；
+ * ⑤ 工件里不许再出现"补全/悬浮/中断**一并**不支持"那种把三条压成一条的说法 —— Task 5 初稿就是这么写的，
+ *    其中"补全不支持"被 2026-10-20 的实测推翻（补全会出面板）。三条各有各的真相，谁被推翻就改哪一条。
  */
 describe(`${NOTEBOOK_KERNELS.scala.id} kernelspec（交付标签与缺陷记录）`, () => {
   // `!` 与上面 pyspark 那份同源：模块级加载循环刚按注册表把每条都读进来并 existsSync 判过，
@@ -109,7 +113,7 @@ describe(`${NOTEBOOK_KERNELS.scala.id} kernelspec（交付标签与缺陷记录�
     ).not.toMatch(/2\.12\.\d+/);
   });
 
-  it('spike 时代的 arena_spike_status 必须已整键移除；中断实测读数（SIGINT）必须落在 metadata 里', () => {
+  it('spike 时代的 arena_spike_status 必须已整键移除；中断实测读数（容器档 SIGINT + 真浏览器）必须落在 metadata 里', () => {
     expect(
       scala.metadata?.arena_spike_status,
       'arena_spike_status 还在 ⇒ 工件里躺着一句"不是交付/没登记进 NOTEBOOK_KERNELS"的过期话（Task 3 之后它就是假的）。' +
@@ -119,8 +123,19 @@ describe(`${NOTEBOOK_KERNELS.scala.id} kernelspec（交付标签与缺陷记录�
     expect(
       metaText,
       'metadata 里读不到 SIGINT/中断 的实测记录 ⇒ Task 4 容器档量到的第一份中断读数（3/3 次 handler 抛错）' +
-        '没有落进工件；页面边界块说"中断不支持"，证据链必须在镜像工件上闭环，不能只活在报告里',
+        '没有落进工件；页面边界块说"中断按下去没有可观察效果"，证据链必须在镜像工件上闭环，不能只活在报告里',
     ).toMatch(/SIGINT/);
+    // 修复轮补的两条（判据只增）：界面那条路也要有读数（页面现在引用的就是它），且三条不许被压成一条。
+    expect(
+      metaText,
+      'metadata 里只有容器档那条 SIGINT 读数、没有**真浏览器**按『Interrupt the kernel』那条 ⇒ ' +
+        '页面边界话引用的是界面读数（2026-10-20：可按下、无可观察效果、不杀 kernel），证据链在工件上断了',
+    ).toMatch(/浏览器/);
+    expect(
+      metaText,
+      'metadata 里又出现"补全/悬浮/中断**一并**不支持"那种压成一条的说法 ⇒ 那正是被 2026-10-20 实测推翻的写法' +
+        '（补全会出补全面板）。三条各有各的真相，要改就改被推翻的那一条（评审修复轮 ⑤）',
+    ).not.toMatch(/补全[^。”]{0,12}中断[^。”]{0,4}不支持/);
   });
 });
 

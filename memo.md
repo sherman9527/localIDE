@@ -4038,10 +4038,14 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
   ① 页面边界块 5→7 段（summary「7 条边界」、单元层 `boundarySentences` 7→13 串、e2e `toHaveCount(5)→(7)` + 新名词判据
   `Unknown Error`）——"共用环境 / pip / CPU"三句全部按 kernel 点名，页头那句「kernel 用的是网页 IDE 那份环境」同步改；
   ② Scala 的 JVM 量级按 `kernel.json` 实写 `-Xmx2g -Dspark.master=local[2]`（不抄 Python 的 `local[2] --driver-memory 512m`）；
-  ③ 报错形状原话进 DOM："报错有，但堆栈帧没有，能看的那句话在错误消息里"（106 字符 / 0 帧）；
+  ③ 报错形状原话进 DOM："报错有，但堆栈帧没有，能看的那句话在错误消息里"（106 字符 / 0 帧）
+  —— ⚠ 修复轮把**数字**从页面上撤了（无闸门的一次性读数不该上屏；读数住在这里与报告里，带日期才诚实）；
   ④ `language_info.version`：核查确认**没有任何组件渲染它** ⇒ 要求转成判据（单元档三态 textContent+innerHTML 无 `2.12.x`；
   镜像档 `display_name` 无版本号），破坏性=往页头塞 `2.12.15` 必红；
-  ⑤ 补全/悬浮/中断明写不支持（中断证据 = T4 §9 SIGINT 读数）；
+  ⑤ ~~补全/悬浮/中断明写不支持（中断证据 = T4 §9 SIGINT 读数）；~~
+  **→ 2026-10-20 修复轮订正：这一条里三条只有一条对。** 同一轮的真浏览器第二次量：补全**有**面板、悬浮文档**没有**、
+  界面那颗中断**可以按但没有可观察效果**（既不掐停正在跑的 cell，也不杀 kernel —— 探索档"SIGINT 会带走整个 JVM"
+  在界面这条路被否证）。逐条读数、订正后的话与闸门见里程碑 BN。
   ⑥ 构建上下文三处假话改事实：`display_name`「Scala (Toree, WI-91 探索)」→ `Scala (Toree)`、`arena_spike_status` 整键移除
   换 `arena_kernel_status`、SIGINT 读数落 `arena_interrupt_reading`；`BUILDINFO.md` 两处 + `Dockerfile` 三处注释回事实；
   新闸门 `notebook-image.test.ts`（标签不含探索字样/不含 2.12.x、spike 键缺席、SIGINT 读数在场）。
@@ -4074,7 +4078,7 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
 | 容器 | `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` | **`VERIFY_EXIT=0`**、✓ verify 全部通过；矩阵 `158 可判 / 跳过（栈不可用）0`（六栈全 true）；五个 notebook 阶段**各恰好 1 次**；`教程 17 passed / 0 skipped`、`Scala kernel：11 passed / 0 skipped / 11 total ✓`、判题矩阵 `555/11/566`（比 T4 轮 +2 = 本轮 notebook-image 的两条新 it）；`grep -c scala-kernel.test.ts`=0（--exclude 真生效）；`.env` absent 未动 |
 | E2E | `npm run e2e` | **`E2E_EXIT=0`、74 passed (3.3m)**；`notebook-page.spec.ts` 三条全绿（跑的是本轮的 7 段计数与 `Unknown Error` 名词判据；独立 e2e 实例，不占 7799） |
 | 破坏性 | 页面塞 `2.12.15` / kernel.json 三点回坏 / 只删 `arena_interrupt_reading` | 依次 `1 failed (36)`、`2 failed (8)`（点名探索字样与 spike 键）、`1 failed (8)`（SIGINT 单因）；还原 md5 复核；全程未用 `git checkout --` |
-| 棘轮 | `npx vitest run server/test/regression/memory-file-ratchet.test.ts` | 5 passed；COMPLETED 并集 108→110；行级守恒比对 HEAD：丢失 3 行 = 速览三行**有意**替换（一个内核→两条 kernel、88→90 两处计数），历史原文 0 丢失 |
+| 棘轮 | `npx vitest run server/test/regression/memory-file-ratchet.test.ts` | 5 passed；COMPLETED 并集 108→110；行级守恒比对 HEAD：~~丢失 3 行~~ **修复轮按同一份 diff 复算 = 丢失 4 行**（`git show e991ce4:HANDOVER.md` vs `4eefda2` 的 HANDOVER+archive 并集，跑法见 `.qoder/skills/handover/SKILL.md` 第 3 步），4 行全部是速览/段头注释行的**有意**替换：一个内核→两条 kernel、三档读数换成本轮、"更早的 88 条"→90 两处（速览一行 + COMPLETED 段头一行），历史原文 0 丢失。日志 `conservation-task5-round.log` |
 
 ### 已知问题
 

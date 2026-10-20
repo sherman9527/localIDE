@@ -30,7 +30,14 @@
   ①Scala kernel 是判题池之外的**又一个** Spark JVM，量级按工件实写 `-Xmx2g -Dspark.master=local[2]`（读自 `docker/jupyter/kernels/arena-scala-toree/kernel.json`；Python 侧保留 `--master local[2] --driver-memory 512m`，两组数不许互抄）；
   ②报错形状原话上屏："报错有，但堆栈帧没有，能看的那句话在错误消息里"+ `Unknown Error`（容器档实测 106 字符 / traceback 0 项）；
   ③`language_info.version`（自报 2.12.15、实载 2.12.18）**页面上一个都不显示** —— 核查后确认没有任何组件渲染 `language_info`，要求转成判据：单元档三态判 textContent+innerHTML 无 `2.12.x`，镜像档判 `display_name` 不含版本号（破坏性：往页头塞 `2.12.15` ⇒ 红，读数在 task-5-report.md §4）；
-  ④补全/悬浮文档/中断明写**不支持**，中断的证据 = Task 4 §9 的 SIGINT 首测（3/3、handler 抛错、不落成 cell error、掐不掉执行）。
+  ④~~补全/悬浮文档/中断明写**不支持**，中断的证据 = Task 4 §9 的 SIGINT 首测（3/3、handler 抛错、不落成 cell error、掐不掉执行）。~~
+  ｜**2026-10-20 修复轮订正（把压成一条的三条拆回各自的实测）**：这一条里**三条只有一条全对**。控制端在真 Scala notebook 上又量了一次（宿主 Edge，`127.0.0.1:7788`）：
+  ④a **补全会** —— `val abcd = 123` 求值后在新格敲 `abc` 按 Tab 弹出补全面板（DOM 节点 `lm-Widget jp-Completer jp-ThemedContainer jp-HoverBox`，里面有 `abcd`）⇒ 原话"补全不支持"是**假的**；
+  ④b **悬浮文档不会** —— 两次 hover（`x`、`abcd`）都没有 hovermove/HoverBox 内容，DOM 里只有那个（隐藏的）补全节点 ⇒ 这一条原话对；
+  ④c **界面那颗『Interrupt the kernel』可以按，但没有可观察效果** —— `Thread.sleep(60000); println("slept60")` 起跑约 2 秒后按它：约 20 秒时那一格仍是 `[*]:` 无输出、`pgrep -fc '[o]rg\.apache\.toree\.Main'` 为 **1**；60 秒时那一格**正常跑完**并拿到 `[3]: slept60` ⇒ 既不掐停正在跑的 cell，也**不会把 kernel 弄死** —— 探索档那句"SIGINT 默认会把整个 JVM 带走"在**界面这条路**上被**否证**（Task 4 容器档看到的 handler 抛进 stderr，正是"按了什么都没发生"的原因）。
+  ⇒ 页面边界块第七段、`README.md`、`docs/ARCHITECTURE.md`、`docker/BUILDINFO.md`、`kernel.json` 的 metadata 现在都按**三条各自的真相**写，并把来源写进句子（"2026-10-20 真浏览器实测"）；
+  闸门：`web/test/notebook.test.tsx` 的 `boundarySentences`（新增五句：这三样各有各的真相 / 补全有 / 悬浮文档没有 / 中断可以按但没有可观察效果 / 既不掐停正在跑的 cell，也不会把 kernel 弄死）
+  与 `notebook-image.test.ts` 的两条新 expect（工件里必须有**浏览器**那条读数；不许再出现"补全…中断…不支持"那种压成一条的说法）。
   ｜构建上下文三处假话同批改事实（裁决 T5-5）：`display_name` 「Scala (Toree, WI-91 探索)」→ 交付名 `Scala (Toree)`；`arena_spike_status`（"不是交付/没登记进 NOTEBOOK_KERNELS" —— `9cee1b5` 之后就是用户可见假话）**整键移除**，换成 `arena_kernel_status`（交付状态+缺陷清单+红线①接口），SIGINT 实测落进新键 `arena_interrupt_reading`，`arena_unmeasured_risk` 只剩 setSecurityManager 一条；`docker/BUILDINFO.md` 两处与 `docker/Dockerfile` 三处注释改回事实；新闸门 `notebook-image.test.ts` 钉"标签不含探索字样/不含 2.12.x、spike 键缺席、SIGINT 读数在场"。改名**没有牵动任何测试字面量**（Task 3 的"从工件读 display_name"纪律兑现：status.test 29 passed、web 36 passed 一次没改）。
   ｜顺带修掉同族假话：`README.md` kernel 段按 kernel 分家、`docs/JUDGING.md` 超时段写两个 JVM、`docs/ARCHITECTURE.md` 七段边界 + 两份 kernelspec 条目 + "容器档那三组阶段"补 Scala 阶段、A1 设计文档 ②"至今没落地"划线订正、页头那句「kernel 用的是网页 IDE 那份环境」按 kernel 点名。
   ｜验证（三档 + 破坏性，退出码都被看到；详表 `.superpowers/sdd/2026-10-10-scala-kernel-integration-wi91b/task-5-report.md`）：
@@ -49,6 +56,10 @@
   收尾删 session 后 `toree=0`、`java=0`、`ipykernel=0`。
   ｜**界面上没测的两样**（诚实记账）：Tab 补全与"停止"按钮的界面行为 —— 边界那句"中断不支持"目前只有容器档 3/3 那次读数撑着；
   我这次打 `/jupyter/api/kernels/<id>/interrupt` 是在 session 已删之后，回 404 不算读数。
+  ｜**同批第二次真浏览器 pass 把这两样量掉了（2026-10-20，就在上面那条记账之后）**：补全**有**面板、悬浮文档**没有**、
+  界面那颗中断按钮**按下去无可观察效果且不杀 kernel** —— 三处读数与它们推翻/证实了什么，逐条写在本条上面那个 ④ 的订正块里（不在这里重复）。
+  ⚠ 这一趟的价值不在"补了清单"，在于它**推翻了界面上正在显示的一句话**：单测与 e2e 都是绿的，边界话也是假的 ——
+  "绿"从来不等于"说过的那句话是真的"，凡是**写在页面上给用户看的能力承诺**都要有一条对着 DOM 的读数。
   ｜2026-10-16 的推迟决定（两句，逐字随迁）：
 - **WI-100 / WI-96（Toree 接成第五页的 Scala kernel）—— 2026-10-16 用户点头：这一版先不接。**
   ｜理由当场核过，不是推测：`shared/src/notebook.ts:108` 是 `NOTEBOOK_KERNELS = { pyspark: 'arena-pyspark' }`，只一条，界面照注册表给 ⇒ 现在**没有谎**；而这版计划要同时动镜像、量具、判据与界面，**停在半程恰好会造出**"界面写着两个内核都能选、镜像里只有一个"那种谎。所以留一个完整执行窗口再做（计划：`docs/superpowers/plans/2026-10-10-scala-kernel-integration-wi91b.md`，5 个任务，Task 1 是先把量具改对）。WI-96 是同一族账，接入时一并还。
@@ -616,5 +627,19 @@ N-15 `/api/bank` 瘦身（WI-79）、N-16 端口绑回环（WI-78）、N-13 出�
 - **N-19 再加一家公司的扩充（从 WI-56 拆出来的持续项，2026-10-19）**：六家 ≥30 的目标已达成并收口成 WI-56，"继续扩"这件事需要一个不误导的位置 —— 前置是**先补公司向素材**（JD / 面经 / 业务语境），不是先出题；达标线与报数方式沿用 `content.test.ts` 的"公司维度"那条。
 
 - **N-20 教程期望的 kernel 要做成注册表自带字段（Scala 教程 notebook 的前置账，2026-10-20 记自 WI-91b 计划 §9）**：`tutorials.test.ts` 的执行层今天钉的是"kernel 必须是 `arena-pyspark`" —— 一句**全集断言**，Scala 教程一存在就会撞红。账的内容：把"每篇期望哪条 kernel"做成注册表自带字段（落在 `tutorial-claims.ts` 还是 notebook metadata，做的时候定一处真相，不许两处各写），**不许就地放宽成"pyspark 或 scala"** —— 放宽那一瞬间，"写成镜像自带的 `python3` 照样跑绿"这个红线①的洞就回来了（这正是探索档点名过的那条）。前置条件：`content/notebooks/` 里今天**没有** Scala 教程（Scala kernel 已选得到、跑得动、有容器档闸门，但教程是另一件事）；这条账在那一天到来时才要动。
+
+- **N-22 `ide/debug.test.ts` 那一族 CDP 用例在整档并发下出现过一次瞬态红（2026-10-20 记，WI-91b Task 5 修复轮）**：
+  症状 —— `npm run verify:fast` 的「网页 IDE（执行内核与解耦边界）」阶段红两条用例，报的是 `WebSocket 连接失败`；
+  单独重跑那一条阶段与整个文件都绿，之后整档重跑 `VERIFY_FAST_EXIT=0`。
+  **这一发是被"复跑复绿"消掉的，不是被证掉的**：红那一趟的日志没留下（只留下了"跑过了"这句话），
+  所以现在既不能说它是回归、也不能说它不是。
+  ｜**下一次再现时的规矩（不许当 flaky 关掉，先取证 —— 这正是 WI-72 那条纪律的形状）**：
+  ① **留住红的日志**：`npx vitest run server/test/ide web/test/ide.test.tsx --reporter=json --outputFile=data/flaky-ide.json > data/flaky-ide.log 2>&1`
+  （重定向到文件再判 `$?`，不要管道吃退出码）；② 记下具体是哪几条、CDD 端口与 `pgrep -fc '[dd]ebug-js'` 的读数（方括号模式，不打印整条命令行）；
+  ③ 对照变量只有一个：**并发负载**（同阶段前后是不是还挂着判题矩阵 / 真浏览器）—— 同一条用例单跑绿而整档红，就往"端口或会话被并发挤掉"取证；
+  单跑也红就往 CDP 本身（`--inspect` 端口、会话清理、`debug-js` 子进程残留）取证。取得证据之前**不许**加 `skipIf`、不许调 timeout、不许把它标成 flaky。
+  ｜复现命令（想主动撞它就跑这一串，别用"顺手再跑一遍"当验证）：
+  `npm run verify:fast`（整档，含并发的大头）；对照：`npx vitest run server/test/ide/debug.test.ts`（单文件）。
+  ｜相关既有账：WI-92/WI-99（调试用例与优雅退出）、WI-105（`debug-js` 的 ws URL 按 chunk 解析竞态 —— 那条已修，症状不同：那是 URL 解析竞态，不是连接建不起来）。
 
 - **N-21 在嵌入的 iframe 里"新建 notebook"会跳到顶层新标签页（2026-10-20 控制端真浏览器读数里看见的）**：第五页左栏点已有文件 → iframe 的 `src` 换成那本 notebook，**编辑在内嵌里**（这条是好的，反向对照也做过）；但内嵌 Jupyter 自己的 `New → Scala (Toree)` 会开一个**顶层新标签页**（上游 Notebook app 的行为），于是"新建"这一步落在了我们的壳外面 —— 用户看到的是一个不带我们页头与边界说明的整屏 Jupyter。账的内容：要么把新建导流到我们自己的路径（例如左栏给"新建"入口、由服务端在 workDir 里按选定 kernel 建一本，iframe 再指过去），要么在界面上把这一点说实话（"新建会开新标签页，回到这一页继续用左栏切文件"）。**不是缺陷修复而是产品边界**：今天 Scala/Python 都选得到、都跑得动，只是"出生"这一步在壳外。前置：动它之前先确认逃生链接（`/jupyter/tree`）那条路仍然够用。

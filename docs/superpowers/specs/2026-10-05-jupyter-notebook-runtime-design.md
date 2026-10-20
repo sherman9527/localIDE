@@ -17,8 +17,12 @@
 > `arena-scala-toree` 的 `needsVenv:false` 是实测事实；选择器标签 `Scala (Toree)`，
 > 契约示例里 `ready:false` + "还在 A2 阶段"那一态**从未成为交付形状**（这条 kernel 随镜像就位、直接 ready）。
 > 错误表的真相与页面对用户的说法以 `web/src/pages/Notebook.tsx` 边界块（7 段）与
-> `server/test/notebooks/scala-kernel.test.ts`（容器档真跑）为准 —— 那边说"没堆栈帧、不显示 version、
-> 补全/悬浮/中断不支持"，这里纸面的 Scala 错误形状就按那边读。
+> `server/test/notebooks/scala-kernel.test.ts`（容器档真跑）为准 —— 那边说的是"没堆栈帧、不显示 version"，
+> 而**补全 / 悬浮文档 / 中断是三条各自的真相**（2026-10-20 真浏览器实测：补全有、悬浮文档没有、
+> 中断可以按但没有可观察效果 —— 不掐停正在跑的 cell，也不杀 kernel）。
+> ⚠ 这里原本写的是"补全/悬浮/中断不支持"一句带过 —— 那是 WI-91b Task 5 初稿的说法，同一轮第二次实测
+> 把"补全不支持"推翻了；订正记在 `.superpowers/sdd/2026-10-10-scala-kernel-integration-wi91b/task-5-report.md` §10。
+> 这里纸面的 Scala 错误形状就按上面那两处读。
 > ③ **token 的放行判据是合取，不只按 socket 对端**：`isLocalPeer` ∧ `isLoopbackHostHeader`
 > （只看对端拦不住 DNS rebinding）—— 本文写"只按对端"的那几段按此读。
 > ④ 本文"现状"表里的**行号快照已漂移**（`docker/Dockerfile:66` 这类指针），要按符号名找，不要按行号。

@@ -51,7 +51,9 @@ import { Loading } from '../components/AsyncState';
  * 那几句边界话常驻，不随状态切换收起（IDE 那边同一课）：①环境共用（**按 kernel 分开说**：
  * Python 那条与判题用的是另一套解释器、Scala 那条连 IDE venv 都不碰；绝对路径拦不住）、
  * ②CPU 不在这页管辖内（两条 kernel 各起一个判题池之外的 Spark JVM，量级各写各的）、
- * ③Scala 侧的报错形状（`Unknown Error` + 空堆栈帧）与不支持三样（补全/悬浮/中断）、
+ * ③Scala 侧的报错形状（`Unknown Error` + 空堆栈帧）与那三样各自的真相（补全有 / 悬浮文档没有 /
+ *   中断按下去无可观察效果 —— 2026-10-20 真浏览器实测；Task 5 初稿把三条一起写成"不支持"，
+ *   其中"补全不支持"被实测推翻，见 `task-5-report.md` 的修复轮）、
  * ④答案可读不是安全边界、⑤只在本机打得开。用户在"要装包"和"要撞墙"的两个时刻都需要它们，
  * 而那正是状态最难看的时候。
  * （`db08cf8` 把第一句拆成了两句，那是 5 段的起点；WI-91b Task 5 接入第二条 kernel 后长到 7 段 ——
@@ -437,25 +439,38 @@ export default function Notebook() {
             `web/test/notebook.test.tsx` 的 `boundarySentences` 钉着，不要顺手改写。
             WI-91b Task 5 把它从 5 段长到 7 段："共用环境 / pip 装哪套"两句改成**按 kernel 点名**
             （arena-pyspark 共用 IDE venv、arena-scala-toree 是镜像里独立的 Java 进程，方向相反），
-            CPU 那句带上 Scala 侧真实的 JVM 量级（读自 docker/jupyter/kernels/arena-scala-toree/kernel.json），
-            再补 Scala 侧两件（报错形状 ename=Unknown Error 且空堆栈帧；补全/悬浮/中断不支持）。都不许美化。 */}
+            CPU 那句带上两条 kernel **各自**的 JVM 量级（量级由 `web/test/notebook.test.tsx` 从
+            `docker/jupyter/kernels/<id>/kernel.json` **派生**后逐条钉住，页面与 README/ARCHITECTURE/JUDGING
+            同源于工件，不许谁抄谁），再补 Scala 侧两件（报错形状 ename=Unknown Error 且空堆栈帧；
+            补全/悬浮文档/中断三样的真相）。都不许美化。
+            ⚠ 修复轮（2026-10-20）：第七段初稿把三样一并写成"不支持"，真浏览器实测推翻其中一条
+            （补全会出面板），现在按**三条各自的实测**逐条说，并带上读数日期 —— 边界话的来源要在句子里。 */}
         <details className="nb-boundary-details">
           <summary className="card-title">这页跟判题有什么关系（7 条边界，点开看）</summary>
           <div className="col small">
             <p>
-              两条 kernel 的「共用环境」不是同一件事：<strong>Python kernel</strong>（arena-pyspark）与 IDE 共用同一份环境，判题用的是另一套解释器 —— <strong>这是默认，不是这道页面上的强制</strong>；<strong>Scala kernel</strong>（arena-scala-toree）跑的是镜像里独立的 Java 进程，<strong>完全不碰 IDE 那份 venv</strong> —— venv 在不在与它无关，「准备环境」那把按钮也修不到它头上。
+              两条 kernel 的「共用环境」不是同一件事：
+              <strong>Python kernel</strong>（arena-pyspark）与 IDE 共用同一份环境，判题用的是另一套解释器 —— <strong>这是默认，不是这道页面上的强制</strong>；
+              <strong>Scala kernel</strong>（arena-scala-toree）跑的是镜像里独立的 Java 进程，<strong>完全不碰 IDE 那份 venv</strong> —— venv 在不在与它无关，「准备环境」那把按钮也修不到它头上。
             </p>
             <p>
-              <span className="mono">!pip3 install</span> 命中哪个 pip 由 <span className="mono">PATH</span> 决定 —— 这句只对 <strong>Python kernel</strong> 成立：服务那边把 IDE 那份 venv 前置在 PATH 上，所以默认装进的是 notebook 自己的环境。但绝对路径拦不住 —— <span className="mono">!/usr/local/bin/pip3 install X</span> 装进的就是判题那套解释器，改的是你之后每道题的判题结果（红线①的承诺由闸门守着，不由这一页守着）。
+              <span className="mono">!pip3 install</span> 命中哪个 pip 由 <span className="mono">PATH</span> 决定 —— 这句只对 <strong>Python kernel</strong> 成立：服务那边把 IDE 那份 venv 前置在 PATH 上，所以默认装进的是 notebook 自己的环境。但绝对路径拦不住 ——
+              <span className="mono">!/usr/local/bin/pip3 install X</span> 装进的就是判题那套解释器，改的是你之后每道题的判题结果（红线①的承诺由闸门守着，不由这一页守着）。
             </p>
             <p>
-              这一页也管不住 <strong>CPU</strong>：<strong>Python kernel</strong> 自带 <span className="mono">--master local[2] --driver-memory 512m</span>，那是判题池之外的第二个 Spark JVM；<strong>Scala kernel</strong> 另起一个 <span className="mono">-Xmx2g -Dspark.master=local[2]</span> 的 JVM。「判题优先、IDE 排队、不抢占」那套安排看不见这两个，笔记本里跑重活时，被判题的那道 Spark 题可能被推向超时。
+              这一页也管不住 <strong>CPU</strong>：
+              <strong>Python kernel</strong> 自带 <span className="mono">--master local[2] --driver-memory 512m</span>，那是判题池之外的第二个 Spark JVM；
+              <strong>Scala kernel</strong> 另起一个 <span className="mono">-Xmx2g -Dspark.master=local[2]</span> 的 JVM —— 两个 JVM 都不在队列里。「判题优先、IDE 排队、不抢占」那套安排看不见这两个，笔记本里跑重活时，被判题的那道 Spark 题可能被推向超时。
             </p>
             <p>
-              <strong>Scala kernel</strong> 的报错形状与 Python 那条不同：编译错误的 <span className="mono">ename</span> 恒为 <span className="mono">Unknown Error</span>，而且<strong>没有堆栈帧</strong> —— 报错有，但堆栈帧没有，能看的那句话在错误消息里（容器档负例夹具实测：错误消息 106 个字符、堆栈帧 0 条）。
+              <strong>Scala kernel</strong> 的报错形状与 Python 那条不同：编译错误的
+              <span className="mono">ename</span> 恒为 <span className="mono">Unknown Error</span>，而且<strong>没有堆栈帧</strong> —— 报错有，但堆栈帧没有，能看的那句话在错误消息里（容器档负例夹具实测）。
             </p>
             <p>
-              <strong>Scala kernel</strong> 这三样不支持，界面不许把它们说成有：<strong>补全</strong>、<strong>悬浮文档</strong>、<strong>中断</strong>。中断有实测读数：信号送进那条 JVM 后 kernel 自己的中断处理器直接抛错（容器档 3/3 次），既不落成一条 cell 报错、也掐不掉正在跑的代码 —— 那个按钮不是可靠的刹车。
+              <strong>Scala kernel</strong> 这三样各有各的真相，界面按 2026-10-20 真浏览器实测说（同一本 Scala notebook，逐条量的）：
+              <strong>补全有</strong> —— <span className="mono">val abcd = 123</span> 求值之后，在新格敲 <span className="mono">abc</span> 按 Tab 会弹补全面板；
+              <strong>悬浮文档没有</strong> —— 两次 hover 都没有出面板；
+              <strong>中断可以按，但没有可观察效果</strong> —— <span className="mono">Thread.sleep(60000)</span> 起跑 2 秒后按工具条那颗「Interrupt the kernel」，那一格照样跑到底出了结果，那条 JVM 也还活着（既不掐停正在跑的 cell，也不会把 kernel 弄死）。
             </p>
             <p>
               notebook 里能读到题库的参考答案 —— <strong>这不是安全边界</strong>。工作目录只是让默认视图干净，

@@ -136,16 +136,23 @@ curl 则不带这个头 —— 三种都放行，别的页面想嵌它判 `cross
 
 - **kernel 有两条，"共用环境"对它们是相反的两件事**（WI-91b 接入 `Scala (Toree)` 后，这句必须按 kernel 点名）：
   **`PySpark (arena)`** 的 argv 指向 `/opt/arena-ide-env/python/bin/python` —— 就是网页 IDE 那份 venv，
-  所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。**这条同时是判题那条红线的第二个入口**
+  所以 notebook 里 `!pip3 install requests` 装完，下一格就能 `import`。它自带
+  `--master local[2] --driver-memory 512m`（`docker/jupyter/kernels/arena-pyspark/kernel.json` 的
+  `PYSPARK_SUBMIT_ARGS`）—— 那是判题池之外的第二个 Spark JVM，超时那笔账见 `docs/JUDGING.md`。
+  **这条同时是判题那条红线的第二个入口**
   —— 默认装进的是 IDE 那套 site-packages，判题器读不到；**但那是默认，不是这一页能给的保证**：
   entrypoint 那道 PATH 前置只管裸命令，写成 `!/usr/local/bin/pip3 install X` 装进去的就是判题那个解释器，
   闸门与页面都拦不住这种写法（红线①的可复现性靠**镜像 + 闸门**，见 `docs/JUDGING.md` 红线①最后两段）。
   **`Scala (Toree)`**（`arena-scala-toree`）是镜像里独立的 Java 进程（`/usr/bin/java` 起 Toree，
   `-Xmx2g -Dspark.master=local[2]`），**完全不碰 IDE 那份 venv** —— venv 在不在与它无关，「准备环境」
   修不了它也不需要修它。它的已知边界都写在页面边界块里且一句没美化：编译错误 `ename` 恒为
-  `Unknown Error`、堆栈帧为空（可用的那句话只在错误消息里，容器档实测 106 字符）；kernel 自报的
-  `language_info.version`（2.12.15）与实载（2.12.18）对不上 ⇒ 界面不显示版本；补全、悬浮文档、
-  中断不支持（中断有实测：SIGINT 进 JVM 后处理器直接抛错，掐不掉正在跑的代码）。跨 cell 状态与
+  `Unknown Error`、堆栈帧为空（可用的那句话只在错误消息里）；kernel 自报的
+  `language_info.version`（2.12.15）与实载（2.12.18）对不上 ⇒ 界面不显示版本；
+  **补全、悬浮文档、中断三样各有各的真相**（2026-10-20 真浏览器实测：补全**有**、悬浮文档**没有**、
+  中断**可以按但没有可观察效果** —— 既不掐停正在跑的 cell，也不会把 kernel 弄死）。
+  ⚠ 这一句 Task 5 初稿写的是"三样都不支持"，其中"补全不支持"被实测推翻 —— 两组 JVM 的数与这三条真相
+  现在都由 `web/test/notebook.test.tsx` 的同一道闸门钉住（数从 `kernel.json` 派生，不许谁抄谁）。
+  跨 cell 状态与
   活的 SparkSession 有容器档闸门真跑着（`./start.sh --verify` 的「Scala kernel 真跑（WI-91b Task 4）」
   阶段，配 `assert-ran --require-no-skips`）。**Scala 侧还没有教程 notebook** —— 现有的 `00-smoke` +
   四篇教程声明的都是 `arena-pyspark`；每篇教程期望哪条 kernel 要做成注册表自带字段，账在

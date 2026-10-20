@@ -295,7 +295,8 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
 + 工具条三把
 （刷新状态 / 在新标签页打开 / 准备环境，后两把各按状态出现）+ 横幅区（空则整块不渲染；
 `seedError` 那句诊断住在里面）+ 七段常驻边界话（默认折进 `<details>`；WI-91b Task 5 把"共用环境 / pip / CPU"
-改成按 kernel 点名并新增 Scala 两段——报错形状与"补全/悬浮/中断不支持"，逐字契约在 `boundarySentences`）+ 左栏树 + 右栏 iframe。
+改成按 kernel 点名并新增 Scala 两段——报错形状、以及"补全 / 悬浮文档 / 中断"三样**各自**的真相
+（2026-10-20 真浏览器实测：补全有、悬浮文档没有、中断可以按但没有可观察效果），逐字契约在 `boundarySentences`）+ 左栏树 + 右栏 iframe。
 2026-10-10 用户点名的简化删的是**容器不是话**：「运行时」卡壳与"这次铺了什么"示例清单
 （`notebook-files`）整块没了，五态那句逐字未动，删没删由缺席判据钉（单元层 + e2e 各一条）。
 **内嵌与逃生链接两路都不带凭据**（WI-98 把最后一处补齐：iframe 的 src 与 `notebook-open` 的 href 都是
@@ -342,6 +343,7 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
 - **kernel 注册在镜像级，两份工件、各按条目数据判就绪**（WI-91b Task 3/5）：
   **Python 那条**（`/usr/local/share/jupyter/kernels/arena-pyspark/kernel.json`）argv 指向
   IDE 那个命名卷 venv 的 python，所以 notebook 里 `!pip3 install` 下一格就能 import；
+  它的 `PYSPARK_SUBMIT_ARGS` 里带 `--master local[2] --driver-memory 512m`。
   **Scala 那条**（`arena-scala-toree/kernel.json`，选择器标签 `Scala (Toree)`）是镜像里独立的
   `/usr/bin/java` 进程（`-Xmx2g -Dspark.master=local[2]`，类路径让 Spark 自带的 2.12.18 赢过 fat jar 里的
   2.12.15），**完全不碰 IDE venv** —— `needsVenv:false` 是注册表条目自带的数据，`status.ts` 按条目查它，
@@ -387,8 +389,10 @@ WI-94 把它改成**两栏内嵌**（计划：`docs/superpowers/plans/2026-10-09
   `alive=42` 不许出现 —— 那是"跨 cell 状态活"与"不是整本一次性编译"的对照本体；外加"负例的 error 必须带
   非空 `evalue`"与"真跑之后夹具目录/仓库根/工作区不许多出 `metastore_db`/`derby.log`/`spark-warehouse`"。
   assert-ran 同款 `--require-no-skips`：容器组整片被跳掉会看起来像 `8 passed / 3 skipped` 而 vitest exit 0。
-  页面上那几句 Scala 边界话（`Unknown Error`、空堆栈帧、不显示 version、补全/悬浮/中断不支持）逐条有
-  这份闸门的读数垫着 —— 它们不是转述上游文档，是这一档每轮交付验证都会重量的东西。
+  页面上那几句 Scala 边界话（`Unknown Error`、空堆栈帧、不显示 version，以及补全 / 悬浮文档 / 中断
+  三样各自的真相 —— **补全有、悬浮文档没有、中断按下去无可观察效果**，2026-10-20 真浏览器实测）逐条有
+  读数垫着：报错形状与 version 由这份闸门每轮交付验证重量，那三样由真浏览器量（Task 5 初稿把三条
+  一并写成"不支持"，其中"补全不支持"就是被第二次实测推翻的 —— 边界话的来源现在写在句子里）。
 
 `GET` 顺手铺示例是**故意**留在读路径上的（页面不做定时轮询 ⇒ 那点 `stat`/`copyFile` 只随点击发生，
 这是计划自查里挂给 Task 10 用数据判的那条，结论：保持现状）。

@@ -126,7 +126,10 @@ WI-91b Task 3）⇒ 页面与 `status.ts` 的 allow-list 都看得见它、Jupyt
 不看 PATH），类路径把 `/opt/spark/jars/*`（判题侧共用的那份、且是指向 pip pyspark 的**只读**符号链接）排在 fat jar 前面；
 `fetch-toree.sh` 末尾与 Dockerfile 的 kernelspec 自检各有一道类路径顺序闸门，且脚本 GATE 1 先断言 `unzip -l` **实读条目总数 > 0**
 （空读数不许冒充通过），再断言制品内 `org/apache/spark` 类计数为 0。kernel 的缺陷与边界（`Unknown Error`、空堆栈帧、
-不许显示 version、补全/悬浮/中断不支持）由页面边界块对用户说实话，逐字契约钉在 `web/test/notebook.test.tsx`。
+不许显示 version，以及补全 / 悬浮文档 / 中断**三样各自的真相**：2026-10-20 真浏览器实测 = 补全有、悬浮文档没有、
+中断可以按但没有可观察效果）由页面边界块对用户说实话，逐字契约钉在 `web/test/notebook.test.tsx`
+（那份边界话初稿曾把三样一并写成"不支持"，其中"补全不支持"被实测推翻 —— 工件 metadata 里只留**读数**，
+叙述与措辞归页面与测试，免得同一件事实被抄成三处）。
 
 ## 换 base 或升主版本时要做的事
 
