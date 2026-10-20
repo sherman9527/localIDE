@@ -211,8 +211,15 @@ export function foldEraTagGroups(groups: readonly TagAliasGroup[], tagsPresent: 
     const bare = raw.slice(prefix.length);
     if (!bare || !present.has(bare)) continue;
     if (base.has(raw)) continue;
-    const canonical = canonicalByLower.get(bare) ?? bare;
-    if (canonical === raw) continue;
+    // 某组已经拿这个写法当自己的规范名 ⇒ 折它就是改写那条手写裁决。
+    // （评审 C1b：一旦有人给裸形出了题，`modern:mysql8-window-functions` 会被挂到裸形名下，
+    //  把那一组"与不带前缀的 window-functions 是两档，永不互并"的手写判决劈成两半。）
+    if (canonicalByLower.has(raw)) continue;
+    // ⚠ 目标必须**先过 alias 表**再谈规范名：裸形自己可能正是某个组的 alias。真题里就有这一形 ——
+    //  `inference-gateway` 是 `llm-gateway` 组的 alias，而库里另有 8 道题写 `modern:inference-gateway`。
+    //  只查 canonicalByLower 会把 `modern:x` 挂到 `x` 上，造出一条 a→b→c 的链：
+    //  下拉里同一考点占两格，且**印的题数与筛出来的行数不一致**（评审 C1 实测：选项写着 8，点下去回 5 行）。
+    const canonical = canonicalTag(bare, base);
     const bucket = byTarget.get(canonical);
     if (bucket) bucket.push(raw);
     else byTarget.set(canonical, [raw]);

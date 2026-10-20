@@ -47,6 +47,7 @@ interface AuditCategory {
   ratio: string;
   orphans: { tag: string; role: string; ids: string[] }[];
   orphanTotal: number;
+  /** 写法数（同一个概念的多种拼法，含带时代前缀的那些）—— 与上面的概念数分列。 */  orphanSpellings: number;
   orphanMeta: number;
   orphanPointGaps: number;
 }
@@ -134,20 +135,32 @@ describe('INDEX.md 的元标签 vs 考点缺口分区（N-11 第一发）', () =
     expect(audit.companyTruth, '脚本读到的公司清单与 QUESTION_COMPANIES 不一致').toEqual([...QUESTION_COMPANIES]);
   });
 
-  it('分口径真的分到了东西：三类报表里元标签 > 0（全归 point-gap 等于这条是装饰）', () => {
+  it('分口径真的在分：概念与写法分列、时代前缀不再当免检理由（评审 I1 改的就是这一条的前提）', () => {
+    // 这一条原来判的是"每类元标签 > 0"。I1 之后那个前提没了：**带 `modern:` 的脱钩是穿着标记外衣的真缺口**，
+    // 剥完前缀仍然找不到矩阵行，就不该被免检。所以这里改判三件事，每一件都比"元标签 > 0"更难被做假：
+    let deduped = 0;
     for (const name of ['frontend', 'algorithms', 'sql', 'hot-interviews']) {
       const c = byCategory(name);
       expect(c, `报表里没有类别 ${name}（CATEGORY_IDS 与脚本读的那份不一致）`).toBeDefined();
-      expect(c!.orphanTotal, `${name}：一个脱钩标签都没有 ⇒ 下面那条"元标签 > 0"会空转，先查口径`).toBeGreaterThan(0);
-      expect(c!.orphanMeta, `${name}：元标签数为 0 ⇒ 分类器没在分（或前缀/公司表漂了），N 还是那个失真数`).toBeGreaterThan(0);
-      expect(c!.orphanPointGaps, `${name}：考点缺口为 0 ⇒ 所有脱钩都被免检了，那这条报表就没用了`).toBeGreaterThan(0);
-      expect(c!.orphanPointGaps, `${name}：考点缺口不小于脱钩总数 ⇒ 元标签根本没被分出去`).toBeLessThan(c!.orphanTotal);
+      expect(c!.orphanTotal, `${name}：一个脱钩概念都没有 ⇒ 下面两条判据都会空转，先查口径`).toBeGreaterThan(0);
+      expect(c!.orphanPointGaps, `${name}：缺口为 0 ⇒ 所有脱钩都被免检了，这条报表就没用了`).toBeGreaterThan(0);
+      expect(
+        c!.orphanTotal,
+        `${name}：概念数(${c!.orphanTotal}) 大于写法数(${c!.orphanSpellings}) ⇒ 去重反了`,
+      ).toBeLessThanOrEqual(c!.orphanSpellings);
+      if (c!.orphanTotal < c!.orphanSpellings) deduped++;
+      // 时代前缀**不是**免检理由：报表里不许有 role=era-meta 的条目（有就说明分类器又按前缀放行了）
+      const exempt = c!.orphans.filter((o) => o.role === 'era-meta');
+      expect(exempt, `${name}：有脱钩仅因带 \`modern:\` 前缀就被算成元标签 ⇒ 真缺口被藏起来（I1 的病灶）：${exempt.map((o) => o.tag).join(', ')}`).toEqual([]);
     }
-    const era = audit.categories.flatMap((c) => c.orphans.filter((o) => o.role === 'era-meta'));
-    const company = audit.categories.flatMap((c) => c.orphans.filter((o) => o.role === 'company-meta'));
+    expect(deduped, '没有任何一类出现"多种写法合成一个概念" ⇒ 去重那条路没生效，写法数与概念数会永远相等').toBeGreaterThan(0);
+    // 元标签这一桶必须还装着**真元标签**（公司维度），否则"分口径"退化成"全算缺口"
+    const companyMeta = audit.categories.flatMap((c) => c.orphans.filter((o) => o.role === 'company-meta' || o.role === 'company-name-meta'));
+    expect(companyMeta.length, '一个元标签都没有 ⇒ 分类器可能整个不认了（那 N 又变回失真数）').toBeGreaterThan(0);
     console.log(
-      `[脱钩分口径] ${audit.categories.map((c) => `${c.category} ${c.orphanTotal}（元 ${c.orphanMeta}/缺口 ${c.orphanPointGaps}）`).join('｜')}\n` +
-        `  其中时代前缀 ${era.length} 个、company: 前缀 ${company.length} 个、纯公司名 ${audit.categories.flatMap((c) => c.orphans.filter((o) => o.role === 'company-name-meta')).length} 个`,
+      `[脱钩分口径] ${audit.categories.map((c) => `${c.category} 概念 ${c.orphanTotal}/写法 ${c.orphanSpellings}（元 ${c.orphanMeta}/缺口 ${c.orphanPointGaps}）`).join('｜')}
+` +
+        `  去重生效的类别 ${deduped} 个；真元标签（公司维度）${companyMeta.length} 个：${companyMeta.map((o) => o.tag).join(', ')}`,
     );
   });
 

@@ -1,27 +1,27 @@
 # 知识库索引（自动生成，请勿手改）
 
 > 由 `npm run kb:index`（`node scripts/kb/compile-knowledge.mjs`）生成。
-> 生成时间：2026-10-20T12:37:53.883Z
+> 生成时间：2026-10-20T13:51:28.650Z
 > 输入：`content/knowledge/<类别>/README.md` 考点矩阵（7 类）+ 题库 258 题（其中软删除 0 题不计入"已出题"）。
 > 覆盖判定：题目 `tags[]`（去掉时代前缀，前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）命中矩阵第 1 列反引号里的 tag 即算已覆盖；
 > 未写反引号 tag 的行列进「无显式 tag（无法判定）」单独统计，其中**靠标签派生 slug 撞上的**另列一档（改中文名就会变，脆）。
-> 脱钩标签分两个口径：**元标签**（时代标记 / 出处标记 / 纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；
+> 脱钩标签分两个口径：**元标签**（只有 `company:*` 前缀与纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；⚠ 带 `modern:` 的脱钩**算缺口不算元**：剥掉前缀之后矩阵里仍然没有那一行，那就是一个真考点穿着标记的外衣（评审 I1）；
 > **考点缺口**才是"该给矩阵补一行"的可行动数 —— 只看合起来的 N 会被元标签撑到失真。
 
 ## 类别总览
 
 | 类别 | 考点数 | 含 code 形式 | 含 rubric 形式 | 无显式 tag（无法判定） | 仅派生 slug 命中（脆） | 语料篇数 | 已出题（可见） | 代码题 | 主观题 | 已覆盖考点 | 未覆盖考点 | 覆盖率 | 脱钩标签（元/缺口） | 判分方式分布 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [`frontend`](./frontend/README.md) 前端工程 | 20 | 17 | 3 | 0 | 0 | [4](./frontend/README.md#语料文件) | 23 | 23 | 0 | 13 | 7 | 65% | 79（12/67） | react-vitest=23 |
-| [`algorithms`](./algorithms/README.md) 算法 | 20 | 19 | 1 | 20 | 0 | [4](./algorithms/README.md#语料文件) | 59 | 59 | 0 | 0 | 0 | — | 245（40/205） | java-junit=59 |
-| [`sql`](./sql/README.md) SQL 与存储 | 21 | 19 | 2 | 20 | 0 | [5](./sql/README.md#语料文件) | 50 | 50 | 0 | 0 | 1 | 0% | 216（39/177） | mysql=36 redis=14 |
-| [`system-design`](./system-design/README.md) 系统设计 | 21 | 8 | 13 | 0 | 0 | [5](./system-design/README.md#语料文件) | 36 | 0 | 36 | 19 | 2 | 90% | 144（46/98） | llm-rubric=36 |
-| [`big-data`](./big-data/README.md) 大数据处理 | 30 | 9 | 21 | 0 | 0 | [7](./big-data/README.md#语料文件) | 38 | 26 | 12 | 19 | 11 | 63% | 151（29/122） | pyspark=24 llm-rubric=12 spark-scala=2 |
-| [`agent-design`](./agent-design/README.md) Agent 设计 | 17 | 3 | 14 | 0 | 0 | [5](./agent-design/README.md#语料文件) | 27 | 0 | 27 | 13 | 4 | 76% | 105（22/83） | llm-rubric=27 |
-| [`hot-interviews`](./hot-interviews/README.md) 高频面试题 | 18 | 4 | 14 | 0 | 0 | [12](./hot-interviews/README.md#语料文件) | 25 | 0 | 25 | 10 | 8 | 56% | 111（22/89） | llm-rubric=25 |
+| [`frontend`](./frontend/README.md) 前端工程 | 20 | 17 | 3 | 0 | 0 | [4](./frontend/README.md#语料文件) | 23 | 23 | 0 | 13 | 7 | 65% | 79（元 0/缺口 79；写法 79） | react-vitest=23 |
+| [`algorithms`](./algorithms/README.md) 算法 | 20 | 19 | 1 | 20 | 0 | [4](./algorithms/README.md#语料文件) | 59 | 59 | 0 | 0 | 0 | — | 241（元 0/缺口 241；写法 245） | java-junit=59 |
+| [`sql`](./sql/README.md) SQL 与存储 | 21 | 19 | 2 | 20 | 0 | [5](./sql/README.md#语料文件) | 50 | 50 | 0 | 0 | 1 | 0% | 214（元 0/缺口 214；写法 216） | mysql=36 redis=14 |
+| [`system-design`](./system-design/README.md) 系统设计 | 21 | 8 | 13 | 0 | 0 | [5](./system-design/README.md#语料文件) | 36 | 0 | 36 | 19 | 2 | 90% | 143（元 0/缺口 143；写法 144） | llm-rubric=36 |
+| [`big-data`](./big-data/README.md) 大数据处理 | 30 | 9 | 21 | 0 | 0 | [7](./big-data/README.md#语料文件) | 38 | 26 | 12 | 19 | 11 | 63% | 149（元 0/缺口 149；写法 151） | pyspark=24 llm-rubric=12 spark-scala=2 |
+| [`agent-design`](./agent-design/README.md) Agent 设计 | 17 | 3 | 14 | 0 | 0 | [5](./agent-design/README.md#语料文件) | 27 | 0 | 27 | 13 | 4 | 76% | 103（元 0/缺口 103；写法 105） | llm-rubric=27 |
+| [`hot-interviews`](./hot-interviews/README.md) 高频面试题 | 18 | 4 | 14 | 0 | 0 | [12](./hot-interviews/README.md#语料文件) | 25 | 0 | 25 | 10 | 8 | 56% | 108（元 2/缺口 106；写法 111） | llm-rubric=25 |
 
 **合计**：147 个考点，其中 107 个可机器判定覆盖，已覆盖 74 个（69%）；题库 258 题。
-**脱钩标签合计**：1051 个 = 元标签 210 个 + **考点缺口 841 个**（后者才是"该补一行矩阵"的清单）。
+**脱钩考点合计**：1037 个概念（1051 种写法）= 元标签 2 个 + **考点缺口 1035 个**（后者才是"该补一行矩阵"的清单）。
 
 ## 未覆盖考点（"该出什么题"的直接答案）
 
@@ -37,19 +37,19 @@
 - `esm-cjs-interop` 构建产物与模块互操作｜形式 code｜judgeKind react-vitest｜JD 能力项：APL-WEB-1 APL-WEB-5
 - `server-components` Server Components 的边界与坑｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：APL-BE-1 APL-WEB-1
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：79 个（元标签 12 / 考点缺口 67）**
-   要处理的是那 **67 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 12 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：79 个概念 / 79 种写法（元标签 0 / 考点缺口 79）**
+   要处理的是那 **79 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
 - `race-condition`（3 题：fe-react-0001, fe-react-0002, fe-react-0003）
 - `cancellation`（3 题：fe-react-0001, fe-react-0002, fe-react-0009）
 - `null-vs-zero`（3 题：fe-react-0013, fe-react-0014, fe-react-0017）
+- `marketplace-rules`（3 题：fe-react-0015, fe-react-0017, fe-react-0018）
 - `forms`（2 题：fe-react-0004, fe-react-0005）
 - `large-list`（2 题：fe-react-0006, fe-react-0009）
 - `profiler`（2 题：fe-react-0006, fe-react-0007）
 - `partial-failure`（2 题：fe-react-0009, fe-react-0011）
-- `accessibility`（2 题：fe-react-0012, fe-react-0019）
-- …另有 59 个考点缺口（完整清单：`--orphan-audit-json`）
+- …另有 71 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `algorithms`｜未覆盖 0 / 可判定 0 个考点
 
@@ -65,19 +65,19 @@
 - 图遍历与拓扑排序
 - …另有 12 行
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：245 个（元标签 40 / 考点缺口 205）**
-   要处理的是那 **205 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 40 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：241 个概念 / 245 种写法（元标签 0 / 考点缺口 241）**
+   要处理的是那 **241 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
 - `overflow-contract`（9 题：alg-java-0001, alg-java-0002, alg-java-0003…）
+- `inference-gateway`（7 题：alg-java-0021, alg-java-0022, alg-java-0023…）
 - `llm-inference`（5 题：alg-java-0022, alg-java-0023, alg-java-0024…）
+- `resilience-semantics`（5 题：alg-java-0047, alg-java-0049, alg-java-0050…）
 - `sorting`（3 题：alg-java-0002, alg-java-0004, alg-java-0014）
 - `prefix-sum`（3 题：alg-java-0003, alg-java-0013, alg-java-0026）
 - `sliding-window`（3 题：alg-java-0007, alg-java-0016, alg-java-0028）
 - `rate-limiting`（3 题：alg-java-0021, alg-java-0028, alg-java-0050）
-- `backpressure`（3 题：alg-java-0023, alg-java-0033, alg-java-0036）
-- `circuit-breaker`（3 题：alg-java-0033, alg-java-0047, alg-java-0058）
-- …另有 197 个考点缺口（完整清单：`--orphan-audit-json`）
+- …另有 233 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `sql`｜未覆盖 1 / 可判定 1 个考点
 
@@ -97,19 +97,19 @@
 - Online DDL 与变更安全
 - …另有 12 行
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：216 个（元标签 39 / 考点缺口 177）**
-   要处理的是那 **177 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 39 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：214 个概念 / 216 种写法（元标签 0 / 考点缺口 214）**
+   要处理的是那 **214 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
+- `marketplace-integrity`（5 题：sql-mysql-0014, sql-mysql-0015, sql-mysql-0016…）
 - `window-functions`（4 题：sql-mysql-0001, sql-mysql-0002, sql-mysql-0003…）
 - `recursive-cte`（4 题：sql-mysql-0004, sql-mysql-0013, sql-mysql-0017…）
 - `null-semantics`（4 题：sql-mysql-0006, sql-mysql-0010, sql-mysql-0011…）
 - `metric-definition`（4 题：sql-mysql-0015, sql-mysql-0018, sql-mysql-0020…）
 - `no-lua-constraint`（4 题：sql-redis-0009, sql-redis-0011, sql-redis-0012…）
 - `analytics`（3 题：sql-mysql-0001, sql-mysql-0007, sql-mysql-0008）
-- `data-quality`（3 题：sql-mysql-0004, sql-mysql-0016, sql-mysql-0019）
-- `zset`（3 题：sql-redis-0001, sql-redis-0002, sql-redis-0007）
-- …另有 169 个考点缺口（完整清单：`--orphan-audit-json`）
+- `mysql8-window-functions`（3 题：sql-mysql-0001, sql-mysql-0002, sql-mysql-0003）
+- …另有 206 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `system-design`｜未覆盖 2 / 可判定 21 个考点
 
@@ -118,19 +118,19 @@
 - `distributed-lock` 分布式锁与租约｜形式 code｜judgeKind redis｜JD 能力项：并发正确性、平台可靠性
 - `rdbms-transactions` 关系型存储与事务边界｜形式 code｜judgeKind mysql｜JD 能力项：数据建模、性能调优
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：144 个（元标签 46 / 考点缺口 98）**
-   要处理的是那 **98 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 46 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：143 个概念 / 144 种写法（元标签 0 / 考点缺口 143）**
+   要处理的是那 **143 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
 - `data-quality`（4 题：sys-design-rubric-0005, sys-design-rubric-0006, sys-design-rubric-0007…）
 - `privacy-by-design`（3 题：sys-design-rubric-0002, sys-design-rubric-0004, sys-design-rubric-0008）
 - `capacity-planning`（3 题：sys-rubric-0001, sys-rubric-0002, sys-rubric-0005）
+- `privacy-engineering`（3 题：sys-rubric-0003, sys-rubric-0004, sys-rubric-0008）
 - `gpu-scheduling`（2 题：sys-rubric-0001, sys-rubric-0006）
-- `llm-inference`（1 题：sys-rubric-0001）
-- `quantitative-reasoning`（1 题：sys-rubric-0001）
-- `gpu-utilization`（1 题：sys-rubric-0002）
-- `slo-tail-latency`（1 题：sys-rubric-0002）
-- …另有 90 个考点缺口（完整清单：`--orphan-audit-json`）
+- `hash-field-ttl`（1 题：sys-design-rubric-0001）
+- `stale-while-revalidate`（1 题：sys-design-rubric-0001）
+- `crdt-convergence`（1 题：sys-design-rubric-0002）
+- …另有 135 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `big-data`｜未覆盖 11 / 可判定 30 个考点
 
@@ -148,19 +148,19 @@
 - `data-governance-privacy` 隐私与数据治理｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：隐私工程、合规
 - `feature-store-pit` 特征平台与时点正确性｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：ML/数据平台协同
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：151 个（元标签 29 / 考点缺口 122）**
-   要处理的是那 **122 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 29 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：149 个概念 / 151 种写法（元标签 0 / 考点缺口 149）**
+   要处理的是那 **149 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
 - `pyspark`（7 题：bd-pyspark-0002, bd-pyspark-0003, bd-pyspark-0004…）
+- `spark-on-k8s`（4 题：bd-rubric-0009, bd-rubric-0010, bd-rubric-0011…）
+- `iceberg-v3`（3 题：bd-pyspark-0005, bd-rubric-0002, bd-rubric-0004）
 - `gaps-and-islands`（3 题：bd-pyspark-0006, bd-pyspark-0009, bd-scala-0001）
 - `spark-sql`（3 题：bd-pyspark-0009, bd-pyspark-0011, bd-pyspark-0012）
-- `idempotent-dedup`（2 题：bd-pyspark-0005, bd-pyspark-0011）
-- `late-data`（2 题：bd-pyspark-0006, bd-pyspark-0016）
-- `schema-evolution`（2 题：bd-pyspark-0011, bd-pyspark-0013）
-- `feature-store`（2 题：bd-pyspark-0015, bd-pyspark-0021）
-- `label-leakage`（2 题：bd-pyspark-0015, bd-pyspark-0021）
-- …另有 114 个考点缺口（完整清单：`--orphan-audit-json`）
+- `spark-4-2-nearest-by`（2 题：bd-pyspark-0002, bd-pyspark-0010）
+- `paimon-1.4`（2 题：bd-pyspark-0003, bd-rubric-0002）
+- `spark-4-ansi-default`（2 题：bd-pyspark-0004, bd-pyspark-0007）
+- …另有 141 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `agent-design`｜未覆盖 4 / 可判定 17 个考点
 
@@ -171,19 +171,19 @@
 - `agent-edge-cloud` 端云协同与隐私｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：隐私优先架构
 - `agent-product-loop` 任务定义与评估闭环｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：业务影响、跨职能协作
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：105 个（元标签 22 / 考点缺口 83）**
-   要处理的是那 **83 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 22 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：103 个概念 / 105 种写法（元标签 0 / 考点缺口 103）**
+   要处理的是那 **103 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 本类别没有。
 
+- `agent-runtime`（3 题：ag-rubric-0002, ag-rubric-0003, ag-rubric-0004）
+- `agent-ops`（3 题：ag-rubric-0003, ag-rubric-0004, ag-rubric-0005）
 - `decision-reproducibility`（3 题：ag-rubric-0008, ag-rubric-0010, ag-rubric-0012）
 - `privacy-engineering`（2 题：ag-design-rubric-0003, ag-design-rubric-0007）
 - `idempotency`（2 题：ag-rubric-0001, ag-rubric-0004）
-- `agent-runtime`（2 题：ag-rubric-0003, ag-rubric-0004）
 - `action-tiering`（2 题：ag-rubric-0012, ag-rubric-0014）
 - `kv-cache`（1 题：ag-design-rubric-0001）
-- `platform-governance`（1 题：ag-design-rubric-0002）
-- `data-governance`（1 题：ag-design-rubric-0004）
-- …另有 75 个考点缺口（完整清单：`--orphan-audit-json`）
+- `mcp`（1 题：ag-design-rubric-0002）
+- …另有 95 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `hot-interviews`｜未覆盖 8 / 可判定 18 个考点
 
@@ -198,19 +198,19 @@
 - `apple-device-integrity` 【Apple·后端】设备/账户认证与反滥用｜形式 code｜judgeKind java-junit｜JD 能力项：安全、服务契约
 - `unknown-domain-reasoning` 【两家·通用】"你没做过但要怎么负责"题｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：学习能力、技术判断
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：111 个（元标签 22 / 考点缺口 89）**
-   要处理的是那 **89 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 22 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：108 个概念 / 111 种写法（元标签 2 / 考点缺口 106）**
+   要处理的是那 **106 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）： 2 个。
 
+- `llm-inference`（3 题：hot-rubric-0001, hot-rubric-0007, hot-rubric-0008）
+- `experimentation`（2 题：hot-interviews-rubric-0001, hot-rubric-0014）
+- `marketplace-integrity`（2 题：hot-interviews-rubric-0002, hot-rubric-0005）
 - `data-quality`（2 题：hot-interviews-rubric-0003, hot-rubric-0006）
+- `privacy-engineering`（2 题：hot-interviews-rubric-0005, hot-rubric-0011）
 - `observability`（2 题：hot-rubric-0001, hot-rubric-0004）
 - `kv-cache`（2 题：hot-rubric-0002, hot-rubric-0007）
-- `feature-store`（1 题：hot-interviews-rubric-0001）
-- `experimentation`（1 题：hot-interviews-rubric-0001）
-- `booking-concurrency`（1 题：hot-interviews-rubric-0002）
-- `idempotency-retry`（1 题：hot-interviews-rubric-0002）
-- `agent-edge-cloud`（1 题：hot-interviews-rubric-0005）
-- …另有 81 个考点缺口（完整清单：`--orphan-audit-json`）
+- `data-contract`（2 题：hot-rubric-0006, hot-rubric-0009）
+- …另有 98 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ## JD 热度 vs 知识库缺口
 

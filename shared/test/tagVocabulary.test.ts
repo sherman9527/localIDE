@@ -239,3 +239,23 @@ describe('classifyOrphanTag（元标签 vs 考点缺口：报告口径的唯一�
     expect(classifyOrphanTag('company:')).toBe('company-meta');
   });
 });
+describe('评审 C1：折叠的目标必须先过 alias 表（真题里 `inference-gateway` 是 `llm-gateway` 组的 alias）', () => {
+  it('裸形自己是某个组的 alias 时，`modern:裸形` 要挂到那个组的规范名上，不许造出 a→b→c 的链', () => {
+    const registry: TagAliasGroup[] = [{ canonical: 'llm-gateway', aliases: ['inference-gateway'], reason: '同义' }];
+    const { groups, folded } = foldEraTagGroups(registry, ['inference-gateway', 'modern:inference-gateway', 'llm-gateway']);
+    expect(folded.map((f) => f.canonical), '不能挂到 inference-gateway 上 —— 那是个 alias').toEqual(['llm-gateway']);
+    const map = buildTagAliasMap(groups);
+    expect(canonicalTag('modern:inference-gateway', map), '一条查表就该到终点，两跳的链没人能从界面上看出来').toBe('llm-gateway');
+    // 反面：旧写法（只查 canonicalByLower）会把这一对挂到 alias 上，于是同一考点占两个下拉位
+    expect(map.has('inference-gateway'), 'alias 不该被折叠层再登记一次成为规范名').toBe(true);
+    expect(map.get('inference-gateway')).toBe('llm-gateway');
+  });
+
+  it('某组已经拿 `modern:x` 当规范名时，折叠不越权（评审 C1b：否则会把那一组的手写判决劈成两半）', () => {
+    const registry: TagAliasGroup[] = [
+      { canonical: 'modern:mysql8-window-functions', aliases: ['modern:mysql8-window'], reason: '同一概念的两种写法，与不带前缀的 window-functions 是两档，永不互并' },
+    ];
+    const { folded } = foldEraTagGroups(registry, ['modern:mysql8-window-functions', 'mysql8-window-functions']);
+    expect(folded, '裸形出现了也不许把这条挂过去 —— 那等于改写手写裁决').toEqual([]);
+  });
+});

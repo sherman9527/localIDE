@@ -101,7 +101,7 @@ export async function computeKnowledgeReport({ knowledgeDir = process.env.ARENA_
       readmeMissing: kb.readmeMissing,
     });
     const orphans = findOrphanTags(shared, catVisible, kb.points);
-    detail.push({ kb, covered, uncovered, untrackable, derivedOnly, auditPoints, orphanTags: orphans.tags, orphanMeta: orphans.meta, orphanPointGaps: orphans.pointGaps });
+    detail.push({ kb, covered, uncovered, untrackable, derivedOnly, auditPoints, orphanTags: orphans.tags, orphanSpellings: orphans.spellings, orphanMeta: orphans.meta, orphanPointGaps: orphans.pointGaps });
   }
 
   const jdGaps = await findJdGaps(knowledge, shared);
@@ -136,6 +136,7 @@ export function buildOrphanAudit(report) {
       derivedOnly: d.derivedOnly.map((x) => x.point.tag),
       ratio: r.ratio,
       orphans,
+      orphanSpellings: d.orphanSpellings,
       orphanTotal: orphans.length,
       orphanMeta: meta.length,
       orphanPointGaps: pointGaps.length,
@@ -170,9 +171,30 @@ function findOrphanTags(shared, catQuestions, points) {
       if (!known.has(stripped)) orphans.set(raw, [...(orphans.get(raw) ?? []), q.id]);
     }
   }
-  const tags = [...orphans.entries()].map(([tag, ids]) => ({ tag, ids })).sort((a, b) => b.ids.length - a.ids.length);
+  // ⚠ 按**剥掉时代前缀之后的形**去重，再分类（评审 I1）：`modern:x` 与 `x` 是同一个考点，
+  // 分两条报会把同一件事催两次；而"带着 `modern:` 前缀"本身**不构成"这是元标签"** ——
+  // 剥完之后矩阵里仍然没有对应行，那就是一个真缺口穿着标记的外衣。
+  // 只有 `company:*` 与纯公司名才是真的元标签（出处/公司维度，本来就不该有考点行）。
+  const byConcept = new Map();
+  for (const [tag, ids] of orphans.entries()) {
+    const eraPrefix = shared.TAG_ERA_PREFIXES.find((x) => tag.toLowerCase().startsWith(x.toLowerCase()));
+    const stripped = eraPrefix ? tag.toLowerCase().slice(eraPrefix.length) : tag.toLowerCase();
+    const entry = byConcept.get(stripped) ?? { tag: stripped, spellings: new Set(), ids: new Set() };
+    entry.spellings.add(tag);
+    for (const id of ids) entry.ids.add(id);
+    byConcept.set(stripped, entry);
+  }
+  const tags = [...byConcept.values()]
+    .map((e) => ({ tag: e.tag, spellings: [...e.spellings].sort(), ids: [...e.ids].sort() }))
+    .sort((a, b) => b.ids.length - a.ids.length);
   const isMeta = (t) => shared.isMetaOrphanTag(t);
-  return { tags, meta: tags.filter((t) => isMeta(t.tag)), pointGaps: tags.filter((t) => !isMeta(t.tag)) };
+  return {
+    tags,
+    // 写法数与概念数都报出去：只报一个的话，"92 种写法"与"74 个概念"会被读成同一个东西
+    spellings: orphans.size,
+    meta: tags.filter((t) => isMeta(t.tag)),
+    pointGaps: tags.filter((t) => !isMeta(t.tag)),
+  };
 }
 
 /** JD 里被反复提到、但知识库矩阵里找不到对应考点的技术栈 —— 需求 19"先整理知识库再出题"的缺口信号。 */
@@ -224,7 +246,7 @@ export function renderKnowledgeIndex({ rows, detail, jdGaps, parseErrors, hidden
     `> 输入：\`content/knowledge/<类别>/README.md\` 考点矩阵（${categories.length} 类）+ 题库 ${total} 题（其中软删除 ${hiddenCount} 题不计入"已出题"）。`,
     '> 覆盖判定：题目 `tags[]`（去掉时代前缀，前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）命中矩阵第 1 列反引号里的 tag 即算已覆盖；',
     '> 未写反引号 tag 的行列进「无显式 tag（无法判定）」单独统计，其中**靠标签派生 slug 撞上的**另列一档（改中文名就会变，脆）。',
-    '> 脱钩标签分两个口径：**元标签**（时代标记 / 出处标记 / 纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；',
+    '> 脱钩标签分两个口径：**元标签**（只有 `company:*` 前缀与纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；⚠ 带 `modern:` 的脱钩**算缺口不算元**：剥掉前缀之后矩阵里仍然没有那一行，那就是一个真考点穿着标记的外衣（评审 I1）；',
     '> **考点缺口**才是"该给矩阵补一行"的可行动数 —— 只看合起来的 N 会被元标签撑到失真。',
     '',
     '## 类别总览',
@@ -235,20 +257,21 @@ export function renderKnowledgeIndex({ rows, detail, jdGaps, parseErrors, hidden
   for (const r of rows) {
     const d = detail.find((x) => x.kb.category === r.category);
     lines.push(
-      `| [\`${r.category}\`](./${r.category}/README.md) ${r.label} | ${r.points} | ${r.codePoints} | ${r.rubricPoints} | ${r.untrackable} | ${r.derivedOnly} | [${r.topics}](./${r.category}/README.md#语料文件) | ${r.questions} | ${r.code} | ${r.rubric} | ${r.covered} | ${r.uncovered} | ${r.ratio} | ${d ? d.orphanTags.length : 0}（${d ? d.orphanMeta.length : 0}/${d ? d.orphanPointGaps.length : 0}） | ${r.kinds} |`,
+      `| [\`${r.category}\`](./${r.category}/README.md) ${r.label} | ${r.points} | ${r.codePoints} | ${r.rubricPoints} | ${r.untrackable} | ${r.derivedOnly} | [${r.topics}](./${r.category}/README.md#语料文件) | ${r.questions} | ${r.code} | ${r.rubric} | ${r.covered} | ${r.uncovered} | ${r.ratio} | ${d ? d.orphanTags.length : 0}（元 ${d ? d.orphanMeta.length : 0}/缺口 ${d ? d.orphanPointGaps.length : 0}；写法 ${d ? d.orphanSpellings : 0}） | ${r.kinds} |`,
     );
   }
   const totalPoints = rows.reduce((s, r) => s + r.points, 0);
   const totalCovered = rows.reduce((s, r) => s + r.covered, 0);
   const totalTrackable = rows.reduce((s, r) => s + r.covered + r.uncovered, 0);
   const totalOrphans = detail.reduce((s, d) => s + d.orphanTags.length, 0);
+  const totalSpellings = detail.reduce((s, d) => s + (d.orphanSpellings ?? 0), 0);
   const totalMeta = detail.reduce((s, d) => s + d.orphanMeta.length, 0);
   lines.push('');
   lines.push(
     `**合计**：${totalPoints} 个考点，其中 ${totalTrackable} 个可机器判定覆盖，已覆盖 ${totalCovered} 个（${totalTrackable ? Math.round((totalCovered / totalTrackable) * 100) : 0}%）；题库 ${total} 题。`,
   );
   lines.push(
-    `**脱钩标签合计**：${totalOrphans} 个 = 元标签 ${totalMeta} 个 + **考点缺口 ${totalOrphans - totalMeta} 个**（后者才是"该补一行矩阵"的清单）。`,
+    `**脱钩考点合计**：${totalOrphans} 个概念（${totalSpellings} 种写法）= 元标签 ${totalMeta} 个 + **考点缺口 ${totalOrphans - totalMeta} 个**（后者才是"该补一行矩阵"的清单）。`,
   );
   if (parseErrors.length > 0) {
     lines.push('');
@@ -302,12 +325,12 @@ export function renderKnowledgeIndex({ rows, detail, jdGaps, parseErrors, hidden
     if (d.orphanTags.length > 0) {
       lines.push(
         '',
-        `**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：${d.orphanTags.length} 个（元标签 ${d.orphanMeta.length} / 考点缺口 ${d.orphanPointGaps.length}）**`,
+        `**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：${d.orphanTags.length} 个概念 / ${d.orphanSpellings} 种写法（元标签 ${d.orphanMeta.length} / 考点缺口 ${d.orphanPointGaps.length}）**`,
       );
       lines.push(
         `   要处理的是那 **${d.orphanPointGaps.length} 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。`,
       );
-      lines.push('   元标签不参与催补（时代/出处标记本来就长在题面上）：' + (d.orphanMeta.length ? ` \`modern:*\`/\`company:*\`/公司名 ${d.orphanMeta.length} 个。` : ' 本类别没有。'));
+      lines.push('   元标签不参与催补（**只有出处/公司维度才算**：`company:*` 前缀与纯公司名）：' + (d.orphanMeta.length ? ` ${d.orphanMeta.length} 个。` : ' 本类别没有。'));
       const listed = d.orphanPointGaps.length > 0 ? d.orphanPointGaps : d.orphanTags;
       lines.push('', listed.slice(0, 8).map((o) => `- \`${o.tag}\`（${o.ids.length} 题：${o.ids.slice(0, 3).join(', ')}${o.ids.length > 3 ? '…' : ''}）`).join('\n'));
       if (listed.length > 8) lines.push(`- …另有 ${listed.length - 8} 个考点缺口（完整清单：\`--orphan-audit-json\`）`);

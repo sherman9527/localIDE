@@ -12,6 +12,7 @@ import {
   foldEraTagGroups,
   publicBankRow,
   publicQuestion,
+  tagMatches,
 } from '@arena/shared';
 import { loadBank } from '../../src/bank/loader.js';
 import { statementHash } from '../../src/bank/ingest.js';
@@ -574,5 +575,42 @@ describe('时代标记折叠（N-17 第二次量出来的那一族：modern:x �
       expect(cntB.get(into), `${name}(${cntA.get(name)}) 并进 ${into} 时题数丢了`).toBeGreaterThanOrEqual(cntA.get(name) ?? 0);
     }
     console.log(`[时代折叠] 出现 ≥${TAG_FACET_MIN_COUNT} 次的筛选项：只用手写词表 ${a.size} 个 → 叠上时代折叠 ${b.size} 个`);
+  });
+});
+describe('交付出去的那份词表要整体合法（评审 C1：旧闸门只查手写文件，折出来的组没人管）', () => {
+  const rawTags = new Set(bank.questions.flatMap((q) => q.tags));
+  const { groups: effective } = foldEraTagGroups(tagAliases, rawTags);
+  const map = buildTagAliasMap(effective);
+
+  it('合起来的词表里没有链、没有 alias 同时当规范名、没有 alias 属于两组', () => {
+    const asCanonical = new Set(effective.map((g) => g.canonical.toLowerCase()));
+    const seen = new Map<string, string>();
+    for (const g of effective) {
+      for (const a of g.aliases) {
+        const lower = a.toLowerCase();
+        expect(asCanonical.has(lower), `${a} 既是某组的 alias 又是另一组的规范名 ⇒ 查表要跳两跳才对，界面上没人看得出来`).toBe(false);
+        const prev = seen.get(lower);
+        expect(prev === undefined || prev === g.canonical, `${a} 属于两组（${prev} / ${g.canonical}）`).toBe(true);
+        seen.set(lower, g.canonical);
+      }
+    }
+  });
+
+  it('下拉里印的题数 === 点下去筛到的行数，对**每一个**规范名都成立（C1 的病灶正是这两者不一致）', () => {
+    const counts = countQuestionsByCanonicalTag(bank.questions.map((q) => q.tags), map);
+    const bad: string[] = [];
+    for (const [name, count] of counts) {
+      const rows = bank.questions.filter((q) => tagMatches(q.tags, name, map)).length;
+      if (rows !== count) bad.push(`${name}：印 ${count}、筛到 ${rows}`);
+    }
+    expect(bad, `facet 的 count 与筛选结果不一致的规范名（一个考点两格、或数字骗人）：\n  ${bad.join('\n  ')}`).toEqual([]);
+  });
+
+  it('每一个规范名都真的能筛到自己（不许存在"有 count 但点下去 0 行"的幽灵项）', () => {
+    const counts = countQuestionsByCanonicalTag(bank.questions.map((q) => q.tags), map);
+    for (const [name, count] of counts) {
+      if (count < TAG_FACET_MIN_COUNT) continue;
+      expect(bank.questions.some((q) => tagMatches(q.tags, name, map)), `下拉项 ${name} 点下去一行都没有`).toBe(true);
+    }
   });
 });
