@@ -1327,3 +1327,28 @@
   会把会话笔记烤进本地镜像）——**它改的是镜像构建，控制者要在这个 HEAD 之后再跑一次容器档收尾**。
   ｜**仍未做/未测**：spec §11 的镜像增量与常驻内存两项**未测**（照写"未测"，没有数字就不编）；
   Jupyter 无守护 → WI-93；notebook 内嵌已交付 → 见下方 WI-94（COMPLETED）。
+
+- [x] WI-90 **企业级 PySpark 教程 notebook（子项目 B 第一轮 3 篇）**｜计划 `docs/superpowers/plans/2026-10-09-pyspark-tutorial-notebooks-wi90.md`，五档全部收口，2026-10-09～10-10
+  交付：`content/notebooks/01-skew-and-hot-keys.ipynb`（倾斜与热 key：加盐两阶段 + 广播绕开 join shuffle +
+  "为什么 skew hint 救不了聚合"推到机制层）、`02-small-files-and-partitioning.ipynb`（落盘文件数 = **非空 writer 数**、
+  读侧打包由 `maxPartitionBytes` 与**加性**的 `openCostInBytes` 决定、`coalesce` 不能提升并行度、
+  `partitionOverwriteMode` 的 static 一次清库）、`03-reading-the-plan-and-aqe.ipynb`（计划地图 +
+  "合并读侧的是 `coalescePartitions` 那一个子开关，不是 AQE 这个大开关"）。三篇都不带 outputs。
+  闸门：`server/test/notebooks/tutorials.test.ts` + 注册表 `tutorial-claims.ts`（住在被测文件**外面**）。
+  两层判据 + 三条牙：执行层（零 `output_type=error` 且 `metadata.kernelspec.name === arena-pyspark`，
+  写成 `python3` 照样跑得绿而那正是红线①的坏形状）、结论层（14 条 `WI90[篇][slug] OK` 与注册表**双向相等**）、
+  打 marker 那个 cell 必须有**语句级** `assert`（堵"删 assert 留 print"）、末 cell 必须 `spark.stop()`、
+  `00-` 前缀是封闭集合（新写一篇叫 `00-*` 会红）。
+  | 验证 | 命令 | 结果 |
+  | --- | --- | --- |
+  | 容器全量 | `./start.sh --verify` | 末行 `✓ verify 全部通过`；教程阶段出现**恰好 1 次**；`教程 notebook：14 passed / 0 skipped / 14 total ✓`；kernel+embed `Tests 53 passed (53)`；矩阵 `代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道` |
+  | 宿主 | `npm run verify:fast` | `✓ verify 全部通过`（`tutorials 14 tests \| 4 skipped`、`kernel 35 \| 11 skipped`、`embed 18`） |
+  | E2E | `npm run e2e` | `E2E_EXIT=0`，74 passed |
+  | 真浏览器 | `#/notebook` 里点开篇 1 并连跑 cell | prompt `[1]:`、stdout 出现 `WI90[…][hot-key-dominates] OK` 与 `[salting-halves-max-partition] OK`，**数字与容器档一字不差**（0.4754→0.175，降到 36.8%）⇒ "可运行"两条路（nbconvert / 页面经 Jupyter Server）都验过 |
+  | 实测用时 | vitest per-test duration（`data/verify-tutorials.json`） | 篇 1 26.31s / 篇 2 56.31s / 篇 3 18.98s，合计 ≈101.6s（目标 ≤90s/篇、硬预算 120s） |
+  | 破坏性验证 | 三篇各自 + 闸门自身 | 篇 1 四条、篇 2 四条、篇 3 四条、闸门十条形状变异，全部实测 `EXIT=1` 后还原转绿 |
+  还掉的债：教程闸门接进 `assert-ran.mjs --require-no-skips`（"整片 skip 也算失败"），`verify-gate: manual`
+  不再是免检金牌（必须独立成行且指着真实存在、确实认领本文件的阶段）。
+  **仍然敞着的口子（如实写）**：一条成立的 manual 申报仍可为自己免检（要堵得让"阶段集合"本身进判据）；
+  `--exclude` 的值被 `verify-coverage` 当成认领而不是排除（已记 A2）；`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象。
+  教训与全表见 `memo.md` 里程碑 BE。后续批次（v2/v3 那 9 类主题）**不在本 WI 里**，要开新 WI。

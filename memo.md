@@ -4169,3 +4169,42 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
 **第二发（同一天，控制端接着做）**：量完第一发发现真正的大头不是拼写变体而是**时代前缀** —— `privacy-engineering`(2) 与 `modern:privacy-engineering`(10) 被拆成两个下拉项、各自都不到门槛，而仓库自己的两条读路径早就把它们当一个考点。⇒ 加一条**条件式**折叠规则（`foldEraTagGroups`，只在裸形真的存在时折），放在唯一看得见全库的那一层（`listBank`），折出来的组与手写组走同一张表 ⇒ 三条读路径仍然同源、客户端拿到的还是响应里那份 `tagGroups`。数：978 → 961 → **941** 种写法，facet 82 → 89 → **94**。⚠ **我自己错在哪**：派发词写了"不许跨 `modern:` 前缀合并"，那是照字面保护一个其实是分裂的口径 —— 判据把这条错误约束钉住之前，是仓库里另外两处代码先反对它。**约束与既有实现冲突时要先去查既有实现为什么那样**。破坏性：去掉条件式（一律剥前缀）⇒ 4 条红；把折叠整体去掉 ⇒ "折到了东西"与三条 api 行为判据红。
 
 **下一步**：N-11 的另一半（索引把元标签与考点标签分开统计 ⇒ 只定 `frontend` 那 20 行且只给新题用 ⇒ 老题不回填）。
+
+
+---
+
+## 里程碑 BP：N-11 三发 —— 报表先分口径、frontend 一类定名、生成物自己带新鲜度闸门（2026-10-20）
+
+**做了什么**（照板上 2026-09-23 定的顺序，一步没越）
+- **① 分口径**（`306efa0`）：`content/knowledge/INDEX.md` 的"脱钩"过去把**元标签**与**考点标签**混着数，
+  于是一个 92 的数里真正可行动的只有 74 —— 报表现在两个数都印并点名"缺口才是可行动数"。
+  实测：frontend 92=元18/缺口74、algorithms 245=元40/缺口205、sql 216=元39/缺口177、system-design 144=元46/缺口98、
+  big-data 151=元29/缺口122、agent-design 105=元22/缺口83、hot-interviews 111=元22/缺口89（全库脱钩 1064，元标签 216）。
+  规则收成一份真相：`shared/src/tagVocabulary.ts` 加 `TAG_META_PREFIXES` 与 `classifyOrphanTag()`，
+  `shared/src/taxonomy.ts` 加 `QUESTION_COMPANIES`（原来只活在 `content.test.ts` 的 `COMPANY_FLOORS` 键里 —— 脚本不能 import 测试）。
+  **`classic:` 故意没加**：题库今天一个都没有，加了就是猜规则。
+- **② frontend 定名**（`58fa9f2`）：矩阵 20 行补上 `中文名（\`tag-id\`）` ⇒ 该类别覆盖率从**算不出的 `—`** 变成 **13/20 = 65%**。
+  20 个名字里 **13 个沿用题库已有写法**（其中 6 个靠 N-17 的 `modern:` 折叠才命中）、**7 个新造**。
+  **`content/questions/**` 一字节未动**（板上写的是"命名用满一个季度再谈回填"），每个 commit 前都看了 `git status`。
+- **③ 生成物自己带闸门**（`1da72ff`）：`renderKnowledgeIndex(report, {now})` 改成纯函数 + 只读缝 `--print-markdown --timestamp <ISO>`，
+  `knowledge-index.test.ts` 拿提交里那一行「生成时间」重算再**逐字节**比 —— 过去 `kb:index` 不在任何阶段里，
+  `INDEX.md` 是手提交的，历史上真漂过一次（`d01bdfc`）。**判据不碰 git**（`.dockerignore` 排掉 `.git`，
+  任何 shell-out 到 git 的判据在容器档必然空转 —— N-18 记过这笔）。
+
+**验证**
+- 三发各自 `npm run verify:fast` → 0（日志 `verify-fast-commit{1,2,3}.log`）；容器档见"已知问题"。
+- 破坏性：给 `algorithms` 一行补 tag 而不重跑 `kb:index` ⇒ 新鲜度闸门红；换时间戳重算 ⇒ 必然不同**且只差第 4 行**（防"恒等"的对照）；
+  删掉"仅派生 slug 命中"那一档 ⇒ 那条夹具判据红（兜底存在而今天一次没命中，"0"本身不是证据，所以用临时矩阵真命中一次再判它落对档）。
+- 字节对照：重新生成的 INDEX.md 与提交的那份 `cmp` 相等（改这发之前两者只差时间戳行 ⇒ 基线干净）。
+
+**已知问题**
+- **派发给这个任务的第三个 agent 也在 150 轮上限处断了**，断点是"容器档跑完 → 写报告"之间：
+  板上条目与 `INDEX.md` 已提交，但容器档 `VERIFY_EXIT` 没被看到、`report.md` 没写。
+  ⇒ 同一轮里这已经是第三次（Task 5 修复轮、N-17、N-11）。**教训不是"下次写短点"，是派发粒度**：
+  一个 agent 一次只该领"一个 commit 的量"，容器档与报告由控制端跑。
+- 7 个新造的 tag 名是**会给下一个季度定名的东西**，值得人过一眼（`ts-strict-compilation`、`conditional-types`、`react-compiler`、
+  `numeric-text-time-boundaries`、`flaky-test-governance`、`esm-cjs-interop`、`server-components`）。
+  命名错了比"算不出覆盖率"更糟 —— 报表看着有数，其实是编的（板上 2026-09-23 那句原话）。
+
+**下一步**：`algorithms` / `sql` 两类同法定名（各 20/21 行），但要等 frontend 这批命名被真用过一次再动；
+老题回填仍按板上的"一个季度"条件挂着。

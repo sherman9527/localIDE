@@ -18,9 +18,73 @@
 - **三档验证的当前读数**（2026-10-20，WI-91b Task 5 同批镜像 `534dfeff1599`/2.58GB）：`npm run verify:fast` EXIT=0（宿主 ~2.5 分）；`./start.sh --verify` EXIT=0（容器：单测 672 passed / 11 skipped，判题矩阵 158 可判 / 跳过 0，教程档 17 passed / 0 skipped，**Scala 档 11 passed / 0 skipped**）；`npm run e2e` 74 passed。
 - **最近这批最要紧的四条**：WI-113 `.env` 的权限抄写改走 .NET（这台机器上 `Get-Acl` 因 PS 7 污染根本不可用）；WI-114 整轮 verify 里"仓库真 `.env` 没被动过"有了哨兵；WI-93 Jupyter 掉了会自己回来（有上限的重启循环）；N-18 题库"只增不减"的基线在容器里从"死"改成走镜像烤入的清单。
 - **`## TODO` 是空的**：待办要么做完、要么进"已决定"。新想法进 `## 新增需求池`，别在 TODO 挂长期项（WI-56 就是这么收回来的）。
-- **历史在哪**：本格只留最近 20 条；更早的 91 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
+- **历史在哪**：本格只留最近 20 条；更早的 92 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
 
 ## COMPLETED
+- [x] N-11（第一发＋第二发＋第三发）**出题 tags 与知识矩阵脱钩：索引分口径 → frontend 一类定名 → 报表新鲜度闸门**（2026-10-20，`306efa0` / `58fa9f2` / `1da72ff`）
+  ｜**照板上 2026-09-23 定的顺序做，一步不越**：① 报表把**元标签**与**考点标签**分开统计（纯口径，不动题库）；
+  ② 只挑 `frontend` 一类把 20 行考点定名，**只给新题用**；③ **老题 tags 一字节没回填**（板上写的是"等命名用满一个季度再定"，
+  所以这一发里 `content/questions/**` 的 `git status` 必须是空的 —— 每个 commit 前都看过）。
+  ｜**① 的分口径读数（2026-10-20 实测，改前那个 N 是失真数）**：`frontend 92 = 元 18 / 缺口 74`、
+  `algorithms 245 = 元 40 / 缺口 205`、`sql 216 = 元 39 / 缺口 177`、`system-design 144 = 元 46 / 缺口 98`、
+  `big-data 151 = 元 29 / 缺口 122`、`agent-design 105 = 元 22 / 缺口 83`、`hot-interviews 111 = 元 22 / 缺口 89`
+  （元 = 时代前缀 + `company:` 前缀 + 纯公司名；全库脱钩 1064 个里元标签 216 个）。报表两个数都印，**并点名缺口才是可行动数**。
+  ｜规则收成一份真相（这是本仓库反复付账的"第四份字面量"）：`shared/src/tagVocabulary.ts` 新增 `TAG_META_PREFIXES = ['company:']`
+  与 `classifyOrphanTag()`；`shared/src/taxonomy.ts` 新增 `QUESTION_COMPANIES`（原来只在 `content.test.ts` 的 `COMPANY_FLOORS` 键里）——
+  **`classic:` 故意没加**（题库今天一个都没有，那个 `classic:true` 是测试夹具的形状 ⇒ 加了就是猜规则）。
+  ｜**② 的结果**：`frontend` 覆盖率从**算不出来的 `—`** 变成 **13/20 = 65%**；20 个 tag 里 **13 个是题库已有的写法**
+  （`discriminated-union`、`runtime-validation`、`use-optimistic`、`render-performance`、`data-fetching`、`error-boundary`、`unicode`
+  这 7 个是裸形，`react19-actions`/`react19-use`/`react19-transition`/`react19-activity`/`use-effect-event`/`use-sync-external-store`
+  这 6 个靠 `modern:` 折叠命中），**7 个是新造**（`ts-strict-compilation`、`conditional-types`、`react-compiler`、
+  `numeric-text-time-boundaries`、`flaky-test-governance`、`esm-cjs-interop`、`server-components`）—— 新造的那七个是**会给下一个季度定名的东西**，
+  见本条末尾"要人点头的命名"。frontend 脱钩数因此 92 → 79（元 18 → 12、缺口 74 → 67）。
+  ｜**派生 slug 那一档**（覆盖判定保留了兜底，但单独报"仅靠切词命中"的行）：今天**七类全是 0** —— 兜底存在而一次没命中，
+  所以"0"本身不是证据 ⇒ 闸门用一份**临时矩阵**真命中一次（`Data Fetching` → slug `data-fetching` → 真题 2 道）再判它落到 `derivedOnly`
+  而不是 `covered`，反面是同一行写成 `中文名（`tag-id`）` 就换档。破坏性：删掉那一档 ⇒ 这条夹具判据红。
+  ｜**③ 的闸门**：`renderKnowledgeIndex(report, { now })` 改成纯函数（无 I/O、无 `new Date()`），写盘只剩 `compileKnowledgeIndex()` 一处；
+  新增只读缝 `--print-markdown --timestamp <ISO>`，`knowledge-index.test.ts` 拿**提交里那一行「生成时间」**重算一遍再**逐字节**比 ——
+  两侧都在工作树里 ⇒ **不用 git**（`.dockerignore` 排掉 `.git`，任何 shelling out 到 git 的判据在容器档必然空转，N-18 记过这笔）。
+  实测：`cmp` 重新生成的那份与 `INDEX.md` **字节相等**（改这一发之前两者只差时间戳行，所以基线是干净的）；
+  换时间戳重算 ⇒ 必然不同**且只差第 4 行**（这条是对照，防"恒等"）。破坏性两读：给 `algorithms` 一行补 tag 不重跑 `kb:index` ⇒ 红；
+  手改 `INDEX.md` 里一个数 ⇒ 红；`--timestamp` 打非 ISO ⇒ 退出 2（不许悄悄退回 now()，那会让比对永远"差一行时间戳"）。
+  ｜**两条只读缝都不许写文件**（`--orphan-audit-json` / `--print-markdown`），且**未知参数一律拒绝**：
+  第一发跑到一半真撞上 —— 那时还没有这条缝，测试叫一声 `--orphan-audit-json` 就把 `content/knowledge/INDEX.md` **重写了一遍**
+  （`content/` 是 bind mount，容器里也一样）。"报表过期"这个故障会被验证过程自己修好，正是本仓库点名的"闸门被自己的跑法喂绿"。
+  现在两条判据盯着：跑完审计文件必须逐字节没变、打错的 `--orphan-audit-jsn` 必须非 0 退出且点名是哪个参数。
+  ｜**没动阈值**：`content.test.ts` 的 `counted > 20`（语料篇数）与本发无关（它判的是目录里的 .md 篇数，不是矩阵行数）；
+  `COMPANY_FLOORS` 六个地板数字一字未改，只是改成从 `QUESTION_COMPANIES` 出发数题，并新增一条"清单只有一份"的判据。
+  受影响的是**报表自身的读数**，都重测了：可判定考点 87 → **107**、已覆盖 61 → **74**、全库脱钩合计 1064 = 元 216 + 缺口 848。
+  ｜验证：宿主每个 commit 都过 `npm run verify:fast` → `✓ verify 全部通过`（pre-commit hook 又各跑一遍，三笔全绿）；
+  新增用例 `shared/test/tagVocabulary.test.ts` +7（26 passed）、`server/test/regression/knowledge-index.test.ts` 15 条、
+  `server/test/bank/knowledge-matrix.test.ts` 4 条；`npm run typecheck` EXIT=0；
+  容器 `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` → **`VERIFY_EXIT=0`**、判题矩阵 `跳过（栈不可用）0 道`（读数以该轮日志为准）。
+  ｜**要人点头的命名（新造的七个里我最没把握的五个）**：`numeric-text-time-boundaries`（这行同时管数值/文本/时区，
+  名字里的 text 与下一行的 `unicode` 语义重叠）、`flaky-test-governance`（"可判分性"是不是该另起 `test-judgability`）、
+  `esm-cjs-interop`（漏了 tree-shaking/产物体积那一半）、`ts-strict-compilation`（与已有 `modern:ts-strict-modeling` 只差一个词，
+  下一个人很可能把两行混用）、`conditional-types`（太泛，将来 `agent-design` 之类会不会抢同名）。
+  改名成本现在最低：矩阵行是**唯一**被消费的对方，老题没回填 ⇒ 没有任何题会因为改名而变脱钩。
+  ｜**`.superpowers/**` 不在 eslint 的 ignores 里**：一次性 helper 脚本（我用它做那 20 处精确替换）落在里面会让 `npm run verify:fast` 的
+  lint 阶段红三条 `no-undef`。用完就删；要留就放 `data/`（已 ignore）。另记一次自己造的错：破坏性还原用错了快照 ——
+  我拿的是**改之前**的 `.orig`，`md5 一致地`把当天新写的 `classifyOrphanTag` 一起抹掉了；
+  教训是**动手之前先把"当前正确版本"另存 `.good`**，md5 校的是它而不是初始备份。
+  ｜原文（需求池里的整条，一字未改）：
+  - **N-11 出题 tags 与知识矩阵脱钩的面积在扩大**（本批实测，不是推测）：`content/knowledge/INDEX.md`
+    把"题目 tag 在矩阵里找不到对应考点"列为独立一档，本批新增的 `llm-inference`、`modern:inference-gateway`
+    都落进这一档；`frontend` 类别 20 行考点**根本没写反引号 tag**，导致该类别覆盖率算不出来（表里是"—"）。
+    后果：`kb:index` 的"未覆盖考点"这份"该出什么题"的答案对这几类是失灵的，加题越多加得越没有方向。
+    ｜**2026-09-23 复核后决定暂不做，理由记在这里免得下次重新发现**：
+    实际工作量不是"给矩阵补 tag"。`frontend`/`algorithms`/`sql` 三类共 60 行考点没 tag，
+    要让覆盖率可判定必须**两边同时对齐**：矩阵行加 `中文名（\`tag-id\`）` + 已入库的 16+37+? 道题
+    的 `tags[]` 里得出现同样的 tag。后者是改动**已入库题**（撞红线 C5 的"永不覆盖"），
+    而且 tag 命名是一次性定 60 个术语的取舍 —— 定错了比"算不出覆盖率"更糟（报表看着有数，其实是编的）。
+    另外"脱钩 62/148/102…"那个数被设计性地虚高：`modern:*`、`classic:*`、公司名这类元标签
+    本来就不该有考点行，`compile-knowledge.mjs` 只剥 `modern:` 前缀。
+    ｜**公司维度已经不用 `grep` 了**：`content.test.ts` 的"公司维度"闸门每次报每家题数、
+    可机器判数与最弱类别（WI-66），所以这里剩下的只有"考点 tag"那一半。
+    ｜真要做，顺序应当是：① 先让索引把"元标签"与"考点标签"分开统计（不改题库，纯报告口径）；
+    ② 再挑**一个**类别（建议 `frontend`，16 题最少）把 20 行 tag 定下来并只给新题用；
+    ③ 老题的 tags 要不要回填，等 ② 的命名被用过一个季度再定。
+
 - [x] N-17（另一半）**标签词表的同义归并**（2026-10-20；筛选层那半早已由 WI-85 落地，这里做的是词表本身）
   ｜**做法是加一层，不是改数据**：`content/tags-aliases.json`（canonical + aliases + 每组一句"为什么是同一件事"）只在**读/聚合时**生效 —— 已入库题目的 `tags[]` **一字节未动**（`Question` 是 `.strict()`，加字段会同时撞 C5 与出处指纹：`check_provenance.py` 的指纹覆盖除 `id`/`schemaVersion`/`source.ingestedAt`/`case.visible` 外的每一个键）。纯函数住 `shared/src/tagVocabulary.ts`，服务端 facet 求和、服务端 `tag=` 筛选、客户端筛选**三处调同一个 `tagMatches`**（题库页除关键词外全在浏览器里筛，判据不随响应下来就会两边各猜一次）；词表本身合不合法由 `content.test.ts` 用真文件判。  ｜**实测（2026-10-20）**：全库不同写法 **978 → 961**（手写词表 17 组）→ **941**（再叠时代折叠 21 对），能进下拉的 facet（≥3 次）**82 → 89 → 94**。归并的价值不在"数字变小"，在**同一考点的几种写法合起来才配占一个下拉位**（分开数谁都不到门槛）。  ｜**故意没做的事**：① 不合并宽↔窄（`hooks` 与 `react-hooks` 是两个考点，不是同义词）；② `classic:` 与 `company:` 这类前缀**不折** —— 前者今天库里一个都没有（那个 `classic:true` 是测试夹具的形状），加进来就是"为了对称猜一条规则"；③ **没有裸形同伴的 `modern:` 标签一个字都不改**：172 个里只有 21 个有裸形同伴，一律剥前缀会白改 151 个用户看得见的 facet 名字却什么也没合并（破坏性：把条件去掉 ⇒ 4 条判据红，日志 `destructive-era-unconditional.log`）。⚠ 这一条是**派发词的裁决失误**：我当初写的是"不许跨 `modern:` 前缀合并"，而仓库自己的两条读路径（`scripts/bank/kit.mjs` 的 `x:tag` 后缀匹配、`compile-knowledge.mjs` 剥 `modern:`）早就把它们当一个考点 —— 只有 facet 不认。规则补在 facet 这一层，且做成**条件式**而不是手写 21 组别名（新配对自动生效，不靠人记得加）。③ 卡片与详情页的标签徽章**仍显示题目里存的原词** —— 数据没被改过，界面就不许假装改过；下拉里是规范名，所以"筛到的题挂着一个写法不同的徽章"是**有意的**，页面提示里写清了这一点（那句提示的位置有 E2E 判据，别挪）。  ｜验证：`npx vitest run shared/test/tagVocabulary.test.ts server/test/bank/content.test.ts server/test/api/api.test.ts web/test/bank.test.tsx` → **135 passed / 3 skipped**（其中三条 `[时代折叠]` 读数直接打印在报告里：折了 21 对、172 个 `modern:` 里 151 个保持原名、筛选项 89 → 94）；宿主 `npm run verify:fast` → `✓ verify 全部通过`；容器 `MIRROR_APT=… ./start.sh --verify` → **`VERIFY_EXIT=0`**、矩阵 `158 道可判 / 跳过（栈不可用）0 道`；注册表判据的破坏性读数（自指 / 成链 / 一个别名进两组 / 别名指向不存在的题 / 空引一组）见 `.superpowers/sdd/n17-tag-aliases/`。  ｜原文（需求池里的整条，一字未改）：
   - **N-17 题库的"标签"下拉有 963 个选项**（2026-09-24 做 WI-79 时顺手量到）：
@@ -32,8 +96,7 @@
     ｜**剩下的一半仍开着**：词表本身的同义归并。这属于出题规范（C8 / N-11 那一族）而不是页面问题；
     改词表会动到已入库题目的 tags，那在 C5"只增不减"的边界内，但需要一次显式的清洗批次 + 出处复核。
 
-
-> 最近 20 条（按条目正文里出现的日期倒序）。更早的 91 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
+> 最近 20 条（按条目正文里出现的日期倒序）。更早的 92 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
 
 - [x] WI-100 **把 Toree 接成第五页可用的 Scala kernel（= WI-91 探索胜出路径 B；执行窗口 = WI-91b 计划五任务）**（`c6db718`+`4289a99` T1 量具、`b327d2a`+`aa79fc5` T2 镜像工件、`9cee1b5`+`b0ead20` T3 注册表（还 WI-96）、`035a7e4`+`596ef2a` T4 容器档闸门、Task 5 本轮（`e991ce4` 页面/工件/闸门/文档 + 本发记忆板，2026-10-20））
   ｜**这条曾在 2026-10-16 被用户点头推迟**（当时的理由与计划约束见下面随迁的原文），重启条件是"留一个完整执行窗口、不停在半程" —— WI-91b 正是那一轮：五个任务一批落地，页面、注册表、闸门、镜像同批换字节，main 上**从未出现过**"界面写着两个内核都能选、镜像里只有一个"的半程谎。
@@ -465,31 +528,6 @@
   （上游 PageConfig 自带）、摘掉守卫时红的是外层 origin 钩子不是守卫、`removeContentTypeParser` 那处删错形态是**挂死而不是红**
   （挂死的门禁比红更坏）、`?token=` 泄漏的第二条路是 Fastify 自带的 pino 请求日志。
 
-- [x] WI-90 **企业级 PySpark 教程 notebook（子项目 B 第一轮 3 篇）**｜计划 `docs/superpowers/plans/2026-10-09-pyspark-tutorial-notebooks-wi90.md`，五档全部收口，2026-10-09～10-10
-  交付：`content/notebooks/01-skew-and-hot-keys.ipynb`（倾斜与热 key：加盐两阶段 + 广播绕开 join shuffle +
-  "为什么 skew hint 救不了聚合"推到机制层）、`02-small-files-and-partitioning.ipynb`（落盘文件数 = **非空 writer 数**、
-  读侧打包由 `maxPartitionBytes` 与**加性**的 `openCostInBytes` 决定、`coalesce` 不能提升并行度、
-  `partitionOverwriteMode` 的 static 一次清库）、`03-reading-the-plan-and-aqe.ipynb`（计划地图 +
-  "合并读侧的是 `coalescePartitions` 那一个子开关，不是 AQE 这个大开关"）。三篇都不带 outputs。
-  闸门：`server/test/notebooks/tutorials.test.ts` + 注册表 `tutorial-claims.ts`（住在被测文件**外面**）。
-  两层判据 + 三条牙：执行层（零 `output_type=error` 且 `metadata.kernelspec.name === arena-pyspark`，
-  写成 `python3` 照样跑得绿而那正是红线①的坏形状）、结论层（14 条 `WI90[篇][slug] OK` 与注册表**双向相等**）、
-  打 marker 那个 cell 必须有**语句级** `assert`（堵"删 assert 留 print"）、末 cell 必须 `spark.stop()`、
-  `00-` 前缀是封闭集合（新写一篇叫 `00-*` 会红）。
-  | 验证 | 命令 | 结果 |
-  | --- | --- | --- |
-  | 容器全量 | `./start.sh --verify` | 末行 `✓ verify 全部通过`；教程阶段出现**恰好 1 次**；`教程 notebook：14 passed / 0 skipped / 14 total ✓`；kernel+embed `Tests 53 passed (53)`；矩阵 `代码题 158 道，本次可判 158 道，跳过（栈不可用）0 道` |
-  | 宿主 | `npm run verify:fast` | `✓ verify 全部通过`（`tutorials 14 tests \| 4 skipped`、`kernel 35 \| 11 skipped`、`embed 18`） |
-  | E2E | `npm run e2e` | `E2E_EXIT=0`，74 passed |
-  | 真浏览器 | `#/notebook` 里点开篇 1 并连跑 cell | prompt `[1]:`、stdout 出现 `WI90[…][hot-key-dominates] OK` 与 `[salting-halves-max-partition] OK`，**数字与容器档一字不差**（0.4754→0.175，降到 36.8%）⇒ "可运行"两条路（nbconvert / 页面经 Jupyter Server）都验过 |
-  | 实测用时 | vitest per-test duration（`data/verify-tutorials.json`） | 篇 1 26.31s / 篇 2 56.31s / 篇 3 18.98s，合计 ≈101.6s（目标 ≤90s/篇、硬预算 120s） |
-  | 破坏性验证 | 三篇各自 + 闸门自身 | 篇 1 四条、篇 2 四条、篇 3 四条、闸门十条形状变异，全部实测 `EXIT=1` 后还原转绿 |
-  还掉的债：教程闸门接进 `assert-ran.mjs --require-no-skips`（"整片 skip 也算失败"），`verify-gate: manual`
-  不再是免检金牌（必须独立成行且指着真实存在、确实认领本文件的阶段）。
-  **仍然敞着的口子（如实写）**：一条成立的 manual 申报仍可为自己免检（要堵得让"阶段集合"本身进判据）；
-  `--exclude` 的值被 `verify-coverage` 当成认领而不是排除（已记 A2）；`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象。
-  教训与全表见 `memo.md` 里程碑 BE。后续批次（v2/v3 那 9 类主题）**不在本 WI 里**，要开新 WI。
-
 ## IN PROGRESS
 
 （无 —— 正在做的条目才写这里；长期项要么写清达标线，要么进需求池。）
@@ -534,7 +572,6 @@
   ｜**别顺手做**：改 baseline 的取法会动到"题库只增不减"这条红线的判据本身，得连带复扫一遍
   `content/questions/` 与历史基线文件是否一致。
 
-
 - **N-16 端口暴露面**｜**已决议并落地 → WI-78**（2026-09-24 用户拍板"不考虑手机 / iPad 访问"）：
   `compose.yml` 现在把 7788 绑 `127.0.0.1`，并由 `server/test/regression/compose-ports.test.ts`
   钉住"每个发布端口都必须绑回环"。
@@ -564,29 +601,15 @@
   `cases` 482KB、`rubric` 22KB —— 而 `cases` 在列表页只有"几个用例"一个用途、`statement` 只为客户端搜索。
   ｜当时否掉的方向也记一下：给响应加 gzip（`@fastify/compress`）—— 仓库规矩是"能不加依赖就不加"，
   且 Node 自带 zlib 手写会碰缓存头。单机 loopback 下这是几十毫秒级的解析，不是坏功能。
-- **N-11 出题 tags 与知识矩阵脱钩的面积在扩大**（本批实测，不是推测）：`content/knowledge/INDEX.md`
-  把"题目 tag 在矩阵里找不到对应考点"列为独立一档，本批新增的 `llm-inference`、`modern:inference-gateway`
-  都落进这一档；`frontend` 类别 20 行考点**根本没写反引号 tag**，导致该类别覆盖率算不出来（表里是"—"）。
-  后果：`kb:index` 的"未覆盖考点"这份"该出什么题"的答案对这几类是失灵的，加题越多加得越没有方向。
-  ｜**2026-09-23 复核后决定暂不做，理由记在这里免得下次重新发现**：
-  实际工作量不是"给矩阵补 tag"。`frontend`/`algorithms`/`sql` 三类共 60 行考点没 tag，
-  要让覆盖率可判定必须**两边同时对齐**：矩阵行加 `中文名（\`tag-id\`）` + 已入库的 16+37+? 道题
-  的 `tags[]` 里得出现同样的 tag。后者是改动**已入库题**（撞红线 C5 的"永不覆盖"），
-  而且 tag 命名是一次性定 60 个术语的取舍 —— 定错了比"算不出覆盖率"更糟（报表看着有数，其实是编的）。
-  另外"脱钩 62/148/102…"那个数被设计性地虚高：`modern:*`、`classic:*`、公司名这类元标签
-  本来就不该有考点行，`compile-knowledge.mjs` 只剥 `modern:` 前缀。
-  ｜**公司维度已经不用 `grep` 了**：`content.test.ts` 的"公司维度"闸门每次报每家题数、
-  可机器判数与最弱类别（WI-66），所以这里剩下的只有"考点 tag"那一半。
-  ｜真要做，顺序应当是：① 先让索引把"元标签"与"考点标签"分开统计（不改题库，纯报告口径）；
-  ② 再挑**一个**类别（建议 `frontend`，16 题最少）把 20 行 tag 定下来并只给新题用；
-  ③ 老题的 tags 要不要回填，等 ② 的命名被用过一个季度再定。
 
 已消化：N-01 难度自适应（WI-41/44）、N-02 错题本与间隔重复（WI-41）、N-03 雷达图与本周小结（WI-43/48）、
 N-04 链表/树入参（WI-46）、N-05 判题历史回看（WI-45）、N-06 提交落盘路径、N-07 E2E 目录规范（决议不采纳）、
 N-08 验证工作流规则、N-09 E2E 独立实例、N-10 judgeKind 双向测试闸门、N-12 公司维度进度（WI-66）、
 N-14 出处审计接进闸门（WI-73，并补上"接了但从来没执行"的守卫）、
 N-15 `/api/bank` 瘦身（WI-79）、N-16 端口绑回环（WI-78）、N-13 出处指向 gitignore（决议"报数不搬原文"，
-闸门报数 + README 写明边界）、N-17 标签下拉（筛选层 WI-85：963→78 项；**词表同义归并 2026-10-20 落地**，见 COMPLETED 顶部那条）。
+闸门报数 + README 写明边界）、N-17 标签下拉（筛选层 WI-85：963→78 项；**词表同义归并 2026-10-20 落地**，见 COMPLETED 顶部那条）、
+N-11 出题 tags 与知识矩阵脱钩（**2026-10-20 三发全落地**：① 索引分口径 ② `frontend` 20 行定名 ③ 报表新鲜度闸门，见 COMPLETED 顶部；
+板上 ③"老题回填"那条**按原决定不动**，等命名用满一个季度再议）。
 都已落地或已决议。
 下一步若没有新需求，就是**日常使用 + 按使用中发现的问题回头修**，而不是继续堆功能（需求堆里没有一条还没被证伪为"用户不需要"）。
 
