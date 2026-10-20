@@ -29,6 +29,8 @@
  *    因为一次解析两跳之后，没人能从界面上看出这个名字为什么是它。
  */
 
+import { QUESTION_COMPANIES } from './taxonomy.js';
+
 /** 词表文件的 schema 版本。写文件、读文件、判文件都读这一个数，不许各写一个 1。 */
 export const TAG_ALIASES_SCHEMA_VERSION = 1;
 
@@ -129,6 +131,54 @@ export function publicTagAliasGroups(groups: readonly TagAliasGroup[]): TagAlias
  * 语义上也不是同义词标记 —— 加进来就是"为了对称猜一条规则"，等真出现再说。
  */
 export const TAG_ERA_PREFIXES = ['modern:'] as const;
+
+/**
+ * **出处**标记前缀（N-11 第一发量出来的第二族）。
+ *
+ * `company:airbnb` 标的是"这道题来自哪家"，与"这道题考什么"无关 —— 它本来就不该在考点矩阵里有一行。
+ * 单独一张表而不是写进 `TAG_ERA_PREFIXES`：那个前缀参与**折叠**（`modern:x` 与 `x` 是同一个考点），
+ * 而这个前缀参与的是**分类**（`company:` 后面那个名字不是另一个考点的 alias）。
+ * 混在一张表里的后果是折叠层会去折 `company:airbnb`，而它没有裸形同伴，那是一次纯粹的改名。
+ */
+export const TAG_META_PREFIXES = ['company:'] as const;
+
+/** 一个"在矩阵里找不到对应考点"的题目标签的去向。 */
+export type OrphanTagRole = 'era-meta' | 'company-meta' | 'company-name-meta' | 'point-gap';
+
+/** 归类规则的注入面：默认读 shared 那三张表，闸门用它证明"换一张表结论就变"。 */
+export interface OrphanTagRules {
+  eraPrefixes?: readonly string[];
+  metaPrefixes?: readonly string[];
+  companies?: readonly string[];
+}
+
+/**
+ * 这个脱钩标签是**元标签**（报告里不该催补矩阵行）还是**考点缺口**（该补一行）？
+ *
+ * 为什么判据住在 shared 而不是报告脚本里：`scripts/kb/compile-knowledge.mjs` 曾经自己写了一条
+ * `raw.replace(/^modern:/, '')` —— 字面量抄在脚本里，于是"什么算时代标记"在仓库里有两份，
+ * 而 `TAG_ERA_PREFIXES` 是今天刚立的那一份。报告口径与折叠层分叉的症状很难看破：
+ * 同一个 `modern:x` 一边算同一个考点、另一边算脱钩。
+ * ⚠ `classic:` **不在**任何一张表里：题库今天一个都没有（那个 `classic:true` 是测试夹具的形状），
+ * 加进来就是"为了对称猜一条规则"（与 `TAG_ERA_PREFIXES` 那条决定同一个理由）。
+ */
+export function classifyOrphanTag(raw: string, rules: OrphanTagRules = {}): OrphanTagRole {
+  const eraPrefixes = rules.eraPrefixes ?? TAG_ERA_PREFIXES;
+  const metaPrefixes = rules.metaPrefixes ?? TAG_META_PREFIXES;
+  const companies = rules.companies ?? QUESTION_COMPANIES;
+  const tag = String(raw ?? '').toLowerCase();
+  if (!tag) return 'point-gap';
+  if (eraPrefixes.some((p) => tag.startsWith(p.toLowerCase()))) return 'era-meta';
+  if (metaPrefixes.some((p) => tag.startsWith(p.toLowerCase()))) return 'company-meta';
+  // 整标签就是一个公司名（`airbnb`）：只认**全等**，`airbnb-search-ranking` 是一条真考点
+  if (companies.some((c) => c.toLowerCase() === tag)) return 'company-name-meta';
+  return 'point-gap';
+}
+
+/** 元标签 = 不是考点缺口。与 `classifyOrphanTag` 同一条判据，不留第二份"什么叫元标签"。 */
+export function isMetaOrphanTag(raw: string, rules: OrphanTagRules = {}): boolean {
+  return classifyOrphanTag(raw, rules) !== 'point-gap';
+}
 
 /** 时代折叠的结果：补完的组，以及**这一轮实际折了哪些**（给闸门与界面说实话用）。 */
 export interface EraFoldResult {

@@ -60,3 +60,17 @@ export const CATEGORY_META: Record<CategoryId, CategoryMeta> = {
 export const CATEGORY_LIST: (CategoryMeta & { id: CategoryId })[] = CATEGORY_IDS.map((id) => ({ id, ...CATEGORY_META[id] }));
 
 export const isCategoryId = (v: string): v is CategoryId => (CATEGORY_IDS as readonly string[]).includes(v);
+
+/**
+ * 题库里真实出现过的出处公司（N-11 第一发把它从两份字面量收成一份）。
+ *
+ * 这里原来是**两处各抄一遍**：`server/test/bank/content.test.ts` 的 `COMPANY_FLOORS` 键、
+ * 以及报告侧"这个标签是不是公司名"的判断。抄第三份是迟早的事（本仓库为同一族问题反复付账），
+ * 而分叉的代价不对称：清单少一家 ⇒ 那一家的 `airbnb-*` 之类标签被报成"考点缺口"，
+ * 报表就在一件不存在的事情上催补矩阵行。
+ * ⚠ 这一份**不是** `scripts/jd/sources.json` 的替代：那是抓取目标（含查询与 adapter），
+ * 这是"题目出处点名过的公司"。两边要对齐时改的是这里，sources.json 只增目标不增名字。
+ */
+export const QUESTION_COMPANIES = ['Airbnb', 'Apple', 'DeepSeek', 'PDD', 'ByteDance', 'Alibaba'] as const;
+
+export type QuestionCompany = (typeof QUESTION_COMPANIES)[number];

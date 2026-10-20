@@ -158,16 +158,16 @@ export function parseMatrix(markdown, { validKinds = [] } = {}) {
   return points;
 }
 
-export async function readCategoryKnowledge(category, { validKinds = [] } = {}) {
-  const dir = join(KNOWLEDGE_DIR, category);
-  const readmePath = join(dir, 'README.md');
-  const topicFiles = existsSync(dir)
-    ? readdirSync(dir)
+export async function readCategoryKnowledge(category, { validKinds = [], dir } = {}) {
+  const kbDir = dir ?? join(KNOWLEDGE_DIR, category);
+  const readmePath = join(kbDir, 'README.md');
+  const topicFiles = existsSync(kbDir)
+    ? readdirSync(kbDir)
         .filter((f) => f.endsWith('.md') && f !== 'README.md')
         .sort()
     : [];
   if (!existsSync(readmePath)) {
-    return { category, dir, readmePath, readmeMissing: true, points: [], topicFiles };
+    return { category, dir: kbDir, readmePath, readmeMissing: true, points: [], topicFiles };
   }
   const markdown = await readFile(readmePath, 'utf8');
   const points = parseMatrix(markdown, { validKinds });
@@ -176,7 +176,7 @@ export async function readCategoryKnowledge(category, { validKinds = [] } = {}) 
     .find((l) => l.startsWith('>') && /版本|基线|核实|定位/.test(l));
   return {
     category,
-    dir,
+    dir: kbDir,
     readmePath,
     readmeMissing: false,
     points,

@@ -3,14 +3,19 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   TAG_ALIASES_SCHEMA_VERSION,
+  TAG_ERA_PREFIXES,
+  TAG_META_PREFIXES,
   buildTagAliasMap,
   canonicalTag,
+  classifyOrphanTag,
   countQuestionsByCanonicalTag,
   foldEraTagGroups,
-  TAG_ERA_PREFIXES,
+  isMetaOrphanTag,
   tagMatches,
+  type OrphanTagRole,
   type TagAliasGroup,
 } from '../src/tagVocabulary.js';
+import { QUESTION_COMPANIES } from '../src/taxonomy.js';
 
 /**
  * N-17 的另一半：标签词表的**同义归并**层（纯函数，无 I/O）。
@@ -166,5 +171,71 @@ describe('foldEraTagGroups（时代标记折叠：modern:x 折进 x，但只在�
     const a = foldEraTagGroups([], tags);
     const b = foldEraTagGroups([], [...tags].reverse());
     expect(JSON.stringify(b.folded)).toEqual(JSON.stringify(a.folded));
+  });
+});
+
+/**
+ * N-11 的第一发：`INDEX.md` 那个"脱钩标签 N 个"里混着两类完全不同的东西 ——
+ * 元标签（`modern:` 时代标记、`company:` 出处标记、纯公司名）本来就不该有考点行，
+ * 而考点缺口才是"该补一行矩阵"的那个数。把它们混在一起报，N 就被元标签撑到失真
+ * （实测 frontend/algorithms/sql 三类是 92/245/216，其中元标签 18/40/39）。
+ * 归类规则因此**必须只有一份**，且用的是 shared 已有的那两张表（`TAG_ERA_PREFIXES`、
+ * `QUESTION_COMPANIES`），不许报告侧再抄一个 `['modern:','classic:']` —— 那正是本仓库反复付账的"第四份字面量"。
+ */
+describe('classifyOrphanTag（元标签 vs 考点缺口：报告口径的唯一判据）', () => {
+  it('时代前缀 ⇒ era-meta，且用的是 TAG_ERA_PREFIXES 那一份而不是本地抄一份', () => {
+    expect(classifyOrphanTag('modern:react19-actions')).toBe('era-meta');
+    for (const prefix of TAG_ERA_PREFIXES) {
+      expect(classifyOrphanTag(`${prefix}anything`), `${prefix} 不在时代前缀表里却被折了/被认了`).toBe('era-meta');
+    }
+  });
+
+  it('company: 前缀 ⇒ company-meta（前缀表也只有一份）', () => {
+    expect(TAG_META_PREFIXES).toContain('company:');
+    expect(classifyOrphanTag('company:airbnb')).toBe('company-meta');
+    expect(classifyOrphanTag('COMPANY:APPLE')).toBe('company-meta');
+  });
+
+  it('整个标签就是一个已知公司名 ⇒ company-name-meta；公司名来自 QUESTION_COMPANIES', () => {
+    expect(QUESTION_COMPANIES.length, '公司清单空了 ⇒ 这一路判据在空转').toBeGreaterThan(0);
+    for (const company of QUESTION_COMPANIES) {
+      expect(classifyOrphanTag(company.toLowerCase()), `${company} 没被认成公司名元标签 ⇒ 题库侧与报告侧的公司清单又分叉了`).toBe('company-name-meta');
+      expect(classifyOrphanTag(company), `${company}（原样大小写）该同样命中`).toBe('company-name-meta');
+    }
+  });
+
+  it('其余一律 point-gap —— 这才是"该补一行考点"的可行动数', () => {
+    expect(classifyOrphanTag('race-condition')).toBe('point-gap');
+    expect(classifyOrphanTag('llm-inference')).toBe('point-gap');
+    // 公司名只是**前缀**的场景不是元标签：airbnb-search-ranking 是一条考点，少一个字都不算
+    expect(classifyOrphanTag('airbnb-search-ranking')).toBe('point-gap');
+    // 带冒号的未知前缀不许被顺手归进元标签（那会把真缺口藏起来）
+    expect(classifyOrphanTag('vendor:whatever')).toBe('point-gap');
+  });
+
+  it('规则可注入（闸门要能证"换一张表结论就变"，而不是信一份硬编码副本）', () => {
+    const injected = { eraPrefixes: ['era2:'], metaPrefixes: [], companies: ['Zeta'] };
+    expect(classifyOrphanTag('modern:x', injected)).toBe('point-gap');
+    expect(classifyOrphanTag('era2:x', injected)).toBe('era-meta');
+    expect(classifyOrphanTag('company:airbnb', injected)).toBe('point-gap');
+    expect(classifyOrphanTag('zeta', injected)).toBe('company-name-meta');
+  });
+
+  it('元标签与考点缺口互斥且覆盖全部（isMetaOrphanTag 就是它的补集）', () => {
+    const samples = ['modern:x', 'company:x', 'airbnb', 'plain-gap', 'classic:x'];
+    const roles: OrphanTagRole[] = ['era-meta', 'company-meta', 'company-name-meta', 'point-gap'];
+    for (const s of samples) {
+      const role = classifyOrphanTag(s);
+      expect(roles, `${s} 归到了名单外的类别 ${role}（报告那侧就会漏计）`).toContain(role);
+      expect(isMetaOrphanTag(s), `${s}：isMetaOrphanTag 与 classifyOrphanTag 说的不是同一件事`).toBe(role !== 'point-gap');
+    }
+    // classic: 今天库里一个都没有（那个 classic:true 是测试夹具的形状），所以它**不是**元标签
+    expect(TAG_ERA_PREFIXES).toEqual(['modern:']);
+    expect(classifyOrphanTag('classic:x')).toBe('point-gap');
+  });
+
+  it('空串与畸形输入不炸、退成 point-gap（报告生成器不许因为一道脏标签整个挂掉）', () => {
+    expect(classifyOrphanTag('')).toBe('point-gap');
+    expect(classifyOrphanTag('company:')).toBe('company-meta');
   });
 });

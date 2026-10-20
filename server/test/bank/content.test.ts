@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  QUESTION_COMPANIES,
   TAG_ERA_PREFIXES,
   TAG_FACET_MIN_COUNT,
   buildTagAliasMap,
@@ -197,7 +198,7 @@ describe('答案里的具体数字（草稿探针）', () => {
  * ｜地板里的数一律取本闸门实测值，不取交接文档里人肉数过的数 ——
  * ｜第一次跑就把 WI-56 写的"代码 10 / 15 / 16"纠成 9 / 14 / 16（三种独立数法一致）。
  */
-const COMPANY_FLOORS: Record<string, { total: number; code: number }> = {
+const COMPANY_FLOORS: Record<(typeof QUESTION_COMPANIES)[number], { total: number; code: number }> = {
   // 2026-09-25 各抬一格：Airbnb 多了 `sql-mysql-0036`（预订占用对账），
   // DeepSeek 多了 `alg-java-0059`（epoll LT/ET 的唤醒计数）。都是"有出处 + 容器判过 + 朴素解会挂"的题。
   Airbnb: { total: 31, code: 10 },
@@ -215,8 +216,15 @@ const COMPANY_FLOORS: Record<string, { total: number; code: number }> = {
 };
 
 describe('公司维度（报告 + 只减不许，N-12）', () => {
+  /**
+   * 行的**来源**是 `shared` 那份 `QUESTION_COMPANIES`，不是 `COMPANY_FLOORS` 的键。
+   * 为什么较真：N-11 第一发把"哪些名字算公司"做进了报表口径（`classifyOrphanTag` 要认得出
+   * `airbnb` 这种纯公司名元标签），那份判据读的是 shared；这里再让"数题"读一张本地键表，
+   * 就是同一个问题在两个地方各答一次 —— 漏一家的代价还不对称：报表会催"给矩阵补一行考点"。
+   */
   const companyRows = () =>
-    Object.entries(COMPANY_FLOORS).map(([company, floor]) => {
+    QUESTION_COMPANIES.map((company) => {
+      const floor = COMPANY_FLOORS[company];
       const items = bank.questions.filter((q) => q.source.company === company);
       const code = items.filter((q) => q.judgeKind !== 'llm-rubric').length;
       const byCategory = new Map<string, number>();
@@ -224,6 +232,16 @@ describe('公司维度（报告 + 只减不许，N-12）', () => {
       const weakest = [...byCategory.entries()].sort((a, b) => a[1] - b[1])[0];
       return { company, total: items.length, code, floor, weakest };
     });
+
+  it('公司清单只有一份：地板表的键、shared 的 QUESTION_COMPANIES、题库里真实出现的 company 三者必须相等', () => {
+    const floors = Object.keys(COMPANY_FLOORS).sort();
+    expect(floors, 'COMPANY_FLOORS 的键与 shared 的 QUESTION_COMPANIES 不一致 ⇒ 有一家的题不进报表').toEqual(
+      [...QUESTION_COMPANIES].sort(),
+    );
+    const inBank = [...new Set(bank.questions.map((q) => q.source.company).filter((c): c is string => Boolean(c)))].sort();
+    const unknown = inBank.filter((c) => !(QUESTION_COMPANIES as readonly string[]).includes(c));
+    expect(unknown, `题库里出现了清单外的公司 ${unknown.join(', ')}：先加进 shared/src/taxonomy.ts 的 QUESTION_COMPANIES（分类器与地板表都会跟着它）`).toEqual([]);
+  });
 
   it('报出每家的题数、可机器判数与最弱类别（进度不该只靠人记得去数）', () => {
     const rows = companyRows();

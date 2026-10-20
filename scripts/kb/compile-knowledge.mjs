@@ -9,11 +9,20 @@
  *   - content/questions 题库（软删除题不计入"已出题"，但仍列进"历史去重池"）
  *   - content/jd-cache/skills.json（存在时用来指出"JD 很热但矩阵里没有对应考点"的缺口）
  *
- * 覆盖判定：题目的 tags[]（含 modern: 前缀）里出现考点 tag 即算覆盖。
+ * 覆盖判定：题目的 tags[]（含元标签前缀）里出现考点 tag 即算覆盖。
  * 只认**显式写在矩阵第 1 列反引号里的 tag**；没写 tag 的行无法机器判定，会单独统计并提示补 tag。
+ * 第 1 列没写 tag 的行仍会拿"标签推出来的 slug"去撞一次题目 —— 但那类命中**单独报**
+ * （`仅派生 slug 命中`）：中文名一改，"哪些考点已出题"就跟着悄悄换。
+ *
+ * 只读的缝（不写文件；未知参数一律拒绝，绝不允许退化成"整份生成 + 写盘"）：
+ *   node scripts/kb/compile-knowledge.mjs --orphan-audit-json     # 分口径的审计 JSON（闸门判它）
+ *
+ * 为什么不把这些规则写在脚本里而要从 @arena/shared 拿：`modern:` 曾经在这里被硬写成
+ * `raw.replace(/^modern:/, '')`，于是"什么算时代标记"在仓库里有两份（第二份是 N-17 立的 `TAG_ERA_PREFIXES`）。
+ * 报告口径与折叠层分叉的症状极难看破：同一个 `modern:x` 一边算同一个考点、另一边算脱钩。
  */
 import { join } from 'node:path';
-import { UsageError, isMain, rel, writeTextAtomic } from '../jd/lib.mjs';
+import { UsageError, isMain, parseArgs, rel, writeTextAtomic } from '../jd/lib.mjs';
 import { loadShared, readCategoryKnowledge, KNOWLEDGE_DIR } from './kit.mjs';
 import { SKILLS_FILE, loadQuestions, statsByCategory, coveredQuestionIds, isExecutable } from '../bank/kit.mjs';
 import { readFile } from 'node:fs/promises';
@@ -25,7 +34,15 @@ export function clipCell(text, max = 60) {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
-export async function compileKnowledgeIndex() {
+/**
+ * 算出这份报表需要的全部数据（无副作用；`--orphan-audit-json` 与生成路径共用它，
+ * 所以"闸门判的分区"与"报表里印的分区"不可能是两套口径）。
+ *
+ * `ARENA_KB_DIR` 只换**读**的目录（闸门用它造一行"没有显式 tag 但标签能切出 slug"的矩阵，
+ * 证明派生 slug 那一档不是装饰）。默认走 `content/knowledge`，与 `npm run kb:index` 逐字节同一条路。
+ * ⚠ 它**不换**写路径：这条脚本只写 `content/knowledge/INDEX.md` 这一个文件，且只走生成那条路。
+ */
+export async function computeKnowledgeReport({ knowledgeDir = process.env.ARENA_KB_DIR || KNOWLEDGE_DIR } = {}) {
   const shared = await loadShared();
   const categories = [...shared.CATEGORY_IDS];
   const { questions, errors, hiddenIds } = await loadQuestions();
@@ -34,7 +51,7 @@ export async function compileKnowledgeIndex() {
 
   const knowledge = [];
   for (const category of categories) {
-    knowledge.push(await readCategoryKnowledge(category, { validKinds: [...shared.JUDGE_KINDS] }));
+    knowledge.push(await readCategoryKnowledge(category, { validKinds: [...shared.JUDGE_KINDS], dir: join(knowledgeDir, category) }));
   }
 
   const rows = [];
@@ -44,13 +61,19 @@ export async function compileKnowledgeIndex() {
     const covered = [];
     const uncovered = [];
     const untrackable = [];
+    const derivedOnly = [];
+    const auditPoints = [];
     for (const point of kb.points) {
+      const ids = coveredQuestionIds(point, catVisible);
       if (!point.hasExplicitTag) {
         untrackable.push(point);
+        // 派生 slug 的命中单独一档：它今天能把题目撞上来，改一次中文名就换了目标（报表必须说实话说它脆）
+        if (ids.length > 0) derivedOnly.push({ point, ids });
+        auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: false, matchedBy: ids.length > 0 ? 'derived' : 'none', covered: false, questionIds: ids });
         continue;
       }
-      const ids = coveredQuestionIds(point, catVisible);
       (ids.length > 0 ? covered : uncovered).push({ point, ids });
+      auditPoints.push({ tag: point.tag, label: point.label, hasExplicitTag: true, matchedBy: 'explicit', covered: ids.length > 0, questionIds: ids });
     }
     const s = stats.get(kb.category);
     const kinds = Object.entries(s?.kinds ?? {})
@@ -69,23 +92,68 @@ export async function compileKnowledgeIndex() {
       covered: covered.length,
       uncovered: uncovered.length,
       untrackable: untrackable.length,
+      derivedOnly: derivedOnly.length,
       ratio: covered.length + uncovered.length === 0 ? '—' : `${Math.round((covered.length / (covered.length + uncovered.length)) * 100)}%`,
       kinds,
       topics: kb.topicFiles.length,
       readmeMissing: kb.readmeMissing,
     });
-    detail.push({ kb, covered, uncovered, untrackable, orphanTags: findOrphanTags(catVisible, kb.points) });
+    const orphans = findOrphanTags(shared, catVisible, kb.points);
+    detail.push({ kb, covered, uncovered, untrackable, derivedOnly, auditPoints, orphanTags: orphans.tags, orphanMeta: orphans.meta, orphanPointGaps: orphans.pointGaps });
   }
 
   const jdGaps = await findJdGaps(knowledge, shared);
-  const markdown = renderMarkdown({ rows, detail, jdGaps, parseErrors: errors, hiddenCount: hiddenIds.size, total: questions.length, categories });
-  const out = join(KNOWLEDGE_DIR, 'INDEX.md');
-  await writeTextAtomic(out, markdown);
-  return { out, rows, jdGaps, parseErrors: errors };
+  return {
+    shared,
+    rows,
+    detail,
+    jdGaps,
+    parseErrors: errors,
+    hiddenCount: hiddenIds.size,
+    total: questions.length,
+    categories,
+  };
 }
 
-/** 题目带了 tag，但该类别矩阵里没有任何考点含这个 tag —— 说明题面与知识库脱钩了。 */
-function findOrphanTags(catQuestions, points) {
+/** `--orphan-audit-json` 的输出：真实题库 + 真实矩阵算出来的分区，闸门判它的**性质**而不是判一份抄本。 */
+export function buildOrphanAudit(report) {
+  const { shared, rows, detail } = report;
+  const categories = rows.map((r) => {
+    const d = detail.find((x) => x.kb.category === r.category);
+    const orphans = d.orphanTags.map((o) => ({ ...o, role: shared.classifyOrphanTag(o.tag) }));
+    const meta = orphans.filter((o) => o.role !== 'point-gap');
+    const pointGaps = orphans.filter((o) => o.role === 'point-gap');
+    return {
+      category: r.category,
+      points: d.auditPoints,
+      totalPoints: r.points,
+      explicitPoints: r.explicitPoints,
+      untrackablePoints: r.untrackable,
+      covered: r.covered,
+      uncovered: r.uncovered,
+      derivedOnly: d.derivedOnly.map((x) => x.point.tag),
+      ratio: r.ratio,
+      orphans,
+      orphanTotal: orphans.length,
+      orphanMeta: meta.length,
+      orphanPointGaps: pointGaps.length,
+    };
+  });
+  return {
+    categories,
+    eraPrefixTruth: [...shared.TAG_ERA_PREFIXES],
+    metaPrefixTruth: [...shared.TAG_META_PREFIXES],
+    companyTruth: [...shared.QUESTION_COMPANIES],
+  };
+}
+
+/**
+ * 题目带了 tag，但该类别矩阵里没有任何考点含这个 tag —— 题面与知识库脱钩。
+ * 剥前缀只认 `TAG_ERA_PREFIXES` 那一份（时代折叠的同一张表），命中判定沿用 coveredQuestionIds 的口径。
+ * ⚠ 返回**三个数**而不是一个：元标签（时代/出处标记、纯公司名）本来就不该有考点行，
+ * 只有 pointGaps 才是"该补一行矩阵"的可行动数。合成一个数报出去，报表就会长期催一件不存在的事。
+ */
+function findOrphanTags(shared, catQuestions, points) {
   const known = new Set();
   for (const p of points) {
     if (p.hasExplicitTag) known.add(p.tag.toLowerCase());
@@ -94,11 +162,15 @@ function findOrphanTags(catQuestions, points) {
   const orphans = new Map();
   for (const q of catQuestions) {
     for (const raw of q.tags) {
-      const tag = raw.replace(/^modern:/, '').toLowerCase();
-      if (!known.has(tag)) orphans.set(raw, [...(orphans.get(raw) ?? []), q.id]);
+      const lower = String(raw).toLowerCase();
+      const eraPrefix = shared.TAG_ERA_PREFIXES.find((p) => lower.startsWith(p.toLowerCase()));
+      const stripped = eraPrefix ? lower.slice(eraPrefix.length) : lower;
+      if (!known.has(stripped)) orphans.set(raw, [...(orphans.get(raw) ?? []), q.id]);
     }
   }
-  return [...orphans.entries()].map(([tag, ids]) => ({ tag, ids })).sort((a, b) => b.ids.length - a.ids.length);
+  const tags = [...orphans.entries()].map(([tag, ids]) => ({ tag, ids })).sort((a, b) => b.ids.length - a.ids.length);
+  const isMeta = (t) => shared.isMetaOrphanTag(t);
+  return { tags, meta: tags.filter((t) => isMeta(t.tag)), pointGaps: tags.filter((t) => !isMeta(t.tag)) };
 }
 
 /** JD 里被反复提到、但知识库矩阵里找不到对应考点的技术栈 —— 需求 19"先整理知识库再出题"的缺口信号。 */
@@ -121,6 +193,15 @@ async function findJdGaps(knowledge, shared) {
   return { generatedAt: payload?.generatedAt, gaps };
 }
 
+/** 生成 = 算 + 渲染 + 写盘（写盘只有这一处；只读的缝走 computeKnowledgeReport / buildOrphanAudit）。 */
+export async function compileKnowledgeIndex() {
+  const report = await computeKnowledgeReport();
+  const markdown = renderMarkdown(report);
+  const out = join(KNOWLEDGE_DIR, 'INDEX.md');
+  await writeTextAtomic(out, markdown);
+  return { out, markdown, rows: report.rows, detail: report.detail, jdGaps: report.jdGaps, parseErrors: report.parseErrors };
+}
+
 function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total, categories }) {
   const now = new Date().toISOString();
   const lines = [
@@ -129,24 +210,33 @@ function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total,
     '> 由 `npm run kb:index`（`node scripts/kb/compile-knowledge.mjs`）生成。',
     `> 生成时间：${now}`,
     `> 输入：\`content/knowledge/<类别>/README.md\` 考点矩阵（${categories.length} 类）+ 题库 ${total} 题（其中软删除 ${hiddenCount} 题不计入"已出题"）。`,
-    '> 覆盖判定：题目 `tags[]`（去掉 `modern:` 前缀）命中矩阵第 1 列反引号里的 tag 即算已覆盖；未写反引号 tag 的行列在「无显式 tag」里单独统计。',
+    '> 覆盖判定：题目 `tags[]`（去掉时代前缀，前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）命中矩阵第 1 列反引号里的 tag 即算已覆盖；',
+    '> 未写反引号 tag 的行列进「无显式 tag（无法判定）」单独统计，其中**靠标签派生 slug 撞上的**另列一档（改中文名就会变，脆）。',
+    '> 脱钩标签分两个口径：**元标签**（时代标记 / 出处标记 / 纯公司名，规则 = `shared` 的 `classifyOrphanTag`）本来就不该有考点行；',
+    '> **考点缺口**才是"该给矩阵补一行"的可行动数 —— 只看合起来的 N 会被元标签撑到失真。',
     '',
     '## 类别总览',
     '',
-    '| 类别 | 考点数 | 含 code 形式 | 含 rubric 形式 | 无显式 tag（无法判定） | 语料篇数 | 已出题（可见） | 代码题 | 主观题 | 已覆盖考点 | 未覆盖考点 | 覆盖率 | 判分方式分布 |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| 类别 | 考点数 | 含 code 形式 | 含 rubric 形式 | 无显式 tag（无法判定） | 仅派生 slug 命中（脆） | 语料篇数 | 已出题（可见） | 代码题 | 主观题 | 已覆盖考点 | 未覆盖考点 | 覆盖率 | 脱钩标签（元/缺口） | 判分方式分布 |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const r of rows) {
+    const d = detail.find((x) => x.kb.category === r.category);
     lines.push(
-      `| [\`${r.category}\`](./${r.category}/README.md) ${r.label} | ${r.points} | ${r.codePoints} | ${r.rubricPoints} | ${r.untrackable} | [${r.topics}](./${r.category}/README.md#语料文件) | ${r.questions} | ${r.code} | ${r.rubric} | ${r.covered} | ${r.uncovered} | ${r.ratio} | ${r.kinds} |`,
+      `| [\`${r.category}\`](./${r.category}/README.md) ${r.label} | ${r.points} | ${r.codePoints} | ${r.rubricPoints} | ${r.untrackable} | ${r.derivedOnly} | [${r.topics}](./${r.category}/README.md#语料文件) | ${r.questions} | ${r.code} | ${r.rubric} | ${r.covered} | ${r.uncovered} | ${r.ratio} | ${d ? d.orphanTags.length : 0}（${d ? d.orphanMeta.length : 0}/${d ? d.orphanPointGaps.length : 0}） | ${r.kinds} |`,
     );
   }
   const totalPoints = rows.reduce((s, r) => s + r.points, 0);
   const totalCovered = rows.reduce((s, r) => s + r.covered, 0);
   const totalTrackable = rows.reduce((s, r) => s + r.covered + r.uncovered, 0);
+  const totalOrphans = detail.reduce((s, d) => s + d.orphanTags.length, 0);
+  const totalMeta = detail.reduce((s, d) => s + d.orphanMeta.length, 0);
   lines.push('');
   lines.push(
     `**合计**：${totalPoints} 个考点，其中 ${totalTrackable} 个可机器判定覆盖，已覆盖 ${totalCovered} 个（${totalTrackable ? Math.round((totalCovered / totalTrackable) * 100) : 0}%）；题库 ${total} 题。`,
+  );
+  lines.push(
+    `**脱钩标签合计**：${totalOrphans} 个 = 元标签 ${totalMeta} 个 + **考点缺口 ${totalOrphans - totalMeta} 个**（后者才是"该补一行矩阵"的清单）。`,
   );
   if (parseErrors.length > 0) {
     lines.push('');
@@ -182,12 +272,33 @@ function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total,
       if (d.uncovered.length > 40) lines.push(`- …另有 ${d.uncovered.length - 40} 个，见 \`${kb.category}/README.md\``);
     }
     if (d.untrackable.length > 0) {
-      lines.push('', `**无法自动判定覆盖（第 1 列没写反引号 tag）：${d.untrackable.length} 行** —— 修法：把考点名改成 \`中文名（\`tag-id\`）\` 格式，然后重跑本脚本。`)
+      lines.push('', `**无法自动判定覆盖（第 1 列没写反引号 tag）：${d.untrackable.length} 行** —— 修法：把考点名改成 \`中文名（\`tag-id\`）\` 格式，然后重跑本脚本。`);
       lines.push('', d.untrackable.slice(0, 8).map((p) => `- ${p.label}`).join('\n') + (d.untrackable.length > 8 ? `\n- …另有 ${d.untrackable.length - 8} 行` : ''));
     }
+    if (d.derivedOnly.length > 0) {
+      lines.push(
+        '',
+        `**⚠ 仅靠派生 slug 命中题目（第 1 列没有反引号 tag，命中目标是从中文名切出来的）：${d.derivedOnly.length} 行** —— 这类"已覆盖"是脆的：`,
+      );
+      lines.push(
+        '   给这一行改个中文名，覆盖统计就换目标（而且没有任何东西会红）。修法同上：把 tag 写进反引号 —— 形如 中文名（`tag-id`） —— 别依赖切词。',
+        '',
+        d.derivedOnly.slice(0, 8).map(({ point, ids }) => `- ${point.label}（派生 slug \`${point.tag}\`，命中 ${ids.length} 题：${ids.slice(0, 3).join(', ')}${ids.length > 3 ? '…' : ''}）`).join('\n') +
+          (d.derivedOnly.length > 8 ? `\n- …另有 ${d.derivedOnly.length - 8} 行` : ''),
+      );
+    }
     if (d.orphanTags.length > 0) {
-      lines.push('', `**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：${d.orphanTags.length} 个** —— 修法：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。`);
-      lines.push('', d.orphanTags.slice(0, 8).map((o) => `- \`${o.tag}\`（${o.ids.length} 题：${o.ids.slice(0, 3).join(', ')}${o.ids.length > 3 ? '…' : ''}）`).join('\n'));
+      lines.push(
+        '',
+        `**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：${d.orphanTags.length} 个（元标签 ${d.orphanMeta.length} / 考点缺口 ${d.orphanPointGaps.length}）**`,
+      );
+      lines.push(
+        `   要处理的是那 **${d.orphanPointGaps.length} 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。`,
+      );
+      lines.push('   元标签不参与催补（时代/出处标记本来就长在题面上）：' + (d.orphanMeta.length ? ` \`modern:*\`/\`company:*\`/公司名 ${d.orphanMeta.length} 个。` : ' 本类别没有。'));
+      const listed = d.orphanPointGaps.length > 0 ? d.orphanPointGaps : d.orphanTags;
+      lines.push('', listed.slice(0, 8).map((o) => `- \`${o.tag}\`（${o.ids.length} 题：${o.ids.slice(0, 3).join(', ')}${o.ids.length > 3 ? '…' : ''}）`).join('\n'));
+      if (listed.length > 8) lines.push(`- …另有 ${listed.length - 8} 个考点缺口（完整清单：\`--orphan-audit-json\`）`);
     }
   }
 
@@ -216,25 +327,63 @@ function renderMarkdown({ rows, detail, jdGaps, parseErrors, hiddenCount, total,
   return `${lines.join('\n')}\n`;
 }
 
-async function main() {
-  try {
-    const result = await compileKnowledgeIndex();
-    console.log(`INDEX.md 已生成 → ${rel(result.out)}`);
-    const totalPoints = result.rows.reduce((s, r) => s + r.points, 0);
-    const totalCovered = result.rows.reduce((s, r) => s + r.covered, 0);
-    const totalTrackable = result.rows.reduce((s, r) => s + r.covered + r.uncovered, 0);
+/** 脚本认识的全部参数；不在这里的就是打错了的。 */
+const KNOWN_FLAGS = ['orphan-audit-json'];
+
+/**
+ * 参数解析单独一条判据：**未知参数一律拒绝**。
+ * 为什么这条要紧：`content/` 在容器里是 bind mount，而默认那条路会**写** `INDEX.md`。
+ * 打错一个字母的 flag 要是被忽略，测试就会顺手把报表重新生成一遍 ——
+ * "报表过期"这个故障从此被验证过程自己修好（本仓库点名的"闸门被自己的跑法喂绿"）。
+ */
+export function parseCliArgs(argv) {
+  // 先按**名字**逐个核一遍再交给 parseArgs：parseArgs 对未知 flag 报的是"缺少参数值"（它把下一个 token 当值），
+  // 那句报错既没说"这名字我不认识"、也不稳定（未知 flag 放在最后一个 token 时根本没得吃）。
+  // 这条脚本唯一该被允许的行为是"生成并写文件"与"只读地报数"，中间不许有第三种"看起来跑了但跑的是默认那条"。
+  for (const token of argv) {
+    if (!token.startsWith('--') || token === '--') continue;
+    const name = token.slice(2).split('=')[0];
+    if (!KNOWN_FLAGS.includes(name)) throw new UsageError(`未知参数：--${name}｜这条脚本只认 ${KNOWN_FLAGS.map((f) => `--${f}`).join(' / ')}（不忽略多余参数：忽略 = 打错的只读缝退化成"生成并写文件"）`);
+  }
+  const args = parseArgs(argv, { booleans: KNOWN_FLAGS });
+  const extra = args._ ?? [];
+  if (extra.length > 0) throw new UsageError(`未知参数：${extra.map((u) => `"${u}"`).join(' ')}（这条脚本不收位置参数）`);
+  return args;
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const args = parseCliArgs(argv);
+  // 只读的审计缝：闸门（server/test/regression/knowledge-index.test.ts）判的是**真实题库 + 真实矩阵**的分区，
+  // 不是自己在测试里重算一份（重算的那份永远不会因为"实现算错了"而红）。
+  if (args['orphan-audit-json']) {
+    const report = await computeKnowledgeReport();
+    process.stdout.write(`${JSON.stringify(buildOrphanAudit(report))}\n`);
+    return;
+  }
+
+  const result = await compileKnowledgeIndex();
+  console.log(`INDEX.md 已生成 → ${rel(result.out)}`);
+  const totalPoints = result.rows.reduce((s, r) => s + r.points, 0);
+  const totalCovered = result.rows.reduce((s, r) => s + r.covered, 0);
+  const totalTrackable = result.rows.reduce((s, r) => s + r.covered + r.uncovered, 0);
+  console.log(
+    `  类别 ${result.rows.length} 个｜考点 ${totalPoints} 个（可判定 ${totalTrackable}）｜已覆盖 ${totalCovered}｜未覆盖 ${totalTrackable - totalCovered}`,
+  );
+  for (const r of result.rows) {
+    const d = result.detail.find((x) => x.kb.category === r.category);
     console.log(
-      `  类别 ${result.rows.length} 个｜考点 ${totalPoints} 个（可判定 ${totalTrackable}）｜已覆盖 ${totalCovered}｜未覆盖 ${totalTrackable - totalCovered}`,
+      `  - ${r.category.padEnd(15)} 考点 ${String(r.points).padStart(2)} 已出题 ${String(r.questions).padStart(2)}（代码 ${r.code}/主观 ${r.rubric}）未覆盖 ${String(r.uncovered).padStart(2)} 无tag ${String(r.untrackable).padStart(2)} 派生命中 ${String(r.derivedOnly).padStart(2)} 脱钩 ${String(d?.orphanTags.length ?? 0).padStart(3)}（元 ${d?.orphanMeta.length ?? 0}/缺口 ${d?.orphanPointGaps.length ?? 0}）`,
     );
-    for (const r of result.rows) {
-      console.log(`  - ${r.category.padEnd(15)} 考点 ${String(r.points).padStart(2)} 已出题 ${String(r.questions).padStart(2)}（代码 ${r.code}/主观 ${r.rubric}）未覆盖 ${String(r.uncovered).padStart(2)} 无tag ${r.untrackable}`);
-    }
-    if (result.jdGaps) console.log(`  JD 热点无对应考点：${result.jdGaps.gaps.length} 个${result.jdGaps.gaps.length ? `（${result.jdGaps.gaps.slice(0, 6).map((g) => g.tag).join(', ')}…）` : ''}`);
-    if (result.parseErrors.length > 0) {
-      console.error(`✗ 题库里有 ${result.parseErrors.length} 个坏文件，先跑 npm run bank:check 修掉`);
-      process.exit(1);
-    }
-  } catch (err) {
+  }
+  if (result.jdGaps) console.log(`  JD 热点无对应考点：${result.jdGaps.gaps.length} 个${result.jdGaps.gaps.length ? `（${result.jdGaps.gaps.slice(0, 6).map((g) => g.tag).join(', ')}…）` : ''}`);
+  if (result.parseErrors.length > 0) {
+    console.error(`✗ 题库里有 ${result.parseErrors.length} 个坏文件，先跑 npm run bank:check 修掉`);
+    process.exit(1);
+  }
+}
+
+if (isMain(import.meta.url)) {
+  main().catch((err) => {
     if (err instanceof UsageError) {
       console.error(`✗ ${err.message}`);
       process.exit(2);
@@ -242,7 +391,5 @@ async function main() {
     }
     console.error(`✗ 知识库索引生成失败：${err?.stack ?? err}`);
     process.exit(1);
-  }
+  });
 }
-
-if (isMain(import.meta.url)) main();
