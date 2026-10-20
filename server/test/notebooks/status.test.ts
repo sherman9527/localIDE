@@ -302,7 +302,7 @@ describe('notebookStatus', () => {
     const src = readFileSync(join(config.repoRoot, 'server', 'src', 'notebooks', 'status.ts'), 'utf8');
     expect(src, 'filter 的输入必须是 Object.values(NOTEBOOK_KERNELS).map((k) => k.id)，否则加一条 kernel 要改两处')
       .toMatch(/const ARENA_KERNEL_IDS[^=]*=\s*Object\.values\(NOTEBOOK_KERNELS\)\.map\(\(k\) => k\.id\)/);
-    expect(src, 'status.ts 里不许出现任何被引号包住的 arena kernel 名字字面量（唯一真相是 NOTEBOOK_KERNELS；散文里写死也算）')
+    expect(src, 'status.ts 里不许出现被引号包住的 arena kernel 名字字面量（唯一真相是 NOTEBOOK_KERNELS）。⚠ 这条抓的是**当成数据用的字面量**：注释与报错文案里点名 id 是合法的，它抓不到也不该抓 —— "散文里写死"由下面那条 `otherRegistered` 派生判据与 `status.test.ts` 的逐条对质管，不靠这个正则')
       .not.toMatch(/['"]arena-[a-z0-9-]+['"]/);
     expect(src, 'needsVenv 不许按 id 相等硬判（WI-96）：就绪判据住在注册表条目里，要按 id 查出来')
       .not.toMatch(/const needsVenv = id ===/);

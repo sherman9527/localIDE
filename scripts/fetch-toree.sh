@@ -284,6 +284,8 @@ fi
 # GATE 2：${DEST} 里不许出现**与 /opt/spark/jars 同名不同版**的 jar 文件名。
 #   A 档那条同名漂移闸门的等价物（这里只剩"文件名"这一维，因为载荷只有一个 jar）。
 STRAY_RE='^(scala-(compiler|library|reflect)|scala-xml_2\.12|scala-collection-compat_2\.12|slf4j-(api|nop)|log4j-|jackson-|spark-[a-z_]+_2\.12|jline)-'
+# ⚠ `-printf` 是 GNU find 的扩展：Git Bash 与镜像里都是 GNU，BSD/macOS 的 find 没有这一支
+#   （那种机器上要么换 `basename` 循环，要么直接 ./start.sh 走容器档）。
 stray="$(find "$DEST" -type f -name '*.jar' -printf '%f\n' | grep -E "$STRAY_RE" || true)"
 [ -z "$stray" ] || die "这些 jar 不该出现在 ${DEST}（它们与 /opt/spark/jars 里的同名不同版，谁先上类路径谁赢）：
   ${stray}"

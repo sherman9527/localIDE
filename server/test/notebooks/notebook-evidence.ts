@@ -49,8 +49,10 @@ import { config } from '../../src/config.js';
  *   marker 判据 —— 它们吃的是 `executedNotebookEvidence`：整段严格 `JSON.parse` + 宽松 error 语义）**没有这份容忍**：
  *   把 Toree 污染的 stdout 喂给那扇门，得到的是「输出不是 notebook JSON：(Scala,org…」的一条**数据**条目，
  *   而不是被读出来。这个不对称**是刻意的**（改量具 ≠ 放宽判据）：给 stdout 门加前缀容忍是**另一道门的判据变更**，
- *   要单独的裁决与它自己的测试，不许顺手 —— 且今天唯一注册的 kernel `arena-pyspark` 的 nbconvert 输出不被污染，
- *   没有现需。分界由 notebook-evidence.test.ts 的「宽松门对前缀垃圾仍报 输出不是 notebook JSON」钉成被验事实；
+ *   要单独的裁决与它自己的测试，不许顺手 —— 且**现需至今为零** —— 不是"只注册了一条 kernel"（`NOTEBOOK_KERNELS` 现在两条，这句话在 Task 3 之后就已经假过一次），
+ *   而是**没有任何一份 Scala notebook 会走到这扇门前**：Scala 的夹具按裁决住在 `server/test/notebooks/fixtures/`，
+ *   题闸门 `tutorials.test.ts` 判的仍是"每篇都跑在 `arena-pyspark` 上"，而 N-20 把"每篇期望哪条 kernel"
+ *   记成注册表自带字段 —— **那一天**才是重新裁决这扇门的时刻（届时按现需改判据，别按今天这句话改）。分界由 notebook-evidence.test.ts 的「宽松门对前缀垃圾仍报 输出不是 notebook JSON」钉成被验事实；
  *   **下游作者（Task 4）读到这里时不要以为 stdout 门已防污染** —— Task 4 走的是文件门（`readExecutedNotebookFile`）。
  * - `executedNotebookScratchPath(tag)` / `removeExecutedNotebookScratch(path)` —— 落盘临时文件的**唯一**选址与
  *   收尾实现：住在实例自己的数据目录（`config.dataDir`，即 `ARENA_DATA_DIR` 跟着走的那棵树；WI-40 隔离纪律），
