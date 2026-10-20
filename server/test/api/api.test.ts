@@ -20,6 +20,7 @@ import {
   type QuestionDetailResponse,
   type RubricVerdict,
   type StackHealth,
+  type TagAliasGroup,
   type TodayResponse,
 } from '@arena/shared';
 import type { BankPort, Clock, GradePort, JudgePort, ProgressStore } from '../../src/ports.js';
@@ -36,7 +37,7 @@ import type {
 } from '@arena/shared';
 import { findLanguage } from '../../src/ide/languages.js';
 import { buildApp } from '../../src/api/app.js';
-import { BareFakeStore, FakeBank, FakeStore, REFERENCE_ANSWER_MARKER, REFERENCE_SOLUTION_MARKER, fixedClock, newAttempt, seedQuestions } from '../game/fixtures.js';
+import { BareFakeStore, FakeBank, FakeStore, REFERENCE_ANSWER_MARKER, REFERENCE_SOLUTION_MARKER, fixedClock, makeQuestion, newAttempt, seedQuestions } from '../game/fixtures.js';
 import { parseBook } from '../../src/game/review.js';
 
 /** 内存假 judge：只通过 JudgePort 相遇，绝不 import 真实判题实现（Task 6/7 由他人交付）。 */
@@ -999,5 +1000,135 @@ describe('GET /api/bank 的列表行（N-15 的瘦身）', () => {
     const totalLabeled = counts.reduce((a, b) => a + b, 0);
     expect(totalLabeled + body.unlabeled).toBe(body.rows.length);
     expect(body.rows.filter((r) => r.company).length).toBe(totalLabeled);
+  });
+});
+
+/**
+ * N-17 的另一半：标签词表的**读时归并**。
+ *
+ * 这里判的是"读路径的语义"，所以词表是**注入**的（`buildApp({ tagAliases })`）——
+ * 行为判据不该跟着 `content/tags-aliases.json` 的内容漂移，否则改一次词表就要改一次测试。
+ * 词表本身合不合法、真题库上到底并掉了多少个写法，由 `server/test/bank/content.test.ts`
+ * 那组闸门用**真实文件 + 真题库**判。两边各管一段，没有第三份实现。
+ */
+describe('GET /api/bank 的同义归并（词表只作用于读侧聚合，题目数据不动）', () => {
+  const GROUPS: TagAliasGroup[] = [
+    { canonical: 'window-functions', aliases: ['window-function'], reason: '单复数两种写法' },
+    { canonical: 'data-quality', aliases: ['dqc'], reason: '缩写与全称' },
+  ];
+
+  const aliasBank = () =>
+    new FakeBank([
+      makeQuestion({ id: 'alg-java-0101', category: 'algorithms', judgeKind: 'java-junit', tags: ['window-functions'] }),
+      makeQuestion({ id: 'alg-java-0102', category: 'algorithms', judgeKind: 'java-junit', tags: ['window-functions'] }),
+      makeQuestion({ id: 'alg-java-0103', category: 'algorithms', judgeKind: 'java-junit', tags: ['window-function'] }),
+      // data-quality 这一组刻意做成"两种写法混着用、还有一道同时写两种"——真题里 sql-mysql-0019 就是这个形状
+      makeQuestion({ id: 'sql-mysql-0104', category: 'sql', judgeKind: 'mysql', tags: ['data-quality', 'dqc'] }),
+      makeQuestion({ id: 'sql-mysql-0105', category: 'sql', judgeKind: 'mysql', tags: ['dqc'] }),
+      makeQuestion({ id: 'sql-mysql-0106', category: 'sql', judgeKind: 'mysql', tags: ['data-quality'] }),
+    ]);
+
+  it('facet 的 count 是同组题数之和：单看任何一种写法都不到门槛，合起来才进下拉', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      const body = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank' }));
+      const wf = body.tags.find((t) => t.name === 'window-functions');
+      expect(wf, `归并后 window-functions 该进下拉，实际下拉是 ${JSON.stringify(body.tags)}`).toBeTruthy();
+      expect(wf!.count, '2 道写复数 + 1 道写单数 = 3').toBe(3);
+      expect(body.tags.map((t) => t.name), 'alias 不再自己占一个下拉项').not.toContain('window-function');
+      // 对照：**同一批题**、词表为空 ⇒ 谁都不够门槛。这条断言证明"进下拉"是归并带来的，不是阈值松了。
+      const bare = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: [] });
+      const bareBody = await ok<BankResponse>(await bare.inject({ method: 'GET', url: '/api/bank' }));
+      expect(bareBody.tags, '没有词表时不该有任何标签够 ≥3 次（这正是归并要解决的问题）').toEqual([]);
+      await bare.close();
+    } finally {
+      await merged.close();
+    }
+  });
+
+  it('同一题挂了同组两种写法时只数一次：facet 是题数，不是拼法的数量', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      const body = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank' }));
+      const dq = body.tags.find((t) => t.name === 'data-quality');
+      expect(dq, 'data-quality 组：3 道题（其中一道同时写了 dqc）').toBeTruthy();
+      // 3 道题、4 次写法出现 —— 数成 4 就是把"拼法"当成了"题目"
+      expect(dq!.count, 'sql-mysql-0104 同时挂 data-quality 与 dqc，不该被数成 2 题').toBe(3);
+    } finally {
+      await merged.close();
+    }
+  });
+
+  it('按 canonical 筛与按 alias 筛得到同一批题（两边语义一致，选哪个名字不该少一半）', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      const byCanonical = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank?tag=window-functions' }));
+      const byAlias = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank?tag=window-function' }));
+      expect(byCanonical.rows.map((r) => r.id).sort(), '只写了单数那一道也必须被筛到').toEqual([
+        'alg-java-0101',
+        'alg-java-0102',
+        'alg-java-0103',
+      ]);
+      expect(byAlias.rows.map((r) => r.id).sort()).toEqual(byCanonical.rows.map((r) => r.id).sort());
+      // 没登记的标签还是老行为（大小写不敏感的精确匹配）
+      const untouched = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank?tag=DATA-QUALITY' }));
+      expect(untouched.rows.map((r) => r.id).sort(), '大小写不敏感是既有行为，归并层不许把它改严').toEqual([
+        'sql-mysql-0104',
+        'sql-mysql-0105',
+        'sql-mysql-0106',
+      ]);
+    } finally {
+      await merged.close();
+    }
+  });
+
+  it('rows[].tags 与 tagCount 都还是**原词**口径：题目没被改过，界面就得照原样说', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      const body = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank' }));
+      const aliasRow = body.rows.find((r) => r.id === 'alg-java-0103')!;
+      expect(aliasRow.tags, '列表行里的标签必须是题目存的那个写法').toEqual(['window-function']);
+      // tagCount = 库里真实存在多少种**写法**（4 种），facet 名单 = 多少个**规范名**（2 个）：
+      // 两个数量的是不同的东西，谁都不许被"顺手统一"成另一个。
+      expect(body.tagCount, 'tagCount 数的是写法：window-function 与 window-functions 各算一种，dqc 与 data-quality 也是').toBe(4);
+      expect(body.tags.length, '规范名只有 2 个（都过了门槛）').toBe(2);
+      expect(body.tagCount).toBeGreaterThan(body.tags.length);
+    } finally {
+      await merged.close();
+    }
+  });
+
+  it('响应把词表带出来给客户端（客户端筛标签要用同一份判据，不能再猜一次）', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      const body = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank' }));
+      expect(body.tagGroups).toEqual(GROUPS.map((g) => ({ canonical: g.canonical, aliases: g.aliases })));
+    } finally {
+      await merged.close();
+    }
+  });
+
+  it('关键词搜索不做归并（搜的是原话，命中要解释得通）：q=dqc 只命中真写了 dqc 的两道，tag=dqc 命中整组三道', async () => {
+    const merged = await buildApp({ judge, grade, bank: aliasBank(), store, clock, tagAliases: GROUPS });
+    try {
+      // `haystackOf` 把 tags **原样**拼进子串匹配的输入里 ⇒ 命中的都是"题面/标签里确实出现过这串字"的题。
+      // 这里故意不归并：把 q=dqc 换成 q=data-quality 再搜，命中的题面里根本没有用户输入的那串字，
+      // 搜索结果就从"搜到了什么"变成"系统替我猜了什么"；而"阈值以下的写法照样搜得到"是 N-17 上半段
+      // 已经承诺过的兜底。facet 筛选走 tagMatches，关键词走 substring —— 两个口径各有语义，不许合并。
+      const byKeyword = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank?q=dqc' }));
+      expect(byKeyword.rows.map((r) => r.id).sort(), 'q= 只该命中真写了 dqc 的题目').toEqual(['sql-mysql-0104', 'sql-mysql-0105']);
+      const byTag = await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank?tag=dqc' }));
+      expect(byTag.rows.map((r) => r.id).sort(), 'tag= 才做归并：整组三道都在').toEqual([
+        'sql-mysql-0104',
+        'sql-mysql-0105',
+        'sql-mysql-0106',
+      ]);
+      // alias 不再自己占下拉项，但它当筛选值照样能用（既有那条"挡住的是位置不是题目"的判据的另一半）
+      expect(byTag.tags, '筛选项按全库算，且不因归并少掉任何一项').toEqual(
+        (await ok<BankResponse>(await merged.inject({ method: 'GET', url: '/api/bank' }))).tags,
+      );
+    } finally {
+      await merged.close();
+    }
   });
 });

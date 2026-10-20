@@ -9,13 +9,17 @@ import {
   CATEGORY_META,
   JUDGE_KINDS,
   TAG_FACET_MIN_COUNT,
+  buildTagAliasMap,
+  countQuestionsByCanonicalTag,
   detailFromGrade,
   detailFromJudge,
   isCategoryId,
   leagueFor,
   publicBankRow,
   publicQuestion,
+  publicTagAliasGroups,
   questionReference,
+  tagMatches,
   todayIso,
   type AttemptsResponse,
   type BankQuery,
@@ -27,16 +31,17 @@ import {
   type HideResponse,
   type JudgeEvent,
   type JudgeKind,
-  type JudgeStatus,
   type JudgePostRequest,
   type JudgePostResponse,
   type JudgeRequest,
   type JudgeResult,
+  type JudgeStatus,
   type ProgressResponse,
   type Question,
   type QuestionDetailResponse,
   type RubricVerdict,
   type StackHealth,
+  type TagAliasGroup,
   type TodayResponse,
 } from '@arena/shared';
 import type { BankPort, Clock, GradePort, JudgePort, ProgressStore } from '../ports.js';
@@ -83,6 +88,7 @@ import type {
   ReplStopResponse,
 } from '@arena/shared';
 import { config } from '../config.js';
+import { loadTagAliases } from '../bank/tagAliases.js';
 import { errorFields, logError, logInfo, logWarn, newTraceId } from '../log.js';
 import { evaluatePlanProgress, isJudgeable, planForDay, practicePool } from '../game/daily.js';
 import { applyAttempt, bookStats, loadBook } from '../game/review.js';
@@ -129,6 +135,14 @@ export interface AppDeps {
    * 它不是请求参数 ⇒ 客户端碰不到它，也指不了别处（把上游做成可配 = 给一个没鉴权的服务加一条 SSRF）。
    */
   notebookUpstream?: NotebookUpstream;
+  /**
+   * N-17：标签同义词表。**不传 = 生产路径 = 读 `config.tagsAliasesFile`**（`content/tags-aliases.json`）。
+   *
+   * 只为测试开：行为判据（facet 求和、alias 能筛到 canonical 那道题）不该跟着词表的内容漂移，
+   * 否则改一次词表就要改一次测试；词表本身合不合法由 `server/test/bank/content.test.ts` 用真文件判。
+   * 它不是请求参数 ⇒ 客户端碰不到它（"能不能换一份词表"必须是部署决定，不是查询串里的东西）。
+   */
+  tagAliases?: readonly TagAliasGroup[];
 }
 
 interface ApiError {
@@ -149,6 +163,13 @@ const wantsIncludedHidden = (value: unknown): boolean =>
  * "搜这道题"到底搜什么。带 `q=` 与不带 `q=` 的 `/api/bank` 走的是同一个 `listBank`，
  * 所以这里只有一份判据 —— 分成两份写迟早会出现"列表页能搜到公司、搜索框搜不到"。
  * 正文（statement）留在这里用，列表响应里不再带它（N-15）。
+ *
+ * **这里故意不做同义归并（N-17 的另一半）**：`q=` 是子串匹配，命中的理由必须是
+ * "你输入的那串字真的出现在这道题里"。把 alias 换成 canonical 再去匹配，就会做出
+ * "搜 `dqc` 却返回一道通篇没写过 dqc 的题"——结果解释不通，而用户没法知道自己漏了什么；
+ * 何况"阈值以下的写法照样搜得到"正是 N-17 上半段承诺过的兜底。
+ * 归并只管**分类**（facet 计数与 `tag=` 筛选，走 `tagMatches`），不管**全文检索**。
+ * 两个口径各有语义，谁也不许被"顺手统一"成另一个。
  */
 const haystackOf = (q: Question): string =>
   [q.id, q.title, q.statement, q.category, q.tags.join(' '), q.source.company ?? ''].join(' ').toLowerCase();
@@ -992,13 +1013,25 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   });
 
   async function listBank(query: BankQuery): Promise<BankResponse> {
-    const [pool, hidden] = await Promise.all([query.includeHidden ? bank.all() : bank.visible(), bank.hiddenIds()]);
-    // 筛选项按**全库**算：一搜索就把下拉里的选项筛掉，看起来像"题库少了一批标签"
-    const tagCounts = new Map<string, number>();
+    const [pool, hidden, aliasGroups] = await Promise.all([
+      query.includeHidden ? bank.all() : bank.visible(),
+      bank.hiddenIds(),
+      deps.tagAliases ? Promise.resolve(deps.tagAliases) : loadTagAliases(),
+    ]);
+    /**
+     * N-17 的另一半：同义词表只在这里生效 —— **读侧聚合**，题目数据一字未动。
+     * 判据全部来自 `@arena/shared` 的 tagVocabulary（客户端筛标签调的是同一个 `tagMatches`）。
+     */
+    const aliasMap = buildTagAliasMap(aliasGroups);
+    // 筛选项按**全库**算：一搜索就把下拉里的选项筛掉，看起来像"题库少了一批标签"。
+    // count 是"这一组写法合起来的**题数**"（一题挂了同组两种写法只数一次），见 countQuestionsByCanonicalTag。
+    const tagCounts = countQuestionsByCanonicalTag(pool.map((q) => q.tags), aliasMap);
+    // tagCount 保持**原词口径**（库里的不同写法数），与上面那个"规范名数"不是同一个量：
+    // 题目没被改过，所以"真实存在多少种拼法"这个数必须照原词报，界面靠它说清被频次挡住的那部分。
+    const rawTagCount = new Set(pool.flatMap((q) => q.tags)).size;
     const counts = new Map<string, number>();
     let unlabeled = 0;
     for (const q of pool) {
-      for (const t of q.tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
       if (q.source.company) counts.set(q.source.company, (counts.get(q.source.company) ?? 0) + 1);
       else unlabeled += 1;
     }
@@ -1006,7 +1039,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     const filtered = pool.filter((q) => {
       if (query.category && q.category !== query.category) return false;
       if (query.difficulty && q.difficulty !== query.difficulty) return false;
-      if (query.tag && !q.tags.some((tag) => tag.toLowerCase() === query.tag!.toLowerCase())) return false;
+      if (query.tag && !tagMatches(q.tags, query.tag, aliasMap)) return false;
       if (needle && !haystackOf(q).includes(needle)) return false;
       return true;
     });
@@ -1018,7 +1051,9 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
         .filter(([, count]) => count >= TAG_FACET_MIN_COUNT)
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')),
-      tagCount: tagCounts.size,
+      tagCount: rawTagCount,
+      // 词表随响应出去，客户端才可能与服务端筛得一模一样（判据一份，读者两处）
+      tagGroups: publicTagAliasGroups(aliasGroups),
       companies: [...counts.entries()]
         .map(([name, count]) => ({ name, count }))
         .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-CN')),

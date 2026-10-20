@@ -2,9 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { publicBankRow, publicQuestion } from '@arena/shared';
+import { TAG_FACET_MIN_COUNT, buildTagAliasMap, canonicalTag, countQuestionsByCanonicalTag, publicBankRow, publicQuestion } from '@arena/shared';
 import { loadBank } from '../../src/bank/loader.js';
 import { statementHash } from '../../src/bank/ingest.js';
+import { loadTagAliases } from '../../src/bank/tagAliases.js';
 import { config } from '../../src/config.js';
 import { registeredKinds } from '../../src/judge/registry.js';
 import { registerOptionalRunners } from '../../src/judge/runners/index.js';
@@ -28,6 +29,12 @@ const MINIMUMS: Record<string, number> = {
 };
 
 const bank = await loadBank(config.bankDir);
+
+/**
+ * 标签词表：闸门读它用的是**运行时的同一条路径**（`loadTagAliases()` + `config.tagsAliasesFile`），
+ * 不是自己再拼一次文件名 —— 否则"容器里读不到 bind mount 的词表"这种故障会躲过闸门。
+ */
+const tagAliases = await loadTagAliases();
 
 describe('题库结构（必须始终通过）', () => {
   it(`没有解析失败的题目文件（实际 ${bank.errors.length} 个错）`, () => {
@@ -309,6 +316,147 @@ describe('知识库语料必须被该类别 README 收录', () => {
     }
     expect(counted, '一篇语料都没扫到（等于闸门失效）').toBeGreaterThan(20);
     expect(orphans, `这些语料没有任何入口，出题时没人会发现它：${orphans.join(', ')}`).toEqual([]);
+  });
+});
+
+describe('标签词表的同义归并（N-17 的另一半：只在读时归并，题目数据一字不动）', () => {
+  /**
+   * 词表为什么能存在而不撞红线 C5：它**不在 `content/questions/**` 里**，
+   * 两条出处指纹路径（`scripts/bank/drafts/check_provenance.py` 与 `server/src/bank/ingest.ts`）
+   * 都只看题目文件，所以它既不改题目也不需要复核出处。这条判据本身也要被钉住（下面那条）。
+   */
+  const TAG_RE = /^[a-z0-9][a-z0-9:._-]*$/;
+  const groups = tagAliases;
+  const map = buildTagAliasMap(groups);
+
+  it('词表读得出、且不是空的（两档共用同一条读取路径：config.tagsAliasesFile）', () => {
+    expect(existsSync(config.tagsAliasesFile), `词表文件不存在：${config.tagsAliasesFile}`).toBe(true);
+    // loadTagAliases() 对"读不到 / 不是合法 JSON / 形状不对"一律给空表（不炸启动），
+    // 所以**空表就是它坏掉的信号** —— 这一条把"静默降级成不归并"判红（本仓库最怕的那种绿）。
+    expect(groups.length, `词表里一条组都没有（文件坏了？路径 ${config.tagsAliasesFile}）`).toBeGreaterThan(0);
+    // content/ 是 bind mount、server/ 是烤进镜像的：两档都必须在这里读到同一批组
+    console.log(`[词表] ${config.tagsAliasesFile} 读出 ${groups.length} 组，${groups.reduce((n, g) => n + g.aliases.length, 0)} 条别名`);
+  });
+
+  it('词表不在题库目录里（在里面的话两条出处指纹路径都会看见它，C5 就被绕开了）', () => {
+    const rel = config.tagsAliasesFile.startsWith(config.bankDir + sep) || config.tagsAliasesFile.startsWith(config.bankDir + '/');
+    expect(rel, `词表落在了题库目录 ${config.bankDir} 里`).toBe(false);
+    // 而且 loader 只认 `<类别>/<文件>.json`，落在 content/ 根上就不会被当成题目
+    const filesInBankDir = readdirSync(config.bankDir, { withFileTypes: true }).filter((e) => e.isFile() && e.name.endsWith('.json'));
+    expect(filesInBankDir.map((e) => e.name), '题库目录根部出现了裸 JSON 文件，loader 会把它们当题目').toEqual([]);
+  });
+
+  it('每条 canonical 与 alias 都过题目用的那张标签正则', () => {
+    const bad: string[] = [];
+    for (const g of groups) {
+      if (!TAG_RE.test(g.canonical)) bad.push(`${g.canonical}（canonical）`);
+      for (const a of g.aliases) if (!TAG_RE.test(a)) bad.push(`${a}（alias of ${g.canonical}）`);
+    }
+    expect(bad, `不合法的词表项：${bad.join(', ')}`).toEqual([]);
+  });
+
+  it('形状规矩：每组至少一条别名、至少一行 reason，且 alias 不重复', () => {
+    const bad = groups.flatMap((g) => [
+      ...(g.aliases.length === 0 ? [`组 ${g.canonical} 一条别名都没有（不合并的登记是装饰）`] : []),
+      ...(!g.reason || g.reason.trim().length < 4 ? [`组 ${g.canonical} 没有 reason（为什么这三个写法是同一件事）`] : []),
+      ...(new Set(g.aliases).size !== g.aliases.length ? [`组 ${g.canonical} 组内有重复别名：${g.aliases.join(', ')}`] : []),
+      ...(g.aliases.includes(g.canonical) ? [`组 ${g.canonical} 把自己列成了别名`] : []),
+    ]);
+    expect(bad, bad.join('; ')).toEqual([]);
+  });
+
+  it('没有链、没有一个别名属于两组、没有两组共用一个 canonical', () => {
+    const canonicalOf = new Map<string, string>();
+    const ownerOfAlias = new Map<string, string>();
+    const bad: string[] = [];
+    for (const g of groups) {
+      if (canonicalOf.has(g.canonical)) bad.push(`${g.canonical} 是两组的 canonical（${canonicalOf.get(g.canonical)} 与 ${g.canonical}）`);
+      canonicalOf.set(g.canonical, g.canonical);
+      for (const a of g.aliases) {
+        if (canonicalOf.has(a)) bad.push(`别名 ${a}（属于 ${g.canonical}）同时是另一组 ${canonicalOf.get(a)} 的 canonical —— 链`);
+        if (ownerOfAlias.has(a)) bad.push(`别名 ${a} 同时登记在 ${ownerOfAlias.get(a)} 与 ${g.canonical} 两组`);
+        ownerOfAlias.set(a, g.canonical);
+      }
+    }
+    // 再核一遍"链"的另一半：canonical 自己不能是别人的别名（上面按登记顺序查，正反各来一次才不漏最后一组）
+    for (const g of groups) {
+      if (ownerOfAlias.has(g.canonical)) bad.push(`${g.canonical} 既是本组的 canonical，又是 ${ownerOfAlias.get(g.canonical)} 组的别名 —— 链`);
+    }
+    expect(bad, [...new Set(bad)].join('; ')).toEqual([]);
+  });
+
+  it('没有死别名：词表里的每条 alias 都真的出现在至少一道题上', () => {
+    const used = new Set(bank.questions.flatMap((q) => q.tags));
+    const dead = groups.flatMap((g) => g.aliases.filter((a) => !used.has(a)).map((a) => `${a}（→ ${g.canonical}）`));
+    expect(dead, `这些别名没有任何一道题在用，删掉它们：${dead.join(', ')}`).toEqual([]);
+  });
+
+  it('归并真的在归并：从真题库算，同组写法收拢成一个名字，且 facet 只增不减', () => {
+    const rawTags = new Set(bank.questions.flatMap((q) => q.tags));
+    const canonTags = new Set(bank.questions.flatMap((q) => q.tags.map((t) => canonicalTag(t, map))));
+    expect(
+      canonTags.size,
+      `归并没有收拢任何写法：归并前 ${rawTags.size} 种写法 → 归并后 ${canonTags.size} 个规范名`,
+    ).toBeLessThan(rawTags.size);
+    console.log(`[词表] 不同标签数：归并前 ${rawTags.size} 种写法 → 归并后 ${canonTags.size} 个规范名（并掉 ${rawTags.size - canonTags.size} 个）`);
+
+    // facet 口径：两个数都走**交付里那一份** `countQuestionsByCanonicalTag`（空表 = 归并前）。
+    // 这里刻意不再自己写一遍计数：自己写的那份永远不会因为"实现算错了"而红
+    // —— 破坏性验证 D11b 就是这样撞出来的：把共享函数里的"一题只数一次"删掉，
+    // 只调它的那条会红，自己另算一份的那条照样绿。
+    const tagLists = bank.questions.map((q) => q.tags);
+    const before = countQuestionsByCanonicalTag(tagLists, new Map());
+    const after = countQuestionsByCanonicalTag(tagLists, map);
+    const facetsBefore = new Set([...before.entries()].filter(([, c]) => c >= TAG_FACET_MIN_COUNT).map(([n]) => n));
+    const facetsAfter = new Set([...after.entries()].filter(([, c]) => c >= TAG_FACET_MIN_COUNT).map(([n]) => n));
+    expect(facetsAfter.size, `归并后 facet 反而变少（${facetsBefore.size} → ${facetsAfter.size}）：合并绝不会让一个已有筛选项消失`).toBeGreaterThanOrEqual(facetsBefore.size);
+    console.log(`[词表] 出现 ≥${TAG_FACET_MIN_COUNT} 次的筛选项：归并前 ${facetsBefore.size} 个 → 归并后 ${facetsAfter.size} 个`);
+
+    // 存在"靠归并才成为 facet"的组：组里每一种写法单独都不够门槛，合起来才够
+    const born = groups
+      .map((g) => ({ g, members: [g.canonical, ...g.aliases], merged: after.get(g.canonical) ?? 0 }))
+      .filter(({ members, merged }) => merged >= TAG_FACET_MIN_COUNT && members.every((m) => (before.get(m) ?? 0) < TAG_FACET_MIN_COUNT));
+    expect(
+      born.length,
+      `没有任何一组是"靠归并才凑满 ≥${TAG_FACET_MIN_COUNT} 次"的 —— 那词表就没在合并同义词，只是在改名`,
+    ).toBeGreaterThan(0);
+    console.log(
+      `[词表] 因为归并才成为筛选项的组：` +
+        born.map(({ g, members, merged }) => `${g.canonical}（${members.map((m) => `${m}:${before.get(m) ?? 0}`).join(' + ')} = ${merged}）`).join('；'),
+    );
+  });
+
+  it('同一道题挂了同组两种写法时，题数只加一次（不是拼法的数量）', () => {
+    // 真题里就有这个形状：sql-mysql-0019 同时写了 data-quality 与 dqc
+    const coTagged = bank.questions.filter((q) => {
+      const set = new Set(q.tags.map((t) => canonicalTag(t, map)));
+      return set.size < q.tags.length;
+    });
+    console.log(`[词表] 同题共挂同组写法的题目：${coTagged.map((q) => q.id).join(', ') || '（无）'}`);
+    const counts = countQuestionsByCanonicalTag(bank.questions.map((q) => q.tags), map);
+    // 判据对**每一个规范名**都成立：facet 的 count 必须等于"挂了这一组任一写法的题目数"。
+    // 写成"只查 data-quality 那一条"也行，但它抓不到"以后有人新加的组正好踩中另一个形状"。
+    const wrong = [...counts.entries()].map(([name, count]) => {
+      const members = new Set([name, ...(groups.find((g) => g.canonical === name)?.aliases ?? [])]);
+      const holders = bank.questions.filter((q) => q.tags.some((t) => members.has(t))).length;
+      return count === holders ? null : `${name}：facet 报 ${count}，实际挂了这组任一写法的题是 ${holders} 道`;
+    }).filter((line): line is string => line !== null);
+    expect(wrong, wrong.join('; ')).toEqual([]);
+    const dq = counts.get('data-quality') ?? 0;
+    const dqRaw = bank.questions.filter((q) => q.tags.includes('data-quality')).length;
+    expect(dq, 'sql-mysql-0019 同时挂 data-quality 与 dqc，归并后题数不该变成 13').toBe(dqRaw);
+  });
+
+  it('归并判据只有一份：服务端与 web 都从 @arena/shared 引，不许各自再写一遍', () => {
+    const read = (rel: string) => readFileSync(join(config.repoRoot, rel), 'utf8');
+    const serverSide = read(join('server', 'src', 'api', 'app.ts'));
+    const clientSide = read(join('web', 'src', 'pages', 'Bank.tsx'));
+    for (const [name, src] of [['app.ts', serverSide], ['Bank.tsx', clientSide]] as const) {
+      expect(src, `${name} 没有引入 shared 的归并判据`).toMatch(/tagMatches/);
+      // 旧的两份各自实现：服务端 tags.some(tag => tag.toLowerCase() === ...)、客户端 q.tags.includes(tag)
+      expect(src, `${name} 还留着自己写的精确匹配`).not.toMatch(/tags\.some\(\s*\(tag\)\s*=>\s*tag\.toLowerCase\(\)/);
+      expect(src, `${name} 还留着 includes 精确匹配`).not.toMatch(/q\.tags\.includes\(tag\)/);
+    }
   });
 });
 

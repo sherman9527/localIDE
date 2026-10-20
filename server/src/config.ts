@@ -87,6 +87,15 @@ export const config = {
   bankDir: process.env.ARENA_BANK_DIR ?? join(repoRoot, 'content', 'questions'),
   curriculumDir: process.env.ARENA_CURRICULUM_DIR ?? join(repoRoot, 'content', 'curriculum'),
   hiddenFile: process.env.ARENA_HIDDEN_FILE ?? join(repoRoot, 'content', 'hidden.json'),
+  /**
+   * 标签同义词表（N-17 的另一半）。形状照上面那行 `hiddenFile`：仓库内、`content/` 下、可用 env 覆盖。
+   *
+   * 为什么它必须落在 `content/questions/**` **之外**：那里的每个文件都会被两条出处指纹路径看见
+   * （`scripts/bank/drafts/check_provenance.py` 与 `server/src/bank/ingest.ts`），
+   * 而词表是"读时归并"的配置，不该参与任何题目指纹。`content/` 与 `hidden.json` 一样是 bind mount
+   * （compose.yml 里挂的是整个 content），所以改词表不用重建镜像 —— 两档读到的就是同一份文件。
+   */
+  tagsAliasesFile: process.env.ARENA_TAGS_ALIASES_FILE ?? join(repoRoot, 'content', 'tags-aliases.json'),
   dataDir,
   dbFile: process.env.ARENA_DB_FILE ?? join(dataDir, 'arena.db'),
   judgeWorkDir: join(dataDir, 'judge'),

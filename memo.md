@@ -4098,3 +4098,72 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
 - Scala 教程 notebook 到来前先做 **N-20**（教程 kernel 声明进注册表）；**不许**就地放宽执行层判据。
 - WI-101（路径 C）仅在 B 的②③④任一变成产品问题时重开；重开先读边界块与 T4 §9。
 - CDP 两条瞬态红若复发：按 WI-72 的取证钩子纪律处理，不当 flaky 关。
+
+
+---
+
+## 里程碑 BN：WI-91b 的三轮修复与整枝终审 —— "绿"与"说过的那句话是真的"是两件事（2026-10-20）
+
+**做了什么**
+- Task 3 修复轮：`status.ts` 的 pyspark `reason` 不再把注册表写进散文（改成 `ARENA_KERNEL_IDS.filter(≠本条)` 派生），
+  web 的 7 份单 kernel 夹具改为整表派生（旧夹具现在每页顺带挂"半接入镜像"横幅，两条判据被自己前提拆台）。
+- Task 4 修复轮：预算由调用方显式传进探针（原来真预算住在隔壁文件的私有常量里，门是同义反复）；
+  负例那条**真的判 cell 下标**（原来常驻判据的消息引用了一条不存在的容器判据，而它盖住的正是"错 cell 报错"这一坏形状）；
+  并给 `assert-ran.mjs --require-no-skips` 补了它自己从来没有过的**行为判据**（跑脚本、两个方向、清理夹具）。
+- Task 5 两轮：见下"最有价值的一条"；第二轮清掉那句被推翻的话在两个活文件里的残留
+  （`HANDOVER.md` WI-101 的前提、`web/test/notebook.test.tsx` 文件头），并把工件里三条真相的判据从
+  一条顺序相关的负正则换成**三条正判据**（DV3 实测：那次变异只有新正判据抓得到）。
+- 终审（15 提交 / 33 文件 / +2998−379）：**无 Critical、红线①全程未动、五条完成判据逐条对上读数**；
+  三条 Important 全是"话与事实脱节"，收在 `bc288af`。
+
+**验证**（每档退出码都被看到，没有管道吃码）
+- 宿主 `npm run verify:fast` → 0（多轮，含每次 pre-commit 的复跑）；容器 `MIRROR_APT=… ./start.sh --verify` →
+  `VERIFY_EXIT=0`、矩阵 `158 可判 / 跳过（栈不可用）0 道`、五个 notebook 阶段各恰好 1 次、教程 17/0、Scala 档 11/0；
+  宿主 `npm run e2e` → 74 passed / `E2E_EXIT=0`。整镜像 `--no-cache` 冷构建 → `REBUILD_EXIT=0`、2.58 GB。
+- 破坏性：DV1 `-Xmx2g→3g` ⇒ web 4 条红并点名派生值；DV2 摘掉工件里的"浏览器"⇒ notebook-image 1 条红；
+  DV3 `补全有面板→补全不支持` ⇒ 只有新加的正判据红（旧负正则抓不到）；T4 的四条见 `task-4-report.md`。
+- 字节对照：工作树与容器内 `kernel.json` 同 md5；容器烤入的 bundle 里新句在、旧句 0 命中。
+
+**已知问题**
+- **最有价值的一条不是修出来的，是量出来的**：计划 Task 5 ④ 写"补全/悬浮文档/中断都不支持"，
+  真浏览器第二次量发现**补全会出 `jp-Completer` 面板** —— 而当时单测与 e2e 全绿、页面上正印着那句假话。
+  ⇒ 教训入规：**写在页面上给用户看的能力承诺，必须有一条对着 DOM 的读数**；计划文本本身也要被实测管。
+- 派发纪律的账：两个修复 agent 都在 150 轮上限处断在"报告 + 提交"上（代码在工作树里）。
+  ⇒ 以后修复轮把"先提交、再写报告"排成两步；本轮剩下的由控制端做完。
+- 终审记的 4 处"措辞耦合"（判得太贴字面）已开 **N-23**；`N-21`（iframe 里新建 notebook 跳到顶层标签页）、
+  `N-22`（IDE 的 CDP 瞬态红：下次必须留日志取证）同批记账。
+
+**下一步**：WI-101（路径 C）保持"有证据的未触发"；N-20 在 Scala 教程出现当天必须先做；N-11 的另一半待开工。
+
+---
+
+## 里程碑 BO：N-17 的另一半 —— 标签词表同义归并，一层不改数据的归并（2026-10-20）
+
+**做了什么**
+- `content/tags-aliases.json`（17 组：canonical + aliases + 每组一句"为什么是同一件事"）**只在读/聚合时生效**；
+  已入库题目的 `tags[]` 一字节未动 —— `Question` 是 `.strict()`，加字段会同时撞 C5"永不覆盖"与出处指纹
+  （`check_provenance.py` 的指纹覆盖除 `id`/`schemaVersion`/`source.ingestedAt`/`case.visible` 外的每一个键）。
+- 纯函数进 `shared/src/tagVocabulary.ts`（`buildTagAliasMap` / `canonicalTag` / `tagMatches` / `countQuestionsByCanonicalTag`），
+  服务端 facet 求和、服务端 `tag=` 筛选、客户端筛选**三处调同一个 `tagMatches`** —— 题库页除关键词外全在浏览器里筛，
+  判据不随 `/api/bank` 响应下来就会两边各猜一次（症状：下拉里选它少一道、手敲 URL 不少，而两边测试都绿）。
+- 词表合法性判据进 `server/test/bank/content.test.ts`（真文件）：自指 / 成链 / 一个别名进两组 / 组内重复 /
+  死别名（题库里没人用）/ 空引一组 / 标签正则 / **归并真的合到了**（消息里打印归并前后两个数）。
+  行为判据进 `api.test.ts` 与 `web/test/bank.test.tsx`，用注入的词表，**不跟词表内容一起漂**。
+- 界面说实话：下拉里是规范名，而卡片与详情页徽章仍显示题目里存的原词 —— 提示里写清"这是有意的、数据没被改过"
+  （那句提示的位置有 E2E 判据）。`tagCount`（原词口径）与 `tags.length`（规范名口径）在注释里钉死"数的不是同一个东西，不许顺手统一"。
+- 板上 N-17 从需求池整段搬进 COMPLETED（原文一字未改随迁），`shared/src/api.ts` 注释里写死的 77/963 换成"不写死数 + 指向带日期的读数"。
+
+**验证**
+- `npx vitest run shared/test/tagVocabulary.test.ts server/test/bank/content.test.ts server/test/api/api.test.ts web/test/bank.test.tsx` → **126 passed / 3 skipped**。
+- 宿主 `npm run verify:fast` → `✓ verify 全部通过`；容器 `MIRROR_APT=… ./start.sh --verify` → `VERIFY_EXIT=0`、矩阵 `158 可判 / 跳过 0 道`。
+- 实测数（2026-10-20，258 题）：不同写法 **978 → 961**；能进下拉的 facet（≥3）**82 → 89**。
+
+**已知问题**
+- 归并是**保守的 17 组**：宽↔窄（`hooks` vs `react-hooks`）、跨 `modern:`/`classic:` 前缀的一律不合；
+  拒合清单与非拒理由在 `.superpowers/sdd/n17-tag-aliases/report.md` —— 那份清单和合并不合并同等重要，
+  它挡住的是"下一个人好心把两个不同考点合了"。
+- 词表是**新文件**，不在 `content/questions/**` 里 ⇒ 出处指纹与题库计数都不受它影响；
+  但它落在 bind mount 的 `content/` 下（`server/**` 是烤进镜像的）⇒ 改词表不需要重建，这一条对调试是好事，
+  对"镜像自洽"是另一回事：镜像里那份 `content/` 是 seed，跑起来才被铺进实例目录。
+
+**下一步**：N-11 的另一半（索引把元标签与考点标签分开统计 ⇒ 只定 `frontend` 那 20 行且只给新题用 ⇒ 老题不回填）。

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { BankRow, CategoryId } from '@arena/shared';
-import { CATEGORY_LIST, TAG_FACET_MIN_COUNT, isCategoryId } from '@arena/shared';
+import { CATEGORY_LIST, TAG_FACET_MIN_COUNT, buildTagAliasMap, isCategoryId, tagMatches } from '@arena/shared';
 import { api } from '../api';
 import { errorMessage } from '../lib/errors';
 import { useAsync, useDebounced } from '../lib/hooks';
@@ -51,18 +51,25 @@ export default function Bank({ initialCategory }: { initialCategory?: string | n
   const companies = data?.companies ?? [];
   const unlabeled = data?.unlabeled ?? 0;
 
+  /**
+   * 同义词表（N-17 的另一半）随 `/api/bank` 的响应到达这里。
+   * 客户端这一路筛选**必须**用服务端那份同一个 `tagMatches`：整表是一次拉回、除关键词外都在浏览器里筛，
+   * 两边各写一遍"什么算同一个标签"迟早分叉（症状：下拉里选它少一道、手敲 URL 不少，而两边测试都绿）。
+   */
+  const tagAliasMap = useMemo(() => buildTagAliasMap(data?.tagGroups ?? []), [data]);
+
   const rows = useMemo(() => {
     const list: BankRow[] = [];
     for (const q of data?.rows ?? []) {
       if (category !== 'all' && q.category !== category) continue;
       if (difficulty !== 'all' && q.difficulty !== difficulty) continue;
-      if (tag !== 'all' && !q.tags.includes(tag)) continue;
+      if (tag !== 'all' && !tagMatches(q.tags, tag, tagAliasMap)) continue;
       if (company === '(none)' ? Boolean(q.company) : company !== 'all' && q.company !== company) continue;
       if (hiddenIds.has(q.id) && !showHidden) continue;
       list.push(q);
     }
     return list;
-  }, [data, category, difficulty, tag, company, showHidden, hiddenIds]);
+  }, [data, category, difficulty, tag, tagAliasMap, company, showHidden, hiddenIds]);
 
   const toggleHide = useCallback(async (question: BankRow, hide: boolean) => {
     setBusyId(question.id);
@@ -186,11 +193,23 @@ export default function Bank({ initialCategory }: { initialCategory?: string | n
           挡住的是下拉的位置，不是题目：稀有标签照样能用关键词搜到（服务端 haystack 含 tags）。
           这一句必须放在这一行的**外面**：它原先长在标签那一列里，把那一列撑高一行，
           `align-items: center` 就把整个标签控件顶得比旁边几个高（用户截图指的就是这个）。
+          —— 位置有 E2E 判据（tests/e2e/judge.spec.ts 那条"五个控件在同一条水平线上"），别挪回去。
         */}
         {tagTotal > tags.length && (
           <p className="tiny muted" data-testid="bank-tag-hint">
-            标签只列出现 ≥{TAG_FACET_MIN_COUNT} 次的 {tags.length} 个；另有 {tagTotal - tags.length} 个只出现一两次，
-            在"关键词"里搜得到
+            {tagAliasMap.size > 0 ? (
+              <>
+                标签按同义归并后只列出现 ≥{TAG_FACET_MIN_COUNT} 次的 {tags.length} 个规范名；全库有 {tagTotal} 种写法，
+                另有 {tagTotal - tags.length} 个没在这里单列 —— 它们只出现一两次，或已作为同义写法并进上面某个名字，
+                在"关键词"里都搜得到。下拉里是归并后的名字，而卡片与详情页的标签徽章仍显示题目里存的原词：
+                所以筛到的题可能挂着一个写法不同的标签 —— 题目数据没有被改动过，这是有意的。
+              </>
+            ) : (
+              <>
+                标签只列出现 ≥{TAG_FACET_MIN_COUNT} 次的 {tags.length} 个；另有 {tagTotal - tags.length} 个只出现一两次，
+                在"关键词"里搜得到
+              </>
+            )}
           </p>
         )}
       </section>

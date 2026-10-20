@@ -1,5 +1,6 @@
 export * from './taxonomy.js';
 export * from './question.js';
+export * from './tagVocabulary.js';
 export * from './judge.js';
 export * from './attempt.js';
 export * from './game.js';

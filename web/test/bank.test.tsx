@@ -66,6 +66,8 @@ const FACETS = {
   ],
   // 全库不同标签比下拉里的多：那部分只能靠关键词搜（N-17 的收敛就是为这个）
   tagCount: 12,
+  // 这份夹具故意不带同义词表（N-17 的另一半另有夹具，见下面那个 describe）
+  tagGroups: [] as { canonical: string; aliases: string[] }[],
   companies: [
     { name: 'Airbnb', count: 1 },
     { name: 'PDD', count: 1 },
@@ -193,5 +195,86 @@ describe('题库页的标签下拉（N-17：963 项的 select 等于没有）', 
   it('全库标签都进了下拉（没东西被挡住）时不许出现那句提示', async () => {
     await renderBank({ tagCount: FACETS.tagCount - 10 });
     expect(screen.queryByTestId('bank-tag-hint')).toBeNull();
+  });
+});
+
+/**
+ * N-17 的另一半：词表归并之后，**客户端这一路筛选也必须走同一份判据**。
+ *
+ * 为什么这里要有判据而不是只信服务端：题库页除关键词外全在客户端筛（整表一次拉回），
+ * 所以 `tag=` 在服务端用 tagMatches、客户端却还用 `q.tags.includes(tag)` 的话，
+ * 症状是"下拉里选 window-functions 少一道，直接敲 URL 却不少"—— 两边都是绿的，谁也不报错。
+ */
+describe('题库页的同义归并筛选（客户端与服务端同一套语义）', () => {
+  beforeEach(() => {
+    cleanup();
+    state.calls.length = 0;
+  });
+
+  const GROUPS = [{ canonical: 'window-functions', aliases: ['window-function'], reason: '单复数两种写法' }];
+  const MERGED_ROWS: BankRow[] = [
+    row('alg-java-0201', '窗口帧的默认语义', { tags: ['window-functions'] }),
+    row('alg-java-0202', '同一考点但只写了单数', { tags: ['window-function'] }),
+    row('alg-java-0203', '与这组无关的题', { tags: ['backpressure'] }),
+  ];
+
+  async function renderMerged(withGroups = true) {
+    state.fail = false;
+    state.bank = {
+      rows: MERGED_ROWS,
+      hiddenIds: [],
+      total: MERGED_ROWS.length,
+      tags: [{ name: 'window-functions', count: 3 }],
+      // 全库**写法**数（原词口径，3 种）比规范名数（1 个）多，所以提示行会出现
+      tagCount: 3,
+      tagGroups: withGroups ? GROUPS : [],
+      companies: [],
+      unlabeled: 0,
+    };
+    const view = render(<Bank />);
+    await screen.findByText(`${MERGED_ROWS.length} 题`);
+    return view;
+  }
+
+  const titlesUnder = async (value: string) => {
+    fireEvent.change(screen.getByLabelText('按标签筛选'), { target: { value } });
+    const list = await screen.findByRole('list');
+    return within(list).getAllByRole('listitem').map((item) => item.textContent ?? '');
+  };
+
+  it('下拉里只有规范名，选它也能筛到只写了别名的那一行（老写法在这里会少一道）', async () => {
+    await renderMerged();
+    const select = screen.getByLabelText('按标签筛选') as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(['all', 'window-functions']);
+    const titles = await titlesUnder('window-functions');
+    expect(titles.length, '复数写法那道 + 单数写法那道，两道都要在').toBe(2);
+    expect(titles.some((t) => t.includes('同一考点但只写了单数'))).toBe(true);
+    expect(titles.some((t) => t.includes('与这组无关的题')), '别把不相关的题也并进来看似合理').toBe(false);
+  });
+
+  it('徽章上的标签仍是题目存的原词（数据没被改，界面不能假装改过）', async () => {
+    await renderMerged();
+    await titlesUnder('window-functions');
+    const list = await screen.findByRole('list');
+    const aliasRow = within(list).getAllByRole('listitem').find((i) => (i.textContent ?? '').includes('同一考点但只写了单数'))!;
+    expect(within(aliasRow).getByText('window-function', { exact: true }), '这里必须显示题目里那个单数写法').toBeTruthy();
+  });
+
+  it('提示行要把"筛选名 ≠ 徽章写法"这件事实说出来，同时别丢掉老那句（频次挡住的那些去哪了）', async () => {
+    await renderMerged();
+    const hint = screen.getByTestId('bank-tag-hint');
+    expect(hint.textContent).toContain('原词');
+    expect(hint.textContent).toContain('归并');
+    // 老那句还在：tagCount 3 种写法 − 下拉 1 个规范名 = 另有 2 种
+    expect(hint.textContent).toContain('2 个');
+    expect(hint.textContent).toContain('关键词');
+  });
+
+  it('词表为空时（没有登记任何同义组）退回精确匹配，且不许凭空承诺归并', async () => {
+    await renderMerged(false);
+    const titles = await titlesUnder('window-functions');
+    expect(titles.length, '没有词表就只能精确匹配 —— 这是降级，不是另一种语义').toBe(1);
+    const hint = screen.getByTestId('bank-tag-hint');
+    expect(hint.textContent, '没做归并就不许说"下拉里是归并后的名字"').not.toContain('原词');
   });
 });

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "canonical": "data-quality",
+      "aliases": ["dqc"],
+      "reason": "DQC 就是 Data Quality Check 的缩写展开，指的是同一个「数据质量校验」考点。证据比推断硬：sql-mysql-0019 一道题同时挂着 data-quality 与 dqc —— 题库自己就把这两个写法当同一件事。"
+    },
+    {
+      "canonical": "window-functions",
+      "aliases": ["window-function"],
+      "reason": "单复数之差（-s 的有无）：sql-mysql-0011（没有 PERCENTILE_CONT 时算 P99）与 sql-mysql-0012（出境门禁里的窗口聚合）写的都是窗口函数，与 bd-pyspark-0010、sql-mysql-0001/0002/0003/0009 的 window-functions 同一个考点。绝不跨档并到 modern:mysql8-window-functions。"
+    },
+    {
+      "canonical": "modern:mysql8-window-functions",
+      "aliases": ["modern:mysql8-window"],
+      "reason": "同一档（modern:）里「MySQL 8 窗口函数」的全称与缩写：sql-mysql-0011 用缩写、sql-mysql-0001/0002/0003 用全称，指的是同一条版本能力。与不带前缀的 window-functions 是两档，永不互并。"
+    },
+    {
+      "canonical": "integer-overflow",
+      "aliases": ["int-overflow"],
+      "reason": "「整数溢出」的完整拼法与缩写拼法。alg-java-0032（六边形距离求和）、alg-java-0040（桶数累加）、alg-java-0059（epoll 计数）三道题的坑都是同一件事：算到边界翻符号/截断。"
+    },
+    {
+      "canonical": "three-valued-logic",
+      "aliases": ["three-value-logic"],
+      "reason": "SQL 三值逻辑的两种拼法，差的只是一个 d（valued / value）：sql-mysql-0010（NOT IN 碰上 NULL）、bd-pyspark-0017（不该给 vs 该给却没给）与 sql-mysql-0033（口径门禁里的 NULL 比较）讲的是同一条「既不是真也不是假」。不并 three-state-null（那是「三态取值」的更窄一档）。"
+    },
+    {
+      "canonical": "tie-breaking",
+      "aliases": ["tie-break"],
+      "reason": "同一名词的动名词式与名词式写法（并列时按什么定序）：alg-java-0051（加权轮询同分）、sql-redis-0001（同分升序编码）与 sql-mysql-0015（并列会话取哪条）是同一条判据。"
+    },
+    {
+      "canonical": "state-machine",
+      "aliases": ["fsm"],
+      "reason": "FSM 是 finite-state machine 的缩写，与 state machine 指同一个东西（状态集合 + 迁移表）：ag-rubric-0004 的「Agent 运行时 FSM」与 alg-java-0033/0047 的熔断器状态机题都是这一条。不并 async-state-machine / state-machine-coverage / version-guarded-state-machine（那些是带额外限定的更窄写法）。"
+    },
+    {
+      "canonical": "llm-gateway",
+      "aliases": ["inference-gateway"],
+      "reason": "同一层网关的两种叫法（LLM 网关 / 推理网关），且题库是交叉使用它们的：alg-java-0021 挂 llm-gateway + modern:inference-gateway，alg-java-0028 挂 inference-gateway + modern:llm-gateway —— 两道的考点都是「网关上给推理请求限流/计量」。不并 gateway（sys-rubric-0005 那个是更上一层的入口网关）。"
+    },
+    {
+      "canonical": "scd2",
+      "aliases": ["scd2-zipper"],
+      "reason": "拉链表就是 SCD2 在中文数仓里的实现名：bd-pyspark-0009 的标题写的正是「Spark SQL 生成 SCD2 拉链」，与 bd-pyspark-0021、bd-rubric-0004 的 SCD2 生效区间是同一个考点的两种写法。"
+    },
+    {
+      "canonical": "late-data",
+      "aliases": ["late-arrival"],
+      "reason": "「迟到数据」与「晚到 / 迟到到达」指同一个现象：bd-pyspark-0016 的标题就叫「迟到数据与窗口重算」，bd-pyspark-0019 的输入里 ingest_batch>1 的注释写的是「回补批次写进来的晚到数据」。不并 watermark —— 那是处理迟到的另一件机制。"
+    },
+    {
+      "canonical": "count-distinct",
+      "aliases": ["distinct-count"],
+      "reason": "同两个词的词序互换（COUNT(DISTINCT …) ↔ 去重后的计数），考点都是「按实体去重再计数」：sql-mysql-0016 按去重用户计数、alg-java-0032 轨迹级去重。不并 exact-count-distinct（那条窄在「精确 vs 估算」这个额外轴上）。"
+    },
+    {
+      "canonical": "join-fanout",
+      "aliases": ["fan-out-join"],
+      "reason": "同两个词的词序互换：JOIN 造成的行数放大。sql-mysql-0015「分母不许被 JOIN 吃掉」与 sql-mysql-0025「天级去重之和被重复计」是同一件事。不并 feed-fanout / message-fanout —— 那两个扇出的对象是推送与消息，不是 JOIN。"
+    },
+    {
+      "canonical": "topological-sort",
+      "aliases": ["topological-order"],
+      "reason": "「拓扑排序」是算法名、「拓扑序」是它的输出名，同一个考点：alg-java-0010 用它算关键路径与假环，alg-java-0039 要求「拓扑序还必须唯一」。不并 dependency-graph / dag-longest-path（依赖图与关键路径是相邻的另一件事）。"
+    },
+    {
+      "canonical": "dual-ledger",
+      "aliases": ["two-ledger"],
+      "reason": "「双账本」与「两套账本」是同一件事的两种写法（two ↔ dual）：alg-java-0044 库存与商家镜像两本账、alg-java-0041 券批次与库存两个池子，都要「分开计数再对账」。"
+    },
+    {
+      "canonical": "window-frame",
+      "aliases": ["frame-clause"],
+      "reason": "「窗口帧」与「帧子句」指同一个构造（SQL 的 ROWS/RANGE）：bd-pyspark-0006 的标题写「窗口帧 + gaps & islands」，sql-mysql-0002 考「累计 GMV 的默认帧语义」。不并 rows-vs-range（那是帧内部二选一的更窄一档），也不并 sliding-window（算法题里的滑动窗口是另一件事）。"
+    },
+    {
+      "canonical": "system-adaptive-protection",
+      "aliases": ["adaptive-protection"],
+      "reason": "Sentinel 那个特性有全名与短写两种登记：alg-java-0055 的标题就写着「Sentinel 系统自适应保护」却登记成 adaptive-protection，sys-rubric-0022 用的正是 system-adaptive-protection —— 同一条「load 只做启动控制、通过量由 maxQps×minRt/RT 决定」。"
+    },
+    {
+      "canonical": "ordered-message-group",
+      "aliases": ["message-group"],
+      "reason": "同一件机制的 API 字段名与描述名：RocketMQ 顺序消息用 messageGroup 作分组键，alg-java-0053 登记成 message-group（「组到队列必须是纯函数」），hot-rubric-0019 登记成 ordered-message-group（「同一个订单的事件必须按序到」）。不并 sequence-group —— 那是 Paimon 主键表的字段版本序列，另一个引擎的另一件事。"
+    }
+  ]
+}
