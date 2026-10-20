@@ -19,8 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *    不可能再发生，留着分支与用例就是装饰判据（"删判据必须说清判的对象为什么不存在了"—— 这就是说明；
  *    实现与后端用例里的同一段理由见 `server/src/notebooks/status.ts` 与 `status.test.ts`）。
  * 那几句边界话（共用环境——按 kernel 点名 / 绝对路径拦不住 / CPU 两个 JVM 的真实量级 /
- * Scala 报错形状 / Scala 不支持补全·悬浮·中断 / 答案可读不是安全边界 / 只在本机打得开，
- * 逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
+ * Scala 报错形状 / Scala 的补全·悬浮文档·中断**三样各自的实测真相**（补全有、悬浮文档没有、中断按下去无可观察效果）/
+ * 答案可读不是安全边界 / 只在本机打得开，逐字清单见下面的 `boundarySentences`）在任何一态都常驻。
  *
  * ## WI-94 Task 6 加进来的那一维：notebook 现在**内嵌在这一页里**，不是"跳出去开一个标签页"
  *
