@@ -1,7 +1,7 @@
 # 知识库索引（自动生成，请勿手改）
 
 > 由 `npm run kb:index`（`node scripts/kb/compile-knowledge.mjs`）生成。
-> 生成时间：2026-10-20T12:30:07.893Z
+> 生成时间：2026-10-20T12:37:53.883Z
 > 输入：`content/knowledge/<类别>/README.md` 考点矩阵（7 类）+ 题库 258 题（其中软删除 0 题不计入"已出题"）。
 > 覆盖判定：题目 `tags[]`（去掉时代前缀，前缀表 = `shared` 的 `TAG_ERA_PREFIXES`）命中矩阵第 1 列反引号里的 tag 即算已覆盖；
 > 未写反引号 tag 的行列进「无显式 tag（无法判定）」单独统计，其中**靠标签派生 slug 撞上的**另列一档（改中文名就会变，脆）。
@@ -12,7 +12,7 @@
 
 | 类别 | 考点数 | 含 code 形式 | 含 rubric 形式 | 无显式 tag（无法判定） | 仅派生 slug 命中（脆） | 语料篇数 | 已出题（可见） | 代码题 | 主观题 | 已覆盖考点 | 未覆盖考点 | 覆盖率 | 脱钩标签（元/缺口） | 判分方式分布 |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| [`frontend`](./frontend/README.md) 前端工程 | 20 | 17 | 3 | 20 | 0 | [4](./frontend/README.md#语料文件) | 23 | 23 | 0 | 0 | 0 | — | 92（18/74） | react-vitest=23 |
+| [`frontend`](./frontend/README.md) 前端工程 | 20 | 17 | 3 | 0 | 0 | [4](./frontend/README.md#语料文件) | 23 | 23 | 0 | 13 | 7 | 65% | 79（12/67） | react-vitest=23 |
 | [`algorithms`](./algorithms/README.md) 算法 | 20 | 19 | 1 | 20 | 0 | [4](./algorithms/README.md#语料文件) | 59 | 59 | 0 | 0 | 0 | — | 245（40/205） | java-junit=59 |
 | [`sql`](./sql/README.md) SQL 与存储 | 21 | 19 | 2 | 20 | 0 | [5](./sql/README.md#语料文件) | 50 | 50 | 0 | 0 | 1 | 0% | 216（39/177） | mysql=36 redis=14 |
 | [`system-design`](./system-design/README.md) 系统设计 | 21 | 8 | 13 | 0 | 0 | [5](./system-design/README.md#语料文件) | 36 | 0 | 36 | 19 | 2 | 90% | 144（46/98） | llm-rubric=36 |
@@ -20,38 +20,36 @@
 | [`agent-design`](./agent-design/README.md) Agent 设计 | 17 | 3 | 14 | 0 | 0 | [5](./agent-design/README.md#语料文件) | 27 | 0 | 27 | 13 | 4 | 76% | 105（22/83） | llm-rubric=27 |
 | [`hot-interviews`](./hot-interviews/README.md) 高频面试题 | 18 | 4 | 14 | 0 | 0 | [12](./hot-interviews/README.md#语料文件) | 25 | 0 | 25 | 10 | 8 | 56% | 111（22/89） | llm-rubric=25 |
 
-**合计**：147 个考点，其中 87 个可机器判定覆盖，已覆盖 61 个（70%）；题库 258 题。
-**脱钩标签合计**：1064 个 = 元标签 216 个 + **考点缺口 848 个**（后者才是"该补一行矩阵"的清单）。
+**合计**：147 个考点，其中 107 个可机器判定覆盖，已覆盖 74 个（69%）；题库 258 题。
+**脱钩标签合计**：1051 个 = 元标签 210 个 + **考点缺口 841 个**（后者才是"该补一行矩阵"的清单）。
 
 ## 未覆盖考点（"该出什么题"的直接答案）
 
-### `frontend`｜未覆盖 0 / 可判定 0 个考点
+### `frontend`｜未覆盖 7 / 可判定 20 个考点
 
-**无法自动判定覆盖（第 1 列没写反引号 tag）：20 行** —— 修法：把考点名改成 `中文名（`tag-id`）` 格式，然后重跑本脚本。
+待出题（建议形式与 judgeKind 取自矩阵）：
 
-- 严格编译基线与 6.0 迁移
-- 判别联合 + 穷尽建模
-- 泛型与条件类型实战
-- 类型边界与外部契约
-- React 19 Actions 三件套
-- 与回滚语义
-- 数据获取与竞态
-- 转译优先级
-- …另有 12 行
+- `ts-strict-compilation` 严格编译基线与 6.0 迁移｜形式 code｜judgeKind react-vitest｜JD 能力项：APL-WEB-1
+- `conditional-types` 泛型与条件类型实战｜形式 code/rubric｜judgeKind llm-rubric｜JD 能力项：APL-WEB-1
+- `react-compiler` React Compiler 1.0 与手动 memo 取舍｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：APL-WEB-1 APL-WEB-2
+- `numeric-text-time-boundaries` 数值/文本/时区边界｜形式 code｜judgeKind react-vitest｜JD 能力项：APL-WEB-4 APL-WEB-1
+- `flaky-test-governance` 测试可判分性与 flaky 治理｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：APL-WEB-5
+- `esm-cjs-interop` 构建产物与模块互操作｜形式 code｜judgeKind react-vitest｜JD 能力项：APL-WEB-1 APL-WEB-5
+- `server-components` Server Components 的边界与坑｜形式 rubric｜judgeKind llm-rubric｜JD 能力项：APL-BE-1 APL-WEB-1
 
-**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：92 个（元标签 18 / 考点缺口 74）**
-   要处理的是那 **74 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
-   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 18 个。
+**题目 tag 在矩阵里找不到对应考点（题面与知识库脱钩）：79 个（元标签 12 / 考点缺口 67）**
+   要处理的是那 **67 个考点缺口**：给矩阵补一行考点，或把题目 tag 换成矩阵里已有的。
+   元标签不参与催补（时代/出处标记本来就长在题面上）： `modern:*`/`company:*`/公司名 12 个。
 
 - `race-condition`（3 题：fe-react-0001, fe-react-0002, fe-react-0003）
 - `cancellation`（3 题：fe-react-0001, fe-react-0002, fe-react-0009）
-- `render-performance`（3 题：fe-react-0006, fe-react-0007, fe-react-0008）
 - `null-vs-zero`（3 题：fe-react-0013, fe-react-0014, fe-react-0017）
-- `data-fetching`（2 题：fe-react-0001, fe-react-0002）
-- `error-boundary`（2 题：fe-react-0003, fe-react-0009）
 - `forms`（2 题：fe-react-0004, fe-react-0005）
 - `large-list`（2 题：fe-react-0006, fe-react-0009）
-- …另有 66 个考点缺口（完整清单：`--orphan-audit-json`）
+- `profiler`（2 题：fe-react-0006, fe-react-0007）
+- `partial-failure`（2 题：fe-react-0009, fe-react-0011）
+- `accessibility`（2 题：fe-react-0012, fe-react-0019）
+- …另有 59 个考点缺口（完整清单：`--orphan-audit-json`）
 
 ### `algorithms`｜未覆盖 0 / 可判定 0 个考点
 

@@ -4,6 +4,16 @@
 
 1. 先看知识库缺什么：`content/knowledge/<类别>/README.md`（考点矩阵）与 `content/knowledge/INDEX.md`
    （考点 × 已出题数）。`npm run kb:index` 重新汇总。
+   ⚠ **`frontend` 的新题请从矩阵第 1 列那 20 个 tag 里选**（形如 `中文名（\`tag-id\`）`，2026-10-20 N-11 第二发定下）：
+   `ts-strict-compilation`、`discriminated-union`、`conditional-types`、`runtime-validation`、`react19-actions`、
+   `use-optimistic`、`react19-use`、`react19-transition`、`react-compiler`、`render-performance`、`react19-activity`、
+   `use-effect-event`、`use-sync-external-store`、`data-fetching`、`error-boundary`、`numeric-text-time-boundaries`、
+   `unicode`、`flaky-test-governance`、`esm-cjs-interop`、`server-components`。
+   为什么点名这一条：报表里"哪个考点还没题"只有**题面挂了矩阵那个 tag**才算得出来；自造一个新写法
+   等于又造一个脱钩标签（`INDEX.md` 的"考点缺口"那一档就是这件事的账）。
+   可以另外再挂细分标签（`race-condition`、`cancellation` 这类），但**矩阵那个 tag 要在**。
+   ⚠ 这是给**新题**的推荐，不是追溯性的规则：已入库的 23 道 frontend 题没有被回填（改动已入库数据要显式批次 + 出处复核）。
+   闸门：`server/test/bank/knowledge-matrix.test.ts` 判"矩阵每行都带显式 tag、覆盖率算得出"（判矩阵，不判题）。
 2. 把草稿写成一个 JSON 文件放在**仓库外**或 `data/` 下（不要直接放进 `content/questions/`）。
    id 规则：**别手写，留给 `ingest()` 自动分配**。它按 `server/src/bank/ingest.ts` 里
    `CATEGORY_PREFIX`（fe/alg/sql/sys/bd/ag/hot）+ `KIND_SHORT`（java/react/mysql/redis/pyspark/scala/rubric）
