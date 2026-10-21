@@ -1352,3 +1352,23 @@
   **仍然敞着的口子（如实写）**：一条成立的 manual 申报仍可为自己免检（要堵得让"阶段集合"本身进判据）；
   `--exclude` 的值被 `verify-coverage` 当成认领而不是排除（已记 A2）；`tutorials.test.ts` 那条常驻形状判据仍只喂手搓对象。
   教训与全表见 `memo.md` 里程碑 BE。后续批次（v2/v3 那 9 类主题）**不在本 WI 里**，要开新 WI。
+
+- [x] WI-94 **notebook 内嵌**（第五页从"跳出去开 7789"改成同源 `/jupyter/*` 反代 + 左文件树右 notebook）｜计划 `docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`，七档全部收口，2026-10-09～10-10
+  ｜形状（与批准的设计一致，且四处按实测改过）：jupyter 自己带 `--ServerApp.base_url=/jupyter/`，前缀的唯一真相在
+  `shared/src/notebook.ts`；`/jupyter/*` 由 `server/src/notebooks/proxy.ts` **手写**反代（HTTP + websocket 两条通道，零新依赖），
+  凭据只在服务端注入（HTTP 走 `Authorization`，ws 只能走 `?token=`，客户端自带的 `token` 一律先摘）⇒ **页面上没有凭据**；
+  放行是**三事合取**（`proxyGuard.ts`：对端本机 ∧ Host 本机字面量 ∧ `Sec-Fetch-Site ∈ {same-origin, 缺席}`），三个否决各有状态码
+  （503 `notebook_not_configured` / 403 `notebook_proxy_refused` / 403 `notebook_cross_site`）；ws 侧另有一条独立判据 —— 它不走路由，
+  Fastify 的钩子碰不到它，所以守卫在 `upgrade` 事件里**再判一次同一个函数**。
+  ｜**顺手修掉的生产缺陷**：一条活着的 websocket 会把容器优雅退出拖成 SIGKILL（`stop -t 30` 实测 32 秒 / `ExitCode 137`，
+  ⇒ `store.close()` 与收尾一行都不执行），根因是 `socket.write()` 紧跟 `socket.destroy()` 会**丢掉已排队的字节**；
+  修法是隧道自己记账 + `onClose` 之前先 `preClose` 排空再关（`index.ts` 与 `compose.yml` 一字未改），修后 **1 秒 / `ExitCode 0`**。
+  ｜验证：`./start.sh --verify` → `CV_EXIT=0`、notebook 阶段出现 **1** 次、该区间内 skip **0**、`embed.test.ts 18 passed` + `kernel.test.ts 30 passed` = `48 passed`、判题矩阵 `158 道全部可判、跳过 0`；`npm run verify:fast` → `FAST_EXIT=0`；`npm run e2e` → **74 passed**；
+  闸门自己的闸门 `verify-coverage`/`typecheck-coverage`/`runner-coverage` 全绿，三档合计约 `1934 passed / 18 skipped`（每条 skip 都有出处，没写成"0 skipped"）。
+  ｜**真浏览器实测**（这一条是功能成立判据，此前任何一档都没证过）：点左栏 → iframe 打开笔记 → 两次 `Shift+Enter` →
+  prompt 从 `[3]:` 变 `[2]:` ⇒ 本次会话起了**全新** `arena-pyspark` kernel、经隧道执行并流回输出；320/480/1440 三档无横向溢出、
+  窄屏堆叠、页头自动换行；console 口径按实测改成"**我们自己的 bundle 0 error / 0 warning**；内嵌的 Notebook 7 自带 2 error / 31 warning，
+  已用**不经隧道的 7789 对照组**逐条归类为上游噪音"。
+  ｜本轮推翻的判断（都留在 `memo.md`）：`POST /api/contents/<file>` 不是 2xx（存路径是 PUT）、"响应体不含 token"不是可判形状
+  （上游 PageConfig 自带）、摘掉守卫时红的是外层 origin 钩子不是守卫、`removeContentTypeParser` 那处删错形态是**挂死而不是红**
+  （挂死的门禁比红更坏）、`?token=` 泄漏的第二条路是 Fastify 自带的 pino 请求日志。

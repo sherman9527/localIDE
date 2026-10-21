@@ -18,9 +18,16 @@
 - **三档验证的当前读数**（2026-10-20，WI-91b Task 5 同批镜像 `534dfeff1599`/2.58GB）：`npm run verify:fast` EXIT=0（宿主 ~2.5 分）；`./start.sh --verify` EXIT=0（容器：单测 672 passed / 11 skipped，判题矩阵 158 可判 / 跳过 0，教程档 17 passed / 0 skipped，**Scala 档 11 passed / 0 skipped**）；`npm run e2e` 74 passed。
 - **最近这批最要紧的四条**：WI-113 `.env` 的权限抄写改走 .NET（这台机器上 `Get-Acl` 因 PS 7 污染根本不可用）；WI-114 整轮 verify 里"仓库真 `.env` 没被动过"有了哨兵；WI-93 Jupyter 掉了会自己回来（有上限的重启循环）；N-18 题库"只增不减"的基线在容器里从"死"改成走镜像烤入的清单。
 - **`## TODO` 是空的**：待办要么做完、要么进"已决定"。新想法进 `## 新增需求池`，别在 TODO 挂长期项（WI-56 就是这么收回来的）。
-- **历史在哪**：本格只留最近 20 条；更早的 92 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
+- **历史在哪**：本格只留最近 20 条；更早的 93 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
 
 ## COMPLETED
+- [x] N-24 **标签形状判据收成一份真相 + 考点覆盖不再认任意前缀**（2026-10-21，`3c3b7fd`；记自 N-17/N-11 评审 I4）
+  ｜**先量再修（Step 0 审计，七类 × 107 行可判定考点）**：这个洞今天**没有咬过任何一行** —— 与 `QUESTION_COMPANIES` 零撞车，只有 `frontend` 那 6 行靠 `modern:` 命中（那是合法的时代标记），`content/knowledge/INDEX.md` 的 `13/20 = 65%` 等读数**一条没动**；⇒ 板上写清楚：这是**潜伏**缺陷（下一次有人加前缀就会分叉），不是"报表在说谎"。探针与读数留在 `.superpowers/sdd/n24-tag-truth/probe.mjs`。
+  ｜**三件改动**：① 形状判据 `TAG_SHAPE_PATTERN` / `isTagShaped()` 导出在 `shared/src/tagVocabulary.ts`（**不是** `api.ts` —— 那里装的是响应契约，而这条回答"词表这层认哪种写法"，与 `TAG_ERA_PREFIXES`/`classifyOrphanTag` 同族）；原来同一条正则抄在七处（其中两处注释自称"同一条"而没有任何东西保证），现在 JS/TS 五文件六站点全读 shared，`subjective_gen.py` 导不动 shared ⇒ 留字面量但由**源码文本对表**判住（抽出来逐字相等，正向判据）+ "全仓只许这两份抄本"的白名单扫描（needle 从常量现推，不抄第八份）。② 覆盖判定搬进 shared 的 `tagCoverageHit()`：**只认精确 + 剥一整段时代前缀**，`company:airbnb` 从此不能把矩阵一行考点记成"已覆盖"；顺手删掉 `scripts/bank/kit.mjs` 那条被通用后缀吞掉的 `modern:${needle}` 死支（它既是死代码又是前缀表的第四份字面量）。③ "行 tag 不许是元标签形状"从只管 `frontend` 扩到**七类**。
+  ｜**判据两头都判（不只判坏的那一面）**：反面 —— 夹具里放一行考点 `airbnb`，题上只有 `company:airbnb` ⇒ `covered` 必须是 0、`ratio` 必须是 `0%` 而不是 `—`（`—` 的含义是"无法判定"），并且这条判据自带一条"题库里 `company:airbnb` 还在吗"的防空转断言；正面 —— `modern:react19-actions` 必须覆盖考点 `react19-actions`（时代折叠就是为它立的表），且 `hitTags` 要报出**靠哪个原词命中的**，报出来的每个命中写法都必须过得了"裸形或时代前缀形"这一关。
+  ｜验证：宿主 `npm run verify:fast` → `✓ verify 全部通过`；容器 `MIRROR_APT=http://mirrors.ustc.edu.cn ./start.sh --verify` → **`VERIFY_EXIT=0`**、判题矩阵 `158 道可判 / 跳过（栈不可用）0 道`（六栈全 true）、`教程 notebook：17 passed / 0 skipped`、`Scala kernel：11 passed / 0 skipped`、`判题矩阵：573 passed / 11 skipped / 584 total`（比上一发多的 3 条就是本轮新增的矩阵/审计判据）。日志 `verify-container3.log`。⚠ 过程诚实记账：这一档今天失败过两次，**都不是代码** —— Docker Desktop 中途重启把容器带走了（`VERIFY_EXIT=137`，再跑成"连不上 docker daemon"）；重跑到第三次才拿到 0。前两份日志留着没删，因为"复跑复绿"本身不是证据。
+  ｜原文（需求池整条，一字未改）：
+  - **N-24 标签正则与"考点 tag 不许是元标签形状"这两件事还没有一份真相（2026-10-20 N-11/N-17 评审 I4 记）**：① 同一条 `^[a-z0-9][a-z0-9:._-]*$` 现在抄在**七处**（`shared` 之外：`content.test.ts:355`、`knowledge-matrix.test.ts:21`、`scripts/kb/kit.mjs:91`、`scripts/bank/kit.mjs:167`、`generate-with-cli.mjs:268`、`drafts/alibaba/subjective_gen.py:29`、`content.test.ts:104`），其中两处还**在注释里自称"同一条正则"而没有任何东西保证**；② `scripts/bank/kit.mjs:116` 那条 `modern:${needle}` 是**死支**（下一行的通用 `x:tag` 后缀匹配已经覆盖它），而正是那条通用后缀匹配让**任意前缀**都能算覆盖 —— 一行矩阵考点标 `airbnb`，会被题目上的 `company:airbnb` 判成"已覆盖"；`knowledge-matrix.test.ts` 目前只对 `frontend` 拒绝元标签形状的考点 tag，其余六类没有这道判据。修法：把正则导出成 `shared` 的 `TAG_SHAPE_PATTERN`/`isTagShaped()` 让七处都读它；删掉死支；"考点 tag 不许是元标签形状"从 frontend 扩到全部七类。⚠ 这一条**不影响任何已交付的读数**（今天没有题因此被误判），它是"下一次加前缀时会分叉"的账。
 - [x] N-11（第一发＋第二发＋第三发）**出题 tags 与知识矩阵脱钩：索引分口径 → frontend 一类定名 → 报表新鲜度闸门**（2026-10-20，`306efa0` / `58fa9f2` / `1da72ff`）
   ｜**照板上 2026-09-23 定的顺序做，一步不越**：① 报表把**元标签**与**考点标签**分开统计（纯口径，不动题库）；
   ② 只挑 `frontend` 一类把 20 行考点定名，**只给新题用**；③ **老题 tags 一字节没回填**（板上写的是"等命名用满一个季度再定"，
@@ -103,7 +110,7 @@
     ｜**剩下的一半仍开着**：词表本身的同义归并。这属于出题规范（C8 / N-11 那一族）而不是页面问题；
     改词表会动到已入库题目的 tags，那在 C5"只增不减"的边界内，但需要一次显式的清洗批次 + 出处复核。
 
-> 最近 20 条（按条目正文里出现的日期倒序）。更早的 92 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
+> 最近 20 条（按条目正文里出现的日期倒序）。更早的 93 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
 
 - [x] WI-100 **把 Toree 接成第五页可用的 Scala kernel（= WI-91 探索胜出路径 B；执行窗口 = WI-91b 计划五任务）**（`c6db718`+`4289a99` T1 量具、`b327d2a`+`aa79fc5` T2 镜像工件、`9cee1b5`+`b0ead20` T3 注册表（还 WI-96）、`035a7e4`+`596ef2a` T4 容器档闸门、Task 5 本轮（`e991ce4` 页面/工件/闸门/文档 + 本发记忆板，2026-10-20））
   ｜**这条曾在 2026-10-16 被用户点头推迟**（当时的理由与计划约束见下面随迁的原文），重启条件是"留一个完整执行窗口、不停在半程" —— WI-91b 正是那一轮：五个任务一批落地，页面、注册表、闸门、镜像同批换字节，main 上**从未出现过**"界面写着两个内核都能选、镜像里只有一个"的半程谎。
@@ -515,25 +522,7 @@
   `kernel + embed + tutorials` ⇒ **67 passed / 0 skipped（104s）**。⇒ "跑着的 = HEAD" 现在是成立的。
   教训与完整读数见 `memo.md` 里程碑 BF 与两份 `task-2-report.md` / `task-3-report.md`（§3-§6 是控制端本人量的）。
 
-- [x] WI-94 **notebook 内嵌**（第五页从"跳出去开 7789"改成同源 `/jupyter/*` 反代 + 左文件树右 notebook）｜计划 `docs/superpowers/plans/2026-10-09-jupyter-notebook-embed-wi94.md`，七档全部收口，2026-10-09～10-10
-  ｜形状（与批准的设计一致，且四处按实测改过）：jupyter 自己带 `--ServerApp.base_url=/jupyter/`，前缀的唯一真相在
-  `shared/src/notebook.ts`；`/jupyter/*` 由 `server/src/notebooks/proxy.ts` **手写**反代（HTTP + websocket 两条通道，零新依赖），
-  凭据只在服务端注入（HTTP 走 `Authorization`，ws 只能走 `?token=`，客户端自带的 `token` 一律先摘）⇒ **页面上没有凭据**；
-  放行是**三事合取**（`proxyGuard.ts`：对端本机 ∧ Host 本机字面量 ∧ `Sec-Fetch-Site ∈ {same-origin, 缺席}`），三个否决各有状态码
-  （503 `notebook_not_configured` / 403 `notebook_proxy_refused` / 403 `notebook_cross_site`）；ws 侧另有一条独立判据 —— 它不走路由，
-  Fastify 的钩子碰不到它，所以守卫在 `upgrade` 事件里**再判一次同一个函数**。
-  ｜**顺手修掉的生产缺陷**：一条活着的 websocket 会把容器优雅退出拖成 SIGKILL（`stop -t 30` 实测 32 秒 / `ExitCode 137`，
-  ⇒ `store.close()` 与收尾一行都不执行），根因是 `socket.write()` 紧跟 `socket.destroy()` 会**丢掉已排队的字节**；
-  修法是隧道自己记账 + `onClose` 之前先 `preClose` 排空再关（`index.ts` 与 `compose.yml` 一字未改），修后 **1 秒 / `ExitCode 0`**。
-  ｜验证：`./start.sh --verify` → `CV_EXIT=0`、notebook 阶段出现 **1** 次、该区间内 skip **0**、`embed.test.ts 18 passed` + `kernel.test.ts 30 passed` = `48 passed`、判题矩阵 `158 道全部可判、跳过 0`；`npm run verify:fast` → `FAST_EXIT=0`；`npm run e2e` → **74 passed**；
-  闸门自己的闸门 `verify-coverage`/`typecheck-coverage`/`runner-coverage` 全绿，三档合计约 `1934 passed / 18 skipped`（每条 skip 都有出处，没写成"0 skipped"）。
-  ｜**真浏览器实测**（这一条是功能成立判据，此前任何一档都没证过）：点左栏 → iframe 打开笔记 → 两次 `Shift+Enter` →
-  prompt 从 `[3]:` 变 `[2]:` ⇒ 本次会话起了**全新** `arena-pyspark` kernel、经隧道执行并流回输出；320/480/1440 三档无横向溢出、
-  窄屏堆叠、页头自动换行；console 口径按实测改成"**我们自己的 bundle 0 error / 0 warning**；内嵌的 Notebook 7 自带 2 error / 31 warning，
-  已用**不经隧道的 7789 对照组**逐条归类为上游噪音"。
-  ｜本轮推翻的判断（都留在 `memo.md`）：`POST /api/contents/<file>` 不是 2xx（存路径是 PUT）、"响应体不含 token"不是可判形状
-  （上游 PageConfig 自带）、摘掉守卫时红的是外层 origin 钩子不是守卫、`removeContentTypeParser` 那处删错形态是**挂死而不是红**
-  （挂死的门禁比红更坏）、`?token=` 泄漏的第二条路是 Fastify 自带的 pino 请求日志。
+
 
 ## IN PROGRESS
 
@@ -639,7 +628,7 @@ N-11 出题 tags 与知识矩阵脱钩（**2026-10-20 三发全落地**：① �
   `npm run verify:fast`（整档，含并发的大头）；对照：`npx vitest run server/test/ide/debug.test.ts`（单文件）。
   ｜相关既有账：WI-92/WI-99（调试用例与优雅退出）、WI-105（`debug-js` 的 ws URL 按 chunk 解析竞态 —— 那条已修，症状不同：那是 URL 解析竞态，不是连接建不起来）。
 
-- **N-24 标签正则与"考点 tag 不许是元标签形状"这两件事还没有一份真相（2026-10-20 N-11/N-17 评审 I4 记）**：① 同一条 `^[a-z0-9][a-z0-9:._-]*$` 现在抄在**七处**（`shared` 之外：`content.test.ts:355`、`knowledge-matrix.test.ts:21`、`scripts/kb/kit.mjs:91`、`scripts/bank/kit.mjs:167`、`generate-with-cli.mjs:268`、`drafts/alibaba/subjective_gen.py:29`、`content.test.ts:104`），其中两处还**在注释里自称"同一条正则"而没有任何东西保证**；② `scripts/bank/kit.mjs:116` 那条 `modern:${needle}` 是**死支**（下一行的通用 `x:tag` 后缀匹配已经覆盖它），而正是那条通用后缀匹配让**任意前缀**都能算覆盖 —— 一行矩阵考点标 `airbnb`，会被题目上的 `company:airbnb` 判成"已覆盖"；`knowledge-matrix.test.ts` 目前只对 `frontend` 拒绝元标签形状的考点 tag，其余六类没有这道判据。修法：把正则导出成 `shared` 的 `TAG_SHAPE_PATTERN`/`isTagShaped()` 让七处都读它；删掉死支；"考点 tag 不许是元标签形状"从 frontend 扩到全部七类。⚠ 这一条**不影响任何已交付的读数**（今天没有题因此被误判），它是"下一次加前缀时会分叉"的账。
+
 
 - **N-23 边界判据里的"措辞耦合"要换成形状耦合（2026-10-20 WI-91b 终审记的四处同源账）**：这一族不是"没判住"，是**判得太贴字面** —— 一次诚实的改写（不改事实、只改说法）就会红，或者反过来换种说法就绕过去。四处：① `kernel.json` 的三条 UI 能力读数现在靠**逐字正则**钉（`notebook-image.test.ts` 的 `补全有面板` 等）⇒ 彻底做法是把读数做成独立键的机器可读对（`arena_ui_readings: {"2026-10-20 真浏览器": {"补全": "有面板", …}}`）再 `JSON.parse` 判三条键，工件散文就能自由改写；② `web/test/notebook.test.tsx` 的 `kernelJvmFlags()` 按 id 分支取 argv / `PYSPARK_SUBMIT_ARGS`（WI-96 在生产侧禁掉的形状，在测试侧活着；它 fail-loud 所以不骗人）⇒ 注册表长到第三条 JVM 型 kernel 时把它做成条目字段；③ 页面 summary 里那句「7 条边界」的**数字本身没被判** —— 单元与 e2e 判的是 `<p>` 数=7，加一段会两处同红但横幅数字可以留着旧的 ⇒ 补一条"summary 含 `(${段落数})`"；④ `kernelLabel()` 的 `?? id` 兜底缺服务端那条 non-self-proving 判据（今天由 `notebook-image` 的 display_name 判据兜着，所以不静默）。⚠ 这一条**不是缺陷**：四处都有读着它们会红的闸门，只是红的时机是"改写措辞"而不是"事实变了"。做的时候顺带做，别单开一轮。
 
