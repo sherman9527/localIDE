@@ -1372,3 +1372,23 @@
   ｜本轮推翻的判断（都留在 `memo.md`）：`POST /api/contents/<file>` 不是 2xx（存路径是 PUT）、"响应体不含 token"不是可判形状
   （上游 PageConfig 自带）、摘掉守卫时红的是外层 origin 钩子不是守卫、`removeContentTypeParser` 那处删错形态是**挂死而不是红**
   （挂死的门禁比红更坏）、`?token=` 泄漏的第二条路是 Fastify 自带的 pino 请求日志。
+
+- [x] WI-91 **真交互式 Scala kernel —— 三条路径的限时探索（子项目 A2）**｜计划 `docs/superpowers/plans/2026-10-10-scala-jupyter-kernel-spike-wi91.md`，2026-10-10
+  交付的是**答案**不是 kernel：探针（`server/test/notebooks/scalaKernelProbe.ts` + 正例/负例两份夹具，`0899573`）+ 三条判据
+  （跨 cell 状态活 = stdout 出现 `alive=42`、`println` 走 stream、活的 SparkSession = `rows=6`）+ 基线数字 + **两条反面自测**。
+  | 路径 | 结论 | 一手依据 |
+  | --- | --- | --- |
+  | A · Almond 0.15.0 | **卡在排序规则①，不接入** | 正例三条全绿（10.5s、+70MB、断网复测 `EXIT=0`），但编译期错误那条 iopub `error` **缺 `traceback`** ⇒ `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 无兜底下标 ⇒ **负例夹具根本跑不了**（`allow_errors=True` 绕不过）；**真界面上 Jupyter 前端自己报** `Kernel message validation error: Missing property 'traceback'` ⇒ 用户写坏代码看不到报错 |
+  | **B · Toree 0.5.0-incubating** | **胜出** | 正例 `doubled=42`/`alive=42`/`rows=6` 全绿；负例 `EXIT=0` 且 `keys=[ename,evalue,output_type,traceback]` 三件齐；+30MB（2.55→2.58GB）；断网复测通过；跑完 `pgrep -c java` 归 0（无残留进程、无镜像外可写状态） |
+  | C · 自包 `IMain` | **不试**（Ruling(W4)） | B 已过 ①②③，C 只能赢 ④ 的体积，代价是"我们自研并长期维护一个 ZMQ kernel" ⇒ 正是本计划自己警告过的"从探索变成维护"。登记成条件账 **WI-101** |
+  B 的四条已知缺陷（**接入前必须知道，都写进了 WI-91b**）：① 两行解释器注册表打进 stdout ⇒ **混在 `nbconvert --stdout` 的 JSON 前面**，
+  我们现成的量具读不出（这是接入的第一件事，属工具侧改动，不是放宽判据）；② `ename` 恒为 `Unknown Error`、`traceback` 是空数组；
+  ③ `language_info.version` 报 2.12.15 而实载 2.12.18；④ `spark.stop()` 收尾炸一条 `Shutdown hooks cannot be modified during shutdown`。
+  产物处置：A/B 的镜像改动**存 patch + 未跟踪文件归档**在 `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-{A-almond,B-toree}/`，
+  工作树已还原到 HEAD（**没有 `git clean -fdx`**）；探针与两份夹具**保留**，它们是 WI-91b 的起点而不是死代码。
+  ⚠ **一条已完成的收尾（2026-10-10 合并后）**：还原工作树**不等于**还原镜像 —— B 的产物一度还烤在跑着的
+  `daily-arena:0.1`（2.58GB、`arena-scala-toree` 已注册）里。已 `docker compose up -d --build arena` 拉回 HEAD 并核过：
+  镜像回到 **2.55GB**、`jupyter kernelspec list` 只剩 `arena-pyspark` + `python3`、
+  `/app/server/test/notebooks/tutorial-claims.ts` 的 md5 与工作树逐字相同，并复跑 notebook 三条阶段
+  `kernel + embed + tutorials` ⇒ **67 passed / 0 skipped（104s）**。⇒ "跑着的 = HEAD" 现在是成立的。
+  教训与完整读数见 `memo.md` 里程碑 BF 与两份 `task-2-report.md` / `task-3-report.md`（§3-§6 是控制端本人量的）。

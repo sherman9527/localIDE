@@ -136,19 +136,29 @@ describe(`${NOTEBOOK_KERNELS.scala.id} kernelspec（交付标签与缺陷记录�
       'metadata 里又出现"补全/悬浮/中断**一并**不支持"那种压成一条的说法 ⇒ 那正是被 2026-10-20 实测推翻的写法' +
         '（补全会出补全面板）。三条各有各的真相，要改就改被推翻的那一条（评审修复轮 ⑤）',
     ).not.toMatch(/补全[^。”]{0,12}中断[^。”]{0,4}不支持/);
-    // 上面那条负判据是**顺序与措辞相关**的（换个连接词就绕得过），所以三条真相各钉一条正判据：
-    // 谁把哪一条改回"不支持"，红的就是那一条，而不是靠一个正则碰运气。
-    for (const [what, pattern] of [
-      ['补全', /补全有面板/],
-      ['悬浮文档', /悬浮文档无面板/],
-      ['中断', /按『中断』无可观察效果/],
+    // 上面那条负判据是**顺序与措辞相关**的（换个连接词就绕得过）—— 留着当第二张网，但**不再**
+    // 靠三条贴散文的正则判事实（N-23：那种判据会在"诚实改写措辞"时红、在"事实被推翻"时绿）。
+    // 判的是工件里那份**机器可读**的读数：verdict 变了就红，散文随便改写都不红。
+    type UiReadings = { measuredAt?: string; measuredBy?: string; capabilities?: Record<string, { verdict?: string; evidence?: string }> };
+    const readings = (scala.metadata as { arena_ui_readings?: UiReadings } | undefined)?.arena_ui_readings;
+    expect(readings?.capabilities, '工件里没有 arena_ui_readings.capabilities ⇒ 页面那三条边界话又回到"贴着散文正则判"（N-23 要根掉的形状）').toBeTruthy();
+    // 三条各自的真相（2026-10-20 真浏览器量的）。任何一条被改回"都不支持"或被人合并，这里就点名红。
+    for (const [cap, verdict] of [
+      ['completion', 'supported'],
+      ['hoverDocs', 'absent'],
+      ['interrupt', 'no-op'],
     ] as const) {
+      expect(readings!.capabilities?.[cap]?.verdict, `${cap} 的读数不再是 ${verdict} ⇒ 要么事实真的变了（那要连带改页面话与报告），要么三条又被压回一条`).toBe(verdict);
       expect(
-        metaText,
-        `metadata 里读不到「${what}」这一条的实测真相原文 ⇒ 三条各有各的读数被压回一条、或被改写；` +
-          '页面边界话引用的就是这三条各自的实测（2026-10-20 真浏览器），证据链必须在工件上逐条闭环',
-      ).toMatch(pattern);
+        readings!.capabilities?.[cap]?.evidence,
+        `${cap} 只有 verdict 没有 evidence ⇒ 一个没有出处的判定就是"应该没问题"换了个 JSON 格式，比散文更危险（看着像数据）`,
+      ).toBeTruthy();
     }
+    expect(readings!.measuredAt, '读数缺日期或日期不是 ISO ⇒ "带日期的读数"这个字段的存在理由没了').toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(readings!.measuredBy, '读数没写是谁/怎么量的 ⇒ 界面上的能力承诺没有出处').toMatch(/浏览器/);
+    // ⚠ 这一条**故意不做**：把工件 verdict 与页面那句散文再对一次表。页面话的逐字契约住在
+    // `web/test/notebook.test.tsx` 的 `boundarySentences`，在这里再抄一份就是第八处耦合（N-23 的另一半）；
+    // 残留的洞是"工件说 supported 而页面写不支持"两边各自都绿 —— 记在板上，不在这里造第二个真相。
   });
 });
 

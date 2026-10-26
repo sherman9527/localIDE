@@ -155,7 +155,19 @@ const readKernelSpec = (id: string): KernelSpecArtifact => {
   return JSON.parse(readFileSync(file, 'utf8')) as KernelSpecArtifact;
 };
 
-const kernelLabel = (id: string): string => readKernelSpec(id).display_name ?? id;
+/**
+ * 标签从工件读，**不许 `?? id` 兜底**（N-23 ④）：兜底的那一行看起来是"稳健"，实际是把
+ * "工件没有 display_name"这件真故障变成一条**永远绿**的断言 —— 夹具里 label 会等于 id，
+ * 于是所有钉 label 的判据都在钉一个我们自己造出来的值（自证）。服务端那份夹具
+ * （`server/test/notebooks/status.test.ts` 读同一批 kernel.json）走的就是"读不到就响亮地停"，两边同形。
+ */
+const kernelLabel = (id: string): string => {
+  const name = readKernelSpec(id).display_name;
+  if (!name) {
+    throw new Error(`docker/jupyter/kernels/${id}/kernel.json 没有 display_name ⇒ 不许退回用 id 当标签（那会让钉标签的判据自证）`);
+  }
+  return name;
+};
 
 /**
  * 两条 kernel 的 **JVM 量级同样只许来自工件**（评审 Important：Task 5 把 `-Xmx2g -Dspark.master=local[2]`
@@ -744,6 +756,13 @@ describe('Notebook 第五页', () => {
     expect(details, '边界卡不是 <details> ⇒ 用户批的"压成一行/折叠"这件没做').not.toBeNull();
     expect(details!.hasAttribute('open'), '默认展开 ⇒ 折叠这一态根本没生效').toBe(false);
     expect(screen.getByTestId('notebook-boundary').querySelectorAll('p')).toHaveLength(7);
+    /**
+     * N-23 ③：summary 里那个**数字**必须跟着段落数走。上面那条判段落数、下面那条判契约条数，
+     * 但"（7 条边界，点开看）"这句是第三处真相 —— 加一段话而忘了改横幅数字，前两条都不会红。
+     * 判据不抄数字：从 DOM 现数，再断横幅里有同一个数。
+     */
+    const pCount = screen.getByTestId('notebook-boundary').querySelectorAll('p').length;
+    expect(details!.querySelector('summary')?.textContent, `横幅里的计数没跟着段落数（${pCount}）走 ⇒ 用户点开的承诺和点开的东西不是一回事`).toContain(`${pCount} 条边界`);
   });
 
   /**

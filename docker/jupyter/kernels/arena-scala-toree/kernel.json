@@ -42,6 +42,24 @@
     "arena_jdk17_note": "那 14 行 --add-opens = 判题侧 server/src/exec/spark-scala.ts 的 SPARK_JVM_FLAGS 那 13 行，**外加一行 java.base/java.util.jar=ALL-UNNAMED**。多出来的那一行是当场撞出来的（2026-10-10，容器里直接 java 起 Main --profile 一份真连接文件）：Toree 的 PluginSearcher 用 clapper 反射扫 jar 里的类，缺它就先报 java.lang.reflect.InaccessibleObjectException: Unable to make public java.util.jar.JarFile$JarFileEntry.getName() accessible: module java.base does not \"opens java.util.jar\" to unnamed module。注意 java.util 与 java.util.jar 是**两个不同的包**，--add-opens 不递归，所以 A 档抄来的那 13 行覆盖不到它。补上之后同一次启动的 ERROR/Exception 计数从 3 掉到 0。",
     "arena_env_note": "HOME 重定向到 /app/data/notebook-kernel-home：与 arena-scala-almond 那条同形 —— kernel 侧任何跟着 HOME 走的缓存（Toree 的 %AddJar / coursier 那套）都不许写进 /root/.cache，因为compose 把宿主 ./docker-cache bind 在那儿（等于往工作树里写）。SPARK_LOCAL_IP=127.0.0.1 同理（local[2] 绑网卡）。spark.ui.enabled=false 不是性能选项：不关的话每个 SparkSession 会在 4040 起一个 HTTP 监听，那是『页面上多出来的一个端口』。",
     "arena_path_a_note": "路径 A（almond）**未落地**：跟踪树里没有 scripts/fetch-almond.sh，也没有 arena-scala-almond kernelspec，别在本仓库找。上文各处『与 arena-scala-almond 那条同形 / A 档抄来的那 13 行』指的是探索档 .superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-A-almond/ —— 该目录不被 git 跟踪，别的 clone 上未必有。",
-    "arena_unmeasured_risk": "接入之后**仍未证**的只剩这一条：Main 启动时会调 System.setSecurityManager（JDK 17 已打『terminally deprecated』警告，警告本身进了 stdout），那是它隔离用户代码的机制，对判题侧无影响（独立 JVM），但对『未来换 JDK』是个到期日。中断一条已有两份读数（容器档 handler 抛错 + 界面无 observable 效果且不杀 kernel，见 arena_interrupt_reading），余下未量的是运行中途逐次按中断的更细行为。"
+    "arena_unmeasured_risk": "接入之后**仍未证**的只剩这一条：Main 启动时会调 System.setSecurityManager（JDK 17 已打『terminally deprecated』警告，警告本身进了 stdout），那是它隔离用户代码的机制，对判题侧无影响（独立 JVM），但对『未来换 JDK』是个到期日。中断一条已有两份读数（容器档 handler 抛错 + 界面无 observable 效果且不杀 kernel，见 arena_interrupt_reading），余下未量的是运行中途逐次按中断的更细行为。",
+    "arena_ui_readings": {
+      "measuredAt": "2026-10-20",
+      "measuredBy": "真浏览器（宿主 Edge，127.0.0.1:7788，同一本 Scala notebook 逐条量）",
+      "capabilities": {
+        "completion": {
+          "verdict": "supported",
+          "evidence": "输入 abc 按 Tab 弹出 jp-Completer 面板，候选含 abcd"
+        },
+        "hoverDocs": {
+          "verdict": "absent",
+          "evidence": "两次 hover（x、abcd）DOM 里没有 hovermove/HoverBox 内容"
+        },
+        "interrupt": {
+          "verdict": "no-op",
+          "evidence": "Thread.sleep(60000) 起跑 2 秒后按『Interrupt the kernel』：那格照样跑完并打出 slept60，JVM 数全程 1"
+        }
+      }
+    }
   }
 }

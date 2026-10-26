@@ -4279,3 +4279,32 @@ WI-101（条件账：只有 WI-100 落地后界面真的出问题才做）。
   **凡带文书的任务，派发时就把文书列成第一个 commit 之前的步骤**，或者干脆由控制端跑文书。
 
 **下一步**：N-23（四处"措辞耦合"换成形状耦合）；N-19 等你点名公司；N-20 / N-22 条件挂着。
+
+
+---
+
+## 里程碑 BS：N-23 —— 把"贴着措辞的判据"换成"贴着形状的判据"（2026-10-21）
+
+**做了什么**
+- ① 工件 `docker/jupyter/kernels/arena-scala-toree/kernel.json` 新增机器可读 `arena_ui_readings`
+  （`completion: supported` / `hoverDocs: absent` / `interrupt: no-op`，每条带 `evidence`，外带 `measuredAt` + `measuredBy`）；
+  `notebook-image.test.ts` 改成解析结构判 verdict，**不再**用三条贴散文的正则。
+- ③ 页面 summary 里「7 条边界」那个**数字**以前没人判（段落数、契约条数都判了）⇒ 现在从 DOM 现数再对表。
+- ④ `kernelLabel()` 的 `?? id` 兜底换成 throw：兜底把"工件没有 display_name"这件真故障变成一条永远绿的自证断言。
+- **② 明确不做**：`kernelJvmFlags()` 按 id 分支（测试侧、fail-loud）—— 加 `flagStyle` 字段是为假想需求做设计，
+  触发条件是注册表出现第三条 JVM 型 kernel。
+
+**验证**
+- 破坏性四条：D1 改 verdict ⇒ 红；**D2 只改写散文 ⇒ 绿**（这一条是整发的意义：旧判据在诚实改写时会红、事实变了反而可能绿）；
+  D3 横幅写 8 ⇒ 红；D4 删 display_name ⇒ 响亮抛错。日志 `destructive-n23-*.log`。
+- 宿主 `npm run verify:fast` → `VERIFY_FAST_EXIT=0`；容器 `./start.sh --verify` → **`VERIFY_EXIT=0`**、
+  `158 可判 / 跳过 0`、教程 `17/0`、Scala `11/0`、判题 `573 / 11 skipped / 584`。
+
+**已知问题**
+- **残留的洞，写清楚不藏**：工件 verdict 与页面那句散文**没有**互相对表 —— 页面话的逐字契约住在 `boundarySentences`，
+  在镜像档再抄一份就是第八处耦合。所以"工件说 supported、页面写不支持"这一对今天仍会两边各绿。
+  下一次要收的话，正确做法是让两边读同一份结构化读数（把 verdict 放进 `shared`，页面渲染它，闸门判它），不是在测试里抄字符串。
+- 板上轮转 WI-91 整块进归档（94 条），行级对表只少我自己改的那两处"93 → 94"速览。
+
+**下一步（新开的一轮，用户点名）**：PySpark 常见面试题的**对照实验** —— AQE 开/关、配置阶梯、watermark 与状态回收；
+`delta-spark` 不在镜像里（252 个 jar 零命中），所以 Delta 的 OPTIMIZE/delta log 只能进主观题与矩阵行，**不给假数字**。

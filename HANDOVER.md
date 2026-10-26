@@ -18,9 +18,17 @@
 - **三档验证的当前读数**（2026-10-20，WI-91b Task 5 同批镜像 `534dfeff1599`/2.58GB）：`npm run verify:fast` EXIT=0（宿主 ~2.5 分）；`./start.sh --verify` EXIT=0（容器：单测 672 passed / 11 skipped，判题矩阵 158 可判 / 跳过 0，教程档 17 passed / 0 skipped，**Scala 档 11 passed / 0 skipped**）；`npm run e2e` 74 passed。
 - **最近这批最要紧的四条**：WI-113 `.env` 的权限抄写改走 .NET（这台机器上 `Get-Acl` 因 PS 7 污染根本不可用）；WI-114 整轮 verify 里"仓库真 `.env` 没被动过"有了哨兵；WI-93 Jupyter 掉了会自己回来（有上限的重启循环）；N-18 题库"只增不减"的基线在容器里从"死"改成走镜像烤入的清单。
 - **`## TODO` 是空的**：待办要么做完、要么进"已决定"。新想法进 `## 新增需求池`，别在 TODO 挂长期项（WI-56 就是这么收回来的）。
-- **历史在哪**：本格只留最近 20 条；更早的 93 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
+- **历史在哪**：本格只留最近 20 条；更早的 94 条整条在 `docs/HANDOVER-archive.md`。跨三份记忆文件的"只增不减"由棘轮按**并集**判 —— 搬移中性，删内容会红。
 
 ## COMPLETED
+- [x] N-23 **边界判据从"贴着措辞"换成"贴着形状"**（2026-10-21；记自 WI-91b 终审，四处里做了三处，②明确延后）
+  ｜**做了什么**：① 工件 `kernel.json` 新增机器可读的 `arena_ui_readings`（三条能力各带 `verdict` + `evidence`，外加 `measuredAt` / `measuredBy`），`notebook-image.test.ts` 改成**解析结构**判三条 verdict，不再用贴散文的正则 —— 旧写法是"诚实改写措辞会红、事实被推翻反而绿"，新的反过来。③ 页面 summary 里那个「7 条边界」的**数字**以前没有判据 （段落数与契约条数都判了，横幅计数是第三处真相）⇒ 现在从 DOM 现数再对表。④ `kernelLabel()` 的 `?? id` 兜底换成 throw —— 兜底会把"工件没有 display_name"这件真故障变成一条永远绿的自证断言。
+  ｜**② 明确不做**（不是漏）：`web/test/notebook.test.tsx` 的 `kernelJvmFlags()` 仍按 id 分支取 `argv` / `PYSPARK_SUBMIT_ARGS`，这是 WI-96 在生产侧禁掉的形状，但它 fail-loud（推不出两项就 throw）；现在给它加 `flagStyle` 字段是**为假想需求做设计** —— 触发条件：注册表里出现第三条 JVM 型 kernel。
+  ｜**破坏性四条**：D1 `completion.verdict` → `unsupported` ⇒ 结构判据红；D2 **只改写散文**（"补全有面板"→"补全会出补全面板"）⇒ **绿** （这一条就是这一发买到的东西：旧正则判据在这里会红）；D3 横幅写"8 条边界" ⇒ 红；D4 删掉 `display_name` ⇒ 响亮抛错。日志 `destructive-n23-{verdict,reword,summary,kernellabel}.log`。
+  ｜**残留的洞（写清楚，不藏）**：工件 verdict 与页面那句散文**没有**对表 —— 页面话的逐字契约住在 `boundarySentences`，在这里再抄一份就是第八处耦合。所以"工件说 supported 而页面写不支持"这一对今天仍会两边各绿，记在这里当下一次评审的靶子。
+  ｜验证：宿主 `npm run verify:fast` → `VERIFY_FAST_EXIT=0`；容器 `MIRROR_APT=… ./start.sh --verify` → **`VERIFY_EXIT=0`**、`158 道可判 / 跳过（栈不可用）0 道`、教程 `17/0`、Scala `11/0`、判题矩阵 `573 passed / 11 skipped / 584 total`。
+  ｜原文（需求池整条，一字未改）：
+  - **N-23 边界判据里的"措辞耦合"要换成形状耦合（2026-10-20 WI-91b 终审记的四处同源账）**：这一族不是"没判住"，是**判得太贴字面** —— 一次诚实的改写（不改事实、只改说法）就会红，或者反过来换种说法就绕过去。四处：① `kernel.json` 的三条 UI 能力读数现在靠**逐字正则**钉（`notebook-image.test.ts` 的 `补全有面板` 等）⇒ 彻底做法是把读数做成独立键的机器可读对（`arena_ui_readings: {"2026-10-20 真浏览器": {"补全": "有面板", …}}`）再 `JSON.parse` 判三条键，工件散文就能自由改写；② `web/test/notebook.test.tsx` 的 `kernelJvmFlags()` 按 id 分支取 argv / `PYSPARK_SUBMIT_ARGS`（WI-96 在生产侧禁掉的形状，在测试侧活着；它 fail-loud 所以不骗人）⇒ 注册表长到第三条 JVM 型 kernel 时把它做成条目字段；③ 页面 summary 里那句「7 条边界」的**数字本身没被判** —— 单元与 e2e 判的是 `<p>` 数=7，加一段会两处同红但横幅数字可以留着旧的 ⇒ 补一条"summary 含 `(${段落数})`"；④ `kernelLabel()` 的 `?? id` 兜底缺服务端那条 non-self-proving 判据（今天由 `notebook-image` 的 display_name 判据兜着，所以不静默）。⚠ 这一条**不是缺陷**：四处都有读着它们会红的闸门，只是红的时机是"改写措辞"而不是"事实变了"。做的时候顺带做，别单开一轮。
 - [x] N-24 **标签形状判据收成一份真相 + 考点覆盖不再认任意前缀**（2026-10-21，`3c3b7fd`；记自 N-17/N-11 评审 I4）
   ｜**先量再修（Step 0 审计，七类 × 107 行可判定考点）**：这个洞今天**没有咬过任何一行** —— 与 `QUESTION_COMPANIES` 零撞车，只有 `frontend` 那 6 行靠 `modern:` 命中（那是合法的时代标记），`content/knowledge/INDEX.md` 的 `13/20 = 65%` 等读数**一条没动**；⇒ 板上写清楚：这是**潜伏**缺陷（下一次有人加前缀就会分叉），不是"报表在说谎"。探针与读数留在 `.superpowers/sdd/n24-tag-truth/probe.mjs`。
   ｜**三件改动**：① 形状判据 `TAG_SHAPE_PATTERN` / `isTagShaped()` 导出在 `shared/src/tagVocabulary.ts`（**不是** `api.ts` —— 那里装的是响应契约，而这条回答"词表这层认哪种写法"，与 `TAG_ERA_PREFIXES`/`classifyOrphanTag` 同族）；原来同一条正则抄在七处（其中两处注释自称"同一条"而没有任何东西保证），现在 JS/TS 五文件六站点全读 shared，`subjective_gen.py` 导不动 shared ⇒ 留字面量但由**源码文本对表**判住（抽出来逐字相等，正向判据）+ "全仓只许这两份抄本"的白名单扫描（needle 从常量现推，不抄第八份）。② 覆盖判定搬进 shared 的 `tagCoverageHit()`：**只认精确 + 剥一整段时代前缀**，`company:airbnb` 从此不能把矩阵一行考点记成"已覆盖"；顺手删掉 `scripts/bank/kit.mjs` 那条被通用后缀吞掉的 `modern:${needle}` 死支（它既是死代码又是前缀表的第四份字面量）。③ "行 tag 不许是元标签形状"从只管 `frontend` 扩到**七类**。
@@ -110,7 +118,7 @@
     ｜**剩下的一半仍开着**：词表本身的同义归并。这属于出题规范（C8 / N-11 那一族）而不是页面问题；
     改词表会动到已入库题目的 tags，那在 C5"只增不减"的边界内，但需要一次显式的清洗批次 + 出处复核。
 
-> 最近 20 条（按条目正文里出现的日期倒序）。更早的 93 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
+> 最近 20 条（按条目正文里出现的日期倒序）。更早的 94 条整条在 `docs/HANDOVER-archive.md`（2026-10-20：WI-87/WI-72 随 WI-100/WI-96 进板整条搬入）。
 
 - [x] WI-100 **把 Toree 接成第五页可用的 Scala kernel（= WI-91 探索胜出路径 B；执行窗口 = WI-91b 计划五任务）**（`c6db718`+`4289a99` T1 量具、`b327d2a`+`aa79fc5` T2 镜像工件、`9cee1b5`+`b0ead20` T3 注册表（还 WI-96）、`035a7e4`+`596ef2a` T4 容器档闸门、Task 5 本轮（`e991ce4` 页面/工件/闸门/文档 + 本发记忆板，2026-10-20））
   ｜**这条曾在 2026-10-16 被用户点头推迟**（当时的理由与计划约束见下面随迁的原文），重启条件是"留一个完整执行窗口、不停在半程" —— WI-91b 正是那一轮：五个任务一批落地，页面、注册表、闸门、镜像同批换字节，main 上**从未出现过**"界面写着两个内核都能选、镜像里只有一个"的半程谎。
@@ -502,26 +510,6 @@
   ⇒ 两条判据要同源（同一组真 error 喂两边），否则改公共件时只有一边有牙。
   验证：把公共件改回「退出码只读 `code`」（就是当年那个 A 类 bug）⇒ `tutorials` 与 `kernel` **同时红**，而同一次运行里旧的那条手搓 `{code:1}` 判据**照样绿** —— 这条对照本身就是 WI-104 存在的理由。崩溃形状那 1 条拆成 3 条（常驻组 10→12 passed）。尾巴（真 spawn 的造法同源化、`from:code` 死支核实）另开 **WI-107**（已交付 `41e248d`，Linux 侧的形状也在那一轮验过）。
 
-- [x] WI-91 **真交互式 Scala kernel —— 三条路径的限时探索（子项目 A2）**｜计划 `docs/superpowers/plans/2026-10-10-scala-jupyter-kernel-spike-wi91.md`，2026-10-10
-  交付的是**答案**不是 kernel：探针（`server/test/notebooks/scalaKernelProbe.ts` + 正例/负例两份夹具，`0899573`）+ 三条判据
-  （跨 cell 状态活 = stdout 出现 `alive=42`、`println` 走 stream、活的 SparkSession = `rows=6`）+ 基线数字 + **两条反面自测**。
-  | 路径 | 结论 | 一手依据 |
-  | --- | --- | --- |
-  | A · Almond 0.15.0 | **卡在排序规则①，不接入** | 正例三条全绿（10.5s、+70MB、断网复测 `EXIT=0`），但编译期错误那条 iopub `error` **缺 `traceback`** ⇒ `nbformat/v4/nbbase.py:112` 的 `output_from_msg` 无兜底下标 ⇒ **负例夹具根本跑不了**（`allow_errors=True` 绕不过）；**真界面上 Jupyter 前端自己报** `Kernel message validation error: Missing property 'traceback'` ⇒ 用户写坏代码看不到报错 |
-  | **B · Toree 0.5.0-incubating** | **胜出** | 正例 `doubled=42`/`alive=42`/`rows=6` 全绿；负例 `EXIT=0` 且 `keys=[ename,evalue,output_type,traceback]` 三件齐；+30MB（2.55→2.58GB）；断网复测通过；跑完 `pgrep -c java` 归 0（无残留进程、无镜像外可写状态） |
-  | C · 自包 `IMain` | **不试**（Ruling(W4)） | B 已过 ①②③，C 只能赢 ④ 的体积，代价是"我们自研并长期维护一个 ZMQ kernel" ⇒ 正是本计划自己警告过的"从探索变成维护"。登记成条件账 **WI-101** |
-  B 的四条已知缺陷（**接入前必须知道，都写进了 WI-91b**）：① 两行解释器注册表打进 stdout ⇒ **混在 `nbconvert --stdout` 的 JSON 前面**，
-  我们现成的量具读不出（这是接入的第一件事，属工具侧改动，不是放宽判据）；② `ename` 恒为 `Unknown Error`、`traceback` 是空数组；
-  ③ `language_info.version` 报 2.12.15 而实载 2.12.18；④ `spark.stop()` 收尾炸一条 `Shutdown hooks cannot be modified during shutdown`。
-  产物处置：A/B 的镜像改动**存 patch + 未跟踪文件归档**在 `.superpowers/sdd/2026-10-10-scala-jupyter-kernel-spike-wi91/path-{A-almond,B-toree}/`，
-  工作树已还原到 HEAD（**没有 `git clean -fdx`**）；探针与两份夹具**保留**，它们是 WI-91b 的起点而不是死代码。
-  ⚠ **一条已完成的收尾（2026-10-10 合并后）**：还原工作树**不等于**还原镜像 —— B 的产物一度还烤在跑着的
-  `daily-arena:0.1`（2.58GB、`arena-scala-toree` 已注册）里。已 `docker compose up -d --build arena` 拉回 HEAD 并核过：
-  镜像回到 **2.55GB**、`jupyter kernelspec list` 只剩 `arena-pyspark` + `python3`、
-  `/app/server/test/notebooks/tutorial-claims.ts` 的 md5 与工作树逐字相同，并复跑 notebook 三条阶段
-  `kernel + embed + tutorials` ⇒ **67 passed / 0 skipped（104s）**。⇒ "跑着的 = HEAD" 现在是成立的。
-  教训与完整读数见 `memo.md` 里程碑 BF 与两份 `task-2-report.md` / `task-3-report.md`（§3-§6 是控制端本人量的）。
-
 
 
 ## IN PROGRESS
@@ -630,6 +618,6 @@ N-11 出题 tags 与知识矩阵脱钩（**2026-10-20 三发全落地**：① �
 
 
 
-- **N-23 边界判据里的"措辞耦合"要换成形状耦合（2026-10-20 WI-91b 终审记的四处同源账）**：这一族不是"没判住"，是**判得太贴字面** —— 一次诚实的改写（不改事实、只改说法）就会红，或者反过来换种说法就绕过去。四处：① `kernel.json` 的三条 UI 能力读数现在靠**逐字正则**钉（`notebook-image.test.ts` 的 `补全有面板` 等）⇒ 彻底做法是把读数做成独立键的机器可读对（`arena_ui_readings: {"2026-10-20 真浏览器": {"补全": "有面板", …}}`）再 `JSON.parse` 判三条键，工件散文就能自由改写；② `web/test/notebook.test.tsx` 的 `kernelJvmFlags()` 按 id 分支取 argv / `PYSPARK_SUBMIT_ARGS`（WI-96 在生产侧禁掉的形状，在测试侧活着；它 fail-loud 所以不骗人）⇒ 注册表长到第三条 JVM 型 kernel 时把它做成条目字段；③ 页面 summary 里那句「7 条边界」的**数字本身没被判** —— 单元与 e2e 判的是 `<p>` 数=7，加一段会两处同红但横幅数字可以留着旧的 ⇒ 补一条"summary 含 `(${段落数})`"；④ `kernelLabel()` 的 `?? id` 兜底缺服务端那条 non-self-proving 判据（今天由 `notebook-image` 的 display_name 判据兜着，所以不静默）。⚠ 这一条**不是缺陷**：四处都有读着它们会红的闸门，只是红的时机是"改写措辞"而不是"事实变了"。做的时候顺带做，别单开一轮。
+
 
 - **N-21 在嵌入的 iframe 里"新建 notebook"会跳到顶层新标签页（2026-10-20 控制端真浏览器读数里看见的）**：第五页左栏点已有文件 → iframe 的 `src` 换成那本 notebook，**编辑在内嵌里**（这条是好的，反向对照也做过）；但内嵌 Jupyter 自己的 `New → Scala (Toree)` 会开一个**顶层新标签页**（上游 Notebook app 的行为），于是"新建"这一步落在了我们的壳外面 —— 用户看到的是一个不带我们页头与边界说明的整屏 Jupyter。账的内容：要么把新建导流到我们自己的路径（例如左栏给"新建"入口、由服务端在 workDir 里按选定 kernel 建一本，iframe 再指过去），要么在界面上把这一点说实话（"新建会开新标签页，回到这一页继续用左栏切文件"）。**不是缺陷修复而是产品边界**：今天 Scala/Python 都选得到、都跑得动，只是"出生"这一步在壳外。前置：动它之前先确认逃生链接（`/jupyter/tree`）那条路仍然够用。
